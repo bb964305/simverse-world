@@ -13,7 +13,7 @@ Config groups:
 - sprite: template_list
 - user_llm: allow_custom_llm
 """
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +23,17 @@ from app.models.user import User
 from app.models.system_config import SystemConfig
 from app.routers.admin.middleware import require_admin
 from app.services.config_service import ConfigService
+from app.services.url_guard import ensure_url_is_public, UnsafeURLError
+
+
+async def _validate_config_value(key: str, value) -> None:
+    """Reject non-public base URLs in outbound-endpoint config keys (SSRF, P0-4d)."""
+    if key.endswith(".base_url") or key.endswith("_base_url"):
+        if isinstance(value, str) and value:
+            try:
+                await ensure_url_is_public(value)
+            except UnsafeURLError as e:
+                raise HTTPException(status_code=400, detail=f"Invalid base URL for {key}: {e}")
 from app.schemas.admin import (
     ConfigGroupResponse,
     ConfigUpdateRequest,
@@ -167,6 +178,7 @@ async def update_config_entry(
     """Update a single config entry."""
     # Always store with group prefix so runtime svc.get("llm.model") finds it
     full_key = req.key if "." in req.key else f"{req.group}.{req.key}"
+    await _validate_config_value(full_key, req.value)
     await _set_config(db, key=full_key, value=req.value, group=req.group, admin_id=admin.id)
     return {"key": full_key, "value": req.value, "group": req.group}
 
@@ -182,6 +194,8 @@ async def update_config_batch(
         {"key": u.key if "." in u.key else f"{u.group}.{u.key}", "value": u.value, "group": u.group}
         for u in req.updates
     ]
+    for u in updates:
+        await _validate_config_value(u["key"], u["value"])
     await _set_config_batch(db, updates, admin_id=admin.id)
     return {"updated": len(updates)}
 

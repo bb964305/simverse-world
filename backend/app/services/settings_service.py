@@ -17,7 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.user import User
 from app.models.resident import Resident
-from app.services.auth_service import pwd_context
+from app.services.auth_service import hash_password, verify_password
+from app.services.url_guard import ensure_url_is_public, UnsafeURLError
 
 
 # ─── settings_json Helpers ────────────────────────────────────────
@@ -89,9 +90,9 @@ async def change_password(
             status_code=400,
             detail="Cannot change password for OAuth-only accounts",
         )
-    if not pwd_context.verify(old_password, user.hashed_password):
+    if not verify_password(old_password, user.hashed_password):
         raise HTTPException(status_code=403, detail="Current password is incorrect")
-    user.hashed_password = pwd_context.hash(new_password)
+    user.hashed_password = hash_password(new_password)
     await db.commit()
 
 
@@ -213,6 +214,11 @@ async def update_llm_settings(
     if api_format is not None:
         user.custom_llm_api_format = api_format
     if api_base_url is not None:
+        if api_base_url:  # empty string clears the custom URL — always allowed
+            try:
+                await ensure_url_is_public(api_base_url)
+            except UnsafeURLError as e:
+                raise HTTPException(status_code=400, detail=f"Invalid base URL: {e}")
         user.custom_llm_base_url = api_base_url
     if api_key is not None:
         user.custom_llm_api_key = api_key
@@ -244,6 +250,11 @@ async def test_llm_connection(
     Test a custom LLM endpoint by sending a minimal chat completion request.
     Returns {success, latency_ms, model_response?, error?}.
     """
+    try:
+        await ensure_url_is_public(api_base_url)
+    except UnsafeURLError as e:
+        return {"success": False, "error": f"Blocked URL: {e}"}
+
     headers: dict[str, str] = {
         "Content-Type": "application/json",
     }

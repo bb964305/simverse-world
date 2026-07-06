@@ -36,7 +36,7 @@ async def test_save_image_returns_media_url(tmp_path):
 @pytest.mark.anyio
 async def test_save_video_returns_media_url(tmp_path):
     svc = MediaService(upload_base=str(tmp_path))
-    content = b"fakevideocontent" * 100
+    content = b"\x00\x00\x00\x18ftypisom" + b"\x00" * 100  # minimal MP4 ftyp box
     f = _make_upload_file("clip.mp4", content, "video/mp4")
 
     result = await svc.save_upload(f, media_type="video")
@@ -84,6 +84,39 @@ async def test_unsupported_video_type_raises_error(tmp_path):
 
     with pytest.raises(MediaValidationError, match="Unsupported video type"):
         await svc.save_upload(f, media_type="video")
+
+
+@pytest.mark.anyio
+async def test_spoofed_image_content_rejected(tmp_path):
+    """Declared image/jpeg but non-image bytes must be rejected (magic bytes, P0-4d)."""
+    svc = MediaService(upload_base=str(tmp_path))
+    content = b"<?php system($_GET['cmd']); ?>"
+    f = _make_upload_file("evil.jpg", content, "image/jpeg")
+
+    with pytest.raises(MediaValidationError, match="does not match a supported image"):
+        await svc.save_upload(f, media_type="image")
+
+
+@pytest.mark.anyio
+async def test_spoofed_video_content_rejected(tmp_path):
+    """Declared video/mp4 but non-video bytes must be rejected (magic bytes, P0-4d)."""
+    svc = MediaService(upload_base=str(tmp_path))
+    content = b"#!/bin/sh\nrm -rf /\n" + b"x" * 100
+    f = _make_upload_file("evil.mp4", content, "video/mp4")
+
+    with pytest.raises(MediaValidationError, match="does not match a supported video"):
+        await svc.save_upload(f, media_type="video")
+
+
+@pytest.mark.anyio
+async def test_extension_follows_sniffed_type_not_declared(tmp_path):
+    """A PNG uploaded as image/jpeg is saved with .png (sniffed type wins)."""
+    svc = MediaService(upload_base=str(tmp_path))
+    content = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+    f = _make_upload_file("actually-png.jpg", content, "image/jpeg")
+
+    result = await svc.save_upload(f, media_type="image")
+    assert result["media_url"].endswith(".png")
 
 
 def test_get_file_path_resolves_url(tmp_path):

@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timedelta, UTC
+import bcrypt
 import jwt
-from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,7 +11,18 @@ from app.config import settings
 from app.models.user import User
 from app.models.transaction import Transaction
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def hash_password(password: str) -> str:
+    # bcrypt only uses the first 72 bytes; truncate explicitly (passlib did the same silently)
+    return bcrypt.hashpw(password.encode("utf-8")[:72], bcrypt.gensalt()).decode("ascii")
+
+
+def verify_password(password: str, hashed: str) -> bool:
+    """Verify against a bcrypt hash. Existing passlib $2b$ hashes verify unchanged."""
+    try:
+        return bcrypt.checkpw(password.encode("utf-8")[:72], hashed.encode("ascii"))
+    except ValueError:
+        return False
 
 def create_token(user_id: str) -> str:
     expire = datetime.now(UTC) + timedelta(minutes=settings.jwt_expire_minutes)
@@ -26,7 +37,7 @@ def verify_token(token: str) -> str | None:
 
 async def register_user(db: AsyncSession, name: str, email: str, password: str) -> tuple[User, str]:
     user_id = str(uuid.uuid4())
-    user = User(id=user_id, name=name, email=email, hashed_password=pwd_context.hash(password))
+    user = User(id=user_id, name=name, email=email, hashed_password=hash_password(password))
     db.add(user)
     db.add(Transaction(user_id=user_id, amount=100, reason="signup_bonus"))
     try:
@@ -40,7 +51,7 @@ async def register_user(db: AsyncSession, name: str, email: str, password: str) 
 async def login_user(db: AsyncSession, email: str, password: str) -> tuple[User, str] | None:
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
-    if not user or not user.hashed_password or not pwd_context.verify(password, user.hashed_password):
+    if not user or not user.hashed_password or not verify_password(password, user.hashed_password):
         return None
     return user, create_token(user.id)
 

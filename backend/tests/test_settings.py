@@ -23,7 +23,7 @@ from app.schemas.settings import (
 from app.services.settings_service import merge_settings_json, build_settings_defaults
 from app.models.user import User
 from app.models.resident import Resident
-from app.services.auth_service import create_token, pwd_context
+from app.services.auth_service import create_token, hash_password
 
 
 # ─── Task 1: Schema Validation Tests ─────────────────────────────
@@ -158,7 +158,7 @@ async def auth_user(db_session) -> tuple[User, str]:
     user = User(
         name="TestUser",
         email="test@example.com",
-        hashed_password=pwd_context.hash("oldpassword123"),
+        hashed_password=hash_password("oldpassword123"),
         settings_json={},
     )
     db_session.add(user)

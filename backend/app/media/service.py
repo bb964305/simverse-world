@@ -24,6 +24,32 @@ class MediaValidationError(ValueError):
     pass
 
 
+def sniff_image_type(content: bytes) -> str | None:
+    """Detect image content-type from magic bytes. Returns None if unrecognized."""
+    if content.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if content.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(content) >= 12 and content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def sniff_video_type(content: bytes) -> str | None:
+    """Detect video content-type from magic bytes. Returns None if unrecognized."""
+    # ISO base media (mp4/mov): size(4) + 'ftyp' + major brand(4)
+    if len(content) >= 12 and content[4:8] == b"ftyp":
+        if content[8:12] == b"qt  ":
+            return "video/quicktime"
+        return "video/mp4"
+    # EBML header (webm/matroska)
+    if content.startswith(b"\x1a\x45\xdf\xa3"):
+        return "video/webm"
+    return None
+
+
 class MediaService:
     """Handles saving and resolving uploaded media files."""
 
@@ -64,7 +90,13 @@ class MediaService:
                     f"Unsupported image type: {content_type!r}. "
                     f"Allowed: {', '.join(ALLOWED_IMAGE_TYPES)}"
                 )
-            ext = ALLOWED_IMAGE_TYPES[content_type]
+            # Don't trust the declared content-type: sniff magic bytes (P0-4d)
+            sniffed = sniff_image_type(content)
+            if sniffed is None or sniffed not in ALLOWED_IMAGE_TYPES:
+                raise MediaValidationError(
+                    "File content does not match a supported image format"
+                )
+            ext = ALLOWED_IMAGE_TYPES[sniffed]
             subdir = "images"
         elif media_type == "video":
             if size > self.max_video_size:
@@ -77,7 +109,13 @@ class MediaService:
                     f"Unsupported video type: {content_type!r}. "
                     f"Allowed: {', '.join(ALLOWED_VIDEO_TYPES)}"
                 )
-            ext = ALLOWED_VIDEO_TYPES[content_type]
+            # Don't trust the declared content-type: sniff magic bytes (P0-4d)
+            sniffed = sniff_video_type(content)
+            if sniffed is None or sniffed not in ALLOWED_VIDEO_TYPES:
+                raise MediaValidationError(
+                    "File content does not match a supported video format"
+                )
+            ext = ALLOWED_VIDEO_TYPES[sniffed]
             subdir = "videos"
         else:
             raise MediaValidationError(f"Unknown media_type: {media_type!r}")
