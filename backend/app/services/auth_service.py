@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timedelta, UTC
-from jose import jwt
+import jwt
 from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
