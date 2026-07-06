@@ -1,4 +1,7 @@
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
+
+_DEFAULT_JWT_SECRET = "dev-secret-change-in-production"
 
 
 class Settings(BaseSettings):
@@ -7,8 +10,20 @@ class Settings(BaseSettings):
     # Production must run `alembic upgrade head` instead (P0-6).
     auto_create_tables: bool = False
     redis_url: str = "redis://localhost:6379/0"
-    jwt_secret: str = "dev-secret-change-in-production"
+    # Local development only; anything non-debug must set a real JWT_SECRET (P0-4b)
+    debug: bool = False
+    jwt_secret: str = _DEFAULT_JWT_SECRET
     jwt_algorithm: str = "HS256"
+
+    @model_validator(mode="after")
+    def _reject_default_jwt_secret(self) -> "Settings":
+        if not self.debug and self.jwt_secret == _DEFAULT_JWT_SECRET:
+            raise ValueError(
+                "JWT_SECRET is still the insecure default — refusing to start. "
+                "Set JWT_SECRET to a long random string, or set DEBUG=true for "
+                "local development."
+            )
+        return self
     jwt_expire_minutes: int = 1440
     github_client_id: str = ""
     github_client_secret: str = ""

@@ -1,3 +1,9 @@
+import os
+
+# Must be set before app.config is imported: tests run without a .env,
+# and non-debug mode refuses the default JWT secret (P0-4b)
+os.environ.setdefault("DEBUG", "true")
+
 import pytest
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
