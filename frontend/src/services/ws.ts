@@ -12,7 +12,12 @@ export function connectWS(): void {
   if (!token || socket?.readyState === WebSocket.OPEN) return
 
   const API_WS = (import.meta.env.VITE_API_URL ?? 'http://localhost:8000').replace(/^http/, 'ws')
-  socket = new WebSocket(`${API_WS}/ws?token=${token}`)
+  // Token goes in the first message, not the URL, so it never lands in access logs (P0-4c)
+  socket = new WebSocket(`${API_WS}/ws`)
+
+  socket.onopen = () => {
+    socket?.send(JSON.stringify({ type: 'auth', token }))
+  }
 
   socket.onmessage = (event) => {
     try {

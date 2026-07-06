@@ -1,4 +1,5 @@
 """WebSocket connection lifecycle: auth, session setup, dispatch loop, cleanup."""
+import asyncio
 import json
 import logging
 
@@ -29,15 +30,46 @@ MESSAGE_HANDLERS = {
 }
 
 
+# How long a fresh connection may take to send its auth message
+AUTH_TIMEOUT_SECONDS = 10
+
+
+async def _authenticate(ws: WebSocket) -> str | None:
+    """Authenticate a freshly accepted connection.
+
+    Preferred: first message `{"type": "auth", "token": "..."}` (P0-4c) —
+    keeps tokens out of nginx/CF access logs. A `?token=` query param is
+    still honored as a deprecated fallback for older clients.
+    """
+    token = ws.query_params.get("token", "")
+    if token:
+        logger.warning("WS auth via query string is deprecated; use an auth message")
+        return verify_token(token)
+
+    try:
+        raw = await asyncio.wait_for(ws.receive_text(), timeout=AUTH_TIMEOUT_SECONDS)
+        data = json.loads(raw)
+    except (TimeoutError, asyncio.TimeoutError, json.JSONDecodeError):
+        return None
+    if data.get("type") != "auth":
+        return None
+    return verify_token(str(data.get("token", "")))
+
+
 async def websocket_handler(ws: WebSocket):
     """Handle a single WebSocket connection lifecycle."""
-    token = ws.query_params.get("token", "")
-    user_id = verify_token(token)
+    await ws.accept()
+
+    try:
+        user_id = await _authenticate(ws)
+    except WebSocketDisconnect:
+        return
     if not user_id:
         await ws.close(code=4001, reason="Unauthorized")
         return
 
-    await manager.connect(user_id, ws)
+    manager.register(user_id, ws)
+    await manager.send(user_id, {"type": "auth_ok"})
 
     user_name, spawn_x, spawn_y, sprite_key = await _load_session_info(user_id)
     await _claim_daily_reward(user_id)

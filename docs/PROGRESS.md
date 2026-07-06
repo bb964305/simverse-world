@@ -11,7 +11,7 @@
 ## Phase 1 — 扛并发与安全（§2/§3）
 - [x] P0-2 WS 事务边界拆分 + database.py 连接池参数 — `c19eb61`。handler.py 拆为 `app/ws/handlers/{connection,context,movement,chat,rating,player_chat}`（原文件删除，main.py 改从 `app.ws.handlers` 导入；测试补丁点改 `app.ws.handlers.chat.ModelRouter`）。chat_msg 拆成两个短 session：LLM 流式期间不持有连接。偏差/顺带：① 发现 player_chat auto 回复同样在 session 内调 LLM，一并拆分——`PlayerChatService.prepare_route`（纯 DB）+ 模块级 `generate_auto_reply`（无 session）；`route_message` 保留为组合封装，test_player_chat 零改动；② 连接池参数仅对非 sqlite URL 生效（sqlite 不用 QueuePool）；③ 遗留：chat_msg 媒体记忆 `add_memory` 在第二个 session 内含 embedding HTTP 调用（秒级，远小于 LLM 流式），可随 P1-2 共享 httpx client 一并优化
 - [x] P0-4a python-jose → PyJWT — API 同形(`import jwt` + encode/decode 签名不变),exp datetime 原生支持,过期/篡改拒绝已验证。注意:PyJWT 对 <32 字节 HMAC key 发 InsecureKeyLengthWarning,dev 默认密钥(31 字节)会触发,仅 DEBUG 模式可见,生产已被 P0-4b 强制真实密钥
-- [ ] P0-4c WS token 改首条 auth 消息
+- [x] P0-4c WS token 改首条 auth 消息 — 后端 `_authenticate`:accept 后等首条 `{"type":"auth","token":...}`(10s 超时),成功回 `auth_ok`;`?token=` query 保留为废弃回退(带 warning 日志,老客户端刷新前不断线),后续可移除;`manager.connect` 改为 `register`(accept 归 handler 所有)。前端 ws.ts 在 onopen 发 auth 消息,URL 不再带 token。新增 tests/test_ws_auth.py 覆盖 6 条握手分支;tsc --noEmit 通过。未做:规格附注的一次性 ticket 方案(可与限流一起再评估)
 - [ ] P0-4d SSRF 防护（私网段拒绝）+ 上传 magic bytes 校验 + passlib → bcrypt
 - [ ] P1-2 共享 httpx AsyncClient
 - [ ] 限流：WS 聊天频控 + REST slowapi 兜底

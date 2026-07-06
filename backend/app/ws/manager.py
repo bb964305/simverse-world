@@ -10,8 +10,8 @@ class ConnectionManager:
         self.chat_queue: dict[str, list[str]] = {}  # resident_id -> [user_ids waiting]
         self.socializing: dict[str, str] = {}  # resident_id -> partner_resident_id
 
-    async def connect(self, user_id: str, ws: WebSocket):
-        await ws.accept()
+    def register(self, user_id: str, ws: WebSocket) -> None:
+        """Register an already-accepted connection (caller owns the accept/auth handshake)."""
         self.active[user_id] = ws
 
     def disconnect(self, user_id: str):
