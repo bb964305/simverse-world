@@ -9,7 +9,7 @@
 - [x] Dockerfile 改为 pip install .（消除依赖漂移）— `6174e13`。顺带修复：pyproject 补 `python-multipart` 依赖（原来只在 Dockerfile 手写清单里）+ 补 hatchling `packages=["app"]` 配置（否则包根本无法构建，`pip install -e .` 也因此恢复可用）；wheel 构建已验证含 agent YAML configs
 
 ## Phase 1 — 扛并发与安全（§2/§3）
-- [ ] P0-2 WS 事务边界拆分 + database.py 连接池参数
+- [x] P0-2 WS 事务边界拆分 + database.py 连接池参数 — `c19eb61`。handler.py 拆为 `app/ws/handlers/{connection,context,movement,chat,rating,player_chat}`（原文件删除，main.py 改从 `app.ws.handlers` 导入；测试补丁点改 `app.ws.handlers.chat.ModelRouter`）。chat_msg 拆成两个短 session：LLM 流式期间不持有连接。偏差/顺带：① 发现 player_chat auto 回复同样在 session 内调 LLM，一并拆分——`PlayerChatService.prepare_route`（纯 DB）+ 模块级 `generate_auto_reply`（无 session）；`route_message` 保留为组合封装，test_player_chat 零改动；② 连接池参数仅对非 sqlite URL 生效（sqlite 不用 QueuePool）；③ 遗留：chat_msg 媒体记忆 `add_memory` 在第二个 session 内含 embedding HTTP 调用（秒级，远小于 LLM 流式），可随 P1-2 共享 httpx client 一并优化
 - [ ] P0-4a python-jose → PyJWT
 - [ ] P0-4c WS token 改首条 auth 消息
 - [ ] P0-4d SSRF 防护（私网段拒绝）+ 上传 magic bytes 校验 + passlib → bcrypt
