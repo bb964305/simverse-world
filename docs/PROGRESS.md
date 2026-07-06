@@ -2,11 +2,11 @@
 
 ## Phase 0 — 止血（OPTIMIZATION_PLAN §2）
 - [x] P0-1 AgentLoop 每 tick 独立 session（loop.py）— `1e884c8`。偏差：`_handle_action`（含居民互聊）随规格示例移入信号量+session 内，互聊期间会占用一个并发槽（原实现在信号量外）；外层短 session 只查 `id+meta_json` 列而非整个 ORM 对象
-- [ ] P0-5 embedding 失败返回 None + 清洗存量零向量
-- [ ] P0-6 create_all 加环境开关
-- [ ] P0-4b jwt_secret 默认值检测，生产拒绝启动
-- [ ] 全局 logger.error 补 exc_info=True
-- [ ] Dockerfile 改为 pip install .（消除依赖漂移）
+- [x] P0-5 embedding 失败返回 None + 清洗存量零向量 — `51df6d3`。偏差：存量零向量清洗未走一次性 migration，改为补偿任务首轮执行（幂等，pgvector 用 `<#>` 快路径）；额外发现并修复 `Memory.embedding` JSON 列 None 落库为 JSON 'null' 而非 SQL NULL 的问题（加 `none_as_null=True`，否则"保持 NULL"的前提不成立）
+- [x] P0-6 create_all 加环境开关 — `ec086a3`。`auto_create_tables` 默认 False；deploy Dockerfile CMD 前置 `alembic upgrade head`。注意：本地开发若不跑 alembic 需在 .env 设 `AUTO_CREATE_TABLES=true`
+- [x] P0-4b jwt_secret 默认值检测，生产拒绝启动 — `ad2fa85`。新增 `debug` 开关（默认 False=强制校验）；本地开发需 `DEBUG=true` 或设置真实 JWT_SECRET；tests conftest 已注入 DEBUG=true。注意：.env.example 里的示例 JWT_SECRET 值不在拒绝名单（仅拒绝代码默认值）
+- [x] 全局 logger.error 补 exc_info=True — `931c9b8`。8 处 except 块内的 logger.error 全部补齐；portrait_service 两处非 except 上下文的 error 调用有意不加
+- [x] Dockerfile 改为 pip install .（消除依赖漂移）— `6174e13`。顺带修复：pyproject 补 `python-multipart` 依赖（原来只在 Dockerfile 手写清单里）+ 补 hatchling `packages=["app"]` 配置（否则包根本无法构建，`pip install -e .` 也因此恢复可用）；wheel 构建已验证含 agent YAML configs
 
 ## Phase 1 — 扛并发与安全（§2/§3）
 - [ ] P0-2 WS 事务边界拆分 + database.py 连接池参数
@@ -50,4 +50,6 @@
 
 ## 发现（施工中发现的新问题，不当场处理）
 - 4 个预先存在的测试失败（HEAD 基线复现，与 P0-1 无关）：`test_forge.py::test_forge_answers_advance_to_generating`、`test_map_integration.py::test_decide_prompt_includes_remembered_residents`、`test_portrait.py::test_generate_portrait_success`（portrait_url 为 None）、`test_preset_import.py::test_seed_presets_creates_residents`（district 默认值断言 'free'，代码已改 'central_plaza'）——测试与代码漂移
-- `pip install -e .` 在 backend 下失败：hatchling 找不到与项目名 `skills_world_backend` 匹配的目录（包在 `app/`），pyproject 缺 `[tool.hatch.build.targets.wheel] packages = ["app"]`。与后续「Dockerfile 改 pip install .」任务直接相关
+- `Memory.embedding` ORM 类型为 JSON 但迁移 004 实际列是 `vector(1024)`，类型不一致：PG 上依赖 asyncpg 文本转型，sqlite 上是 JSON 文本。历史 sqlite 开发库中可能残留 JSON 'null' 文本行（非 SQL NULL），补偿任务扫不到；建议后续统一为 pgvector 的 SQLAlchemy 类型
+- OPTIMIZATION_PLAN P0-5 提到的 qwen3-embedding 2560→1024 维截断问题（应在请求中显式传 dimensions）未在本次处理，规格的修复清单未包含它
+- ~~`pip install -e .` 在 backend 下失败：hatchling 缺打包配置~~ 已在 `6174e13`（Dockerfile 任务）中修复
