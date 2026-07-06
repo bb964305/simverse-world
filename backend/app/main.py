@@ -13,20 +13,22 @@ from app.agent.loop import agent_loop
 
 @asynccontextmanager
 async def lifespan(app):
-    # Auto-create tables (dev mode — production uses Alembic migrations)
-    from app.database import engine, Base
-    # Import all models so Base.metadata knows about them
-    import app.models.user  # noqa: F401
-    import app.models.resident  # noqa: F401
-    import app.models.conversation  # noqa: F401
-    import app.models.transaction  # noqa: F401
-    import app.models.system_config  # noqa: F401
-    import app.models.forge_session  # noqa: F401
-    import app.models.pending_message  # noqa: F401
-    import app.models.memory  # noqa: F401
-    import app.models.personality_history  # noqa: F401
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # Auto-create tables — dev convenience only, off by default (P0-6).
+    # Production schema is managed exclusively by Alembic migrations.
+    if settings.auto_create_tables:
+        from app.database import engine, Base
+        # Import all models so Base.metadata knows about them
+        import app.models.user  # noqa: F401
+        import app.models.resident  # noqa: F401
+        import app.models.conversation  # noqa: F401
+        import app.models.transaction  # noqa: F401
+        import app.models.system_config  # noqa: F401
+        import app.models.forge_session  # noqa: F401
+        import app.models.pending_message  # noqa: F401
+        import app.models.memory  # noqa: F401
+        import app.models.personality_history  # noqa: F401
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
 
     # Start heat cron on startup
     task = asyncio.create_task(heat_cron_loop())

@@ -3,6 +3,9 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/skills_world"
+    # Dev convenience only: create tables from models at startup.
+    # Production must run `alembic upgrade head` instead (P0-6).
+    auto_create_tables: bool = False
     redis_url: str = "redis://localhost:6379/0"
     jwt_secret: str = "dev-secret-change-in-production"
     jwt_algorithm: str = "HS256"
