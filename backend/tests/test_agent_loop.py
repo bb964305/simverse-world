@@ -1,10 +1,17 @@
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.models.resident import Resident
 from app.agent.loop import AgentLoop
 from app.agent.actions import ActionType, ActionResult
 from app.agent.scheduler import DailySchedule
+
+
+@pytest.fixture
+def loop_session_factory(db_engine):
+    """Session factory bound to the test engine, to patch app.agent.loop.async_session."""
+    return async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
 
 
 @pytest.fixture
@@ -36,7 +43,7 @@ async def loop_residents(db_session):
 
 
 @pytest.mark.anyio
-async def test_agent_loop_tick_round_runs(db_session, loop_residents):
+async def test_agent_loop_tick_round_runs(loop_session_factory, loop_residents):
     """_tick_round should call resident_tick for each active resident."""
     loop = AgentLoop()
 
@@ -53,19 +60,46 @@ async def test_agent_loop_tick_round_runs(db_session, loop_residents):
         call_idx += 1
         return result
 
-    with patch("app.agent.loop.resident_tick", side_effect=mock_tick):
-        with patch("app.agent.loop.should_tick", return_value=True):
-            with patch("app.agent.loop.build_schedule", return_value=MagicMock(
-                wake_hour=6, sleep_hour=23, peak_hours=[10], social_slots=[14], rest_ratio=0.3
-            )):
-                await loop._tick_round(db_session)
+    with patch("app.agent.loop.async_session", loop_session_factory):
+        with patch("app.agent.loop.resident_tick", side_effect=mock_tick):
+            with patch("app.agent.loop.should_tick", return_value=True):
+                with patch("app.agent.loop.build_schedule", return_value=MagicMock(
+                    wake_hour=6, sleep_hour=23, peak_hours=[10], social_slots=[14], rest_ratio=0.3
+                )):
+                    with patch("app.agent.loop.manager") as mock_manager:
+                        mock_manager.broadcast = AsyncMock()
+                        await loop._tick_round()
 
     # All 3 residents should have been evaluated
     assert call_idx == 3
 
 
 @pytest.mark.anyio
-async def test_agent_loop_respects_max_concurrent(db_session, loop_residents):
+async def test_agent_loop_each_tick_gets_own_session(db_session, loop_session_factory, loop_residents):
+    """P0-1 regression: every tick must run in its own AsyncSession, never a shared one."""
+    loop = AgentLoop()
+    seen_sessions: list[AsyncSession] = []
+
+    async def capture_tick(db, resident):
+        seen_sessions.append(db)
+        return None
+
+    with patch("app.agent.loop.async_session", loop_session_factory):
+        with patch("app.agent.loop.resident_tick", side_effect=capture_tick):
+            with patch("app.agent.loop.should_tick", return_value=True):
+                with patch("app.agent.loop.build_schedule", return_value=MagicMock(
+                    wake_hour=6, sleep_hour=23, peak_hours=[10], social_slots=[14], rest_ratio=0.3
+                )):
+                    await loop._tick_round()
+
+    assert len(seen_sessions) == 3
+    # All sessions distinct from each other and from any outer session
+    assert len({id(s) for s in seen_sessions}) == 3
+    assert all(s is not db_session for s in seen_sessions)
+
+
+@pytest.mark.anyio
+async def test_agent_loop_respects_max_concurrent(loop_session_factory, loop_residents):
     """AgentLoop should use a semaphore limiting concurrent ticks."""
     loop = AgentLoop()
     concurrent_count = 0
@@ -80,23 +114,24 @@ async def test_agent_loop_respects_max_concurrent(db_session, loop_residents):
         concurrent_count -= 1
         return None
 
-    with patch("app.agent.loop.resident_tick", side_effect=slow_tick):
-        with patch("app.agent.loop.should_tick", return_value=True):
-            with patch("app.agent.loop.build_schedule", return_value=MagicMock(
-                wake_hour=6, sleep_hour=23, peak_hours=[10], social_slots=[14], rest_ratio=0.3
-            )):
-                with patch("app.agent.loop.settings") as mock_settings:
-                    mock_settings.agent_max_concurrent = 2
-                    mock_settings.agent_enabled = True
-                    mock_settings.agent_max_daily_actions = 20
-                    await loop._tick_round(db_session)
+    with patch("app.agent.loop.async_session", loop_session_factory):
+        with patch("app.agent.loop.resident_tick", side_effect=slow_tick):
+            with patch("app.agent.loop.should_tick", return_value=True):
+                with patch("app.agent.loop.build_schedule", return_value=MagicMock(
+                    wake_hour=6, sleep_hour=23, peak_hours=[10], social_slots=[14], rest_ratio=0.3
+                )):
+                    with patch("app.agent.loop.settings") as mock_settings:
+                        mock_settings.agent_max_concurrent = 2
+                        mock_settings.agent_enabled = True
+                        mock_settings.agent_max_daily_actions = 20
+                        await loop._tick_round()
 
     # max concurrent should not exceed limit
     assert max_seen <= 2
 
 
 @pytest.mark.anyio
-async def test_agent_loop_broadcasts_movement(db_session, loop_residents):
+async def test_agent_loop_broadcasts_movement(loop_session_factory, loop_residents):
     """Loop should broadcast resident_move for WANDER actions."""
     loop = AgentLoop()
     broadcasts: list[dict] = []
@@ -108,21 +143,22 @@ async def test_agent_loop_broadcasts_movement(db_session, loop_residents):
         action=ActionType.WANDER, target_slug=None, target_tile=(80, 55), reason="restless"
     )
 
-    with patch("app.agent.loop.resident_tick", return_value=wander_result):
-        with patch("app.agent.loop.should_tick", return_value=True):
-            with patch("app.agent.loop.build_schedule", return_value=MagicMock(
-                wake_hour=6, sleep_hour=23, peak_hours=[10], social_slots=[14], rest_ratio=0.3
-            )):
-                with patch("app.agent.loop.manager") as mock_manager:
-                    mock_manager.broadcast = AsyncMock(side_effect=mock_broadcast)
-                    await loop._tick_round(db_session)
+    with patch("app.agent.loop.async_session", loop_session_factory):
+        with patch("app.agent.loop.resident_tick", return_value=wander_result):
+            with patch("app.agent.loop.should_tick", return_value=True):
+                with patch("app.agent.loop.build_schedule", return_value=MagicMock(
+                    wake_hour=6, sleep_hour=23, peak_hours=[10], social_slots=[14], rest_ratio=0.3
+                )):
+                    with patch("app.agent.loop.manager") as mock_manager:
+                        mock_manager.broadcast = AsyncMock(side_effect=mock_broadcast)
+                        await loop._tick_round()
 
     move_broadcasts = [b for b in broadcasts if b.get("type") == "resident_move"]
     assert len(move_broadcasts) >= 1
 
 
 @pytest.mark.anyio
-async def test_agent_loop_one_failed_tick_doesnt_crash(db_session, loop_residents):
+async def test_agent_loop_one_failed_tick_doesnt_crash(loop_session_factory, loop_residents):
     """A failing tick should be caught and loop should continue."""
     loop = AgentLoop()
     call_count = 0
@@ -134,15 +170,16 @@ async def test_agent_loop_one_failed_tick_doesnt_crash(db_session, loop_resident
             raise RuntimeError("Simulated tick failure")
         return None
 
-    with patch("app.agent.loop.resident_tick", side_effect=flaky_tick):
-        with patch("app.agent.loop.should_tick", return_value=True):
-            with patch("app.agent.loop.build_schedule", return_value=MagicMock(
-                wake_hour=6, sleep_hour=23, peak_hours=[10], social_slots=[14], rest_ratio=0.3
-            )):
-                with patch("app.agent.loop.manager") as mock_manager:
-                    mock_manager.broadcast = AsyncMock()
-                    # Should not raise
-                    await loop._tick_round(db_session)
+    with patch("app.agent.loop.async_session", loop_session_factory):
+        with patch("app.agent.loop.resident_tick", side_effect=flaky_tick):
+            with patch("app.agent.loop.should_tick", return_value=True):
+                with patch("app.agent.loop.build_schedule", return_value=MagicMock(
+                    wake_hour=6, sleep_hour=23, peak_hours=[10], social_slots=[14], rest_ratio=0.3
+                )):
+                    with patch("app.agent.loop.manager") as mock_manager:
+                        mock_manager.broadcast = AsyncMock()
+                        # Should not raise
+                        await loop._tick_round()
 
     # All 3 residents should have been attempted
     assert call_count == 3

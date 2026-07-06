@@ -55,48 +55,64 @@ class AgentLoop:
                 await asyncio.sleep(settings.agent_tick_interval)
                 continue
             try:
-                async with async_session() as db:
-                    await self._tick_round(db)
+                await self._tick_round()
             except Exception as e:
                 logger.error("AgentLoop tick_round error: %s", e)
             await asyncio.sleep(settings.agent_tick_interval)
 
-    async def _tick_round(self, db: AsyncSession) -> None:
-        """One round: evaluate schedules, run concurrent resident ticks."""
-        # Load all active residents
-        result = await db.execute(
-            select(Resident).where(Resident.status.not_in(["sleeping"]))
-        )
-        residents = list(result.scalars().all())
-        if not residents:
+    async def _tick_round(self) -> None:
+        """One round: evaluate schedules, run concurrent resident ticks.
+
+        AsyncSession is not concurrency-safe (P0-1): a short-lived session
+        loads the resident list, then each guarded tick opens its own
+        session inside the semaphore.
+        """
+        # Load id + schedule data for active residents, then release the session
+        async with async_session() as db:
+            result = await db.execute(
+                select(Resident.id, Resident.meta_json).where(
+                    Resident.status.not_in(["sleeping"])
+                )
+            )
+            rows = result.all()
+        if not rows:
             return
 
         current_hour = datetime.now().hour
         semaphore = asyncio.Semaphore(settings.agent_max_concurrent)
 
-        async def guarded_tick(resident: Resident) -> ActionResult | None:
-            """Run one resident's tick with semaphore, handle errors gracefully."""
-            # Evaluate schedule before acquiring semaphore
-            sbti_data = (resident.meta_json or {}).get("sbti")
+        async def guarded_tick(
+            resident_id: str, meta_json: dict | None
+        ) -> ActionResult | None:
+            """Run one resident's tick in its own session, bounded by semaphore."""
+            # Evaluate schedule before acquiring semaphore (no DB needed)
+            sbti_data = (meta_json or {}).get("sbti")
             schedule = build_schedule(sbti_data)
 
             if not should_tick(schedule, current_hour):
                 return None
 
             async with semaphore:
-                try:
-                    action_result = await resident_tick(db, resident)
-                except Exception as e:
-                    logger.warning("Tick error for %s: %s", resident.slug, e)
-                    return None
+                async with async_session() as db:
+                    resident = await db.get(Resident, resident_id)
+                    if resident is None or resident.status == "sleeping":
+                        return None
+                    try:
+                        action_result = await resident_tick(db, resident)
+                    except Exception as e:
+                        logger.warning("Tick error for %s: %s", resident.slug, e)
+                        return None
 
-            if action_result:
-                await self._handle_action(db, resident, action_result)
+                    if action_result:
+                        await self._handle_action(db, resident, action_result)
 
-            return action_result
+                    return action_result
 
         # Run all ticks concurrently, bounded by semaphore
-        await asyncio.gather(*(guarded_tick(r) for r in residents), return_exceptions=True)
+        await asyncio.gather(
+            *(guarded_tick(row.id, row.meta_json) for row in rows),
+            return_exceptions=True,
+        )
 
     async def _handle_action(
         self,
