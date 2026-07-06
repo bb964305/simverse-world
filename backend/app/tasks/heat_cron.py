@@ -24,5 +24,5 @@ async def heat_cron_loop():
             if changes:
                 logger.info(f"Heat cron: {len(changes)} status changes")
         except Exception as e:
-            logger.error(f"Heat cron error: {e}")
+            logger.error(f"Heat cron error: {e}", exc_info=True)
         await asyncio.sleep(HEAT_CRON_INTERVAL_SECONDS)

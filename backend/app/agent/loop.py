@@ -57,7 +57,7 @@ class AgentLoop:
             try:
                 await self._tick_round()
             except Exception as e:
-                logger.error("AgentLoop tick_round error: %s", e)
+                logger.error("AgentLoop tick_round error: %s", e, exc_info=True)
             await asyncio.sleep(settings.agent_tick_interval)
 
     async def _tick_round(self) -> None:

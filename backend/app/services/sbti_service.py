@@ -245,7 +245,7 @@ async def compute_sbti(name: str, ability_md: str, persona_md: str, soul_md: str
         return result
 
     except Exception as e:
-        logger.error(f"SBTI computation failed for '{name}': {e}")
+        logger.error(f"SBTI computation failed for '{name}': {e}", exc_info=True)
         return None
 
 

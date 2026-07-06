@@ -50,7 +50,7 @@ async def resident_tick(
     try:
         phases = registry.get_phases(resident)
     except RuntimeError as e:
-        logger.error("Failed to load phases for %s: %s", resident.slug, e)
+        logger.error("Failed to load phases for %s: %s", resident.slug, e, exc_info=True)
         return None
 
     for phase in phases:

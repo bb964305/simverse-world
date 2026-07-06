@@ -280,7 +280,7 @@ async def websocket_handler(ws: WebSocket):
                                 "done": False,
                             })
                     except Exception as e:
-                        logger.error("LLM streaming error for %s: %s", current_resident.slug, e)
+                        logger.error("LLM streaming error for %s: %s", current_resident.slug, e, exc_info=True)
                         if not full_reply:
                             full_reply = f"（对话出错了：{str(e)[:100]}）"
                             await manager.send(user_id, {

@@ -73,7 +73,7 @@ class PluginRegistry:
                 self._configs[config.name] = config
                 logger.info("Loaded agent config: %s (%s)", config.name, yaml_file.name)
             except Exception as e:
-                logger.error("Failed to load agent config %s: %s", yaml_file, e)
+                logger.error("Failed to load agent config %s: %s", yaml_file, e, exc_info=True)
 
     def get_phases(self, resident: Resident) -> list[PhasePlugin]:
         config_name = resolve_config_name(resident)

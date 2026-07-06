@@ -86,5 +86,5 @@ async def embedding_backfill_loop() -> None:
                 if fixed:
                     logger.info("Embedding backfill: recomputed %d embeddings", fixed)
         except Exception as e:
-            logger.error("Embedding backfill error: %s", e)
+            logger.error("Embedding backfill error: %s", e, exc_info=True)
         await asyncio.sleep(BACKFILL_INTERVAL_SECONDS)

@@ -126,5 +126,5 @@ async def generate_portrait(
             return save_portrait_image(resident_id, image_data)
 
     except Exception as e:
-        logger.error("Portrait generation failed for %s: %s", resident_id, e)
+        logger.error("Portrait generation failed for %s: %s", resident_id, e, exc_info=True)
         return None
