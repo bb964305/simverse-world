@@ -45,10 +45,11 @@ async def generate_embedding(text: str) -> list[float] | None:
         return None
 
 
-async def generate_embeddings_batch(texts: list[str]) -> list[list[float]]:
+async def generate_embeddings_batch(texts: list[str]) -> list[list[float] | None]:
     """Generate embeddings for multiple texts in a single Ollama call.
 
-    Returns list of vectors. Failed items are zero-vectors.
+    Returns list of vectors. Failed items are None so callers keep the
+    DB column NULL (zero-vectors poison cosine-distance retrieval, P0-5).
     """
     if not texts:
         return []
@@ -68,10 +69,10 @@ async def generate_embeddings_batch(texts: list[str]) -> list[list[float]]:
             )
         if resp.status_code != 200:
             logger.warning("Ollama batch embedding failed: %s", resp.status_code)
-            return [[0.0] * dim] * len(texts)
+            return [None] * len(texts)
         data = resp.json()
         embeddings = data.get("embeddings", [])
-        result = []
+        result: list[list[float] | None] = []
         for vec in embeddings:
             if len(vec) > dim:
                 vec = vec[:dim]
@@ -80,8 +81,8 @@ async def generate_embeddings_batch(texts: list[str]) -> list[list[float]]:
             result.append(vec)
         # Pad missing entries
         while len(result) < len(texts):
-            result.append([0.0] * dim)
+            result.append(None)
         return result
     except Exception as e:
         logger.warning("Ollama batch embedding error: %s", e)
-        return [[0.0] * dim] * len(texts)
+        return [None] * len(texts)

@@ -25,7 +25,9 @@ class Memory(Base):
 
     # Embedding (nullable — only event memories get embeddings)
     # pgvector column is added via migration; in SQLite tests this is just None
-    embedding: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # none_as_null: Python None must land as SQL NULL, not JSON 'null' text,
+    # so the `embedding IS NOT NULL` retrieval filter works (P0-5)
+    embedding: Mapped[list | None] = mapped_column(JSON(none_as_null=True), nullable=True)
 
     metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
