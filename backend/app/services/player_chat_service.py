@@ -19,6 +19,23 @@ from app.llm.prompt import assemble_system_prompt
 from app.llm.client import stream_chat
 
 
+async def generate_auto_reply(resident: Resident, user_text: str) -> str:
+    """Call LLM with target's 3-layer persona to generate reply.
+
+    Standalone function (no DB session) so callers can invoke it after
+    closing their session — the LLM call must not hold a connection (P0-2).
+    Works with a detached Resident as long as persona fields are loaded.
+    """
+    system_prompt = assemble_system_prompt(resident)
+    messages = [{"role": "user", "content": user_text}]
+
+    full_reply = ""
+    async for chunk in stream_chat(system_prompt, messages):
+        full_reply += chunk
+
+    return full_reply
+
+
 class PlayerChatService:
     def __init__(self, db: AsyncSession):
         self._db = db
@@ -30,7 +47,34 @@ class PlayerChatService:
         text: str,
         target_online: bool,
     ) -> dict:
-        """Route a player chat message. Returns result dict with action taken."""
+        """Route a player chat message end-to-end (DB decision + LLM auto-reply).
+
+        Convenience wrapper around `prepare_route` + `generate_auto_reply`.
+        Callers that hold a short-lived DB session (e.g. the WS handler)
+        should call `prepare_route` inside the session and
+        `generate_auto_reply` after closing it, so no connection is held
+        during the LLM call (P0-2).
+        """
+        result = await self.prepare_route(sender_id, target_user_id, text, target_online)
+        if result.get("action") != "auto_reply":
+            return result
+        reply_text = await generate_auto_reply(result.pop("resident"), text)
+        return {**result, "text": reply_text}
+
+    async def prepare_route(
+        self,
+        sender_id: str,
+        target_user_id: str,
+        text: str,
+        target_online: bool,
+    ) -> dict:
+        """DB-only routing decision: validate, resolve reply mode, charge.
+
+        Never calls the LLM. For auto mode, returns
+        `{"action": "auto_reply", "resident": <Resident>, ...}` and the caller
+        generates the reply via `generate_auto_reply` (ideally after closing
+        the session).
+        """
         # Load target user and their player resident
         target_user = await self._get_user(target_user_id)
         if not target_user:
@@ -68,27 +112,13 @@ class PlayerChatService:
         if not charged:
             return {"action": "error", "message": "Insufficient Soul Coins"}
 
-        # Generate auto-reply using target's persona
-        reply_text = await self._generate_auto_reply(target_resident, text)
-
         return {
             "action": "auto_reply",
             "target_user_id": target_user_id,
             "sender_id": sender_id,
-            "text": reply_text,
+            "resident": target_resident,
             "is_auto": True,
         }
-
-    async def _generate_auto_reply(self, resident: Resident, user_text: str) -> str:
-        """Call LLM with target's 3-layer persona to generate reply."""
-        system_prompt = assemble_system_prompt(resident)
-        messages = [{"role": "user", "content": user_text}]
-
-        full_reply = ""
-        async for chunk in stream_chat(system_prompt, messages):
-            full_reply += chunk
-
-        return full_reply
 
     async def _queue_message(
         self, sender_id: str, recipient_id: str, text: str, is_auto_reply: bool

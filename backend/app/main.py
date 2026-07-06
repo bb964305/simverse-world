@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.routers import auth, users, residents, forge, profile, search, bulletin, onboarding, sprites, avatar, settings as settings_router, media as media_router
 from app.routers.admin import router as admin_router
-from app.ws.handler import websocket_handler
+from app.ws.handlers import websocket_handler
 from app.tasks.heat_cron import heat_cron_loop
 from app.tasks.embedding_backfill import embedding_backfill_loop
 from app.agent.loop import agent_loop

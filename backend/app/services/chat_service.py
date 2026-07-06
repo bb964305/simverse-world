@@ -1,5 +1,5 @@
 # Chat service: orchestrates coin charging and LLM interaction for chat turns.
-# Primary chat logic lives in app/ws/handler.py (WebSocket handler).
+# Primary chat logic lives in app/ws/handlers/ (WebSocket handlers).
 # This module provides shared helpers if needed by non-WebSocket consumers.
 
 from sqlalchemy.ext.asyncio import AsyncSession

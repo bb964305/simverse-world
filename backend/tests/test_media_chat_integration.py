@@ -82,7 +82,7 @@ async def test_chat_msg_with_image_calls_model_router(
 
     image_url = "/static/uploads/images/test.jpg"
 
-    with patch("app.ws.handler.ModelRouter") as mock_router_cls:
+    with patch("app.ws.handlers.chat.ModelRouter") as mock_router_cls:
         mock_router = MagicMock()
 
         async def fake_chat_with_media(*args, **kwargs):
