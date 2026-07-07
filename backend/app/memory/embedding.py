@@ -1,6 +1,6 @@
 import logging
-import httpx
 from app.config import settings
+from app.http import get_client
 
 logger = logging.getLogger(__name__)
 
@@ -14,17 +14,16 @@ async def generate_embedding(text: str) -> list[float] | None:
         return None
 
     try:
-        async with httpx.AsyncClient(trust_env=False) as client:
-            resp = await client.post(
-                f"{settings.ollama_base_url}/api/embed",
-                json={
-                    "model": settings.ollama_embed_model,
-                    "input": text,
-                    "truncate": True,
-                    "options": {"num_ctx": 2048},
-                },
-                timeout=30.0,
-            )
+        resp = await get_client().post(
+            f"{settings.ollama_base_url}/api/embed",
+            json={
+                "model": settings.ollama_embed_model,
+                "input": text,
+                "truncate": True,
+                "options": {"num_ctx": 2048},
+            },
+            timeout=30.0,
+        )
         if resp.status_code != 200:
             logger.warning("Ollama embedding failed: %s %s", resp.status_code, resp.text[:200])
             return None
@@ -56,17 +55,16 @@ async def generate_embeddings_batch(texts: list[str]) -> list[list[float] | None
 
     dim = settings.ollama_embed_dimensions
     try:
-        async with httpx.AsyncClient(trust_env=False) as client:
-            resp = await client.post(
-                f"{settings.ollama_base_url}/api/embed",
-                json={
-                    "model": settings.ollama_embed_model,
-                    "input": texts,
-                    "truncate": True,
-                    "options": {"num_ctx": 2048},
-                },
-                timeout=60.0,
-            )
+        resp = await get_client().post(
+            f"{settings.ollama_base_url}/api/embed",
+            json={
+                "model": settings.ollama_embed_model,
+                "input": texts,
+                "truncate": True,
+                "options": {"num_ctx": 2048},
+            },
+            timeout=60.0,
+        )
         if resp.status_code != 200:
             logger.warning("Ollama batch embedding failed: %s", resp.status_code)
             return [None] * len(texts)

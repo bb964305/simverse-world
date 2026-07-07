@@ -2,6 +2,8 @@ import asyncio
 from typing import Any
 import httpx
 
+from app.http import get_client
+
 RESEARCH_DIMENSIONS: dict[str, dict[str, Any]] = {
     "writings": {
         "queries_template": ["{name} 著作 文章 论文", "{name} 核心观点 思想"],
@@ -54,16 +56,16 @@ class ResearchStage:
     async def run(self, character_name: str, user_material: str = "") -> dict[str, list[dict]]:
         results: dict[str, list[dict]] = {}
 
-        async with httpx.AsyncClient(trust_env=False) as client:
-            for dim_name, dim_config in RESEARCH_DIMENSIONS.items():
-                dim_results: list[dict] = []
-                for template in dim_config["queries_template"]:
-                    query = template.format(name=character_name)
-                    search_results = await self._search(client, query)
-                    dim_results.extend(search_results)
-                    if self._delay > 0:
-                        await asyncio.sleep(self._delay)
-                results[dim_name] = dim_results
+        client = get_client()
+        for dim_name, dim_config in RESEARCH_DIMENSIONS.items():
+            dim_results: list[dict] = []
+            for template in dim_config["queries_template"]:
+                query = template.format(name=character_name)
+                search_results = await self._search(client, query)
+                dim_results.extend(search_results)
+                if self._delay > 0:
+                    await asyncio.sleep(self._delay)
+            results[dim_name] = dim_results
 
         return results
 

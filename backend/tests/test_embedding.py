@@ -3,19 +3,20 @@ from unittest.mock import AsyncMock, patch, MagicMock
 from app.memory.embedding import generate_embedding, generate_embeddings_batch
 
 
+def _patch_client(mock_client):
+    """Embedding calls go through the shared client (P1-2)."""
+    return patch("app.memory.embedding.get_client", return_value=mock_client)
+
+
 @pytest.mark.anyio
 async def test_generate_embedding_returns_list():
     mock_response = MagicMock()
     mock_response.status_code = 200
     mock_response.json.return_value = {"embeddings": [[0.1] * 1024]}
 
-    with patch("app.memory.embedding.httpx.AsyncClient") as MockClient:
-        mock_client = AsyncMock()
-        mock_client.post.return_value = mock_response
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        MockClient.return_value = mock_client
-
+    mock_client = AsyncMock()
+    mock_client.post.return_value = mock_response
+    with _patch_client(mock_client):
         result = await generate_embedding("Hello world")
 
     assert isinstance(result, list)
@@ -38,13 +39,9 @@ async def test_generate_embeddings_batch():
     mock_response.status_code = 200
     mock_response.json.return_value = {"embeddings": [[0.1] * 1024, [0.2] * 1024]}
 
-    with patch("app.memory.embedding.httpx.AsyncClient") as MockClient:
-        mock_client = AsyncMock()
-        mock_client.post.return_value = mock_response
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        MockClient.return_value = mock_client
-
+    mock_client = AsyncMock()
+    mock_client.post.return_value = mock_response
+    with _patch_client(mock_client):
         results = await generate_embeddings_batch(["text one", "text two"])
 
     assert len(results) == 2
@@ -58,13 +55,9 @@ async def test_generate_embeddings_batch_error_returns_nones():
     mock_response.status_code = 500
     mock_response.text = "Internal Server Error"
 
-    with patch("app.memory.embedding.httpx.AsyncClient") as MockClient:
-        mock_client = AsyncMock()
-        mock_client.post.return_value = mock_response
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        MockClient.return_value = mock_client
-
+    mock_client = AsyncMock()
+    mock_client.post.return_value = mock_response
+    with _patch_client(mock_client):
         results = await generate_embeddings_batch(["text one", "text two"])
 
     assert results == [None, None]
@@ -72,13 +65,9 @@ async def test_generate_embeddings_batch_error_returns_nones():
 
 @pytest.mark.anyio
 async def test_generate_embeddings_batch_exception_returns_nones():
-    with patch("app.memory.embedding.httpx.AsyncClient") as MockClient:
-        mock_client = AsyncMock()
-        mock_client.post.side_effect = RuntimeError("connection refused")
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        MockClient.return_value = mock_client
-
+    mock_client = AsyncMock()
+    mock_client.post.side_effect = RuntimeError("connection refused")
+    with _patch_client(mock_client):
         results = await generate_embeddings_batch(["a", "b", "c"])
 
     assert results == [None, None, None]
@@ -91,13 +80,9 @@ async def test_generate_embeddings_batch_pads_missing_with_none():
     mock_response.status_code = 200
     mock_response.json.return_value = {"embeddings": [[0.1] * 1024]}
 
-    with patch("app.memory.embedding.httpx.AsyncClient") as MockClient:
-        mock_client = AsyncMock()
-        mock_client.post.return_value = mock_response
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        MockClient.return_value = mock_client
-
+    mock_client = AsyncMock()
+    mock_client.post.return_value = mock_response
+    with _patch_client(mock_client):
         results = await generate_embeddings_batch(["a", "b"])
 
     assert len(results) == 2
@@ -111,13 +96,9 @@ async def test_generate_embedding_ollama_error_returns_none():
     mock_response.status_code = 500
     mock_response.text = "Internal Server Error"
 
-    with patch("app.memory.embedding.httpx.AsyncClient") as MockClient:
-        mock_client = AsyncMock()
-        mock_client.post.return_value = mock_response
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        MockClient.return_value = mock_client
-
+    mock_client = AsyncMock()
+    mock_client.post.return_value = mock_response
+    with _patch_client(mock_client):
         result = await generate_embedding("test")
 
     assert result is None

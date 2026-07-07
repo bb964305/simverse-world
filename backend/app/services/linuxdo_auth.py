@@ -4,7 +4,7 @@ import uuid
 from dataclasses import dataclass
 from urllib.parse import urlencode
 
-import httpx
+from app.http import get_client
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,29 +45,29 @@ class LinuxDoOAuth:
 
     async def exchange_code(self, code: str) -> LinuxDoUser:
         """Exchange authorization code for access token, then fetch user info."""
-        async with httpx.AsyncClient(trust_env=False) as client:
-            # Step 1: Exchange code for token (HTTP Basic Auth)
-            token_resp = await client.post(
-                TOKEN_URL,
-                data={
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": self._redirect_uri,
-                },
-                auth=(self._client_id, self._client_secret),
-                timeout=15,
-            )
-            token_resp.raise_for_status()
-            access_token = token_resp.json()["access_token"]
+        client = get_client()
+        # Step 1: Exchange code for token (HTTP Basic Auth)
+        token_resp = await client.post(
+            TOKEN_URL,
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": self._redirect_uri,
+            },
+            auth=(self._client_id, self._client_secret),
+            timeout=15,
+        )
+        token_resp.raise_for_status()
+        access_token = token_resp.json()["access_token"]
 
-            # Step 2: Fetch user info
-            user_resp = await client.get(
-                USER_INFO_URL,
-                headers={"Authorization": f"Bearer {access_token}"},
-                timeout=15,
-            )
-            user_resp.raise_for_status()
-            data = user_resp.json()
+        # Step 2: Fetch user info
+        user_resp = await client.get(
+            USER_INFO_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=15,
+        )
+        user_resp.raise_for_status()
+        data = user_resp.json()
 
         user = LinuxDoUser(
             id=data["id"],

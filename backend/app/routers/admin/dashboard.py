@@ -5,6 +5,8 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 import httpx
 
+from app.http import get_client
+
 from app.database import get_db
 from app.models.user import User
 from app.models.resident import Resident
@@ -124,42 +126,44 @@ async def _check_service_health() -> list[dict]:
     """Ping external services and return health status."""
     results = []
 
-    async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
-        # SearXNG — do a real search query to verify it's functional
-        try:
-            resp = await client.get(
-                f"{SEARXNG_URL}/search",
-                params={"q": "ping", "format": "json"},
-            )
-            latency = int(resp.elapsed.total_seconds() * 1000)
-            ok = resp.status_code == 200
-            results.append({
-                "service": "searxng",
-                "status": "ok" if ok else "error",
-                "latency_ms": latency,
-                "detail": None if ok else f"HTTP {resp.status_code}",
-            })
-        except httpx.TimeoutException:
-            results.append({"service": "searxng", "status": "timeout", "latency_ms": None, "detail": "Connection timed out"})
-        except Exception as e:
-            results.append({"service": "searxng", "status": "error", "latency_ms": None, "detail": str(e)})
+    client = get_client()
 
-        # LLM API — just check if the base URL is reachable (any HTTP response = reachable)
-        llm_url = settings.llm_base_url or "https://api.anthropic.com"
-        try:
-            resp = await client.get(llm_url.rstrip("/"))
-            latency = int(resp.elapsed.total_seconds() * 1000)
-            # Any HTTP response means the host is reachable
-            results.append({
-                "service": "llm_api",
-                "status": "ok",
-                "latency_ms": latency,
-                "detail": None,
-            })
-        except httpx.TimeoutException:
-            results.append({"service": "llm_api", "status": "timeout", "latency_ms": None, "detail": "Connection timed out"})
-        except Exception as e:
-            results.append({"service": "llm_api", "status": "error", "latency_ms": None, "detail": str(e) or f"{type(e).__name__}"})
+    # SearXNG — do a real search query to verify it's functional
+    try:
+        resp = await client.get(
+            f"{SEARXNG_URL}/search",
+            params={"q": "ping", "format": "json"},
+            timeout=5.0,
+        )
+        latency = int(resp.elapsed.total_seconds() * 1000)
+        ok = resp.status_code == 200
+        results.append({
+            "service": "searxng",
+            "status": "ok" if ok else "error",
+            "latency_ms": latency,
+            "detail": None if ok else f"HTTP {resp.status_code}",
+        })
+    except httpx.TimeoutException:
+        results.append({"service": "searxng", "status": "timeout", "latency_ms": None, "detail": "Connection timed out"})
+    except Exception as e:
+        results.append({"service": "searxng", "status": "error", "latency_ms": None, "detail": str(e)})
+
+    # LLM API — just check if the base URL is reachable (any HTTP response = reachable)
+    llm_url = settings.llm_base_url or "https://api.anthropic.com"
+    try:
+        resp = await client.get(llm_url.rstrip("/"), timeout=5.0)
+        latency = int(resp.elapsed.total_seconds() * 1000)
+        # Any HTTP response means the host is reachable
+        results.append({
+            "service": "llm_api",
+            "status": "ok",
+            "latency_ms": latency,
+            "detail": None,
+        })
+    except httpx.TimeoutException:
+        results.append({"service": "llm_api", "status": "timeout", "latency_ms": None, "detail": "Connection timed out"})
+    except Exception as e:
+        results.append({"service": "llm_api", "status": "error", "latency_ms": None, "detail": str(e) or f"{type(e).__name__}"})
 
     return results
 

@@ -66,15 +66,13 @@ async def test_health_check_formats():
     """Health check should return list of ServiceHealthItem-compatible dicts."""
     from app.routers.admin.dashboard import _check_service_health
 
-    with patch("app.routers.admin.dashboard.httpx.AsyncClient") as mock_cls:
+    with patch("app.routers.admin.dashboard.get_client") as mock_get_client:
         mock_client = AsyncMock()
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.elapsed = timedelta(milliseconds=50)
         mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_cls.return_value = mock_client
+        mock_get_client.return_value = mock_client
 
         results = await _check_service_health()
     assert isinstance(results, list)

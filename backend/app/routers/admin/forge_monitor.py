@@ -4,6 +4,8 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 import httpx
 
+from app.http import get_client
+
 from app.database import get_db
 from app.models.user import User
 from app.models.forge_session import ForgeSession
@@ -102,15 +104,14 @@ async def searxng_health(
 ):
     """Dedicated SearXNG health check with extended diagnostics."""
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get("http://localhost:8888/healthz")
-            latency = int(resp.elapsed.total_seconds() * 1000)
-            if resp.status_code == 200:
-                return ServiceHealthItem(service="searxng", status="ok", latency_ms=latency)
-            return ServiceHealthItem(
-                service="searxng", status="error", latency_ms=latency,
-                detail=f"HTTP {resp.status_code}",
-            )
+        resp = await get_client().get("http://localhost:8888/healthz", timeout=10.0)
+        latency = int(resp.elapsed.total_seconds() * 1000)
+        if resp.status_code == 200:
+            return ServiceHealthItem(service="searxng", status="ok", latency_ms=latency)
+        return ServiceHealthItem(
+            service="searxng", status="error", latency_ms=latency,
+            detail=f"HTTP {resp.status_code}",
+        )
     except httpx.TimeoutException:
         return ServiceHealthItem(service="searxng", status="timeout", detail="Connection timed out")
     except Exception as e:

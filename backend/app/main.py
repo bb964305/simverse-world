@@ -9,6 +9,7 @@ from app.ws.handlers import websocket_handler
 from app.tasks.heat_cron import heat_cron_loop
 from app.tasks.embedding_backfill import embedding_backfill_loop
 from app.agent.loop import agent_loop
+from app.http import close_client
 
 
 @asynccontextmanager
@@ -38,6 +39,7 @@ async def lifespan(app):
     task.cancel()
     agent_task.cancel()
     backfill_task.cancel()
+    await close_client()
 
 
 app = FastAPI(title="Simverse World API", lifespan=lifespan)

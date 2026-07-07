@@ -20,12 +20,10 @@ async def test_research_stage_returns_6_dimensions():
         request=httpx.Request("GET", "http://test"),
     )
 
-    with patch("app.forge.research_stage.httpx.AsyncClient") as mock_client_cls:
+    with patch("app.forge.research_stage.get_client") as mock_get_client:
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client_cls.return_value = mock_client
+        mock_get_client.return_value = mock_client
 
         stage = ResearchStage(searxng_url="http://test:58080/search")
         result = await stage.run(character_name="萧炎", user_material="")
@@ -52,12 +50,10 @@ async def test_research_stage_with_user_material():
         request=httpx.Request("GET", "http://test"),
     )
 
-    with patch("app.forge.research_stage.httpx.AsyncClient") as mock_client_cls:
+    with patch("app.forge.research_stage.get_client") as mock_get_client:
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client_cls.return_value = mock_client
+        mock_get_client.return_value = mock_client
 
         stage = ResearchStage(searxng_url="http://test:58080/search")
         result = await stage.run(

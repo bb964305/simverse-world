@@ -400,12 +400,10 @@ async def test_llm_test_connection_success(client, auth_user):
         request=httpx.Request("POST", "https://api.example.com/v1/chat/completions"),
     )
 
-    with patch("app.services.settings_service.httpx.AsyncClient") as MockClient:
+    with patch("app.services.settings_service.get_client") as mock_get_client:
         mock_instance = AsyncMock()
         mock_instance.post.return_value = mock_response
-        mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
-        mock_instance.__aexit__ = AsyncMock(return_value=False)
-        MockClient.return_value = mock_instance
+        mock_get_client.return_value = mock_instance
 
         resp = await client.post(
             "/settings/llm/test",
@@ -427,12 +425,10 @@ async def test_llm_test_connection_timeout(client, auth_user):
     """POST /settings/llm/test should handle timeout gracefully."""
     _, token = auth_user
 
-    with patch("app.services.settings_service.httpx.AsyncClient") as MockClient:
+    with patch("app.services.settings_service.get_client") as mock_get_client:
         mock_instance = AsyncMock()
         mock_instance.post.side_effect = httpx.TimeoutException("timed out")
-        mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
-        mock_instance.__aexit__ = AsyncMock(return_value=False)
-        MockClient.return_value = mock_instance
+        mock_get_client.return_value = mock_instance
 
         resp = await client.post(
             "/settings/llm/test",

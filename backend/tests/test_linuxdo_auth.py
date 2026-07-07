@@ -51,13 +51,11 @@ async def test_exchange_code_for_user():
         request=httpx.Request("GET", "https://connect.linux.do/api/user"),
     )
 
-    with patch("app.services.linuxdo_auth.httpx.AsyncClient") as mock_cls:
+    with patch("app.services.linuxdo_auth.get_client") as mock_get_client:
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(return_value=token_response)
         mock_client.get = AsyncMock(return_value=user_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_cls.return_value = mock_client
+        mock_get_client.return_value = mock_client
 
         user = await oauth.exchange_code("test-code")
 
@@ -90,13 +88,11 @@ async def test_exchange_code_rejects_inactive_user():
         request=httpx.Request("GET", "https://connect.linux.do/api/user"),
     )
 
-    with patch("app.services.linuxdo_auth.httpx.AsyncClient") as mock_cls:
+    with patch("app.services.linuxdo_auth.get_client") as mock_get_client:
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(return_value=token_response)
         mock_client.get = AsyncMock(return_value=user_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_cls.return_value = mock_client
+        mock_get_client.return_value = mock_client
 
         with pytest.raises(ValueError, match="inactive or silenced"):
             await oauth.exchange_code("test-code")

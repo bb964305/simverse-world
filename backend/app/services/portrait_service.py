@@ -3,7 +3,7 @@ import base64
 import logging
 from pathlib import Path
 
-import httpx
+from app.http import get_client
 
 from app.config import settings
 
@@ -63,67 +63,67 @@ async def generate_portrait(
         return None
 
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                f"{base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "user", "content": prompt},
-                    ],
-                    "max_tokens": 1,
-                    "response_format": {"type": "image_url"},
-                },
+        response = await get_client().post(
+            f"{base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "user", "content": prompt},
+                ],
+                "max_tokens": 1,
+                "response_format": {"type": "image_url"},
+            },
+            timeout=timeout,
+        )
+
+        if response.status_code != 200:
+            logger.error(
+                "Gemini API returned %d: %s",
+                response.status_code,
+                response.text[:200],
             )
+            return None
 
-            if response.status_code != 200:
-                logger.error(
-                    "Gemini API returned %d: %s",
-                    response.status_code,
-                    response.text[:200],
-                )
-                return None
+        data = response.json()
 
-            data = response.json()
+        # Parse Gemini image response
+        # The proxy may return in OpenAI-compatible format or Gemini native format
+        image_data = None
 
-            # Parse Gemini image response
-            # The proxy may return in OpenAI-compatible format or Gemini native format
-            image_data = None
+        # Try Gemini native format (candidates -> inlineData)
+        candidates = data.get("candidates", [])
+        if candidates:
+            parts = candidates[0].get("content", {}).get("parts", [])
+            for part in parts:
+                inline = part.get("inlineData", {})
+                if inline.get("data"):
+                    image_data = base64.b64decode(inline["data"])
+                    break
 
-            # Try Gemini native format (candidates -> inlineData)
-            candidates = data.get("candidates", [])
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                for part in parts:
-                    inline = part.get("inlineData", {})
-                    if inline.get("data"):
-                        image_data = base64.b64decode(inline["data"])
-                        break
+        # Try OpenAI chat completion format
+        if not image_data:
+            choices = data.get("choices", [])
+            if choices:
+                content = choices[0].get("message", {}).get("content", "")
+                # Content might be base64 encoded image
+                if content and not content.startswith("{"):
+                    try:
+                        image_data = base64.b64decode(content)
+                    except Exception:
+                        pass
 
-            # Try OpenAI chat completion format
-            if not image_data:
-                choices = data.get("choices", [])
-                if choices:
-                    content = choices[0].get("message", {}).get("content", "")
-                    # Content might be base64 encoded image
-                    if content and not content.startswith("{"):
-                        try:
-                            image_data = base64.b64decode(content)
-                        except Exception:
-                            pass
+        if not image_data:
+            logger.error(
+                "Could not extract image from Gemini response: %s",
+                str(data)[:300],
+            )
+            return None
 
-            if not image_data:
-                logger.error(
-                    "Could not extract image from Gemini response: %s",
-                    str(data)[:300],
-                )
-                return None
-
-            return save_portrait_image(resident_id, image_data)
+        return save_portrait_image(resident_id, image_data)
 
     except Exception as e:
         logger.error("Portrait generation failed for %s: %s", resident_id, e, exc_info=True)

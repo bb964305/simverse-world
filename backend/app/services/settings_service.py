@@ -11,6 +11,8 @@ import time
 from typing import Any
 
 import httpx
+
+from app.http import get_client
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -279,8 +281,7 @@ async def test_llm_connection(
 
     start = time.monotonic()
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(url, json=body, headers=headers)
+        resp = await get_client().post(url, json=body, headers=headers, timeout=15.0)
         latency_ms = int((time.monotonic() - start) * 1000)
 
         if resp.status_code >= 400:

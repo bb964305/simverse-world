@@ -50,12 +50,10 @@ async def test_generate_portrait_success():
         }]
     }
 
-    with patch("app.services.portrait_service.httpx.AsyncClient") as mock_cls:
+    with patch("app.services.portrait_service.get_client") as mock_get_client:
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_cls.return_value = mock_client
+        mock_get_client.return_value = mock_client
 
         with patch("app.services.portrait_service.save_portrait_image") as mock_save:
             mock_save.return_value = "/static/portraits/test-id.png"
@@ -74,12 +72,10 @@ async def test_generate_portrait_api_error():
     mock_response.status_code = 500
     mock_response.text = "Internal Server Error"
 
-    with patch("app.services.portrait_service.httpx.AsyncClient") as mock_cls:
+    with patch("app.services.portrait_service.get_client") as mock_get_client:
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(return_value=mock_response)
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_cls.return_value = mock_client
+        mock_get_client.return_value = mock_client
 
         url = await generate_portrait("fail-id", "Nobody", "")
 
