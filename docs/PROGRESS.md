@@ -51,6 +51,8 @@
 ## 发现（施工中发现的新问题，不当场处理）
 - **成本优化研究完成（2026-07-07）**：28 条实验，产出在 `docs/research/`（REPORT=结论与 P1-1 建议、LOG=实验台账、DIRECTOR_ROADMAP/CALLMAP=Opus 统筹产物）。关键输入给 P1-1：计量字段清单、熔断阈值、杠杆排序（计划优先跳过 decide 省 29-37% 为最大项）；缓存/Batch 判定为不可用杠杆。**开放问题需 Jimmy**：部署机 .env 的 LLM_BASE_URL（验证端点是否 Anthropic 原生，F-02）。顺手修清单：互聊 max_tokens 100→150（截断污染 history 风险）、互聊 history 双注入（chat.py 一行）、玩家聊天 chat_messages 无截断。
 - 4 个预先存在的测试失败（HEAD 基线复现，与 P0-1 无关）：`test_forge.py::test_forge_answers_advance_to_generating`、`test_map_integration.py::test_decide_prompt_includes_remembered_residents`、`test_portrait.py::test_generate_portrait_success`（portrait_url 为 None）、`test_preset_import.py::test_seed_presets_creates_residents`（district 默认值断言 'free'，代码已改 'central_plaza'）——测试与代码漂移
-- `Memory.embedding` ORM 类型为 JSON 但迁移 004 实际列是 `vector(1024)`，类型不一致：PG 上依赖 asyncpg 文本转型，sqlite 上是 JSON 文本。历史 sqlite 开发库中可能残留 JSON 'null' 文本行（非 SQL NULL），补偿任务扫不到；建议后续统一为 pgvector 的 SQLAlchemy 类型
+- ~~`Memory.embedding` ORM 类型为 JSON 但迁移 004 实际列是 `vector(1024)`~~ **已修**（`045cd5a`）：当时猜"PG 靠 asyncpg 文本转型可行"被 vm212 实测证伪（连 NULL 都插不进，整个记忆管线在 PG 上死透）；现用 EmbeddingVector 方言分派类型。sqlite 残留 JSON 'null' 文本行的提醒仍有效
+- **vm212 端到端验证（2026-07-07）暴露并修复 4 个"仅真实 PG 会炸"的 bug**：迁移双头（`6e54e48`）、003 六处 Integer/String 类型漂移+012 同步迁移（`8662175`）、注册 FK 插入顺序（`d3e3a55`，github_auth 早修过但 register/linuxdo 没跟上）、embedding 列类型（`045cd5a`）。根因共性：sqlite 测试（FK 不强制+create_all 不走迁移）掩盖全部四类问题。**建议 Phase 3 CI 加一个 testcontainers-postgres 的迁移+注册冒烟 job**
+- vm212 部署状态：`/opt/skills-world`，API 端口 8100，pgvector/pg16，LLM=百炼 Coding Plan qwen3.7-plus（`/apps/anthropic`）。**AGENT_ENABLED=false**（Coding Plan 条款禁止后端自动化调用，防封 key/烧配额；玩家聊天链路不受影响）。要开 agent loop：改 `/opt/skills-world/deploy/.env` 后 `docker compose up -d api`；上生产须换按量计费 key
 - OPTIMIZATION_PLAN P0-5 提到的 qwen3-embedding 2560→1024 维截断问题（应在请求中显式传 dimensions）未在本次处理，规格的修复清单未包含它
 - ~~`pip install -e .` 在 backend 下失败：hatchling 缺打包配置~~ 已在 `6174e13`（Dockerfile 任务）中修复
