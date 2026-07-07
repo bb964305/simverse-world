@@ -1,7 +1,7 @@
 """add search_vector and last_daily_reward_at
 
 Revision ID: 002_search_reward
-Revises:
+Revises: b9c99304b867
 Create Date: 2026-04-07
 
 """
@@ -9,7 +9,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = '002_search_reward'
-down_revision = None  # Will be updated to chain from initial migration
+down_revision = 'b9c99304b867'
 branch_labels = None
 depends_on = None
 
