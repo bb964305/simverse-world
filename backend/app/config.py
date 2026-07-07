@@ -9,6 +9,10 @@ class Settings(BaseSettings):
     # Dev convenience only: create tables from models at startup.
     # Production must run `alembic upgrade head` instead (P0-6).
     auto_create_tables: bool = False
+    # Run background loops (agent, heat cron, embedding backfill) inside the
+    # API process. True keeps single-process dev behavior; set False in
+    # deployments where the standalone agent-worker owns the loops (P0-3).
+    run_background_tasks: bool = True
     redis_url: str = "redis://localhost:6379/0"
     # Local development only; anything non-debug must set a real JWT_SECRET (P0-4b)
     debug: bool = False
