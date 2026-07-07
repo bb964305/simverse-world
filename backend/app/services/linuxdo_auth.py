@@ -118,6 +118,7 @@ async def find_or_create_user(
         soul_coin_balance=100,
     )
     db.add(user)
+    await db.flush()
     db.add(Transaction(user_id=user_id, amount=100, reason="signup_bonus"))
     await db.commit()
     await db.refresh(user)

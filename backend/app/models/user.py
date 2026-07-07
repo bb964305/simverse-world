@@ -22,7 +22,11 @@ class User(Base):
     linuxdo_trust_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False)
-    player_resident_id: Mapped[str | None] = mapped_column(String, ForeignKey("residents.id"), nullable=True)
+    # use_alter breaks the users<->residents FK cycle so the unit of work can
+    # topologically order INSERTs (users must precede transactions/residents).
+    player_resident_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("residents.id", use_alter=True), nullable=True
+    )
     last_x: Mapped[int] = mapped_column(Integer, default=2432)
     last_y: Mapped[int] = mapped_column(Integer, default=1600)
     settings_json: Mapped[dict] = mapped_column(JSON, default=dict)

@@ -39,8 +39,11 @@ async def register_user(db: AsyncSession, name: str, email: str, password: str) 
     user_id = str(uuid.uuid4())
     user = User(id=user_id, name=name, email=email, hashed_password=hash_password(password))
     db.add(user)
-    db.add(Transaction(user_id=user_id, amount=100, reason="signup_bonus"))
     try:
+        # Flush the user first: without it the unit of work may emit the
+        # Transaction INSERT before the User INSERT and violate the FK.
+        await db.flush()
+        db.add(Transaction(user_id=user_id, amount=100, reason="signup_bonus"))
         await db.commit()
     except IntegrityError:
         await db.rollback()
