@@ -29,10 +29,20 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-changeme}@db:5432/skills_world
-      # Background loops run in the agent-worker service, not the API (P0-3)
-      RUN_BACKGROUND_TASKS: "false"
+      # RUN_BACKGROUND_TASKS stays at its default (true): WS broadcasts go
+      # through the in-process ConnectionManager (app/ws/manager.py), so the
+      # agent loops must live in the API process until P0-3b lands a
+      # cross-process bus (Redis pub/sub). Flipping this to "false" today
+      # would silence all realtime agent events (resident_move, autonomous
+      # chat, heat updates) for connected players.
 
+  # Split-worker mode is OPT-IN until P0-3b (Redis pub/sub) lands.
+  # Do NOT enable before then: worker-side WS broadcasts are dead letters
+  # (player connections live in the api process only).
+  # Once P0-3b is done: start with `docker compose --profile split-worker up -d`
+  # and set RUN_BACKGROUND_TASKS: "false" on the api service above.
   agent-worker:
+    profiles: ["split-worker"]
     build:
       context: ../backend
       dockerfile: ../deploy/Dockerfile
