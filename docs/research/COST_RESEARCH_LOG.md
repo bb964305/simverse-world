@@ -56,6 +56,7 @@
 - 修正-6（M-8，Opus 评审）：Agent 工具跑的真实模型试验，结论定位为 go/no-go 下界证据，不作可靠性 SLA；必须报告失败模式分类。
 - 修正-7（编号口径）：Opus 路线图（DIRECTOR_ROADMAP.md）使用独立编号（D-Exx），与本台账 E-01..09 有冲突。**本台账编号为准**，此后每条实验标注对应 D- 编号。映射：E-06↔D-E09(部分)、E-07↔D-E16(负向已答)、E-08↔D-E24(成本侧)、E-09↔D-E14(政策侧)。
 - 修正-8（E-11 执行中，2026-07-07）：decide 频次模型误用作息门控 0.75——20 动作/日硬帽在 tick=60s 下 ~20-30 分钟耗尽，帽子是约束、作息不是。正确口径：decide LLM/日 = 20×(1−force-execute 占比)。E-06 的"20 次 decide"歪打正着接近正确（其隐含 force-execute=0）。
+- 修正-9（E-29 标定，2026-07-07）：est_tokens 对 **Qwen tokenizer** 实测高估 20–44%（中文 1.21×、JSON 0.97×、混排 1.44×）。若生产走 Qwen 系模型，全部绝对 token 数下修 ~×0.8；比值类结论不受影响。且 Coding Plan 为订阅制，"$/token"口径对该端点失义（按量计费 key 才适用）。
 
 ### 0.6 Opus 统筹产物索引
 
@@ -277,8 +278,16 @@
 - 结论：假设**部分推翻（低估侧）**——记忆段占比没预想大（persona+history 分母更大）。砍半收益 11.5% 属中等杠杆，且有检索质量代价（尾部记忆丢失），性价比排在 P1/合并/滑窗之后。更优路径：记忆条目本身限长（现在单条无字数上限，importance 高的长记忆会膨胀）——记入 P1-1 建议（add_memory 时 content 截断 80 字）。
 - 偏差与备注：合成记忆 25–30 字/条，真实分布未知（dev DB 无 memories 表数据）。
 
+### E-29 生产候选端点探针：百炼 Coding Plan（D-E06，F-02 解除）
+- 状态：done
+- 假设（实验前写，Opus M-1 原文）：端点为非 Anthropic 中转；不透传 cache_control、不返回 usage.cache_*、无 Batch；真实单价偏列表价 >20%。
+- 方法：Jimmy 提供 Coding Plan 凭据（sk-sp- 前缀）。curl 探形态（/v1/messages、/chat/completions、/apps/anthropic/v1/messages）+ 项目真实代码路径（app.llm.client chat/stream_chat）+ SDK 探针（thinking/cache_control/count_tokens/估计器标定）。
+- 结果：① Anthropic 兼容路径 = **`/apps/anthropic`**（根路径 /v1/messages 404；x-api-key 与 Bearer 均可）；OpenAI 形态在 /v1/chat/completions 也可用。② 项目代码路径**零改动可用**（chat/stream/JSON 三形态全通，3.4s 级延迟）。③ **cache_control 被静默吞掉**：600+ tok 前缀带断点重发两次，cache_creation=0/cache_read=0，无报错——假设"不透传"成立，E-07 负向结论第三重坐实。④ count_tokens 404——假设成立。⑤ usage 字段完整返回（Anthropic 形态含 input/output/cache_* 字段，只是 cache 恒 0）——半推翻"不返回 usage.cache_*"（字段在，值恒 0）。⑥ `thinking={"type":"disabled"}` **有效**（out=1 vs 不传时 out=24，qwen3.7-plus 默认带 thinking 块）——项目 llm_thinking=False 默认恰好挡住推理税。⑦ 估计器标定：est/real = 1.21（中文）/0.97（JSON）/1.44（混排）——对 Qwen tokenizer **系统性高估 20–44%**，绝对 token 基线应下修；修正-9 落账。⑧ 定价形态改变：Coding Plan 是**订阅制配额**而非按 token 计费，"$/token"口径对此端点失义，成本管理变为"配额管理"。
+- 结论：M-1 假设大体成立（缓存/count_tokens 死、中转确认），一处半推翻（usage 字段存在）。**决策级发现：Coding Plan 条款仅限编程工具交互使用，明确禁止应用后端/自动化脚本/非交互批量调用**（help.aliyun.com/zh/model-studio/coding-plan-faq）——Simverse agent loop 正是被禁场景，长期接入有封 key 风险，只可用于开发期功能测试；生产需按量计费 key（dashscope.aliyuncs.com，sk- 前缀，两套不互通）。
+- 偏差与备注：qwen3.7-plus 是推理模型，OpenAI 形态下不传 thinking 参数会烧 reasoning tokens（回"OK"耗 87 tok）；订阅配额的额度上限未测（避免烧配额）。
+
 ## 2. 失败与死路记录
 
 - F-01（2026-07-07）：原计划直调 Anthropic count_tokens API 做精确 token 计量 → 本机无凭据，`ant` 未安装、无 key → 降级为 §0.2 估计器 + 比值口径。影响：绝对 $ 数字 ±25%，比较类结论不受影响。
-- F-02（2026-07-07，**开放阻塞，需 Jimmy**）：D-E06「生产端点/真实价目/缓存透传核实」需要部署机 `backend/.env`（llm_base_url + key）。这是能证伪整条缓存/Batch 支线的实验，无凭据无法执行。**待办给 Jimmy：提供部署机 .env 的 LLM_BASE_URL（key 可脱敏），或授权在部署机跑一次探针脚本看 response.usage 是否含 cache_* 字段。** campaign 其余部分不被阻塞，按"@Anthropic 列表价 + 端点透传未验证"双标注继续。
+- F-02（2026-07-07，**已解除**）：D-E06「生产端点/真实价目/缓存透传核实」原缺凭据。当日下午 Jimmy 提供百炼 Coding Plan 端点（coding.dashscope.aliyuncs.com），探针实验落 E-29。核心结论：缓存被静默吞掉（三重否定坐实）、count_tokens 404、thinking disabled 有效、估计器对 Qwen tokenizer 高估 20–44%。
 - F-03（2026-07-07 12:03）：Opus research-director agent 在交付完整路线图**之后**因 Claude session limit 挂断（reset 13:30 Asia/Shanghai）。统筹产物已完整落盘（DIRECTOR_ROADMAP.md），后续复审轮如需 Opus 需等重置；期间由主线程按既定路线图执行。
