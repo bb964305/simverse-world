@@ -18,11 +18,12 @@ def upgrade() -> None:
     # ------------------------------------------------------------------ #
     # User table — 13 new columns                                         #
     # ------------------------------------------------------------------ #
-    op.add_column("users", sa.Column("linuxdo_id", sa.Integer(), nullable=True))
+    op.add_column("users", sa.Column("linuxdo_id", sa.String(length=50), nullable=True))
+    op.create_unique_constraint("uq_users_linuxdo_id", "users", ["linuxdo_id"])
     op.add_column("users", sa.Column("linuxdo_trust_level", sa.Integer(), nullable=True, server_default="0"))
     op.add_column("users", sa.Column("is_admin", sa.Boolean(), nullable=False, server_default="false"))
     op.add_column("users", sa.Column("is_banned", sa.Boolean(), nullable=False, server_default="false"))
-    op.add_column("users", sa.Column("player_resident_id", sa.Integer(), nullable=True))
+    op.add_column("users", sa.Column("player_resident_id", sa.String(), nullable=True))
     op.add_column("users", sa.Column("last_x", sa.Integer(), nullable=True))
     op.add_column("users", sa.Column("last_y", sa.Integer(), nullable=True))
     op.add_column("users", sa.Column("settings_json", sa.Text(), nullable=True))
@@ -48,7 +49,7 @@ def upgrade() -> None:
         sa.Column("value", sa.Text(), nullable=True),
         sa.Column("group", sa.String(length=64), nullable=True),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("updated_by", sa.Integer(), nullable=True),
+        sa.Column("updated_by", sa.String(length=100), nullable=True),
         sa.PrimaryKeyConstraint("key"),
     )
 
@@ -58,7 +59,7 @@ def upgrade() -> None:
     op.create_table(
         "forge_sessions",
         sa.Column("id", sa.String(length=36), nullable=False),
-        sa.Column("user_id", sa.Integer(), nullable=False),
+        sa.Column("user_id", sa.String(), nullable=False),
         sa.Column("character_name", sa.String(length=128), nullable=True),
         sa.Column("mode", sa.String(length=32), nullable=True, server_default="guided"),
         sa.Column("status", sa.String(length=32), nullable=True, server_default="collecting"),
@@ -79,9 +80,9 @@ def upgrade() -> None:
     # ------------------------------------------------------------------ #
     op.create_table(
         "pending_messages",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("sender_id", sa.Integer(), nullable=False),
-        sa.Column("recipient_id", sa.Integer(), nullable=False),
+        sa.Column("id", sa.String(), nullable=False),
+        sa.Column("sender_id", sa.String(), nullable=False),
+        sa.Column("recipient_id", sa.String(), nullable=False),
         sa.Column("text", sa.Text(), nullable=True),
         sa.Column("is_auto_reply", sa.Boolean(), nullable=False, server_default="false"),
         sa.Column("delivered", sa.Boolean(), nullable=False, server_default="false"),
@@ -116,4 +117,5 @@ def downgrade() -> None:
     op.drop_column("users", "is_banned")
     op.drop_column("users", "is_admin")
     op.drop_column("users", "linuxdo_trust_level")
+    op.drop_constraint("uq_users_linuxdo_id", "users", type_="unique")
     op.drop_column("users", "linuxdo_id")
