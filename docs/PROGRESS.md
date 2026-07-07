@@ -49,6 +49,7 @@
 - [ ] P1-3 分页与索引补齐 · [ ] P1-6 大文件拆分 · [ ] CI（GitHub Actions）· [ ] 前端测试底座 · [ ] Sentry + /metrics
 
 ## 发现（施工中发现的新问题，不当场处理）
+- **成本优化研究完成（2026-07-07）**：28 条实验，产出在 `docs/research/`（REPORT=结论与 P1-1 建议、LOG=实验台账、DIRECTOR_ROADMAP/CALLMAP=Opus 统筹产物）。关键输入给 P1-1：计量字段清单、熔断阈值、杠杆排序（计划优先跳过 decide 省 29-37% 为最大项）；缓存/Batch 判定为不可用杠杆。**开放问题需 Jimmy**：部署机 .env 的 LLM_BASE_URL（验证端点是否 Anthropic 原生，F-02）。顺手修清单：互聊 max_tokens 100→150（截断污染 history 风险）、互聊 history 双注入（chat.py 一行）、玩家聊天 chat_messages 无截断。
 - 4 个预先存在的测试失败（HEAD 基线复现，与 P0-1 无关）：`test_forge.py::test_forge_answers_advance_to_generating`、`test_map_integration.py::test_decide_prompt_includes_remembered_residents`、`test_portrait.py::test_generate_portrait_success`（portrait_url 为 None）、`test_preset_import.py::test_seed_presets_creates_residents`（district 默认值断言 'free'，代码已改 'central_plaza'）——测试与代码漂移
 - `Memory.embedding` ORM 类型为 JSON 但迁移 004 实际列是 `vector(1024)`，类型不一致：PG 上依赖 asyncpg 文本转型，sqlite 上是 JSON 文本。历史 sqlite 开发库中可能残留 JSON 'null' 文本行（非 SQL NULL），补偿任务扫不到；建议后续统一为 pgvector 的 SQLAlchemy 类型
 - OPTIMIZATION_PLAN P0-5 提到的 qwen3-embedding 2560→1024 维截断问题（应在请求中显式传 dimensions）未在本次处理，规格的修复清单未包含它
