@@ -29,6 +29,21 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-changeme}@db:5432/skills_world
+      # Background loops run in the agent-worker service, not the API (P0-3)
+      RUN_BACKGROUND_TASKS: "false"
+
+  agent-worker:
+    build:
+      context: ../backend
+      dockerfile: ../deploy/Dockerfile
+    command: python -m app.agent.main
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-changeme}@db:5432/skills_world
 
 volumes:
   pgdata:
