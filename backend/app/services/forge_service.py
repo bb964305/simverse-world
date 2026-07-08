@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.map_data import LOCATIONS as _MAP_LOCATIONS, get_location_id_at, allocate_home
 from app.llm.client import get_client
 from app.llm.json_extract import extract_json_object
+from app.llm.metering import record_usage
 
 
 def _extract_text(response) -> str:
@@ -288,6 +289,7 @@ async def run_generation_pipeline(forge_id: str, db: AsyncSession) -> None:
             )}],
         )
         session["ability_md"] = _extract_text(ability_resp)
+        await record_usage("forge_ability", model=model, owner="system", response=ability_resp)
 
         # Generate persona.md
         persona_resp = await client.messages.create(
@@ -299,6 +301,7 @@ async def run_generation_pipeline(forge_id: str, db: AsyncSession) -> None:
             )}],
         )
         session["persona_md"] = _extract_text(persona_resp)
+        await record_usage("forge_persona", model=model, owner="system", response=persona_resp)
 
         # Generate soul.md
         soul_resp = await client.messages.create(
@@ -310,6 +313,7 @@ async def run_generation_pipeline(forge_id: str, db: AsyncSession) -> None:
             )}],
         )
         session["soul_md"] = _extract_text(soul_resp)
+        await record_usage("forge_soul", model=model, owner="system", response=soul_resp)
 
         # Score quality
         star_rating = await _score_quality(
@@ -546,6 +550,10 @@ async def _score_quality(client, model: str, name: str,
         )
         text = _extract_text(resp).strip()
         data = extract_json_object(text)
+        await record_usage(
+            "forge_score", model=model, owner="system", response=resp,
+            parse_ok=data is not None,
+        )
         if data:
             return max(1, min(3, int(data.get("star_rating", 1))))
     except Exception:
@@ -585,6 +593,10 @@ async def _assign_district(client, model: str, name: str,
         )
         text = _extract_text(resp).strip()
         data = extract_json_object(text)
+        await record_usage(
+            "forge_district", model=model, owner="system", response=resp,
+            parse_ok=data is not None,
+        )
         if data:
             district = (
                 data.get("location_id")

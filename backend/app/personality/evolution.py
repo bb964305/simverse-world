@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.llm.client import chat as llm_chat
 from app.llm.json_extract import extract_json_object
+from app.llm.metering import Meter
 from app.models.resident import Resident
 from app.models.memory import Memory
 from app.models.personality_history import PersonalityHistory
@@ -82,6 +83,8 @@ class EvolutionService:
                     ),
                 }],
                 max_tokens=400,
+                meter=Meter(scenario="evolution_drift", resident_id=resident.id),
+                expects_json=True,
             )
             data = extract_json_object(raw)
             if data is None:
@@ -160,6 +163,8 @@ class EvolutionService:
                     ),
                 }],
                 max_tokens=500,
+                meter=Meter(scenario="evolution_shift", resident_id=resident.id),
+                expects_json=True,
             )
             data = extract_json_object(raw)
             if data is None:
@@ -282,6 +287,7 @@ class EvolutionService:
                     ),
                 }],
                 max_tokens=800,
+                meter=Meter(scenario="evolution_sync", resident_id=resident.id),
             )).strip()
             if new_persona:
                 resident.persona_md = new_persona
@@ -306,6 +312,7 @@ class EvolutionService:
                             ),
                         }],
                         max_tokens=500,
+                        meter=Meter(scenario="evolution_sync", resident_id=resident.id),
                     )).strip()
                     if new_soul:
                         resident.soul_md = new_soul

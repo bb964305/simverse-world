@@ -3,6 +3,7 @@ import re
 from enum import Enum
 
 from app.llm.client import get_client
+from app.llm.metering import record_usage
 from app.config import settings
 
 
@@ -91,6 +92,10 @@ async def convert_to_standard(
             result_text = block.text
             break
 
+    await record_usage(
+        "skill_import", model=model, owner="system", response=response,
+        parse_ok=bool(result_text.strip()),
+    )
     return _parse_split_output(result_text)
 
 

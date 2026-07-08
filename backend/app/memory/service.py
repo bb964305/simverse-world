@@ -4,6 +4,7 @@ from sqlalchemy import select, func, delete, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.memory import Memory
 from app.llm.client import chat as llm_chat
+from app.llm.metering import Meter
 from app.llm.json_extract import extract_json_object
 from app.memory.embedding import generate_embedding
 from app.memory.prompts import (
@@ -304,7 +305,10 @@ class MemoryService:
         )
 
         try:
-            raw = await llm_chat(system, [{"role": "user", "content": user_msg}], max_tokens=500)
+            raw = await llm_chat(
+                system, [{"role": "user", "content": user_msg}], max_tokens=500,
+                meter=Meter(scenario="extract", resident_id=resident.id), expects_json=True,
+            )
             data = extract_json_object(raw)
             if data is None:
                 raise ValueError("no JSON object in LLM response")
@@ -379,7 +383,10 @@ class MemoryService:
         )
 
         try:
-            raw = await llm_chat(system, [{"role": "user", "content": user_msg}], max_tokens=300)
+            raw = await llm_chat(
+                system, [{"role": "user", "content": user_msg}], max_tokens=300,
+                meter=Meter(scenario="update_rel", resident_id=resident.id), expects_json=True,
+            )
             data = extract_json_object(raw)
             if data is None:
                 raise ValueError("no JSON object in LLM response")
@@ -424,7 +431,10 @@ class MemoryService:
         )
 
         try:
-            raw = await llm_chat(system, [{"role": "user", "content": user_msg}], max_tokens=400)
+            raw = await llm_chat(
+                system, [{"role": "user", "content": user_msg}], max_tokens=400,
+                meter=Meter(scenario="reflect", resident_id=resident.id), expects_json=True,
+            )
             data = extract_json_object(raw)
             if data is None:
                 raise ValueError("no JSON object in LLM response")

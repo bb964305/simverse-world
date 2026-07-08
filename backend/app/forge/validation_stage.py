@@ -1,6 +1,7 @@
 from typing import Any
 
 from app.llm.json_extract import extract_json_object
+from app.llm.metering import record_usage
 
 
 class ValidationStage:
@@ -39,6 +40,10 @@ class ValidationStage:
                 break
 
         data = extract_json_object(text)
+        await record_usage(
+            "forge_validate", model=self._model, owner="user", response=response,
+            parse_ok=data is not None,
+        )
         if data is not None:
             return data
 

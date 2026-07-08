@@ -10,6 +10,9 @@ from typing import AsyncGenerator
 
 from app.config import settings
 from app.llm.client import get_client, extract_text
+from app.llm.metering import (
+    Meter, estimate_tokens, record_from_meter, record_usage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +29,7 @@ class ModelRouter:
         *,
         owner: str = "user",
         user_config: dict | None = None,
+        meter: Meter | None = None,
     ) -> AsyncGenerator[str, None]:
         """Stream a response, injecting media context as appropriate.
 
@@ -34,24 +38,25 @@ class ModelRouter:
                     as additional text in the last user message, then the main model streams.
         For no media: plain streaming, identical to stream_chat().
 
-        Yields text chunks.
+        Yields text chunks. When ``meter`` is supplied, the main streamed reply is
+        metered (P1-1); a video pre-pass is metered separately as scenario="video".
         """
         augmented_messages = copy.deepcopy(messages)
 
         if media_type == "image" and media_url:
             augmented_messages = self._inject_image(augmented_messages, media_url)
-            async for chunk in self._stream(system_prompt, augmented_messages, owner=owner, user_config=user_config):
+            async for chunk in self._stream(system_prompt, augmented_messages, owner=owner, user_config=user_config, meter=meter):
                 yield chunk
 
         elif media_type == "video" and media_url:
-            video_summary = await self._understand_video(media_url)
+            video_summary = await self._understand_video(media_url, meter=meter)
             augmented_messages = self._inject_video_summary(augmented_messages, media_url, video_summary)
-            async for chunk in self._stream(system_prompt, augmented_messages, owner=owner, user_config=user_config):
+            async for chunk in self._stream(system_prompt, augmented_messages, owner=owner, user_config=user_config, meter=meter):
                 yield chunk
 
         else:
             # No media — plain text stream (same path as stream_chat)
-            async for chunk in self._stream(system_prompt, messages, owner=owner, user_config=user_config):
+            async for chunk in self._stream(system_prompt, messages, owner=owner, user_config=user_config, meter=meter):
                 yield chunk
 
     def _inject_image(self, messages: list[dict], image_url: str) -> list[dict]:
@@ -117,13 +122,14 @@ class ModelRouter:
             messages[-1]["content"] = injected
         return messages
 
-    async def _understand_video(self, video_url: str) -> str:
+    async def _understand_video(self, video_url: str, *, meter: Meter | None = None) -> str:
         """Call kimi-k2.5 to understand the video and return a text summary.
 
         Uses the same DashScope Anthropic-compatible endpoint as the main model,
         but switches to kimi-k2.5 for video understanding capability.
         """
         client = get_client("system")
+        prompt_text = f"请描述这个视频的内容：{video_url}"
         try:
             resp = await client.messages.create(
                 model=settings.video_llm_model,
@@ -135,13 +141,21 @@ class ModelRouter:
                         "content": [
                             {
                                 "type": "text",
-                                "text": f"请描述这个视频的内容：{video_url}",
+                                "text": prompt_text,
                             }
                         ],
                     }
                 ],
             )
-            return extract_text(resp)
+            text = extract_text(resp)
+            await record_usage(
+                "video", model=settings.video_llm_model, owner="system", response=resp,
+                est_input_tokens=estimate_tokens(prompt_text), est_output_tokens=estimate_tokens(text),
+                resident_id=(meter.resident_id if meter else None),
+                user_id=(meter.user_id if meter else None),
+                conversation_id=(meter.conversation_id if meter else None),
+            )
+            return text
         except Exception as exc:
             logger.warning("Video understanding failed for %s: %s", video_url, exc)
             return f"（视频理解失败，原始链接：{video_url}）"
@@ -153,17 +167,36 @@ class ModelRouter:
         *,
         owner: str = "user",
         user_config: dict | None = None,
+        meter: Meter | None = None,
     ) -> AsyncGenerator[str, None]:
         """Stream text from the main model. Internal helper."""
         client = get_client(owner, user_config=user_config)
+        resolved_model = settings.effective_model
         kwargs: dict = {
-            "model": settings.effective_model,
+            "model": resolved_model,
             "max_tokens": settings.llm_max_tokens,
             "system": system_prompt,
             "messages": messages,
         }
         if not settings.llm_thinking:
             kwargs["thinking"] = {"type": "disabled"}
+        collected: list[str] = []
         async with client.messages.stream(**kwargs) as stream:
             async for text in stream.text_stream:
+                if meter is not None:
+                    collected.append(text)
                 yield text
+            if meter is not None:
+                final = None
+                try:
+                    final = await stream.get_final_message()
+                except Exception:
+                    final = None
+                est_in = estimate_tokens(system_prompt) + sum(
+                    estimate_tokens(m.get("content") if isinstance(m.get("content"), str) else "")
+                    for m in messages
+                )
+                await record_from_meter(
+                    meter, model=resolved_model, owner=owner, response=final,
+                    est_input_tokens=est_in, est_output_tokens=estimate_tokens("".join(collected)),
+                )

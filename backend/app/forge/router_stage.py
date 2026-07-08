@@ -1,6 +1,7 @@
 from typing import Any
 
 from app.llm.json_extract import extract_json_object
+from app.llm.metering import record_usage
 
 
 class InputRouter:
@@ -37,6 +38,10 @@ class InputRouter:
 
         mode = "quick"  # default fallback
         data = extract_json_object(text)
+        await record_usage(
+            "forge_router", model=self._model, owner="system", response=response,
+            parse_ok=data is not None,
+        )
         if data:
             route = data.get("route", "quick")
             if route in ("deep", "quick"):

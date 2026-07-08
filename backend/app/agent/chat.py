@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.prompts import CHAT_INITIATE_SYSTEM, CHAT_REPLY_SYSTEM, CHAT_SUMMARY_SYSTEM, CHAT_SUMMARY_USER
 from app.config import settings
 from app.llm.client import chat as llm_chat
+from app.llm.metering import Meter
 from app.llm.json_extract import extract_json_object
 from app.memory.service import MemoryService
 from app.models.resident import Resident
@@ -134,7 +135,10 @@ async def resident_chat(
                 # Append previous line as context
                 messages = [{"role": "user", "content": history}]
 
-            reply = (await llm_chat(system_prompt, messages, max_tokens=100)).strip()[:200]
+            reply = (await llm_chat(
+                system_prompt, messages, max_tokens=100,
+                meter=Meter(scenario="chat_turn", resident_id=speaker.id),
+            )).strip()[:200]
             dialog_lines.append(f"{speaker.name}: {reply}")
 
         dialog_text = "\n".join(dialog_lines)
@@ -182,6 +186,8 @@ async def resident_chat(
                     ),
                 }],
                 max_tokens=150,
+                meter=Meter(scenario="summary", resident_id=initiator.id),
+                expects_json=True,
             )
             summary_data = extract_json_object(raw_summary) or {
                 "summary": f"{initiator.name} 和 {target.name} 聊了一会儿",

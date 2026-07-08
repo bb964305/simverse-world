@@ -1,6 +1,7 @@
 from typing import Any
 
 from app.llm.json_extract import extract_json_object
+from app.llm.metering import record_usage
 
 
 class ExtractionStage:
@@ -30,6 +31,10 @@ class ExtractionStage:
                 text = block.text
                 break
 
+        await record_usage(
+            "forge_extract", model=self._model, owner="user", response=response,
+            parse_ok=extract_json_object(text) is not None,
+        )
         return self._parse(text)
 
     def _parse(self, text: str) -> dict[str, Any]:

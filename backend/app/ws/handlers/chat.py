@@ -17,6 +17,7 @@ from app.models.user import User
 from app.models.conversation import Conversation, Message
 from app.services.coin_service import charge, get_balance, reward_creator_passive
 from app.llm.prompt import assemble_system_prompt
+from app.llm.metering import Meter
 from app.memory.service import MemoryService
 from app.media.model_router import ModelRouter
 from app.ws.manager import manager
@@ -187,6 +188,12 @@ async def handle_chat_msg(ctx: ConnectionContext, data: dict) -> None:
             messages=ctx.chat_messages,
             media_url=media_url,
             media_type=media_type,
+            meter=Meter(
+                scenario="player_chat",
+                resident_id=ctx.resident.id,
+                user_id=ctx.user_id,
+                conversation_id=ctx.conversation_id,
+            ),
         ):
             full_reply += chunk
             await manager.send(ctx.user_id, {
@@ -215,12 +222,10 @@ async def handle_chat_msg(ctx: ConnectionContext, data: dict) -> None:
             role="assistant",
             content=full_reply,
         ))
-        conv_result = await db.execute(
-            select(Conversation).where(Conversation.id == ctx.conversation_id)
-        )
-        fresh_conv = conv_result.scalar_one_or_none()
-        if fresh_conv:
-            fresh_conv.tokens_used += len(full_reply)  # character count proxy
+        # Real per-attempt token accounting now lives in the llm_usage table,
+        # metered inside the streaming call above (P1-1, E-03). The old
+        # `tokens_used += len(full_reply)` char-count proxy covered only 3–9% of
+        # the true cost and got worse as conversations grew, so it is retired.
         await db.commit()
 
         # If media was sent, store media_summary in event memory

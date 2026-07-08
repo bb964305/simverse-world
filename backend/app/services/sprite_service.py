@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 from app.llm.client import get_client
 from app.llm.json_extract import extract_json_object
+from app.llm.metering import record_usage
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,10 @@ async def match_sprite_by_persona(persona_text: str) -> list[dict]:
 
         # Parse JSON from LLM response (unified extractor, P1-1 E-05)
         attrs = extract_json_object(result_text)
+        await record_usage(
+            "sprite", model=settings.effective_model, owner="system", response=response,
+            parse_ok=attrs is not None,
+        )
         if attrs:
             matched = match_sprite_by_attributes(
                 gender=attrs.get("gender"),

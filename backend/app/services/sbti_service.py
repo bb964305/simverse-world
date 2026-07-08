@@ -9,6 +9,7 @@ import logging
 
 from app.llm.client import get_client
 from app.llm.json_extract import extract_json_object
+from app.llm.metering import record_usage
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +220,10 @@ async def compute_sbti(name: str, ability_md: str, persona_md: str, soul_md: str
 
         # Extract JSON from response (unified extractor, P1-1 E-05)
         dimensions = extract_json_object(text)
+        await record_usage(
+            "sbti", model=model, owner="system", response=resp,
+            parse_ok=dimensions is not None,
+        )
         if dimensions is None:
             logger.warning(f"SBTI: no JSON in LLM response for '{name}'")
             return None

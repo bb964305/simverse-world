@@ -10,6 +10,7 @@ from app.agent.prompts import build_decision_prompt
 from app.agent.schemas import TickContext, parse_action_result
 from app.config import settings
 from app.llm.client import chat as llm_chat
+from app.llm.metering import Meter
 from app.memory.service import MemoryService
 
 logger = logging.getLogger(__name__)
@@ -108,7 +109,10 @@ class BasicDecidePlugin:
             hint = f"\n\n你原本计划在这个时段 {plan.action}（{plan.reason}），但你可以根据当前情况改变主意。"
             user_prompt += hint
 
-        raw = await llm_chat(system_prompt, [{"role": "user", "content": user_prompt}], max_tokens=200)
+        raw = await llm_chat(
+            system_prompt, [{"role": "user", "content": user_prompt}], max_tokens=200,
+            meter=Meter(scenario="decide", resident_id=ctx.resident.id), expects_json=True,
+        )
         return parse_action_result(raw)
 
     async def _load_memories(self, ctx: TickContext) -> None:

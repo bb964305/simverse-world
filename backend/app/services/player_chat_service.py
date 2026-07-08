@@ -17,6 +17,7 @@ from app.models.pending_message import PendingMessage
 from app.services.coin_service import charge
 from app.llm.prompt import assemble_system_prompt
 from app.llm.client import stream_chat
+from app.llm.metering import Meter
 
 
 async def generate_auto_reply(resident: Resident, user_text: str) -> str:
@@ -30,7 +31,10 @@ async def generate_auto_reply(resident: Resident, user_text: str) -> str:
     messages = [{"role": "user", "content": user_text}]
 
     full_reply = ""
-    async for chunk in stream_chat(system_prompt, messages):
+    async for chunk in stream_chat(
+        system_prompt, messages,
+        meter=Meter(scenario="player_chat", resident_id=resident.id),
+    ):
         full_reply += chunk
 
     return full_reply

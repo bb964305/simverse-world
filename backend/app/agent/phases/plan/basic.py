@@ -12,6 +12,7 @@ from app.agent.schemas import TickContext, DailyGoal, HourlyPlan
 from app.config import settings
 from app.llm.client import chat as llm_chat
 from app.llm.json_extract import extract_json_object
+from app.llm.metering import Meter
 from app.memory.service import MemoryService
 from app.ws.manager import manager
 
@@ -200,7 +201,10 @@ class BasicPlanPlugin:
             slot_count=len(slots_info),
         )
 
-        raw = await llm_chat(system_prompt, [{"role": "user", "content": user_prompt}], max_tokens=1200)
+        raw = await llm_chat(
+            system_prompt, [{"role": "user", "content": user_prompt}], max_tokens=1200,
+            meter=Meter(scenario="plan", resident_id=resident.id), expects_json=True,
+        )
 
         # Parse JSON response (strips fences, balanced-brace extraction, tolerates
         # trailing commas) — unified extractor (P1-1, E-05).
