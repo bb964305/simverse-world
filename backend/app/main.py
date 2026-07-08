@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +11,8 @@ from app.tasks.heat_cron import heat_cron_loop
 from app.tasks.embedding_backfill import embedding_backfill_loop
 from app.agent.loop import agent_loop
 from app.http import close_client
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -31,14 +34,25 @@ async def lifespan(app):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
-    # Start heat cron on startup
-    task = asyncio.create_task(heat_cron_loop())
-    agent_task = asyncio.create_task(agent_loop.run())
-    backfill_task = asyncio.create_task(embedding_backfill_loop())
+    # Background loops run in-process only in single-process mode (P0-3):
+    # with RUN_BACKGROUND_TASKS=false they are owned by the standalone
+    # agent-worker process (python -m app.agent.main).
+    background_tasks: list[asyncio.Task] = []
+    if settings.run_background_tasks:
+        background_tasks = [
+            asyncio.create_task(heat_cron_loop()),
+            asyncio.create_task(agent_loop.run()),
+            asyncio.create_task(embedding_backfill_loop()),
+        ]
+        logger.info("Background loops started in-process (run_background_tasks=true)")
+    else:
+        logger.info(
+            "run_background_tasks=false — background loops are delegated "
+            "to the agent-worker process"
+        )
     yield
-    task.cancel()
-    agent_task.cancel()
-    backfill_task.cancel()
+    for task in background_tasks:
+        task.cancel()
     await close_client()
 
 
