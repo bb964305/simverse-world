@@ -1,8 +1,8 @@
-import json
 import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.llm.client import chat as llm_chat
+from app.llm.json_extract import extract_json_object
 from app.models.resident import Resident
 from app.models.memory import Memory
 from app.models.personality_history import PersonalityHistory
@@ -83,7 +83,9 @@ class EvolutionService:
                 }],
                 max_tokens=400,
             )
-            data = json.loads(raw)
+            data = extract_json_object(raw)
+            if data is None:
+                return None
             changes_list = data.get("changes", [])
 
             if not changes_list:
@@ -159,7 +161,9 @@ class EvolutionService:
                 }],
                 max_tokens=500,
             )
-            data = json.loads(raw)
+            data = extract_json_object(raw)
+            if data is None:
+                return None
             changes_list = data.get("changes", [])
             shift_reason = data.get("shift_reason", "")
 

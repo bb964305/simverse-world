@@ -1,6 +1,7 @@
 import json
-import re
 from typing import Any
+
+from app.llm.json_extract import extract_json_object
 
 
 class RefinementStage:
@@ -94,10 +95,4 @@ class RefinementStage:
             if hasattr(block, "text"):
                 text = block.text
                 break
-        match = re.search(r'\{[\s\S]+\}', text)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
-        return {"suggestions": [], "priority": "low"}
+        return extract_json_object(text) or {"suggestions": [], "priority": "low"}

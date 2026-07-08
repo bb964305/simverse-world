@@ -1,10 +1,9 @@
 """Sprite template registry with 20 pre-annotated character sprites and LLM-based matching."""
-import json
 import logging
-import re
 from dataclasses import dataclass, field
 
 from app.llm.client import get_client
+from app.llm.json_extract import extract_json_object
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -118,10 +117,9 @@ async def match_sprite_by_persona(persona_text: str) -> list[dict]:
                 result_text = block.text
                 break
 
-        # Parse JSON from LLM response
-        json_match = re.search(r'\{[^}]+\}', result_text)
-        if json_match:
-            attrs = json.loads(json_match.group())
+        # Parse JSON from LLM response (unified extractor, P1-1 E-05)
+        attrs = extract_json_object(result_text)
+        if attrs:
             matched = match_sprite_by_attributes(
                 gender=attrs.get("gender"),
                 age_group=attrs.get("age_group"),

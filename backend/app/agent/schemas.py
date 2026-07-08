@@ -1,14 +1,13 @@
 """Data models and utility functions for the agent plugin system."""
 from __future__ import annotations
 
-import json
 import logging
-import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
 
 from app.agent.actions import ActionType, ActionResult
+from app.llm.json_extract import extract_json_object
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -88,12 +87,11 @@ def get_world_time() -> tuple[str, int, str]:
 
 
 def parse_action_result(raw: str) -> ActionResult | None:
-    match = re.search(r'\{[^{}]+\}', raw, re.DOTALL)
-    if not match:
+    data = extract_json_object(raw)
+    if data is None:
         logger.debug("No JSON found in decision response: %s", raw[:200])
         return None
     try:
-        data = json.loads(match.group())
         action_str = data.get("action", "")
         try:
             action = ActionType(action_str)
@@ -111,6 +109,6 @@ def parse_action_result(raw: str) -> ActionResult | None:
             target_tile=target_tile,
             reason=str(data.get("reason", ""))[:100],
         )
-    except (json.JSONDecodeError, TypeError, KeyError) as e:
+    except (TypeError, KeyError, ValueError) as e:
         logger.debug("Failed to parse action result: %s | raw: %s", e, raw[:200])
         return None

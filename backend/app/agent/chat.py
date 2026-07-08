@@ -1,7 +1,5 @@
 """Inter-resident conversation engine with memory generation and broadcasting."""
-import json
 import logging
-import re
 import time
 from typing import Any
 
@@ -10,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.prompts import CHAT_INITIATE_SYSTEM, CHAT_REPLY_SYSTEM, CHAT_SUMMARY_SYSTEM, CHAT_SUMMARY_USER
 from app.config import settings
 from app.llm.client import chat as llm_chat
+from app.llm.json_extract import extract_json_object
 from app.memory.service import MemoryService
 from app.models.resident import Resident
 
@@ -184,11 +183,10 @@ async def resident_chat(
                 }],
                 max_tokens=150,
             )
-            match = re.search(r'\{[^{}]+\}', raw_summary, re.DOTALL)
-            if match:
-                summary_data = json.loads(match.group())
-            else:
-                summary_data = {"summary": f"{initiator.name} 和 {target.name} 聊了一会儿", "mood": "neutral"}
+            summary_data = extract_json_object(raw_summary) or {
+                "summary": f"{initiator.name} 和 {target.name} 聊了一会儿",
+                "mood": "neutral",
+            }
         except Exception:
             summary_data = {"summary": f"{initiator.name} 和 {target.name} 聊了一会儿", "mood": "neutral"}
 

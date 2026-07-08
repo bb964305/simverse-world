@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.map_data import LOCATIONS as _MAP_LOCATIONS, get_location_id_at, allocate_home
 from app.llm.client import get_client
+from app.llm.json_extract import extract_json_object
 
 
 def _extract_text(response) -> str:
@@ -544,9 +545,8 @@ async def _score_quality(client, model: str, name: str,
             )}],
         )
         text = _extract_text(resp).strip()
-        match = re.search(r'\{[^}]+\}', text)
-        if match:
-            data = json.loads(match.group())
+        data = extract_json_object(text)
+        if data:
             return max(1, min(3, int(data.get("star_rating", 1))))
     except Exception:
         pass
@@ -584,9 +584,8 @@ async def _assign_district(client, model: str, name: str,
             )}],
         )
         text = _extract_text(resp).strip()
-        match = re.search(r'\{[^}]+\}', text)
-        if match:
-            data = json.loads(match.group())
+        data = extract_json_object(text)
+        if data:
             district = (
                 data.get("location_id")
                 or data.get("district")

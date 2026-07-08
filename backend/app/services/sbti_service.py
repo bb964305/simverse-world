@@ -5,11 +5,10 @@ Analyzes a resident's three-layer text (ability/persona/soul) to compute
 a 15-dimension personality profile and match it to one of 27 SBTI types.
 """
 
-import json
-import re
 import logging
 
 from app.llm.client import get_client
+from app.llm.json_extract import extract_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -218,13 +217,11 @@ async def compute_sbti(name: str, ability_md: str, persona_md: str, soul_md: str
         )
         text = _extract_text(resp).strip()
 
-        # Extract JSON from response
-        match = re.search(r'\{[^}]+\}', text)
-        if not match:
+        # Extract JSON from response (unified extractor, P1-1 E-05)
+        dimensions = extract_json_object(text)
+        if dimensions is None:
             logger.warning(f"SBTI: no JSON in LLM response for '{name}'")
             return None
-
-        dimensions = json.loads(match.group())
 
         # Validate all 15 dimensions present and valid
         for code in DIMENSION_CODES:

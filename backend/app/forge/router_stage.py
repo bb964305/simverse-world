@@ -1,6 +1,6 @@
-import json
-import re
 from typing import Any
+
+from app.llm.json_extract import extract_json_object
 
 
 class InputRouter:
@@ -36,15 +36,11 @@ class InputRouter:
                 break
 
         mode = "quick"  # default fallback
-        match = re.search(r'\{[^}]+\}', text)
-        if match:
-            try:
-                data = json.loads(match.group())
-                route = data.get("route", "quick")
-                if route in ("deep", "quick"):
-                    mode = route
-            except json.JSONDecodeError:
-                pass
+        data = extract_json_object(text)
+        if data:
+            route = data.get("route", "quick")
+            if route in ("deep", "quick"):
+                mode = route
 
         return {
             "mode": mode,

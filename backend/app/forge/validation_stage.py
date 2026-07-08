@@ -1,6 +1,6 @@
-import json
-import re
 from typing import Any
+
+from app.llm.json_extract import extract_json_object
 
 
 class ValidationStage:
@@ -38,12 +38,9 @@ class ValidationStage:
                 text = block.text
                 break
 
-        match = re.search(r'\{[\s\S]+\}', text)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
+        data = extract_json_object(text)
+        if data is not None:
+            return data
 
         return {
             "known_answers": [],

@@ -1,7 +1,6 @@
 """BasicPlanPlugin: generate daily goal + hourly plans via LLM."""
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime
 from typing import Any
@@ -12,6 +11,7 @@ from app.agent.scheduler import build_schedule
 from app.agent.schemas import TickContext, DailyGoal, HourlyPlan
 from app.config import settings
 from app.llm.client import chat as llm_chat
+from app.llm.json_extract import extract_json_object
 from app.memory.service import MemoryService
 from app.ws.manager import manager
 
@@ -202,25 +202,11 @@ class BasicPlanPlugin:
 
         raw = await llm_chat(system_prompt, [{"role": "user", "content": user_prompt}], max_tokens=1200)
 
-        # Parse JSON response — try multiple strategies
-        data = None
-        # Strategy 1: extract outermost { ... }
-        start_idx = raw.find('{')
-        end_idx = raw.rfind('}') + 1
-        if start_idx == -1 or end_idx <= start_idx:
-            raise ValueError(f"No JSON in plan response: {raw[:200]}")
-
-        json_str = raw[start_idx:end_idx]
-        try:
-            data = json.loads(json_str)
-        except json.JSONDecodeError:
-            # Strategy 2: strip trailing commas and retry
-            import re
-            cleaned = re.sub(r',\s*([}\]])', r'\1', json_str)
-            try:
-                data = json.loads(cleaned)
-            except json.JSONDecodeError as e:
-                raise ValueError(f"Failed to parse plan JSON: {e} | raw: {json_str[:300]}")
+        # Parse JSON response (strips fences, balanced-brace extraction, tolerates
+        # trailing commas) — unified extractor (P1-1, E-05).
+        data = extract_json_object(raw)
+        if data is None:
+            raise ValueError(f"No parseable JSON in plan response: {raw[:200]}")
 
         # Store goal
         goal = data.get("goal", {})

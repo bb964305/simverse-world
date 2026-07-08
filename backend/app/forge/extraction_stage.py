@@ -1,6 +1,6 @@
-import json
-import re
 from typing import Any
+
+from app.llm.json_extract import extract_json_object
 
 
 class ExtractionStage:
@@ -33,13 +33,8 @@ class ExtractionStage:
         return self._parse(text)
 
     def _parse(self, text: str) -> dict[str, Any]:
-        match = re.search(r'\{[\s\S]+\}', text)
-        if not match:
-            return {"core_models": [], "heuristics": [], "discarded": []}
-
-        try:
-            data = json.loads(match.group())
-        except json.JSONDecodeError:
+        data = extract_json_object(text)
+        if data is None:
             return {"core_models": [], "heuristics": [], "discarded": []}
 
         core_models = []
