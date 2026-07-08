@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     llm_default_model: str = "claude-haiku-4-5-20251001"
     llm_max_tokens: int = 512
     llm_thinking: bool = False  # disable thinking/reasoning for faster responses
+    # Per-attempt LLM usage telemetry (P1-1, llm_usage table). Metering writes
+    # go to a separate short-lived session and never affect the LLM call; this
+    # flag only gates whether the telemetry rows are persisted at all.
+    llm_metering_enabled: bool = True
 
     @property
     def effective_api_key(self) -> str:

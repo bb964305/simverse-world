@@ -11,6 +11,7 @@ from app.models.user import User
 from app.models.resident import Resident
 from app.models.conversation import Conversation, Message
 from app.models.transaction import Transaction
+from app.models.llm_usage import LLMUsage
 
 config = context.config
 if config.config_file_name is not None:

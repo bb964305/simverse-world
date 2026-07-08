@@ -45,6 +45,20 @@ def _reset_rate_limiters():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _disable_llm_metering():
+    """LLM usage metering (P1-1) writes through its own session/engine. Disable
+    it by default so the broad suite never attempts a real-DB telemetry write;
+    test_llm_usage re-enables it with an injected in-memory sqlite factory."""
+    from app.config import settings as _s
+    from app.llm import metering as _metering
+    prev = _s.llm_metering_enabled
+    _s.llm_metering_enabled = False
+    yield
+    _s.llm_metering_enabled = prev
+    _metering.set_session_factory(None)
+
+
 @pytest.fixture
 async def db_engine():
     engine = create_async_engine(TEST_DATABASE_URL)

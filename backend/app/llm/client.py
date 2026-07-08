@@ -1,6 +1,9 @@
+import time
 from typing import AsyncGenerator
 import anthropic
 from app.config import settings
+from app.llm.json_extract import extract_json_object
+from app.llm.metering import Meter, estimate_tokens, record_from_meter
 
 _system_client: anthropic.AsyncAnthropic | None = None
 _default_user_client: anthropic.AsyncAnthropic | None = None
@@ -74,6 +77,27 @@ def extract_text(response) -> str:
     return ""
 
 
+def _message_text(msg: dict) -> str:
+    """Flatten a single messages-API message to plain text for estimation."""
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+        return " ".join(parts)
+    return ""
+
+
+def _estimate_input_tokens(system_prompt: str, messages: list[dict]) -> int:
+    total = estimate_tokens(system_prompt)
+    for m in messages:
+        total += estimate_tokens(_message_text(m))
+    return total
+
+
 async def chat(
     system_prompt: str,
     messages: list[dict],
@@ -81,23 +105,47 @@ async def chat(
     max_tokens: int | None = None,
     *,
     owner: str = "system",
+    meter: Meter | None = None,
+    expects_json: bool = False,
 ) -> str:
     """Non-streaming LLM call. Returns text string.
 
     Handles thinking mode and ThinkingBlock extraction automatically.
     Use this instead of client.messages.create() directly.
+
+    When ``meter`` is supplied, one ``llm_usage`` row is recorded per attempt
+    (P1-1): usage/latency/cost from the real response, or a char estimate when
+    the endpoint omits ``usage``. ``expects_json`` makes the wrapper set
+    ``parse_ok`` by trying the shared balanced-brace extractor on the output —
+    the E-05 signal for "paid for a call that fell back to defaults".
     """
     client = get_client(owner)
+    resolved_model = model or settings.effective_model
     kwargs: dict = {
-        "model": model or settings.effective_model,
+        "model": resolved_model,
         "max_tokens": max_tokens or settings.llm_max_tokens,
         "system": system_prompt,
         "messages": messages,
     }
     if not settings.llm_thinking:
         kwargs["thinking"] = {"type": "disabled"}
+    t0 = time.perf_counter()
     resp = await client.messages.create(**kwargs)
-    return extract_text(resp)
+    latency_ms = int((time.perf_counter() - t0) * 1000)
+    text = extract_text(resp)
+    if meter is not None:
+        parse_ok = (extract_json_object(text) is not None) if expects_json else None
+        await record_from_meter(
+            meter,
+            model=resolved_model,
+            owner=owner,
+            response=resp,
+            est_input_tokens=_estimate_input_tokens(system_prompt, messages),
+            est_output_tokens=estimate_tokens(text),
+            parse_ok=parse_ok,
+            latency_ms=latency_ms,
+        )
+    return text
 
 
 async def stream_chat(
@@ -107,17 +155,44 @@ async def stream_chat(
     *,
     owner: str = "user",
     user_config: dict | None = None,
+    meter: Meter | None = None,
 ) -> AsyncGenerator[str, None]:
-    """Yield text chunks from LLM streaming response."""
+    """Yield text chunks from LLM streaming response.
+
+    When ``meter`` is supplied, a single ``llm_usage`` row is recorded after
+    the stream drains, reading token counts from the accumulated final message
+    (or a char estimate if the endpoint omits them).
+    """
     client = get_client(owner, user_config=user_config)
+    resolved_model = model or settings.effective_model
     kwargs: dict = {
-        "model": model or settings.effective_model,
+        "model": resolved_model,
         "max_tokens": settings.llm_max_tokens,
         "system": system_prompt,
         "messages": messages,
     }
     if not settings.llm_thinking:
         kwargs["thinking"] = {"type": "disabled"}
+    collected: list[str] = []
+    t0 = time.perf_counter()
     async with client.messages.stream(**kwargs) as stream:
         async for text in stream.text_stream:
+            if meter is not None:
+                collected.append(text)
             yield text
+        if meter is not None:
+            latency_ms = int((time.perf_counter() - t0) * 1000)
+            final = None
+            try:
+                final = await stream.get_final_message()
+            except Exception:
+                final = None
+            await record_from_meter(
+                meter,
+                model=resolved_model,
+                owner=owner,
+                response=final,
+                est_input_tokens=_estimate_input_tokens(system_prompt, messages),
+                est_output_tokens=estimate_tokens("".join(collected)),
+                latency_ms=latency_ms,
+            )
