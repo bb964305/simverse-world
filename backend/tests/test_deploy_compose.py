@@ -1,13 +1,16 @@
-"""P0-3a review fix: deploy compose must not activate split-worker mode yet.
+"""P0-3b invariants for the deploy compose (supersedes the P0-3a gating).
 
-WS broadcasts go through the in-process ConnectionManager (app/ws/manager.py),
-so until P0-3b lands a cross-process bus (Redis pub/sub), running agent loops
-in a separate container makes every worker-side broadcast a dead letter:
-players would stop seeing resident_move / autonomous chat / heat updates.
+P0-3a kept the agent loops inside the API process and gated the standalone
+agent-worker behind an opt-in profile, because WS broadcasts went through the
+in-process ConnectionManager and a worker-side broadcast would be a dead letter.
 
-Therefore the deploy compose must:
-- keep the api service on the default RUN_BACKGROUND_TASKS (true, in-process)
-- not start the agent-worker service by default (opt-in profile only)
+P0-3b landed the cross-process bus (Redis pub/sub + Redis-backed locks/queues/
+presence/counters), so the deploy topology now is:
+- a `redis` service (the shared bus),
+- the `api` service delegating background loops (RUN_BACKGROUND_TASKS=false) and
+  free to run multiple uvicorn workers,
+- the `agent-worker` service starting by default (no profile gate),
+- both api and agent-worker pointed at Redis via REDIS_URL.
 """
 from pathlib import Path
 
@@ -31,24 +34,56 @@ def _env_as_dict(service: dict) -> dict[str, str]:
     return {str(k): str(v) for k, v in env.items()}
 
 
-def test_api_keeps_background_tasks_in_process():
-    """API must not disable in-process loops before a cross-process WS bus exists."""
-    env = _env_as_dict(_load_services()["api"])
-    value = env.get("RUN_BACKGROUND_TASKS", "true").strip().lower()
-    assert value not in ("false", "0", "no", "off"), (
-        "api sets RUN_BACKGROUND_TASKS=false but WS broadcasts are in-process only; "
-        "flipping this before P0-3b (Redis pub/sub) silences all realtime agent events"
-    )
+def _depends_on(service: dict) -> set[str]:
+    dep = service.get("depends_on") or {}
+    if isinstance(dep, list):
+        return set(dep)
+    return set(dep.keys())
 
 
-def test_agent_worker_is_opt_in_only():
-    """agent-worker must not start on plain `docker compose up` until P0-3b."""
+def test_redis_service_present_with_healthcheck():
+    """The shared cross-process bus must exist and be health-gated."""
     services = _load_services()
-    worker = services.get("agent-worker")
-    if worker is None:
-        return  # not defined at all — trivially not started
-    profiles = worker.get("profiles") or []
-    assert profiles, (
-        "agent-worker has no compose profile, so it starts by default; "
-        "its WS broadcasts are dead letters until P0-3b lands a cross-process bus"
+    redis = services.get("redis")
+    assert redis is not None, "no redis service — the P0-3b cross-process bus is missing"
+    assert redis.get("healthcheck"), "redis service must define a healthcheck"
+
+
+def test_api_delegates_background_tasks_to_worker():
+    """With the Redis bus in place, the API must NOT run the loops in-process
+    (that would duplicate them across workers)."""
+    env = _env_as_dict(_load_services()["api"])
+    value = env.get("RUN_BACKGROUND_TASKS", "").strip().lower()
+    assert value in ("false", "0", "no", "off"), (
+        "api should set RUN_BACKGROUND_TASKS=false post-P0-3b so the standalone "
+        "agent-worker owns the loops and the API can scale to multiple workers"
     )
+
+
+def test_agent_worker_starts_by_default():
+    """The agent-worker must start on a plain `docker compose up` now that its
+    broadcasts reach players over Redis pub/sub."""
+    worker = _load_services().get("agent-worker")
+    assert worker is not None, "agent-worker service is missing"
+    profiles = worker.get("profiles") or []
+    assert not profiles, (
+        "agent-worker is still profile-gated; P0-3b's pub/sub bus means its WS "
+        "broadcasts are no longer dead letters, so it should start by default"
+    )
+
+
+def test_api_and_worker_point_at_redis():
+    """Both the API and the agent-worker must be configured with REDIS_URL."""
+    services = _load_services()
+    for name in ("api", "agent-worker"):
+        env = _env_as_dict(services[name])
+        assert env.get("REDIS_URL"), f"{name} is missing REDIS_URL"
+
+
+def test_api_and_worker_depend_on_redis():
+    """Both processes must wait for Redis before starting."""
+    services = _load_services()
+    for name in ("api", "agent-worker"):
+        assert "redis" in _depends_on(services[name]), (
+            f"{name} must depend_on redis so it doesn't start before the bus"
+        )

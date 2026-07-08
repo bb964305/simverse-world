@@ -16,6 +16,21 @@ services:
       timeout: 3s
       retries: 5
 
+  # Shared cross-process bus (P0-3b): ConnectionManager online-state/locks/
+  # queues, the agent daily-action counter, the WS rate limiter, and the
+  # realtime pub/sub broadcast channel all live here. Required now that the
+  # API runs multiple workers and the agent loops run in a separate process.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   api:
     build:
       context: ../backend
@@ -26,23 +41,25 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-changeme}@db:5432/skills_world
-      # RUN_BACKGROUND_TASKS stays at its default (true): WS broadcasts go
-      # through the in-process ConnectionManager (app/ws/manager.py), so the
-      # agent loops must live in the API process until P0-3b lands a
-      # cross-process bus (Redis pub/sub). Flipping this to "false" today
-      # would silence all realtime agent events (resident_move, autonomous
-      # chat, heat updates) for connected players.
+      REDIS_URL: redis://redis:6379/0
+      # P0-3b landed the cross-process WS bus (Redis pub/sub), so the API no
+      # longer owns the agent loops and can safely run multiple workers:
+      # background loops live in the agent-worker service below, and each API
+      # worker relays broadcasts from Redis to its own sockets.
+      RUN_BACKGROUND_TASKS: "false"
+      # Number of uvicorn workers; scale to CPU. Read by the Dockerfile CMD.
+      UVICORN_WORKERS: "${UVICORN_WORKERS:-2}"
 
-  # Split-worker mode is OPT-IN until P0-3b (Redis pub/sub) lands.
-  # Do NOT enable before then: worker-side WS broadcasts are dead letters
-  # (player connections live in the api process only).
-  # Once P0-3b is done: start with `docker compose --profile split-worker up -d`
-  # and set RUN_BACKGROUND_TASKS: "false" on the api service above.
+  # Standalone agent-worker: owns agent_loop + heat_cron + embedding_backfill.
+  # Enabled by default now that P0-3b's Redis pub/sub delivers its WS
+  # broadcasts to the API workers' connected players (before P0-3b these were
+  # dead letters, so this service was gated behind an opt-in profile).
   agent-worker:
-    profiles: ["split-worker"]
     build:
       context: ../backend
       dockerfile: ../deploy/Dockerfile
@@ -51,9 +68,12 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-changeme}@db:5432/skills_world
+      REDIS_URL: redis://redis:6379/0
 
 volumes:
   pgdata:

@@ -14,5 +14,8 @@ RUN pip install --no-cache-dir .
 
 EXPOSE 8000
 
-# Run migrations, then start the API (schema is Alembic-managed, P0-6)
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1"]
+# Run migrations, then start the API (schema is Alembic-managed, P0-6).
+# Multiple workers are safe now that P0-3b moved all shared state to Redis and
+# realtime broadcasts to Redis pub/sub; UVICORN_WORKERS defaults to 1 for
+# single-node dev and is set to 2+ by the deploy compose.
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${UVICORN_WORKERS:-1}"]
