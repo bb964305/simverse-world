@@ -100,6 +100,14 @@ class Settings(BaseSettings):
     agent_enabled: bool = True             # master switch (set False to pause loop)
     agent_debug_always_active: bool = False  # bypass schedule, all residents always active
 
+    # --- Rate Limiting (OPTIMIZATION_PLAN P1-1, limit sub-item) ---
+    # WS chat_msg sliding window is in-process (single-worker model); REST uses
+    # slowapi. Both migrate to Redis once P0-3b lands the cross-process bus.
+    ws_rate_limit_per_minute: int = 20          # chat_msg per user per minute
+    rest_rate_limit_register_per_minute: int = 5   # auth register/login (by IP)
+    rest_rate_limit_forge_per_minute: int = 10     # forge start/quick (by IP)
+    rest_rate_limit_llm_test_per_minute: int = 5   # settings/llm/test (by IP)
+
     model_config = {"env_file": ".env"}
 
 
