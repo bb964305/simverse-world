@@ -53,6 +53,12 @@ export function connectWS(): void {
       if (data.type === 'spawn_position') {
         useGameStore.getState().setSpawnPosition(data.x as number, data.y as number)
       }
+      // Rate-limited: server rejected a chat_msg before any DB/LLM cost.
+      // Surface to the user via listeners (chat panel can show a notice);
+      // also log so it's observable without a listener (P1-1 limit).
+      if (data.type === 'rate_limited') {
+        console.warn('rate_limited:', data.message ?? '请求过快，请稍后再试')
+      }
       // Player-to-player chat: reply from the target player (or auto-reply)
       if (data.type === 'player_chat_reply') {
         useGameStore.getState().addPlayerChatMessage({
