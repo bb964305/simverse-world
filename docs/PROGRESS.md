@@ -18,7 +18,14 @@
 
 ## Phase 2 — 扩展性与成本（§2/§3）
 - [x] P0-3a Agent Worker 独立进程 + compose 服务 — `48fd480`（merge）。`python -m app.agent.main` 入口（三 loop 并发 + SIGTERM 优雅退出）+ `run_background_tasks` 开关 + compose agent-worker 服务。**关键偏差（评审抓的）**：现在翻开关会让 worker 进程的全部 WS 广播成死信（ConnectionManager 是进程内的，居民移动/互聊对玩家不可见）→ compose 默认仍单进程跑 loop，agent-worker 藏在 `--profile split-worker` 后，等 P0-3b Redis pub/sub 落地才启用；两条约束由 test_deploy_compose.py 回归锁死
-- [ ] P0-3b ConnectionManager 状态 Redis 化 + pub/sub 广播
+- [x] P0-3b ConnectionManager 状态 Redis 化 + pub/sub 广播 — `731bfff`→`de50ecb`（5 提交）。
+  - **client**（`731bfff`）：`app/redis_client.py` get_redis/set_redis/close_redis（仿 `http.py`），进程级共享 async client（`decode_responses=True`）。测试用 fakeredis：autouse conftest fixture 每测新建独立 server + 隔离；dev deps 加 `fakeredis`。
+  - **manager**（`7391e1a`）：ConnectionManager 仅保留进程内 `self.local`（本 worker 的 WS 对象，不可跨进程序列化）；在线态/位置(`sv:positions`)、玩家↔NPC 锁(`sv:chatting`)、NPC↔NPC 社交锁(`sv:socializing`)、排队(`sv:queue:{rid}`) 全入 Redis。广播 + 跨 worker `send` 改 Redis pub/sub(`sv:ws`)：每个 API worker 跑一个 `run_subscriber`（lifespan 启动）把信封转发给本地 socket；`send` 到本地用户直发短路（不走 pub/sub）。锁/队列全 Lua-free（HSETNX+HGET 可重入锁、LPOS 去重队列），fakeredis/真 redis 双通。**修复 P0-3a 死信**：worker 侧广播现经 pub/sub 到达玩家。新增 `test_ws_manager_redis.py`。
+  - **daily counts**（`ede69af`）：`_daily_counts` dict → 日期戳 Redis key `sv:daily_actions:{date}:{rid}` INCR + 2 天 TTL（日期戳自带午夜重置）；`_over_daily_limit`/`_incr_daily_count` 转 async。
+  - **rate limiter**（`94cdb8a`）：WS 滑窗 进程内 deque → Redis ZSET（时间戳集合），多 worker 共享计数；语义不变（check 记一次，满则不记返回 False）；`chat_msg` await。
+  - **deploy**（`de50ecb`）：deploy compose 加 `redis` 服务（健康检查）；`api` 设 `RUN_BACKGROUND_TASKS=false` + `UVICORN_WORKERS`(默认2) + `REDIS_URL` + depends_on redis；`agent-worker` 去 `split-worker` profile 闸门（默认启动）+ `REDIS_URL`；Dockerfile CMD 读 `UVICORN_WORKERS`。`test_deploy_compose.py` 重写锁 P0-3b 后不变量（反转 P0-3a 断言）。
+  - **偏差/说明**：① `socializing` 三方法是死代码（全仓无调用点），一并迁 Redis 保持一致但非原子（unused，低风险）。② manager 同步方法转异步（Redis I/O），全调用点加 await；`register` 仍同步（仅本地 dict）。③ Redis 现为**运行时硬依赖**（此前仅在 config/pyproject 声明未接线；forge 仍用内存 session，未在本任务范围内动）。④ 本地开发/CI 无 redis daemon 时测试用 fakeredis；生产/vm212 需起 redis。
+  - **测试**：完整套件分块跑（`--timeout-method=signal`）= 与基线完全一致（433 passed / 10 failed，10 个全为预存：3 已知 + 7 沙盒无外网的网络用例 import/research_stage/resident_edit/map_integration import 项），**零新增失败**。另用**真 redis-server 6.0.16** 跑 smoke（锁可重入/队列去重+跳线下/presence/SCAN cancel/disconnect 清理/socializing/pubsub 广播+exclude/滑窗/日计数+TTL 全绿），确认 fakeredis 未掩盖真 redis 行为差异。
 - [ ] P1-1 LLM 计量（llm_usage 表）+ 预算熔断 + 分级模型 ← 🔥 功能的闸门
 - [ ] P1-4 前端路由懒加载 + manualChunks
 - [ ] P1-5 apiFetch 超时/取消 + Forge 轮询改 WS 推送
@@ -56,5 +63,5 @@
 - vm212 部署状态：`/opt/skills-world`，API 端口 8100，pgvector/pg16，LLM=百炼 Coding Plan qwen3.7-plus（`/apps/anthropic`）。**AGENT_ENABLED=false**（Coding Plan 条款禁止后端自动化调用，防封 key/烧配额；玩家聊天链路不受影响）。要开 agent loop：改 `/opt/skills-world/deploy/.env` 后 `docker compose up -d api`；上生产须换按量计费 key
 - OPTIMIZATION_PLAN P0-5 提到的 qwen3-embedding 2560→1024 维截断问题（应在请求中显式传 dimensions）未在本次处理，规格的修复清单未包含它
 - ~~`pip install -e .` 在 backend 下失败：hatchling 缺打包配置~~ 已在 `6174e13`（Dockerfile 任务）中修复
-- **P1-1 限流子项已完成，主体仍未做（2026-07-08）**：本次只做 §P1-1 的"限流"子项（WS 频控 + REST slowapi）。§P1-1 主体——**LLM 计量（llm_usage 表）+ 每小时预算熔断器 + 分级模型路由**——未开工，这是 🔥 功能（A1/B1/C3/A5 等）的硬闸门。成本优化研究的 E-31（计量字段设计）/E-32（预算熔断稿）已在 `docs/research/DIRECTOR_ROADMAP.md` 备好，下次单独立项。本次限流用的进程内滑窗在 P0-3b Redis 化后应迁 Redis，使多 worker 共享计数。
+- **P1-1 限流子项已完成，主体仍未做（2026-07-08）**：本次只做 §P1-1 的"限流"子项（WS 频控 + REST slowapi）。§P1-1 主体——**LLM 计量（llm_usage 表）+ 每小时预算熔断器 + 分级模型路由**——未开工，这是 🔥 功能（A1/B1/C3/A5 等）的硬闸门。成本优化研究的 E-31（计量字段设计）/E-32（预算熔断稿）已在 `docs/research/DIRECTOR_ROADMAP.md` 备好，下次单独立项。本次限流用的进程内滑窗在 P0-3b Redis 化后应迁 Redis，使多 worker 共享计数。**（2026-07-08 更新：已在 P0-3b `94cdb8a` 迁 Redis ZSET 滑窗，多 worker 共享计数。）**
 - **前端 `npm run build` 在 Node v25 下失败（2026-07-08 发现）**：rolldown 原生 binding `MODULE_NOT_FOUND`，master 基线同样复现（非本次改动引入）。lint 回到基线（7 errors/3 warnings 均为预先存在）、`tsc --noEmit` 通过。需降 Node 至 v22/v20 或换 vite 原生构建解决——记入待办，不在限流 scope 内
