@@ -234,3 +234,20 @@ async def test_pipeline_quick_mode_skips_research(db_session):
         assert session.research_data == {}
     finally:
         BuildStage.run = original_run
+
+
+@pytest.mark.anyio
+async def test_extraction_truncates_research_input():
+    """E-20: deep-forge research (12 full-text results) is capped before injection."""
+    from app.forge.extraction_stage import ExtractionStage, RESEARCH_INPUT_MAX_CHARS
+
+    mock_client = AsyncMock()
+    mock_response = AsyncMock()
+    mock_response.content = [AsyncMock(text='{"mental_models": [], "decision_heuristics": []}')]
+    mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+    stage = ExtractionStage(llm_client=mock_client, model="test-model")
+    await stage.run(research_text="z" * (RESEARCH_INPUT_MAX_CHARS + 5000), character_name="X")
+
+    sent = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
+    assert sent.count("z") == RESEARCH_INPUT_MAX_CHARS

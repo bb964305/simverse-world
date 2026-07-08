@@ -135,8 +135,10 @@ async def resident_chat(
                 # Append previous line as context
                 messages = [{"role": "user", "content": history}]
 
+            # E-17/E-26: 100 tok truncated ~1/4 of "50字" replies mid-sentence,
+            # and the cut half-line then polluted subsequent turns' history.
             reply = (await llm_chat(
-                system_prompt, messages, max_tokens=100,
+                system_prompt, messages, max_tokens=150,
                 meter=Meter(scenario="chat_turn", resident_id=speaker.id),
             )).strip()[:200]
             dialog_lines.append(f"{speaker.name}: {reply}")

@@ -22,6 +22,10 @@ from app.personality.evolution import EvolutionService
 
 logger = logging.getLogger(__name__)
 
+# E-28: cap event-memory content length on store (they're re-injected into every
+# later retrieval; an unbounded entry is paid for repeatedly).
+EVENT_MEMORY_MAX_CHARS = 80
+
 
 class MemoryService:
     def __init__(self, db: AsyncSession):
@@ -43,6 +47,11 @@ class MemoryService:
         metadata_json: dict | None = None,
     ) -> Memory:
         """Create and persist a new memory record."""
+        # E-28: event memories are re-injected into every later retrieval, so an
+        # unbounded entry is paid for over and over. Cap them on store. Longer,
+        # bounded-count types (relationship/reflection) keep their full text.
+        if type == "event" and content and len(content) > EVENT_MEMORY_MAX_CHARS:
+            content = content[:EVENT_MEMORY_MAX_CHARS].rstrip() + "…"
         mem = Memory(
             resident_id=resident_id,
             type=type,

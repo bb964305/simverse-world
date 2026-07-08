@@ -46,6 +46,25 @@ async def test_add_event_memory(db_session, resident):
 
 
 @pytest.mark.anyio
+async def test_event_memory_content_capped(db_session, resident):
+    """E-28: long event memories are truncated on store (re-injected repeatedly)."""
+    from app.memory.service import EVENT_MEMORY_MAX_CHARS
+    svc = MemoryService(db_session)
+    mem = await svc.add_memory(resident.id, "event", "长" * 300, 0.5, "chat_resident")
+    assert len(mem.content) <= EVENT_MEMORY_MAX_CHARS + 1  # +1 for the ellipsis
+    assert mem.content.endswith("…")
+
+
+@pytest.mark.anyio
+async def test_relationship_memory_not_capped(db_session, resident):
+    """Relationship memories (bounded count) keep their full text."""
+    svc = MemoryService(db_session)
+    long_text = "关系描述" * 60  # 240 chars
+    mem = await svc.add_memory(resident.id, "relationship", long_text, 0.5, "chat_resident")
+    assert mem.content == long_text
+
+
+@pytest.mark.anyio
 async def test_get_memories_by_type(db_session, resident):
     svc = MemoryService(db_session)
     await svc.add_memory(resident.id, "event", "Event 1", 0.5, "chat_player")

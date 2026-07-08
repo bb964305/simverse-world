@@ -3,6 +3,10 @@ from typing import Any
 from app.llm.json_extract import extract_json_object
 from app.llm.metering import record_usage
 
+# E-20: deep-forge research injects 12 full-text search results; cap the input
+# so the tail doesn't blow up extraction cost (matches skill-import's [:8000]).
+RESEARCH_INPUT_MAX_CHARS = 8000
+
 
 class ExtractionStage:
     def __init__(self, llm_client, model: str):
@@ -12,6 +16,7 @@ class ExtractionStage:
     async def run(self, research_text: str, character_name: str) -> dict[str, Any]:
         from app.forge.prompts import EXTRACTION_SYSTEM_PROMPT, EXTRACTION_USER_TEMPLATE
 
+        research_text = (research_text or "")[:RESEARCH_INPUT_MAX_CHARS]
         response = await self._client.messages.create(
             model=self._model,
             max_tokens=3000,
