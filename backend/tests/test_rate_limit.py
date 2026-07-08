@@ -9,9 +9,10 @@ Covers:
 - Limits are configurable via settings (callable decorators read settings
   lazily, ws_limiter reads settings lazily).
 
-conftest's autouse `_reset_rate_limiters` clears slowapi storage + ws_limiter
-before each test, so each test starts from an empty window. Tests that need
-a specific small limit monkeypatch settings.*_per_minute.
+conftest's autouse `_reset_rate_limiters` clears slowapi storage before each
+test; the WS limiter now lives in Redis and starts empty because conftest's
+`_fake_redis` installs a fresh in-memory server per test. Tests that need a
+specific small limit monkeypatch settings.*_per_minute.
 """
 import asyncio
 import json
@@ -61,7 +62,7 @@ def _make_ctx(user_id: str = "user-1") -> ConnectionContext:
 async def test_ws_chat_rate_limit_short_circuits_before_charge():
     """Beyond the limit, handle_chat_msg emits rate_limited and never reaches
     charge() — proving the DB/LLM cost path is skipped."""
-    ws_limiter.reset()
+    await ws_limiter.reset()
     fake = FakeManager()
     with patch.object(chat_handler, "manager", fake), \
          patch.object(chat_handler, "charge", new=AsyncMock(side_effect=AssertionError("charge must NOT run when rate-limited"))):
@@ -87,20 +88,20 @@ async def test_ws_chat_rate_limit_short_circuits_before_charge():
 @pytest.mark.anyio
 async def test_ws_rate_limit_resets_after_window():
     """After the 60s horizon elapses, the window is empty again."""
-    limiter = SlidingWindowLimiter(max_per_minute=3)
-    assert limiter.check("k") is True   # 1
-    assert limiter.check("k") is True   # 2
-    assert limiter.check("k") is True   # 3
-    assert limiter.check("k") is False  # 4 -> blocked
-    # advance the monotonic clock well past the 60s window so all stored
-    # hits expire and check() admits a new hit
+    limiter = SlidingWindowLimiter(max_per_minute=3, namespace="test-reset")
+    assert await limiter.check("k") is True   # 1
+    assert await limiter.check("k") is True   # 2
+    assert await limiter.check("k") is True   # 3
+    assert await limiter.check("k") is False  # 4 -> blocked
+    # advance the wall clock well past the 60s window so all stored hits fall
+    # outside it and check() admits a new hit
     import app.ws.rate_limiter as rl
-    orig_monotonic = rl.time.monotonic
+    orig_time = rl.time.time
     try:
-        rl.time.monotonic = lambda: orig_monotonic() + 120.0
-        assert limiter.check("k") is True
+        rl.time.time = lambda: orig_time() + 120.0
+        assert await limiter.check("k") is True
     finally:
-        rl.time.monotonic = orig_monotonic
+        rl.time.time = orig_time
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +146,7 @@ async def test_rest_forge_rate_limit(client):
 @pytest.mark.anyio
 async def test_ws_limit_configurable_via_settings():
     """Raising settings.ws_rate_limit_per_minute admits more hits."""
-    ws_limiter.reset()
+    await ws_limiter.reset()
     with patch.object(settings, "ws_rate_limit_per_minute", 100):
         for _ in range(50):
-            assert ws_limiter.check("cfg-user") is True
+            assert await ws_limiter.check("cfg-user") is True

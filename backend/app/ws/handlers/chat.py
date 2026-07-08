@@ -115,8 +115,8 @@ async def handle_chat_msg(ctx: ConnectionContext, data: dict) -> None:
     if not ctx.in_chat:
         return
     # Rate limit: reject before any DB charge or LLM cost (P1-1 limit).
-    # Window is per-user, in-process (migrates to Redis with P0-3b).
-    if not ws_limiter.check(ctx.user_id):
+    # Per-user 60s sliding window shared across workers via Redis (P0-3b).
+    if not await ws_limiter.check(ctx.user_id):
         await manager.send(ctx.user_id, {
             "type": "rate_limited",
             "message": "请求过快，请稍后再试",
