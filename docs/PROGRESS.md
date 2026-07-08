@@ -17,7 +17,7 @@
 - [ ] 限流：WS 聊天频控 + REST slowapi 兜底
 
 ## Phase 2 — 扩展性与成本（§2/§3）
-- [ ] P0-3a Agent Worker 独立进程 + compose 服务
+- [x] P0-3a Agent Worker 独立进程 + compose 服务 — `48fd480`（merge）。`python -m app.agent.main` 入口（三 loop 并发 + SIGTERM 优雅退出）+ `run_background_tasks` 开关 + compose agent-worker 服务。**关键偏差（评审抓的）**：现在翻开关会让 worker 进程的全部 WS 广播成死信（ConnectionManager 是进程内的，居民移动/互聊对玩家不可见）→ compose 默认仍单进程跑 loop，agent-worker 藏在 `--profile split-worker` 后，等 P0-3b Redis pub/sub 落地才启用；两条约束由 test_deploy_compose.py 回归锁死
 - [ ] P0-3b ConnectionManager 状态 Redis 化 + pub/sub 广播
 - [ ] P1-1 LLM 计量（llm_usage 表）+ 预算熔断 + 分级模型 ← 🔥 功能的闸门
 - [ ] P1-4 前端路由懒加载 + manualChunks
