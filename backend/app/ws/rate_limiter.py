@@ -18,13 +18,21 @@ from app.config import settings
 class SlidingWindowLimiter:
     """Per-key fixed-size sliding window over a 60s horizon.
 
+    ``max_per_minute`` is read from ``settings`` lazily on each ``check`` so
+    tests (and ops) can raise the limit via env without re-importing. Pass a
+    fixed value only for standalone/test instances that must not depend on
+    settings.
+
     ``check`` is O(1) amortized: expired entries are dropped lazily from the
     front of the deque each call.
     """
 
-    def __init__(self, max_per_minute: int):
-        self._max = max_per_minute
+    def __init__(self, max_per_minute: int | None = None):
+        self._max = max_per_minute  # None => read settings.ws_rate_limit_per_minute
         self._hits: dict[str, list[float]] = defaultdict(list)
+
+    def _limit(self) -> int:
+        return self._max if self._max is not None else settings.ws_rate_limit_per_minute
 
     def check(self, key: str) -> bool:
         """Record a hit for ``key`` and return True if allowed, False if the
@@ -35,7 +43,7 @@ class SlidingWindowLimiter:
         # drop entries older than the 60s window (lazy expiry)
         while window and window[0] < cutoff:
             window.pop(0)
-        if len(window) >= self._max:
+        if len(window) >= self._limit():
             return False
         window.append(now)
         return True
@@ -48,5 +56,6 @@ class SlidingWindowLimiter:
             self._hits.pop(key, None)
 
 
-# Per-user chat limiter, tied to ConnectionManager's lifetime.
-ws_limiter = SlidingWindowLimiter(settings.ws_rate_limit_per_minute)
+# Per-user chat limiter, tied to ConnectionManager's lifetime. Reads the
+# limit from settings so it honours WS_RATE_LIMIT_PER_MINUTE overrides.
+ws_limiter = SlidingWindowLimiter()
