@@ -26,7 +26,17 @@
   - **deploy**（`de50ecb`）：deploy compose 加 `redis` 服务（健康检查）；`api` 设 `RUN_BACKGROUND_TASKS=false` + `UVICORN_WORKERS`(默认2) + `REDIS_URL` + depends_on redis；`agent-worker` 去 `split-worker` profile 闸门（默认启动）+ `REDIS_URL`；Dockerfile CMD 读 `UVICORN_WORKERS`。`test_deploy_compose.py` 重写锁 P0-3b 后不变量（反转 P0-3a 断言）。
   - **偏差/说明**：① `socializing` 三方法是死代码（全仓无调用点），一并迁 Redis 保持一致但非原子（unused，低风险）。② manager 同步方法转异步（Redis I/O），全调用点加 await；`register` 仍同步（仅本地 dict）。③ Redis 现为**运行时硬依赖**（此前仅在 config/pyproject 声明未接线；forge 仍用内存 session，未在本任务范围内动）。④ 本地开发/CI 无 redis daemon 时测试用 fakeredis；生产/vm212 需起 redis。
   - **测试**：完整套件分块跑（`--timeout-method=signal`）= 与基线完全一致（433 passed / 10 failed，10 个全为预存：3 已知 + 7 沙盒无外网的网络用例 import/research_stage/resident_edit/map_integration import 项），**零新增失败**。另用**真 redis-server 6.0.16** 跑 smoke（锁可重入/队列去重+跳线下/presence/SCAN cancel/disconnect 清理/socializing/pubsub 广播+exclude/滑窗/日计数+TTL 全绿），确认 fakeredis 未掩盖真 redis 行为差异。
-- [ ] P1-1 LLM 计量（llm_usage 表）+ 预算熔断 + 分级模型 ← 🔥 功能的闸门
+- [ ] P1-1 LLM 计量（llm_usage 表）+ 预算熔断 + 分级模型 ← 🔥 功能的闸门　**（进行中，1/8 子提交已落）**
+  - **已完成 子提交 1/8**（`37fb631`）：统一 JSON 解析器（E-05）。新增 `app/llm/json_extract.py`（剥围栏 + 字符串感知的平衡括号提取 + 容忍尾逗号），替换全部旧的 `re.search(r'{[^{}]+}')` / `r'{[^}]+}'` / `r'{[\s\S]+}'` / `find('{')..rfind('}')` / 裸 `json.loads(raw)`。统一覆盖：decide(schemas)、互聊 summary(chat)、plan、sbti、sprite、forge scoring/district、forge router/validation/extraction/refinement、personality drift/shift、memory extract/relationship/reflection。各兜底行为不变。新增 test_json_extract.py（12 例）。97 相关测试全绿。
+  - **剩余 子提交 2–8（下个会话按序做）**：
+    2. `llm_usage` 表 + Alembic 迁移 + **按 attempt** 计量接线（REPORT §三/E-19）：字段照设计稿全量落（scenario 枚举、model、owner、resident/user/conversation_id、attempt_no、parse_ok、latency_ms、in/out/cache_read/cache_creation tokens、source=usage\|estimated 降级、cost_usd 计算列）；在 `client.py` chat()/stream_chat() + 各直调 `client.messages.create` 点记账；读 `response.usage`，缺失走 est 影子计量。**废弃** `ws/handlers/chat.py` 的 `Conversation.tokens_used += len(full_reply)`（E-03）。⚠️ **迁移需真实 PG 验证**（本沙盒无 pgvector，全链 `alembic upgrade head` 跑不动 → 建议：新表设计为无 FK 的 append-only 遥测表规避类型/FK 漂移风险，单表 up/down 在真 PG isolation 验证，全链在 vm212 复验）。建议表字段 resident_id/user_id/conversation_id 用普通索引列而非 FK（高写入遥测表，避免写耦合 + 存活于居民/用户删除）。
+    3. 熔断三级（80% 背景降频 / 95% 背景规则化 / 100% 只保玩家可见）+ per-user 日预算（映射灵魂币）+ forge 单请求上限；每级规则兜底不白屏；路由：背景锁 haiku、玩家可见可配置（E-24/E-18）。
+    4. 杠杆：decide 计划优先跳过 + 规则级中断检测（E-09/E-10，仅用 TickContext 已有数据，零 LLM，带行为回归测试）。
+    5. 杠杆：互聊收尾 5→1 合并调用（E-04/E-05，带解析失败重试 1 次兜底）。
+    6. 杠杆：互聊 history 双注入修复（E-02，一行：CHAT_REPLY_SYSTEM 去 {history} 槽）。
+    7. 杠杆：玩家聊天滑窗 `ctx.chat_messages[-10:]`（E-08）。
+    8. 顺手修：互聊回复 max_tokens 100→150 / summary 150→200（E-17/E-26）；add_memory 内容入库限长 80 字（E-28）；deep forge extraction 输入截断（E-20）。
+  - **沙盒说明**：Python 3.12 via `uv`（仓库要求 ≥3.11，宿主 3.10 缺 `datetime.UTC`）；测试用 `--timeout-method=signal` 隔离沙盒无外网的网络用例。
 - [ ] P1-4 前端路由懒加载 + manualChunks
 - [ ] P1-5 apiFetch 超时/取消 + Forge 轮询改 WS 推送
 
