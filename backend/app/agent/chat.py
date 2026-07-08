@@ -56,6 +56,8 @@ def _build_chat_system(resident: Resident, other: Resident, rel_text: str, is_in
             relationship_memory=rel_text,
         )
     else:
+        # history is intentionally NOT injected here — it's supplied as the user
+        # message; a {history} slot in the system prompt double-injected it (E-02).
         return CHAT_REPLY_SYSTEM.format(
             responder_name=resident.name,
             sbti_type=sbti_type,
@@ -63,7 +65,6 @@ def _build_chat_system(resident: Resident, other: Resident, rel_text: str, is_in
             initiator_name=other.name,
             persona_md=resident.persona_md or "",
             relationship_memory=rel_text,
-            history=history,
         )
 
 

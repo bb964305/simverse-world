@@ -29,6 +29,10 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# E-08: max chat turns sent to the model per player-NPC message. Bounds the
+# O(n²) input growth of long sessions; the full history is still persisted.
+CHAT_HISTORY_WINDOW = 10
+
 
 async def handle_start_chat(ctx: ConnectionContext, data: dict) -> None:
     try:
@@ -189,13 +193,18 @@ async def handle_chat_msg(ctx: ConnectionContext, data: dict) -> None:
     ctx.chat_messages.append({"role": "user", "content": text})
     system_prompt = assemble_system_prompt(ctx.resident, memory_context=ctx.memory_context)
 
+    # E-08: only send the last N turns to the model. ctx.chat_messages keeps the
+    # full history (for persistence), but sending all of it re-pays for the whole
+    # transcript every turn (O(n²)); a sliding window bounds long-session input.
+    windowed_messages = ctx.chat_messages[-CHAT_HISTORY_WINDOW:]
+
     # --- LLM streaming (10-60s): runs without any DB session ---
     full_reply = ""
     try:
         model_router = ModelRouter()
         async for chunk in model_router.chat_with_media(
             system_prompt=system_prompt,
-            messages=ctx.chat_messages,
+            messages=windowed_messages,
             media_url=media_url,
             media_type=media_type,
             meter=Meter(

@@ -137,11 +137,10 @@ CHAT_REPLY_SYSTEM = """\
 你对 {initiator_name} 的记忆：
 {relationship_memory}
 
-对话历史：
-{history}
-
 请用中文，以符合你人格的方式回应。保持简短（50字以内）。
 """
+# E-02: the dialog history is already supplied as the user message; a {history}
+# slot here double-injected it (~23% wasted dialog input), so it was removed.
 
 CHAT_SUMMARY_SYSTEM = """\
 请将以下居民间的对话总结成 1-2 句话，供玩家看到时理解发生了什么。
