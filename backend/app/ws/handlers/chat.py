@@ -22,6 +22,8 @@ from app.media.model_router import ModelRouter
 from app.ws.manager import manager
 from app.ws.protocol import StartChat, ChatMsg, EndChat
 from app.ws.handlers.context import ConnectionContext
+from app.ws.rate_limiter import ws_limiter
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +113,15 @@ async def handle_start_chat(ctx: ConnectionContext, data: dict) -> None:
 
 async def handle_chat_msg(ctx: ConnectionContext, data: dict) -> None:
     if not ctx.in_chat:
+        return
+    # Rate limit: reject before any DB charge or LLM cost (P1-1 limit).
+    # Window is per-user, in-process (migrates to Redis with P0-3b).
+    if not ws_limiter.check(ctx.user_id):
+        await manager.send(ctx.user_id, {
+            "type": "rate_limited",
+            "message": "请求过快，请稍后再试",
+            "limit_per_minute": settings.ws_rate_limit_per_minute,
+        })
         return
     try:
         ChatMsg(**data)
