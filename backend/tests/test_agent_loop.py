@@ -6,6 +6,7 @@ from app.models.resident import Resident
 from app.agent.loop import AgentLoop
 from app.agent.actions import ActionType, ActionResult
 from app.agent.scheduler import DailySchedule
+from app.llm.budget import BudgetTier
 
 
 @pytest.fixture
@@ -183,3 +184,56 @@ async def test_agent_loop_one_failed_tick_doesnt_crash(loop_session_factory, loo
 
     # All 3 residents should have been attempted
     assert call_count == 3
+
+
+# ── Budget circuit breaker integration (P1-1, E-24) ──────────────────
+
+@pytest.mark.anyio
+async def test_loop_player_only_skips_round(loop_session_factory, loop_residents):
+    """At PLAYER_ONLY (>=100%) the whole background round is paused."""
+    loop = AgentLoop()
+    ticked = 0
+
+    async def spy_tick(db, resident, **kw):
+        nonlocal ticked
+        ticked += 1
+        return None
+
+    with patch("app.agent.loop.async_session", loop_session_factory), \
+         patch("app.agent.loop.background_tier", AsyncMock(return_value=BudgetTier.PLAYER_ONLY)), \
+         patch("app.agent.loop.resident_tick", side_effect=spy_tick), \
+         patch("app.agent.loop.should_tick", return_value=True):
+        tier = await loop._tick_round()
+
+    assert tier == BudgetTier.PLAYER_ONLY
+    assert ticked == 0  # no resident ticked
+
+
+@pytest.mark.anyio
+async def test_loop_rule_only_forces_plan_and_suppresses_chat(loop_session_factory, loop_residents):
+    """At RULE_ONLY (>=95%) ticks run force_plan_only and chat is not initiated."""
+    loop = AgentLoop()
+    seen_force = []
+
+    async def chat_tick(db, resident, *, force_plan_only=False):
+        seen_force.append(force_plan_only)
+        return ActionResult(action=ActionType.CHAT_RESIDENT, target_slug="loop-res-0",
+                            target_tile=None, reason="plan says chat")
+
+    broadcasts = []
+
+    with patch("app.agent.loop.async_session", loop_session_factory), \
+         patch("app.agent.loop.background_tier", AsyncMock(return_value=BudgetTier.RULE_ONLY)), \
+         patch("app.agent.loop.resident_tick", side_effect=chat_tick), \
+         patch("app.agent.loop.should_tick", return_value=True), \
+         patch("app.agent.loop.build_schedule", return_value=MagicMock(
+             wake_hour=6, sleep_hour=23, peak_hours=[10], social_slots=[14], rest_ratio=0.3)), \
+         patch.object(loop, "_initiate_chat", new=AsyncMock()) as mock_initiate, \
+         patch("app.agent.loop.manager") as mock_mgr:
+        mock_mgr.broadcast = AsyncMock(side_effect=lambda d, **k: broadcasts.append(d))
+        tier = await loop._tick_round()
+
+    assert tier == BudgetTier.RULE_ONLY
+    assert seen_force and all(seen_force)          # every tick forced plan-only
+    mock_initiate.assert_not_called()              # inter-resident chat suppressed
+    assert not any(b.get("type") == "resident_chat" for b in broadcasts)

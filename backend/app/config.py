@@ -45,6 +45,21 @@ class Settings(BaseSettings):
     # flag only gates whether the telemetry rows are persisted at all.
     llm_metering_enabled: bool = True
 
+    # --- Budget circuit breaker (P1-1, E-24/E-18) ---
+    # Global daily spend cap (USD). Background LLM work degrades in three tiers
+    # as this fills: >=80% throttle (tick x2), >=95% rule-only (force plan, no
+    # inter-resident chat), >=100% background paused (only player-visible calls).
+    # Default ≈ 15-resident baseline × 1.5; raise for larger worlds. Set 0 to disable.
+    budget_global_daily_usd: float = 1.5
+    # Per-user daily player-visible spend cap (USD); over it, player chat replies
+    # with a friendly "daily limit reached" instead of calling the LLM. 0 disables.
+    budget_user_daily_usd: float = 0.5
+    # Per-request ceiling for a single forge generation (deep ≈ $0.15). 0 disables.
+    budget_forge_request_usd: float = 0.15
+    # Routing (E-18): background/system calls are pinned to this model (locked to
+    # the cheap default); player-visible calls use the configurable effective_model.
+    background_llm_model: str = ""
+
     @property
     def effective_api_key(self) -> str:
         return self.llm_api_key or self.anthropic_api_key
@@ -52,6 +67,18 @@ class Settings(BaseSettings):
     @property
     def effective_model(self) -> str:
         return self.llm_model or self.llm_default_model
+
+    @property
+    def background_model(self) -> str:
+        """Model for background/system LLM calls (E-18 routing control surface).
+
+        Defaults to ``effective_model`` — i.e. no behavior change and no risk of
+        sending an unknown model id to a relay endpoint (the deployment runs
+        qwen3.7-plus via 百炼, where 'claude-haiku-*' is not a valid model, F-02).
+        Ops pin background to a cheaper model by setting ``background_llm_model``;
+        the player-visible path stays on ``effective_model`` regardless, so an
+        upgrade there can't drag up the 88%-of-tokens background traffic."""
+        return self.background_llm_model or self.effective_model
     cors_origins: list[str] = ["http://localhost:5173"]
 
     # --- LinuxDo OAuth (Plan 1) ---

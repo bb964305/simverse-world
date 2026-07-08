@@ -18,6 +18,7 @@ from app.models.conversation import Conversation, Message
 from app.services.coin_service import charge, get_balance, reward_creator_passive
 from app.llm.prompt import assemble_system_prompt
 from app.llm.metering import Meter
+from app.llm.budget import user_over_budget
 from app.memory.service import MemoryService
 from app.media.model_router import ModelRouter
 from app.ws.manager import manager
@@ -145,6 +146,15 @@ async def handle_chat_msg(ctx: ConnectionContext, data: dict) -> None:
 
         if not text:
             await manager.send(ctx.user_id, {"type": "error", "message": "Empty message"})
+            return
+
+        # Per-user daily budget cap (P1-1, E-24): don't charge or call the LLM
+        # once the user has spent their day's allowance.
+        if await user_over_budget(db, ctx.user_id):
+            await manager.send(ctx.user_id, {
+                "type": "budget_exceeded",
+                "message": "今日对话额度已用完，明天再来吧",
+            })
             return
 
         ok = await charge(db, ctx.user_id, cost, f"chat:{ctx.resident.slug}")

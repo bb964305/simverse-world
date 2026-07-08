@@ -28,6 +28,7 @@ from app.agent.scheduler import build_schedule, should_tick
 from app.agent.tick import resident_tick
 from app.config import settings
 from app.database import async_session
+from app.llm.budget import BudgetTier, background_tier
 from app.models.resident import Resident
 from app.ws.manager import manager
 
@@ -54,21 +55,34 @@ class AgentLoop:
             if not settings.agent_enabled:
                 await asyncio.sleep(settings.agent_tick_interval)
                 continue
+            tier = BudgetTier.NORMAL
             try:
-                await self._tick_round()
+                tier = await self._tick_round()
             except Exception as e:
                 logger.error("AgentLoop tick_round error: %s", e, exc_info=True)
-            await asyncio.sleep(settings.agent_tick_interval)
+            # Budget throttle (E-24, ≥80%/≥95%): halve background frequency.
+            sleep_mult = 2 if tier in (BudgetTier.THROTTLE, BudgetTier.RULE_ONLY) else 1
+            await asyncio.sleep(settings.agent_tick_interval * sleep_mult)
 
-    async def _tick_round(self) -> None:
+    async def _tick_round(self) -> BudgetTier:
         """One round: evaluate schedules, run concurrent resident ticks.
 
         AsyncSession is not concurrency-safe (P0-1): a short-lived session
         loads the resident list, then each guarded tick opens its own
         session inside the semaphore.
+
+        Returns the current budget tier so the caller can throttle its sleep.
+        Budget degradation (E-24): PLAYER_ONLY (≥100%) pauses the whole round;
+        RULE_ONLY (≥95%) forces plan-only decides and suppresses inter-resident
+        chat initiation.
         """
         # Load id + schedule data for active residents, then release the session
         async with async_session() as db:
+            tier = await background_tier(db)
+            if tier == BudgetTier.PLAYER_ONLY:
+                # Budget exhausted: pause all background work; player-visible
+                # calls (WS chat) keep running on their own path.
+                return tier
             result = await db.execute(
                 select(Resident.id, Resident.meta_json).where(
                     Resident.status.not_in(["sleeping"])
@@ -76,8 +90,10 @@ class AgentLoop:
             )
             rows = result.all()
         if not rows:
-            return
+            return tier
 
+        force_plan_only = tier == BudgetTier.RULE_ONLY
+        suppress_chat = tier == BudgetTier.RULE_ONLY
         current_hour = datetime.now().hour
         semaphore = asyncio.Semaphore(settings.agent_max_concurrent)
 
@@ -98,13 +114,16 @@ class AgentLoop:
                     if resident is None or resident.status == "sleeping":
                         return None
                     try:
-                        action_result = await resident_tick(db, resident)
+                        # Pass force_plan_only only when set, so patched ticks
+                        # with a (db, resident) signature stay compatible.
+                        tick_kwargs = {"force_plan_only": True} if force_plan_only else {}
+                        action_result = await resident_tick(db, resident, **tick_kwargs)
                     except Exception as e:
                         logger.warning("Tick error for %s: %s", resident.slug, e)
                         return None
 
                     if action_result:
-                        await self._handle_action(db, resident, action_result)
+                        await self._handle_action(db, resident, action_result, suppress_chat=suppress_chat)
 
                     return action_result
 
@@ -113,14 +132,21 @@ class AgentLoop:
             *(guarded_tick(row.id, row.meta_json) for row in rows),
             return_exceptions=True,
         )
+        return tier
 
     async def _handle_action(
         self,
         db: AsyncSession,
         resident: Resident,
         action_result: ActionResult,
+        *,
+        suppress_chat: bool = False,
     ) -> None:
-        """Post-tick: broadcast state changes and handle chat initiation."""
+        """Post-tick: broadcast state changes and handle chat initiation.
+
+        ``suppress_chat`` (budget RULE_ONLY tier) pauses inter-resident chat
+        initiation — a planned CHAT would otherwise fire an 11–13 call wrap-up.
+        """
         movement_actions = {ActionType.WANDER, ActionType.GO_HOME, ActionType.VISIT_DISTRICT}
 
         if action_result.action in movement_actions:
@@ -134,7 +160,10 @@ class AgentLoop:
             })
 
         elif action_result.action == ActionType.CHAT_RESIDENT:
-            await self._initiate_chat(db, resident, action_result.target_slug)
+            if suppress_chat:
+                logger.debug("Budget RULE_ONLY: skipping chat initiation for %s", resident.slug)
+            else:
+                await self._initiate_chat(db, resident, action_result.target_slug)
 
         elif action_result.action in {ActionType.IDLE, ActionType.NAP}:
             await manager.broadcast({

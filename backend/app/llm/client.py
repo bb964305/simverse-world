@@ -120,7 +120,10 @@ async def chat(
     the E-05 signal for "paid for a call that fell back to defaults".
     """
     client = get_client(owner)
-    resolved_model = model or settings.effective_model
+    # Routing (E-18): background/system calls are pinned to the cheap model so an
+    # upgrade of the player-visible model can't drag up background token cost.
+    default_model = settings.background_model if owner == "system" else settings.effective_model
+    resolved_model = model or default_model
     kwargs: dict = {
         "model": resolved_model,
         "max_tokens": max_tokens or settings.llm_max_tokens,

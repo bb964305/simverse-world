@@ -42,8 +42,14 @@ async def _incr_daily_count(resident_id: str) -> None:
 async def resident_tick(
     db: AsyncSession,
     resident: Resident,
+    *,
+    force_plan_only: bool = False,
 ) -> ActionResult | None:
-    """Execute one autonomous tick for a resident via plugin chain."""
+    """Execute one autonomous tick for a resident via plugin chain.
+
+    ``force_plan_only`` (set by the budget breaker's 95%+ tier) makes decide
+    hard-follow the plan with no LLM interrupt — the rule-based fallback.
+    """
     if await _over_daily_limit(resident.id):
         return None
 
@@ -55,6 +61,7 @@ async def resident_tick(
         world_time=world_time,
         hour=hour,
         schedule_phase=schedule_phase,
+        force_plan_only=force_plan_only,
     )
 
     try:

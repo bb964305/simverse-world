@@ -59,6 +59,11 @@ export function connectWS(): void {
       if (data.type === 'rate_limited') {
         console.warn('rate_limited:', data.message ?? '请求过快，请稍后再试')
       }
+      // Budget exceeded: per-user daily LLM allowance spent (P1-1, E-24).
+      // No charge or reply happened; surface a friendly notice.
+      if (data.type === 'budget_exceeded') {
+        console.warn('budget_exceeded:', data.message ?? '今日对话额度已用完，明天再来吧')
+      }
       // Player-to-player chat: reply from the target player (or auto-reply)
       if (data.type === 'player_chat_reply') {
         useGameStore.getState().addPlayerChatMessage({

@@ -22,6 +22,7 @@ from app.services.forge_service import (
 )
 from app.forge.pipeline import ForgePipeline
 from app.llm.client import get_client as get_llm_client
+from app.llm.budget import forge_blocked
 from app.models.forge_session import ForgeSession
 
 router = APIRouter(prefix="/forge", tags=["forge"])
@@ -104,6 +105,8 @@ async def forge_quick(
         raise HTTPException(status_code=400, detail="Name cannot be empty")
     if not req.raw_text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
+    if await forge_blocked(db, user.id):
+        raise HTTPException(status_code=402, detail="Daily LLM budget reached — try again later")
 
     forge_id_data = start_forge(user.id, req.name.strip())
     forge_id = forge_id_data["forge_id"]
@@ -174,6 +177,8 @@ async def deep_start(
     user = await _require_auth(request, db)
     if not req.character_name.strip():
         raise HTTPException(status_code=400, detail="character_name is required")
+    if await forge_blocked(db, user.id):
+        raise HTTPException(status_code=402, detail="Daily LLM budget reached — try again later")
 
     system_client = get_llm_client("system")
     user_client = get_llm_client("user")
