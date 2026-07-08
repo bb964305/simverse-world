@@ -54,7 +54,7 @@ async def test_tick_orchestrator_runs_all_phases():
     ]
 
     with patch("app.agent.tick.registry") as mock_reg, \
-         patch("app.agent.tick._over_daily_limit", return_value=False):
+         patch("app.agent.tick._over_daily_limit", new_callable=AsyncMock, return_value=False):
         mock_reg.get_phases.return_value = mock_phases
         result = await resident_tick(db, resident)
 
@@ -70,7 +70,7 @@ async def test_tick_orchestrator_respects_daily_limit():
     resident = _make_resident()
     db = AsyncMock()
 
-    with patch("app.agent.tick._over_daily_limit", return_value=True):
+    with patch("app.agent.tick._over_daily_limit", new_callable=AsyncMock, return_value=True):
         result = await resident_tick(db, resident)
 
     assert result is None
@@ -97,7 +97,7 @@ async def test_tick_orchestrator_stops_on_skip_remaining():
             return ctx
 
     with patch("app.agent.tick.registry") as mock_reg, \
-         patch("app.agent.tick._over_daily_limit", return_value=False):
+         patch("app.agent.tick._over_daily_limit", new_callable=AsyncMock, return_value=False):
         mock_reg.get_phases.return_value = [StopPhase(), NeverPhase()]
         result = await resident_tick(db, resident)
 

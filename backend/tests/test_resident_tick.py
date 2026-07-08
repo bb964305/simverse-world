@@ -5,8 +5,9 @@ from sqlalchemy import select
 from app.models.resident import Resident
 from app.models.memory import Memory
 from app.agent.actions import ActionType, ActionResult
-from app.agent.tick import resident_tick, _daily_counts
+from app.agent.tick import resident_tick, _daily_key
 from app.agent.schemas import parse_action_result
+from app.redis_client import get_redis
 
 
 @pytest.fixture
@@ -98,7 +99,7 @@ def test_parse_action_result_extracts_json_from_prose():
 @pytest.mark.anyio
 async def test_resident_tick_via_plugin_chain(db_session, tick_resident):
     """Tick should run plugin chain and return action result."""
-    _daily_counts.clear()
+    # fresh fakeredis per test (conftest) => daily counter starts empty
 
     class MockPhase:
         def __init__(self, set_action=False):
@@ -125,7 +126,7 @@ async def test_resident_tick_via_plugin_chain(db_session, tick_resident):
 async def test_resident_tick_respects_daily_limit(db_session, tick_resident):
     """Tick should return None when daily action limit is reached."""
     from app.config import settings
-    _daily_counts[tick_resident.id] = settings.agent_max_daily_actions
+    await get_redis().set(_daily_key(tick_resident.id), settings.agent_max_daily_actions)
 
     result = await resident_tick(db_session, tick_resident)
     assert result is None
@@ -134,7 +135,7 @@ async def test_resident_tick_respects_daily_limit(db_session, tick_resident):
 @pytest.mark.anyio
 async def test_resident_tick_phase_failure_returns_none(db_session, tick_resident):
     """If a phase raises, tick should stop gracefully."""
-    _daily_counts.clear()
+    # fresh fakeredis per test (conftest) => daily counter starts empty
 
     class FailPhase:
         async def execute(self, ctx):

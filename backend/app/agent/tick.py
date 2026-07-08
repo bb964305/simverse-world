@@ -9,24 +9,34 @@ from app.agent.registry import registry
 from app.agent.schemas import TickContext, get_world_time
 from app.config import settings
 from app.models.resident import Resident
+from app.redis_client import get_redis
 
 logger = logging.getLogger(__name__)
 
-_daily_counts: dict[str, int] = {}
-_last_reset_date: str = ""
+# Per-resident daily action cap, in Redis so it is shared across the API
+# workers and the standalone agent-worker and survives process restarts
+# (P0-3b). The key is date-stamped so it "resets" at midnight automatically;
+# a 2-day TTL cleans up yesterday's keys.
+_DAILY_KEY_PREFIX = "sv:daily_actions:"
+_DAILY_TTL_SECONDS = 2 * 86400
 
 
-def _check_and_reset_daily_counts() -> None:
-    global _last_reset_date
+def _daily_key(resident_id: str) -> str:
     today = datetime.now().strftime("%Y-%m-%d")
-    if today != _last_reset_date:
-        _daily_counts.clear()
-        _last_reset_date = today
+    return f"{_DAILY_KEY_PREFIX}{today}:{resident_id}"
 
 
-def _over_daily_limit(resident_id: str) -> bool:
-    _check_and_reset_daily_counts()
-    return _daily_counts.get(resident_id, 0) >= settings.agent_max_daily_actions
+async def _over_daily_limit(resident_id: str) -> bool:
+    val = await get_redis().get(_daily_key(resident_id))
+    return int(val or 0) >= settings.agent_max_daily_actions
+
+
+async def _incr_daily_count(resident_id: str) -> None:
+    r = get_redis()
+    key = _daily_key(resident_id)
+    count = await r.incr(key)
+    if count == 1:  # first action today — set the cleanup TTL once
+        await r.expire(key, _DAILY_TTL_SECONDS)
 
 
 async def resident_tick(
@@ -34,7 +44,7 @@ async def resident_tick(
     resident: Resident,
 ) -> ActionResult | None:
     """Execute one autonomous tick for a resident via plugin chain."""
-    if _over_daily_limit(resident.id):
+    if await _over_daily_limit(resident.id):
         return None
 
     world_time, hour, schedule_phase = get_world_time()
@@ -63,7 +73,7 @@ async def resident_tick(
             break
 
     if ctx.action_result:
-        _daily_counts[resident.id] = _daily_counts.get(resident.id, 0) + 1
+        await _incr_daily_count(resident.id)
         logger.debug("Resident %s ticked: %s -> %s",
                       resident.slug, ctx.action_result.action.value, ctx.action_result.reason)
 
