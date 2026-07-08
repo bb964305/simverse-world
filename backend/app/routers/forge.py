@@ -6,7 +6,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database import get_db, async_session
+from app.rate_limit import limiter
 from app.schemas.forge import (
     ForgeStartRequest, ForgeStartResponse,
     ForgeAnswerRequest, ForgeAnswerResponse,
@@ -36,9 +38,10 @@ async def _require_auth(request: Request, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/start", response_model=ForgeStartResponse)
+@limiter.limit(lambda: f"{settings.rest_rate_limit_forge_per_minute}/minute")
 async def forge_start(
-    req: ForgeStartRequest,
     request: Request,
+    req: ForgeStartRequest,
     db: AsyncSession = Depends(get_db),
 ):
     user = await _require_auth(request, db)
@@ -86,9 +89,10 @@ class QuickForgeRequest(BaseModel):
 
 
 @router.post("/quick")
+@limiter.limit(lambda: f"{settings.rest_rate_limit_forge_per_minute}/minute")
 async def forge_quick(
-    req: QuickForgeRequest,
     request: Request,
+    req: QuickForgeRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """

@@ -12,6 +12,24 @@ from app.database import Base, get_db
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiters():
+    """Clear slowapi's in-memory storage + the WS sliding window before each
+    test so rate-limit state never leaks across tests (P1-1 limit). Tests that
+    assert rate-limiting behaviour set their own small limit and rely on this
+    reset for a clean window."""
+    from app.rate_limit import limiter as _rest_limiter
+    from app.ws.rate_limiter import ws_limiter
+    # slowapi MemoryStorage.reset() drops all hit counters
+    try:
+        _rest_limiter._limiter.storage.reset()
+    except Exception:
+        pass
+    ws_limiter.reset()
+    yield
+
+
 @pytest.fixture
 async def db_engine():
     engine = create_async_engine(TEST_DATABASE_URL)

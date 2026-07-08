@@ -66,6 +66,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- REST rate limiting (OPTIMIZATION_PLAN P1-1, limit sub-item) ---
+# The Limiter instance lives in app.rate_limit so routers can import the
+# decorator without a circular dependency on this module. Here we only wire
+# it into the app + register the 429 handler.
+from app.rate_limit import limiter as _rest_limiter  # noqa: E402
+from slowapi import _rate_limit_exceeded_handler  # noqa: E402
+from slowapi.errors import RateLimitExceeded  # noqa: E402
+
+app.state.limiter = _rest_limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(residents.router)

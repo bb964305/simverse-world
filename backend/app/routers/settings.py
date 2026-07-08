@@ -7,6 +7,7 @@ from app.config import settings as app_settings
 from app.database import get_db
 from app.models.user import User
 from app.models.resident import Resident
+from app.rate_limit import limiter
 from app.services.auth_service import get_current_user
 from app.services.settings_service import (
     get_effective_settings,
@@ -377,9 +378,10 @@ async def patch_llm(
 
 
 @router.post("/llm/test", response_model=LLMTestResponse)
+@limiter.limit(lambda: f"{app_settings.rest_rate_limit_llm_test_per_minute}/minute")
 async def test_llm_endpoint(
-    req: LLMTestRequest,
     request: Request,
+    req: LLMTestRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """POST /settings/llm/test — test custom LLM connection."""

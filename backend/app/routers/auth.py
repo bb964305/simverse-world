@@ -2,12 +2,13 @@ import logging
 import time
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
+from app.rate_limit import limiter
 from app.schemas.user import RegisterRequest, LoginRequest, AuthResponse, UserResponse
 from app.services.auth_service import register_user, login_user, create_token
 from app.services.linuxdo_auth import LinuxDoOAuth, find_or_create_user
@@ -97,7 +98,8 @@ def _validate_and_delete_state(state: str) -> bool:
 # ---------------------------------------------------------------------------
 
 @router.post("/register", response_model=AuthResponse)
-async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit(lambda: f"{settings.rest_rate_limit_register_per_minute}/minute")
+async def register(request: Request, req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     user, token = await register_user(db, req.name, req.email, req.password)
     return AuthResponse(access_token=token, user=UserResponse(
         id=user.id, name=user.name, email=user.email,
@@ -106,7 +108,8 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     ))
 
 @router.post("/login", response_model=AuthResponse)
-async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit(lambda: f"{settings.rest_rate_limit_register_per_minute}/minute")
+async def login(request: Request, req: LoginRequest, db: AsyncSession = Depends(get_db)):
     result = await login_user(db, req.email, req.password)
     if not result:
         raise HTTPException(status_code=401, detail="Invalid credentials")
