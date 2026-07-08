@@ -21,7 +21,7 @@ async def handle_player_chat(ctx: ConnectionContext, data: dict) -> None:
         await manager.send(user_id, {"type": "error", "message": "target_id and text required"})
         return
 
-    target_online = target_id in manager.active
+    target_online = await manager.is_online(target_id)
 
     # Short session: routing decision + charge only. No LLM inside.
     async with async_session() as db:

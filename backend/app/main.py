@@ -11,6 +11,8 @@ from app.tasks.heat_cron import heat_cron_loop
 from app.tasks.embedding_backfill import embedding_backfill_loop
 from app.agent.loop import agent_loop
 from app.http import close_client
+from app.redis_client import close_redis
+from app.ws.manager import manager
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,12 @@ async def lifespan(app):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
+    # WS pub/sub subscriber (P0-3b): every API worker relays broadcast/direct
+    # envelopes from Redis to its own local sockets. Runs regardless of
+    # run_background_tasks — this process owns live WebSocket clients even when
+    # the agent loops live in the standalone worker.
+    subscriber_task = asyncio.create_task(manager.run_subscriber())
+
     # Background loops run in-process only in single-process mode (P0-3):
     # with RUN_BACKGROUND_TASKS=false they are owned by the standalone
     # agent-worker process (python -m app.agent.main).
@@ -51,9 +59,11 @@ async def lifespan(app):
             "to the agent-worker process"
         )
     yield
+    subscriber_task.cancel()
     for task in background_tasks:
         task.cancel()
     await close_client()
+    await close_redis()
 
 
 app = FastAPI(title="Simverse World API", lifespan=lifespan)

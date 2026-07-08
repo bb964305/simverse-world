@@ -43,8 +43,8 @@ async def handle_start_chat(ctx: ConnectionContext, data: dict) -> None:
             await manager.send(ctx.user_id, {"type": "error", "message": "Resident not found"})
             return
         # Queue if NPC is chatting or locked by another player
-        if resident.status == "chatting" or (not manager.lock_resident(resident.id, ctx.user_id)):
-            pos = manager.enqueue(resident.id, ctx.user_id)
+        if resident.status == "chatting" or (not await manager.lock_resident(resident.id, ctx.user_id)):
+            pos = await manager.enqueue(resident.id, ctx.user_id)
             await manager.send(ctx.user_id, {
                 "type": "chat_queued",
                 "resident_slug": slug,
@@ -63,13 +63,13 @@ async def handle_start_chat(ctx: ConnectionContext, data: dict) -> None:
                     "resident_name": resident.name,
                     "cost": wake_cost,
                 })
-                manager.unlock_resident(resident.id)
+                await manager.unlock_resident(resident.id)
                 return
             wake_cost = resident.token_cost_per_turn * 3
             ok = await charge(db, ctx.user_id, wake_cost, f"wake:{slug}")
             if not ok:
                 await manager.send(ctx.user_id, {"type": "error", "message": "Insufficient Soul Coins"})
-                manager.unlock_resident(resident.id)
+                await manager.unlock_resident(resident.id)
                 return
             balance = await get_balance(db, ctx.user_id)
             await manager.send(ctx.user_id, {
@@ -282,7 +282,7 @@ async def handle_end_chat(ctx: ConnectionContext, data: dict) -> None:
         conv_id = fresh_conv.id if fresh_conv else ""
 
     # Release the resident lock
-    manager.unlock_resident(resident_id)
+    await manager.unlock_resident(resident_id)
 
     await manager.send(ctx.user_id, {
         "type": "chat_ended",
@@ -290,7 +290,7 @@ async def handle_end_chat(ctx: ConnectionContext, data: dict) -> None:
     })
 
     # Notify next queued user
-    next_user = manager.dequeue(resident_id)
+    next_user = await manager.dequeue(resident_id)
     if next_user:
         await manager.send(next_user, {
             "type": "queue_ready",

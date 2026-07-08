@@ -11,6 +11,7 @@ import logging
 import signal
 
 from app.agent.loop import agent_loop
+from app.redis_client import close_redis
 from app.tasks.embedding_backfill import embedding_backfill_loop
 from app.tasks.heat_cron import heat_cron_loop
 
@@ -68,6 +69,8 @@ async def main() -> None:
         await asyncio.gather(stop_task, *tasks, return_exceptions=True)
         for sig in registered:
             loop.remove_signal_handler(sig)
+        # Close the shared Redis client the loops used to publish WS events.
+        await close_redis()
         logger.info("agent-worker stopped")
 
 

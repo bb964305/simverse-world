@@ -75,13 +75,13 @@ async def websocket_handler(ws: WebSocket):
     await _claim_daily_reward(user_id)
 
     # Initialize position so other players can see us immediately
-    manager.update_position(user_id, spawn_x, spawn_y, "down", user_name)
+    await manager.update_position(user_id, spawn_x, spawn_y, "down", user_name)
 
     # Send spawn position to the connecting user so the frontend can place the player correctly
     await manager.send(user_id, {"type": "spawn_position", "x": spawn_x, "y": spawn_y})
 
     # Send current online players and announce join
-    online_players = manager.get_online_players(exclude=user_id)
+    online_players = await manager.get_online_players(exclude=user_id)
     if online_players:
         await manager.send(user_id, {"type": "online_players", "players": online_players})
 
@@ -92,7 +92,7 @@ async def websocket_handler(ws: WebSocket):
         await manager.send(user_id, pm)
 
     # Broadcast join with position and sprite so existing players can render the new player
-    pos = manager.positions.get(user_id, {})
+    pos = await manager.get_position(user_id) or {}
     await manager.broadcast(
         {
             "type": "player_joined",
@@ -167,7 +167,7 @@ async def _cleanup(ctx: ConnectionContext) -> None:
     user_id = ctx.user_id
 
     if ctx.in_chat:
-        manager.unlock_resident(ctx.resident.id)
+        await manager.unlock_resident(ctx.resident.id)
         try:
             async with async_session() as db:
                 result = await db.execute(select(Resident).where(Resident.id == ctx.resident.id))
@@ -183,7 +183,7 @@ async def _cleanup(ctx: ConnectionContext) -> None:
             pass
 
     # Save current position
-    pos = manager.positions.get(user_id)
+    pos = await manager.get_position(user_id)
     if pos:
         try:
             async with async_session() as db:
@@ -200,4 +200,4 @@ async def _cleanup(ctx: ConnectionContext) -> None:
         await manager.broadcast({"type": "player_left", "player_id": user_id}, exclude=user_id)
     except Exception:
         pass
-    manager.disconnect(user_id)
+    await manager.disconnect(user_id)
