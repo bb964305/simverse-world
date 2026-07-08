@@ -22,6 +22,7 @@ phases:
     params:
       interrupt_threshold: 6
       plan_adherence_hint: true
+      skip_decide_when_planned: true   # E-09/E-10: follow plan w/o LLM unless interrupted
 
   execute:
     plugin: app.agent.phases.execute.basic.BasicExecutePlugin

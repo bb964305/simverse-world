@@ -63,6 +63,10 @@ class TickContext:
     today_actions: list[str] = field(default_factory=list)
     available_actions: list[ActionType] = field(default_factory=list)
     skip_remaining: bool = False
+    # Budget circuit breaker (P1-1): when the breaker is at its 95%+ tier the
+    # loop sets this so decide hard-follows the plan (no LLM interrupt) — the
+    # rule-based fallback that keeps the world running without spending (E-24).
+    force_plan_only: bool = False
 
 
 def get_world_time() -> tuple[str, int, str]:

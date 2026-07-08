@@ -180,6 +180,90 @@ async def test_basic_decide_no_plan_calls_llm():
     assert ctx.action_result.action == ActionType.IDLE
 
 
+# ── Decide skip lever (E-09/E-10) ────────────────────────────────────
+
+def _decide_ctx_with_plan(action="IDLE", importance=3):
+    ctx = _make_ctx()
+    ctx.current_plan = HourlyPlan(
+        slot=0, hour_range=(9, 11), action=action, target=None,
+        location="home", importance=importance, reason="按计划", status="pending",
+    )
+    ctx.available_actions = [ActionType.IDLE, ActionType.WANDER, ActionType.OBSERVE]
+    return ctx
+
+
+@pytest.mark.anyio
+async def test_decide_skip_follows_plan_without_llm():
+    """skip_decide_when_planned + fresh plan + no interrupt -> no LLM, plan executed."""
+    from app.agent.phases.decide.basic import BasicDecidePlugin
+    ctx = _decide_ctx_with_plan()
+    with patch("app.agent.phases.decide.basic.llm_chat") as mock_llm, \
+         patch("app.agent.phases.decide.basic.MemoryService") as MockMS:
+        MockMS.return_value = AsyncMock(get_memories=AsyncMock(return_value=[]))
+        plugin = BasicDecidePlugin(params={"skip_decide_when_planned": True})
+        ctx = await plugin.execute(ctx)
+    mock_llm.assert_not_called()
+    assert ctx.action_result is not None
+    assert ctx.action_result.action == ActionType.IDLE
+    assert ctx.plan_followed is True
+    assert ctx.current_plan.status == "executing"
+
+
+@pytest.mark.anyio
+async def test_decide_skip_interrupts_on_social_opportunity():
+    """A nearby available partner (CHAT_RESIDENT offered) + non-social plan -> LLM."""
+    from app.agent.phases.decide.basic import BasicDecidePlugin
+    ctx = _decide_ctx_with_plan()
+    neighbor = _make_resident("neighbor")
+    neighbor.id = "other-res"
+    neighbor.status = "idle"
+    ctx.nearby_residents = [neighbor]  # execute() recomputes available_actions -> +CHAT_RESIDENT
+    with patch("app.agent.phases.decide.basic.llm_chat") as mock_llm, \
+         patch("app.agent.phases.decide.basic.MemoryService") as MockMS:
+        mock_llm.return_value = '{"action": "IDLE", "target_slug": null, "target_tile": null, "reason": "x"}'
+        MockMS.return_value = AsyncMock(get_memories=AsyncMock(return_value=[]))
+        plugin = BasicDecidePlugin(params={"skip_decide_when_planned": True})
+        ctx = await plugin.execute(ctx)
+    mock_llm.assert_awaited()
+
+
+@pytest.mark.anyio
+async def test_decide_skip_interrupts_on_fresh_high_importance_memory():
+    """The newest event memory being high-importance -> re-decide with LLM."""
+    from app.agent.phases.decide.basic import BasicDecidePlugin
+    ctx = _decide_ctx_with_plan()
+    hot_mem = MagicMock()
+    hot_mem.importance = 0.9
+    with patch("app.agent.phases.decide.basic.llm_chat") as mock_llm, \
+         patch("app.agent.phases.decide.basic.MemoryService") as MockMS:
+        mock_llm.return_value = '{"action": "WANDER", "target_slug": null, "target_tile": null, "reason": "x"}'
+        MockMS.return_value = AsyncMock(get_memories=AsyncMock(return_value=[hot_mem]))
+        plugin = BasicDecidePlugin(params={"skip_decide_when_planned": True})
+        ctx = await plugin.execute(ctx)
+    mock_llm.assert_awaited()
+
+
+@pytest.mark.anyio
+async def test_decide_force_plan_only_never_interrupts():
+    """force_plan_only (budget 95%+) hard-follows the plan even with a social
+    opportunity present, and even if skip_decide_when_planned is off."""
+    from app.agent.phases.decide.basic import BasicDecidePlugin
+    ctx = _decide_ctx_with_plan()
+    neighbor = _make_resident("neighbor")
+    neighbor.id = "other-res"
+    neighbor.status = "idle"
+    ctx.nearby_residents = [neighbor]  # social opportunity present, but budget forces plan-only
+    ctx.force_plan_only = True
+    with patch("app.agent.phases.decide.basic.llm_chat") as mock_llm, \
+         patch("app.agent.phases.decide.basic.MemoryService") as MockMS:
+        MockMS.return_value = AsyncMock(get_memories=AsyncMock(return_value=[]))
+        plugin = BasicDecidePlugin(params={"skip_decide_when_planned": False})
+        ctx = await plugin.execute(ctx)
+    mock_llm.assert_not_called()
+    assert ctx.action_result.action == ActionType.IDLE
+    assert ctx.plan_followed is True
+
+
 # ── Plan Tests ───────────────────────────────────────────────────────
 
 @pytest.mark.anyio

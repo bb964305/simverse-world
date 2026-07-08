@@ -30,6 +30,7 @@ phases:
     params:
       interrupt_threshold: 8
       plan_adherence_hint: true
+      skip_decide_when_planned: true   # E-09/E-10: follow plan w/o LLM unless interrupted
       social_eagerness: true
       distraction_chance: 0.3
 

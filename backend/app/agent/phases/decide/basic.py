@@ -21,6 +21,13 @@ class BasicDecidePlugin:
         params = params or {}
         self.interrupt_threshold: int = params.get("interrupt_threshold", 6)
         self.plan_adherence_hint: bool = params.get("plan_adherence_hint", True)
+        # E-09/E-10 (largest cost lever,全服省 29–37%): with a fresh plan, execute
+        # it rule-based (no decide LLM) unless a rule-level interrupt fires. Off by
+        # default at the plugin level; enabled in the shipped agent YAML configs.
+        self.skip_decide_when_planned: bool = params.get("skip_decide_when_planned", False)
+        # Newest event memory at/above this importance (0–1 scale) counts as a
+        # fresh notable event -> interrupt and re-decide with the LLM.
+        self.interrupt_memory_importance: float = params.get("interrupt_memory_importance", 0.8)
 
     async def execute(self, ctx: TickContext) -> TickContext:
         ctx.available_actions = get_available_actions(ctx.resident, ctx.nearby_residents)
@@ -37,7 +44,24 @@ class BasicDecidePlugin:
                 plan.status = "executing"
                 return ctx
 
-        # Case 2 & 3: Low-importance plan or no plan -> call LLM
+        # Case 2 (E-09/E-10): plan-priority skip. Follow the plan without an LLM
+        # call when nothing warrants reconsidering. force_plan_only (budget 95%+)
+        # hard-disables interrupts — the breaker's rule-based fallback.
+        if plan and (self.skip_decide_when_planned or ctx.force_plan_only):
+            if ctx.force_plan_only or not self._should_interrupt(ctx):
+                result = self._force_execute_plan(plan, ctx)
+                if result:
+                    ctx.action_result = result
+                    ctx.plan_followed = True
+                    plan.status = "executing"
+                    return ctx
+                # Plan not executable now (e.g. target left). Under a budget
+                # crunch, skip the tick rather than spend on an LLM decide.
+                if ctx.force_plan_only:
+                    ctx.skip_remaining = True
+                    return ctx
+
+        # Case 3: no plan, an interrupt fired, or the plan was unexecutable -> LLM
         try:
             action_result = await self._llm_decide(ctx)
         except Exception as e:
@@ -69,6 +93,29 @@ class BasicDecidePlugin:
                 ctx.plan_followed = False
 
         return ctx
+
+    def _should_interrupt(self, ctx: TickContext) -> bool:
+        """Rule-level interrupt detection (E-09/E-10): should the fresh plan be
+        overridden by an LLM decision? Uses only TickContext data — zero LLM.
+
+        Two signals:
+        - a fresh notable event: the newest event memory is high-importance
+          (memories are loaded newest-first, so this approximates "just happened");
+        - a social opportunity: a partner is available nearby (CHAT_RESIDENT is in
+          available_actions) and the plan isn't already social.
+        """
+        if ctx.memories:
+            newest = ctx.memories[0]
+            importance = getattr(newest, "importance", None)
+            if importance is not None and importance >= self.interrupt_memory_importance:
+                return True
+
+        plan = ctx.current_plan
+        if ActionType.CHAT_RESIDENT in ctx.available_actions:
+            if plan is None or plan.action != ActionType.CHAT_RESIDENT.value:
+                return True
+
+        return False
 
     def _force_execute_plan(self, plan, ctx: TickContext) -> ActionResult | None:
         try:
