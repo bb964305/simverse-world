@@ -65,26 +65,26 @@ async def test_resident_chat_creates_memories(db_session, chat_pair):
         "是啊，你去哪里玩了吗？",        # turn 2: target replies
         "我刚从工程区回来，很有意思。",  # turn 3: initiator
     ]
-    extract_response = json.dumps({
-        "memories": [{"content": "和 Target 聊了天气和工程区", "importance": 0.5}]
-    })
-    rel_response = json.dumps({
-        "content": "Target 是个好相处的人",
-        "importance": 0.5,
-        "metadata": {"affinity": 0.4, "trust": 0.5, "tags": ["friendly"]},
-    })
-    summary_response = json.dumps({
+    # Wrap-up is now ONE merged call (E-04/E-05) producing both residents'
+    # memories + relationships + summary in a single JSON.
+    wrapup_response = json.dumps({
+        "initiator": {
+            "memories": [{"content": "和 Target 聊了天气和工程区", "importance": 0.5}],
+            "relationship": {"content": "Target 是个好相处的人", "importance": 0.5,
+                             "metadata": {"affinity": 0.4, "trust": 0.5, "tags": ["friendly"]}},
+        },
+        "target": {
+            "memories": [{"content": "和 Initiator 聊了天气和工程区", "importance": 0.5}],
+            "relationship": {"content": "Initiator 很健谈", "importance": 0.5,
+                             "metadata": {"affinity": 0.4, "trust": 0.5, "tags": ["talkative"]}},
+        },
         "summary": "Initiator 和 Target 聊了天气和工程区的趣事",
         "mood": "positive",
     })
 
-    tgt_extract_response = json.dumps({
-        "memories": [{"content": "和 Initiator 聊了天气和工程区", "importance": 0.5}]
-    })
-
     call_idx = 0
-    # Order: 3 dialog turns, initiator extract, target extract, initiator rel update, target rel update, summary
-    all_responses = dialog_responses + [extract_response, tgt_extract_response, rel_response, rel_response, summary_response]
+    # Order: 3 dialog turns, then 1 merged wrap-up call.
+    all_responses = dialog_responses + [wrapup_response]
 
     async def side_effect(*args, **kwargs):
         nonlocal call_idx
@@ -116,6 +116,73 @@ async def test_resident_chat_creates_memories(db_session, chat_pair):
     )).scalars().all()
     assert len(init_mems) >= 1
     assert len(tgt_mems) >= 1
+
+
+def _wrapup_json():
+    return json.dumps({
+        "initiator": {"memories": [{"content": "初始者记得聊了A", "importance": 0.5}],
+                      "relationship": {"content": "对方不错", "importance": 0.5, "metadata": {}}},
+        "target": {"memories": [{"content": "目标记得聊了B", "importance": 0.5}],
+                   "relationship": {"content": "对方健谈", "importance": 0.5, "metadata": {}}},
+        "summary": "两人聊得开心", "mood": "positive",
+    })
+
+
+@pytest.mark.anyio
+async def test_process_chat_wrapup_persists_and_summarizes(db_session, chat_pair):
+    """The merged wrap-up persists both sides' memories + relationships and
+    returns the summary/mood (E-04)."""
+    from app.memory.service import MemoryService
+    initiator, target = chat_pair
+    svc = MemoryService(db_session)
+    with patch("app.memory.service.llm_chat", new=AsyncMock(return_value=_wrapup_json())) as m:
+        result = await svc.process_chat_wrapup(initiator, target, "对白全文")
+    assert result["summary"] == "两人聊得开心"
+    assert result["mood"] == "positive"
+    m.assert_awaited_once()  # exactly ONE wrap-up call replaced the old five
+    for rid in (initiator.id, target.id):
+        events = (await db_session.execute(
+            select(Memory).where(Memory.resident_id == rid, Memory.type == "event")
+        )).scalars().all()
+        rels = (await db_session.execute(
+            select(Memory).where(Memory.resident_id == rid, Memory.type == "relationship")
+        )).scalars().all()
+        assert len(events) >= 1 and len(rels) >= 1
+
+
+@pytest.mark.anyio
+async def test_process_chat_wrapup_retries_once_on_parse_failure(db_session, chat_pair):
+    """A first unparseable reply triggers exactly one retry (E-05)."""
+    from app.memory.service import MemoryService
+    initiator, target = chat_pair
+    svc = MemoryService(db_session)
+    side = AsyncMock(side_effect=["这不是JSON", _wrapup_json()])
+    with patch("app.memory.service.llm_chat", new=side):
+        result = await svc.process_chat_wrapup(initiator, target, "对白")
+    assert side.await_count == 2
+    assert result["mood"] == "positive"
+    events = (await db_session.execute(
+        select(Memory).where(Memory.resident_id == initiator.id, Memory.type == "event")
+    )).scalars().all()
+    assert len(events) >= 1
+
+
+@pytest.mark.anyio
+async def test_process_chat_wrapup_falls_back_when_both_fail(db_session, chat_pair):
+    """Both attempts unparseable -> generic summary, no memories (no blank screen)."""
+    from app.memory.service import MemoryService
+    initiator, target = chat_pair
+    svc = MemoryService(db_session)
+    side = AsyncMock(side_effect=["nope", "still nope"])
+    with patch("app.memory.service.llm_chat", new=side):
+        result = await svc.process_chat_wrapup(initiator, target, "对白")
+    assert side.await_count == 2
+    assert result["mood"] == "neutral"
+    assert result["summary"]
+    events = (await db_session.execute(
+        select(Memory).where(Memory.resident_id == initiator.id, Memory.type == "event")
+    )).scalars().all()
+    assert len(events) == 0
 
 
 @pytest.mark.anyio

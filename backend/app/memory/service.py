@@ -14,6 +14,8 @@ from app.memory.prompts import (
     UPDATE_RELATIONSHIP_USER,
     REFLECT_SYSTEM,
     REFLECT_USER,
+    CHAT_WRAPUP_SYSTEM,
+    CHAT_WRAPUP_USER,
     sbti_coloring_block,
 )
 from app.personality.evolution import EvolutionService
@@ -335,26 +337,113 @@ class MemoryService:
             memories.append(mem)
 
         # Evolution hooks (non-blocking)
-        if memories and resident is not None:
-            evo = EvolutionService(self.db)
-
-            # Check for shift on any high-importance memory
-            high_importance = [m for m in memories if m.importance >= 0.9]
-            if high_importance:
-                try:
-                    await evo.evaluate_shift(resident, high_importance[0])
-                except Exception as e:
-                    logger.warning("Shift evaluation error (non-fatal): %s", e)
-
-            # Check drift trigger: count total events since last drift
-            total_events = await self.count_events_since_last_reflection(resident.id)
-            if total_events >= 15:
-                try:
-                    await evo.evaluate_drift(resident)
-                except Exception as e:
-                    logger.warning("Drift evaluation error (non-fatal): %s", e)
+        await self._run_evolution_hooks(resident, memories)
 
         return memories
+
+    async def _run_evolution_hooks(self, resident: "Resident", memories: list[Memory]) -> None:
+        """Conditionally trigger personality shift/drift from freshly-extracted
+        event memories. Shared by extract_events and process_chat_wrapup."""
+        if not memories or resident is None:
+            return
+        evo = EvolutionService(self.db)
+
+        # Check for shift on any high-importance memory
+        high_importance = [m for m in memories if m.importance >= 0.9]
+        if high_importance:
+            try:
+                await evo.evaluate_shift(resident, high_importance[0])
+            except Exception as e:
+                logger.warning("Shift evaluation error (non-fatal): %s", e)
+
+        # Check drift trigger: count total events since last drift
+        total_events = await self.count_events_since_last_reflection(resident.id)
+        if total_events >= 15:
+            try:
+                await evo.evaluate_drift(resident)
+            except Exception as e:
+                logger.warning("Drift evaluation error (non-fatal): %s", e)
+
+    async def process_chat_wrapup(
+        self,
+        initiator: "Resident",
+        target: "Resident",
+        dialog_text: str,
+    ) -> dict:
+        """One-call resident-resident chat wrap-up (E-04/E-05).
+
+        Replaces the old five wrap-up LLM calls (extract×2 + update_relationship×2
+        + summary) with a single merged call — the dialog is sent once instead of
+        five times. Retries once on parse failure, then falls back to a generic
+        summary (never blank-screens). Persists both residents' event memories
+        (with embeddings + evolution hooks) and relationship updates, and returns
+        the broadcast ``{summary, mood}``.
+        """
+        init_rel = await self.get_relationship(initiator.id, resident_id_target=target.id)
+        tgt_rel = await self.get_relationship(target.id, resident_id_target=initiator.id)
+        user_msg = CHAT_WRAPUP_USER.format(
+            initiator_name=initiator.name,
+            target_name=target.name,
+            initiator_relationship=(init_rel.content if init_rel else "（首次接触，尚无关系记忆）"),
+            target_relationship=(tgt_rel.content if tgt_rel else "（首次接触，尚无关系记忆）"),
+            conversation_text=dialog_text,
+        )
+
+        data = None
+        for attempt in (1, 2):  # E-05: one retry on parse failure
+            try:
+                raw = await llm_chat(
+                    CHAT_WRAPUP_SYSTEM, [{"role": "user", "content": user_msg}], max_tokens=800,
+                    meter=Meter(scenario="chat_wrapup", resident_id=initiator.id, attempt_no=attempt),
+                    expects_json=True,
+                )
+                data = extract_json_object(raw)
+            except Exception as e:
+                logger.warning("Chat wrap-up call failed (attempt %d): %s", attempt, e)
+                data = None
+            if data is not None:
+                break
+
+        fallback = {"summary": f"{initiator.name} 和 {target.name} 聊了一会儿", "mood": "neutral"}
+        if data is None:
+            return fallback
+
+        await self._persist_wrapup_side(initiator, target, data.get("initiator") or {})
+        await self._persist_wrapup_side(target, initiator, data.get("target") or {})
+
+        mood = data.get("mood")
+        return {
+            "summary": str(data.get("summary") or fallback["summary"]),
+            "mood": mood if mood in ("positive", "neutral", "negative") else "neutral",
+        }
+
+    async def _persist_wrapup_side(self, resident: "Resident", other: "Resident", side: dict) -> None:
+        """Persist one resident's extracted memories + relationship from the
+        merged wrap-up result, then run evolution hooks."""
+        memories: list[Memory] = []
+        for item in (side.get("memories") or []):
+            content = (item.get("content") or "").strip()
+            if not content:
+                continue
+            importance = float(item.get("importance", 0.5))
+            emb = await generate_embedding(content)
+            mem = await self.add_memory(
+                resident_id=resident.id, type="event", content=content,
+                importance=importance, source="chat_resident", embedding=emb,
+            )
+            memories.append(mem)
+
+        rel = side.get("relationship") or {}
+        rel_content = (rel.get("content") or "").strip() if isinstance(rel, dict) else ""
+        if rel_content:
+            meta = rel.get("metadata")
+            await self.update_relationship(
+                resident.id, resident_id_target=other.id,
+                content=rel_content, importance=float(rel.get("importance", 0.5)),
+                metadata_json=meta if isinstance(meta, dict) else None,
+            )
+
+        await self._run_evolution_hooks(resident, memories)
 
     async def update_relationship_via_llm(
         self,

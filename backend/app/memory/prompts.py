@@ -56,6 +56,37 @@ UPDATE_RELATIONSHIP_USER = """\
 {event_summaries}
 """
 
+# Merged resident-resident chat wrap-up (E-04/E-05): one call replaces the old
+# five (extract×2 + update_relationship×2 + summary). The dialog is sent once
+# instead of five times, cutting wrap-up input cost ~40%.
+CHAT_WRAPUP_SYSTEM = """\
+你是一个对话结算器。给定两位居民的一段对话，一次性完成四件事：
+1. 为每位居民提取 1-3 条最重要的事件记忆（聚焦有意义的信息、情感、承诺、观点，而非寒暄；对话很短可少提或空）；
+2. 为每位居民更新其对对方的关系认知（结合已有关系记忆与本次对话，输出完整关系描述）；
+3. 为玩家生成 1-2 句第三人称对话总结（只概括核心，不透露完整内容）；
+4. 判断整体情绪 mood。
+
+importance 评分：0.1-0.3 日常闲聊 / 0.4-0.6 有实质话题 / 0.7-0.8 涉及感受或价值观 / 0.9-1.0 重大事件或冲突。
+affinity：-1（厌恶）到 1（亲密）；trust：0 到 1；tags：2-5 个印象标签。
+
+输出严格 JSON（不要输出其它内容）：
+{{"initiator": {{"memories": [{{"content": "...", "importance": 0.0}}], "relationship": {{"content": "...", "importance": 0.0, "metadata": {{"affinity": 0.0, "trust": 0.0, "tags": []}}}}}}, "target": {{"memories": [{{"content": "...", "importance": 0.0}}], "relationship": {{"content": "...", "importance": 0.0, "metadata": {{"affinity": 0.0, "trust": 0.0, "tags": []}}}}}}, "summary": "...", "mood": "positive/neutral/negative"}}
+"""
+
+CHAT_WRAPUP_USER = """\
+发起者(initiator)：{initiator_name}
+对象(target)：{target_name}
+
+{initiator_name} 当前对 {target_name} 的关系记忆：
+{initiator_relationship}
+
+{target_name} 当前对 {initiator_name} 的关系记忆：
+{target_relationship}
+
+对话内容：
+{conversation_text}
+"""
+
 REFLECT_SYSTEM = """\
 你是一个自我反思引擎。根据居民最近的经历（事件记忆）和人际关系（关系记忆），提炼 2-3 条高层认知。
 

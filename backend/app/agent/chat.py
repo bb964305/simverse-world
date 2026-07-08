@@ -5,11 +5,10 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.prompts import CHAT_INITIATE_SYSTEM, CHAT_REPLY_SYSTEM, CHAT_SUMMARY_SYSTEM, CHAT_SUMMARY_USER
+from app.agent.prompts import CHAT_INITIATE_SYSTEM, CHAT_REPLY_SYSTEM
 from app.config import settings
 from app.llm.client import chat as llm_chat
 from app.llm.metering import Meter
-from app.llm.json_extract import extract_json_object
 from app.memory.service import MemoryService
 from app.models.resident import Resident
 
@@ -143,58 +142,10 @@ async def resident_chat(
 
         dialog_text = "\n".join(dialog_lines)
 
-        # Generate event memories for both
-        init_memories = await svc.extract_events(
-            resident=initiator,
-            other_name=target.name,
-            conversation_text=dialog_text,
-            source="chat_resident",
-        )
-        tgt_memories = await svc.extract_events(
-            resident=target,
-            other_name=initiator.name,
-            conversation_text=dialog_text,
-            source="chat_resident",
-        )
-
-        # Update relationships for both
-        if init_memories:
-            await svc.update_relationship_via_llm(
-                resident=initiator,
-                other_name=target.name,
-                resident_id_target=target.id,
-                event_summaries=[m.content for m in init_memories],
-            )
-        if tgt_memories:
-            await svc.update_relationship_via_llm(
-                resident=target,
-                other_name=initiator.name,
-                resident_id_target=initiator.id,
-                event_summaries=[m.content for m in tgt_memories],
-            )
-
-        # Generate summary for broadcast
-        try:
-            raw_summary = await llm_chat(
-                CHAT_SUMMARY_SYSTEM,
-                [{
-                    "role": "user",
-                    "content": CHAT_SUMMARY_USER.format(
-                        initiator_name=initiator.name,
-                        target_name=target.name,
-                        dialog_text=dialog_text,
-                    ),
-                }],
-                max_tokens=150,
-                meter=Meter(scenario="summary", resident_id=initiator.id),
-                expects_json=True,
-            )
-            summary_data = extract_json_object(raw_summary) or {
-                "summary": f"{initiator.name} 和 {target.name} 聊了一会儿",
-                "mood": "neutral",
-            }
-        except Exception:
-            summary_data = {"summary": f"{initiator.name} 和 {target.name} 聊了一会儿", "mood": "neutral"}
+        # Wrap-up: one merged LLM call does both residents' memory extraction +
+        # relationship updates + the broadcast summary (E-04/E-05), replacing the
+        # old five calls. It persists memories/relationships and runs evolution.
+        summary_data = await svc.process_chat_wrapup(initiator, target, dialog_text)
 
         _set_cooldown(initiator, target)
 
