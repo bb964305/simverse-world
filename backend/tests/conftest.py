@@ -14,19 +14,34 @@ TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
 
 @pytest.fixture(autouse=True)
+def _fake_redis():
+    """Install a fresh in-memory fakeredis for every test (P0-3b).
+
+    The ConnectionManager online-state/locks/queues, the agent daily-action
+    counter and the WS rate limiter all talk to Redis now; a per-test server
+    gives each test a clean, isolated Redis without a running daemon.
+    """
+    import fakeredis.aioredis
+
+    from app.redis_client import set_redis
+
+    client = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    set_redis(client)
+    yield
+    set_redis(None)
+
+
+@pytest.fixture(autouse=True)
 def _reset_rate_limiters():
-    """Clear slowapi's in-memory storage + the WS sliding window before each
-    test so rate-limit state never leaks across tests (P1-1 limit). Tests that
-    assert rate-limiting behaviour set their own small limit and rely on this
-    reset for a clean window."""
+    """Clear slowapi's in-memory storage before each test so REST rate-limit
+    state never leaks across tests (P1-1 limit). The WS limiter now lives in
+    Redis and is reset by the fresh `_fake_redis` server above."""
     from app.rate_limit import limiter as _rest_limiter
-    from app.ws.rate_limiter import ws_limiter
     # slowapi MemoryStorage.reset() drops all hit counters
     try:
         _rest_limiter._limiter.storage.reset()
     except Exception:
         pass
-    ws_limiter.reset()
     yield
 
 
