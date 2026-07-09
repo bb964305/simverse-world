@@ -9,17 +9,28 @@ const QUEUED_TYPES = new Set(['daily_reward', 'coin_earned'])
 
 export function connectWS(): void {
   const token = useGameStore.getState().token
-  if (!token || socket?.readyState === WebSocket.OPEN) return
+  // Bail if a socket is already OPEN *or* still CONNECTING — opening a second
+  // socket during a race (e.g. React StrictMode double-mount / reconnect) makes
+  // the module `socket` point at the still-connecting one, so the first
+  // socket's onopen `send()` throws "Still in CONNECTING state" (verify-before-done).
+  if (
+    !token ||
+    socket?.readyState === WebSocket.OPEN ||
+    socket?.readyState === WebSocket.CONNECTING
+  ) return
 
   const API_WS = (import.meta.env.VITE_API_URL ?? 'http://localhost:8000').replace(/^http/, 'ws')
   // Token goes in the first message, not the URL, so it never lands in access logs (P0-4c)
-  socket = new WebSocket(`${API_WS}/ws`)
+  // Capture the instance in `ws` so each handler acts on *its own* socket, not
+  // whatever the module `socket` variable happens to point at when it fires.
+  const ws = new WebSocket(`${API_WS}/ws`)
+  socket = ws
 
-  socket.onopen = () => {
-    socket?.send(JSON.stringify({ type: 'auth', token }))
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: 'auth', token }))
   }
 
-  socket.onmessage = (event) => {
+  ws.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data as string) as Record<string, unknown>
       if (data.type === 'coin_update' && typeof data.balance === 'number') {
@@ -147,14 +158,18 @@ export function connectWS(): void {
     }
   }
 
-  socket.onclose = () => {
+  ws.onclose = () => {
+    // Only tear down + schedule a reconnect if this is still the active socket.
+    // A stale socket from a raced re-connect closing must not null out the live
+    // one (which would leak the good socket and churn reconnects).
+    if (socket !== ws) return
     socket = null
     useGameStore.getState().clearOnlinePlayers()
     reconnectTimer = setTimeout(connectWS, 3000)
   }
 
-  socket.onerror = () => {
-    socket?.close()
+  ws.onerror = () => {
+    ws.close()
   }
 }
 
