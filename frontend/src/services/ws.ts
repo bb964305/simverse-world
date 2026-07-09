@@ -111,6 +111,16 @@ export function connectWS(): void {
         useGameStore.getState().setDigestUnread(true)
       }
 
+      // Location encounter (B2): surface a card the player can accept.
+      if (data.type === 'encounter_prompt' && typeof data.resident_slug === 'string') {
+        useGameStore.getState().setPendingEncounter({
+          resident_slug: data.resident_slug as string,
+          resident_name: (data.resident_name as string) || (data.resident_slug as string),
+          location_id: (data.location_id as string) || '',
+          opener: (data.opener as string) || '',
+        })
+      }
+
       // Achievement unlocked (D1): pop a celebratory toast. The durable copy
       // also arrives as an S4 notification (bell), so no store list needed here.
       if (data.type === 'achievement_unlocked' && typeof data.code === 'string') {

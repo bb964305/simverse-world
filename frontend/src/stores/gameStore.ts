@@ -84,6 +84,9 @@ interface GameState {
   clearAchievementToast: () => void
   digestUnread: boolean
   setDigestUnread: (v: boolean) => void
+  pendingEncounter: { resident_slug: string; resident_name: string; location_id: string; opener: string } | null
+  setPendingEncounter: (e: { resident_slug: string; resident_name: string; location_id: string; opener: string }) => void
+  clearPendingEncounter: () => void
 }
 
 export const useGameStore = create<GameState>((set) => ({
@@ -93,6 +96,7 @@ export const useGameStore = create<GameState>((set) => ({
   unreadCount: 0,
   achievementToast: null,
   digestUnread: false,
+  pendingEncounter: null,
   playerSpriteKey: '埃迪',
   chatOpen: false,
   chatResident: null,
@@ -144,6 +148,9 @@ export const useGameStore = create<GameState>((set) => ({
   clearAchievementToast: () => set({ achievementToast: null }),
   digestUnread: false,
   setDigestUnread: (v) => set({ digestUnread: v }),
+  pendingEncounter: null,
+  setPendingEncounter: (e) => set({ pendingEncounter: e }),
+  clearPendingEncounter: () => set({ pendingEncounter: null }),
   setProfileTab: (tab) => set({ profileTab: tab }),
   setOnlinePlayer: (p) => set((s) => {
     const next = new Map(s.onlinePlayers)

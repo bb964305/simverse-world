@@ -4,6 +4,7 @@ import { useGameStore } from './stores/gameStore'
 import { LoginPage } from './pages/LoginPage'
 import { AuthCallbackPage } from './pages/AuthCallbackPage'
 import { AchievementToast } from './components/AchievementToast'
+import { EncounterCard } from './components/EncounterCard'
 
 // Heavy pages are code-split so the login/first-load bundle stays lean:
 // GamePage pulls in Phaser (~1.4MB), ProfilePage pulls in @uiw/react-md-editor
@@ -42,6 +43,7 @@ export default function App() {
   return (
     <BrowserRouter>
       <AchievementToast />
+      <EncounterCard />
       <Suspense fallback={<PageFallback />}>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
