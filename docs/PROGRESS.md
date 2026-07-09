@@ -61,7 +61,12 @@
   - **验证**：新增 `test_world_events.py` 8 例（flip start/end/no-change + 缓存读写/失效 + decide/player prompt 注入 + cron loop 广播）全绿；全量选择性套件（排除 6 个预存网络/基线文件）**484 passed / 0 新失败**。⚠️ 全链 `alembic upgrade head` + 真 PG 复验留 vm212（沙盒无 pgvector）。
 - [ ] S2 事件钩子 bus + 成就引擎（achievements 表 + 6 个埋点）
 - [ ] S3 商店管线（items/purchases + shop_service）
-- [ ] S4 通知中心（notifications + NotificationDrawer）
+- [x] S4 通知中心（notifications + NotificationDrawer）— `83062ba`（后端）+ `3838f05`（前端）
+  - **表/迁移**：`models/notification.py`（id/user_id[index]/kind[String30]/title/body/payload_json/read_at[nullable]/created_at[index]）；迁移 **015**（down=014）。user_id 普通索引列（非 FK）。015 单表 up/down sqlite 隔离实测通过。
+  - **服务**：`services/notification_service.py::notify(db,user_id,kind,title,body,payload)` 写durable行（**提交自身写**，与 coin_service 一致）+ 若 `manager.is_online` 则 `manager.send({type:notification,...})`（best-effort，吞异常）。供 S2 成就解锁等复用。
+  - **API**：`GET /notifications?unread_only=&cursor=`（created_at 游标翻页 + `unread_count` + `next_cursor`）、`POST /notifications/read {ids}`（幂等置 read_at，返回新 unread_count）。
+  - **前端**：`gameStore` 加 notifications/unreadCount 切片 + 3 actions；`ws.ts` 加 `notification` 分支（addNotification 自增未读）；`api.ts` getNotifications/markNotificationsRead；新组件 `NotificationDrawer.tsx`；`TopNav` 铃铛 + 未读角标（mount 拉一次 seed 离线通知）。
+  - **验证**：新增 `test_notifications.py` 5 例（persist / 在线推 WS / 吞 WS 失败 / list+mark_read API / 需鉴权）全绿；全量选择性套件 **489 passed / 0 新失败**；前端 tsc 过、lint 基线 7err/3warn、build 正常。⚠️ 全链迁移 + 真 PG 复验留 vm212。
 - [ ] S5 LocationTracker（location_visits + move 钩子）
 
 ## 批次 1 — 体感与经济
