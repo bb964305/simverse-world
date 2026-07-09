@@ -44,6 +44,7 @@ _build_lookup()
 
 # Per-user last known location (in-memory, this worker only).
 _last_location: dict[str, str | None] = {}
+_secret_seen: set[tuple[str, str]] = set()  # (user_id, location_id) hidden spots already triggered
 _queue: asyncio.Queue = asyncio.Queue(maxsize=10000)
 
 
@@ -62,6 +63,16 @@ def on_move(user_id: str, tile_x: int, tile_y: int) -> None:
         # Left into open world — reset so re-entering re-triggers.
         _last_location[user_id] = None
         return
+    # E8: exact hidden-spot hit → enqueue a one-time secret visit.
+    from app.agent.location_lore import SECRET_TILE_TO_LOCATION
+    secret_loc = SECRET_TILE_TO_LOCATION.get((tile_x, tile_y))
+    if secret_loc is not None and (user_id, secret_loc) not in _secret_seen:
+        _secret_seen.add((user_id, secret_loc))
+        try:
+            _queue.put_nowait((user_id, f"{secret_loc}:secret"))
+        except asyncio.QueueFull:  # pragma: no cover
+            pass
+
     if _last_location.get(user_id) == loc:
         return  # unchanged — hot path returns immediately
     _last_location[user_id] = loc
@@ -104,12 +115,48 @@ async def _record_visit(db, user_id: str, location_id: str) -> bool:
     return False
 
 
+async def _distinct_location_count(db, user_id: str) -> int:
+    from sqlalchemy import func
+    rows = (await db.execute(
+        select(LocationVisit.location_id).where(LocationVisit.user_id == user_id)
+    )).scalars().all()
+    return len({loc for loc in rows if not loc.endswith(":secret")})
+
+
 async def process_one(user_id: str, location_id: str) -> None:
     """Consume a single queued visit (also used directly in tests)."""
     async with async_session() as db:
         first = await _record_visit(db, user_id, location_id)
+
+        # E8: a hidden-spot secret visit — reward + codex star on first find only.
+        if location_id.endswith(":secret"):
+            if first:
+                try:
+                    from app.agent.location_lore import SECRET_REWARD_SC
+                    from app.services.coin_service import reward
+                    from app.services.notification_service import notify
+                    await reward(db, user_id, SECRET_REWARD_SC, f"secret:{location_id}")
+                    await notify(db, user_id, "system", "发现隐藏地点！",
+                                 f"你发现了一处隐藏角落，获得 {SECRET_REWARD_SC} 🪙", {"location_id": location_id})
+                except Exception:
+                    logger.warning("secret reward failed for %s", location_id, exc_info=True)
+            return
+
         if first:
             await emit(db, "location_first_visit", user_id=user_id, location_id=location_id)
+            # E8: show this location's lore + codex progress on first visit.
+            try:
+                from app.agent.location_lore import lore_for
+                from app.agent.map_data import LOCATIONS
+                from app.services.notification_service import notify
+                lore = lore_for(location_id)
+                if lore:
+                    total = len([l for l in LOCATIONS.values() if l.get("bounds")])
+                    n = await _distinct_location_count(db, user_id)
+                    await notify(db, user_id, "system", f"新发现：{LOCATIONS.get(location_id, {}).get('name', location_id)}",
+                                 lore, {"location_id": location_id, "progress": f"{n}/{total}"})
+            except Exception:
+                logger.warning("lore notify failed for %s", location_id, exc_info=True)
         # B2: entering a location may surface an encounter with a nearby resident.
         try:
             from app.services.encounter_service import maybe_encounter
