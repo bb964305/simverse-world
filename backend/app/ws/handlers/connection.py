@@ -155,16 +155,24 @@ async def _load_session_info(user_id: str) -> tuple[str, int, int, str]:
 
 
 async def _claim_daily_reward(user_id: str) -> None:
-    """Attempt daily login reward and notify the user if claimed."""
+    """Attempt daily login reward + generate today's quest; notify the user."""
     from app.services.daily_reward_service import claim_daily_reward
+    from app.services.daily_quest_service import generate_daily_quest
 
     async with async_session() as db:
         reward_result = await claim_daily_reward(db, user_id)
+        # D3: ensure today's topic quest exists on (first) login of the day.
+        try:
+            await generate_daily_quest(db, user_id)
+        except Exception:
+            logger.warning("daily quest generation failed", exc_info=True)
     if reward_result["claimed"]:
         await manager.send(user_id, {
             "type": "daily_reward",
             "amount": reward_result["amount"],
             "new_balance": reward_result["new_balance"],
+            "streak": reward_result.get("streak"),
+            "next_reward": reward_result.get("next_reward"),
         })
 
 

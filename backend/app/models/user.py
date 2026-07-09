@@ -1,6 +1,6 @@
 import uuid
-from datetime import datetime, UTC
-from sqlalchemy import String, Integer, Boolean, DateTime, JSON, ForeignKey
+from datetime import datetime, date as date_type, UTC
+from sqlalchemy import String, Integer, Boolean, DateTime, Date, JSON, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
@@ -16,6 +16,9 @@ class User(Base):
     soul_coin_balance: Mapped[int] = mapped_column(Integer, default=100)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     last_daily_reward_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # --- Daily loop (D3) ---
+    login_streak: Mapped[int] = mapped_column(Integer, default=0)
+    last_login_date: Mapped[date_type | None] = mapped_column(Date, nullable=True)
 
     # --- New fields (Plan 1: Foundation) ---
     linuxdo_id: Mapped[str | None] = mapped_column(String(50), unique=True, nullable=True)

@@ -27,8 +27,8 @@ async def test_claim_daily_reward_first_time(db_session, test_user):
     initial_balance = test_user.soul_coin_balance
     result = await claim_daily_reward(db_session, test_user.id)
     assert result["claimed"] is True
-    assert result["amount"] == 5
-    assert result["new_balance"] == initial_balance + 5
+    assert result["amount"] == 10 and result["streak"] == 1  # ladder day 1
+    assert result["new_balance"] == initial_balance + 10
 
 @pytest.mark.anyio
 async def test_claim_daily_reward_already_claimed_today(db_session, test_user):
@@ -38,9 +38,28 @@ async def test_claim_daily_reward_already_claimed_today(db_session, test_user):
     assert result["reason"] == "already_claimed_today"
 
 @pytest.mark.anyio
-async def test_claim_daily_reward_new_day(db_session, test_user):
-    test_user.last_daily_reward_at = datetime.now(UTC) - timedelta(days=1)
+async def test_consecutive_login_advances_streak(db_session, test_user):
+    from datetime import date
+    test_user.last_login_date = date.today() - timedelta(days=1)
+    test_user.login_streak = 1
     await db_session.commit()
     result = await claim_daily_reward(db_session, test_user.id)
-    assert result["claimed"] is True
-    assert result["amount"] == 5
+    assert result["claimed"] is True and result["streak"] == 2 and result["amount"] == 15
+
+@pytest.mark.anyio
+async def test_broken_streak_resets_to_one(db_session, test_user):
+    from datetime import date
+    test_user.last_login_date = date.today() - timedelta(days=3)  # gap
+    test_user.login_streak = 5
+    await db_session.commit()
+    result = await claim_daily_reward(db_session, test_user.id)
+    assert result["streak"] == 1 and result["amount"] == 10
+
+@pytest.mark.anyio
+async def test_streak_caps_at_day_7(db_session, test_user):
+    from datetime import date
+    test_user.last_login_date = date.today() - timedelta(days=1)
+    test_user.login_streak = 9  # already past the cap
+    await db_session.commit()
+    result = await claim_daily_reward(db_session, test_user.id)
+    assert result["streak"] == 10 and result["amount"] == 50  # capped ladder value
