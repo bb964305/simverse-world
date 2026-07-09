@@ -49,7 +49,7 @@ interface GameState {
   chatTarget: ChatTarget | null
   playerChatMessages: PlayerChatMessage[]
   inputFocused: boolean
-  profileTab: 'residents' | 'conversations' | 'transactions' | 'settings'
+  profileTab: 'residents' | 'conversations' | 'transactions' | 'achievements' | 'settings'
   onlinePlayers: Map<string, OnlinePlayer>
   spawnX: number
   spawnY: number
@@ -71,7 +71,7 @@ interface GameState {
   addPlayerChatMessage: (msg: PlayerChatMessage) => void
   setInputFocused: (v: boolean) => void
   updateBalance: (balance: number) => void
-  setProfileTab: (tab: 'residents' | 'conversations' | 'transactions' | 'settings') => void
+  setProfileTab: (tab: 'residents' | 'conversations' | 'transactions' | 'achievements' | 'settings') => void
   setOnlinePlayer: (p: OnlinePlayer) => void
   removeOnlinePlayer: (id: string) => void
   clearOnlinePlayers: () => void
@@ -79,6 +79,9 @@ interface GameState {
   setNotifications: (items: NotificationItem[], unread: number) => void
   addNotification: (item: NotificationItem) => void
   setUnreadCount: (n: number) => void
+  achievementToast: { code: string; title: string; reward_sc: number } | null
+  showAchievementToast: (t: { code: string; title: string; reward_sc: number }) => void
+  clearAchievementToast: () => void
 }
 
 export const useGameStore = create<GameState>((set) => ({
@@ -86,6 +89,7 @@ export const useGameStore = create<GameState>((set) => ({
   token: localStorage.getItem('token'),
   notifications: [],
   unreadCount: 0,
+  achievementToast: null,
   playerSpriteKey: '埃迪',
   chatOpen: false,
   chatResident: null,
@@ -132,6 +136,9 @@ export const useGameStore = create<GameState>((set) => ({
   setNotifications: (items, unread) => set({ notifications: items, unreadCount: unread }),
   addNotification: (item) => set((s) => ({ notifications: [item, ...s.notifications], unreadCount: s.unreadCount + 1 })),
   setUnreadCount: (n) => set({ unreadCount: n }),
+  achievementToast: null,
+  showAchievementToast: (t) => set({ achievementToast: t }),
+  clearAchievementToast: () => set({ achievementToast: null }),
   setProfileTab: (tab) => set({ profileTab: tab }),
   setOnlinePlayer: (p) => set((s) => {
     const next = new Map(s.onlinePlayers)

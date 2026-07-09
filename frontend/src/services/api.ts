@@ -695,3 +695,21 @@ export function markNotificationsRead(ids: string[]): Promise<{ unread_count: nu
     body: JSON.stringify({ ids }),
   })
 }
+
+// ── Achievements (S2/D1) ────────────────────────────────────────────
+export interface AchievementEntry {
+  code: string
+  title: string
+  description: string
+  icon: string
+  points: number
+  reward_sc: number
+  hidden: boolean
+  unlocked: boolean
+  unlocked_at: string | null
+  progress: { count?: number; target?: number } | null
+}
+
+export function getAchievements(): Promise<{ achievements: AchievementEntry[] }> {
+  return apiFetch('/achievements')
+}

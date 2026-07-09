@@ -106,6 +106,16 @@ export function connectWS(): void {
         })
       }
 
+      // Achievement unlocked (D1): pop a celebratory toast. The durable copy
+      // also arrives as an S4 notification (bell), so no store list needed here.
+      if (data.type === 'achievement_unlocked' && typeof data.code === 'string') {
+        useGameStore.getState().showAchievementToast({
+          code: data.code as string,
+          title: (data.title as string) || '成就解锁',
+          reward_sc: (data.reward_sc as number) || 0,
+        })
+      }
+
       // Forge progress (P1-5): forge_progress / forge_done / forge_error are
       // consumed by the Forge components (DeepForge/QuickForge/ForgeChat) via
       // onWSMessage below — no store state to update here, they flow through as

@@ -1,11 +1,12 @@
 import { useGameStore } from '../../stores/gameStore'
 
-type Tab = 'residents' | 'conversations' | 'transactions' | 'settings'
+type Tab = 'residents' | 'conversations' | 'transactions' | 'achievements' | 'settings'
 
 const NAV_ITEMS: { key: Tab; icon: string; label: string }[] = [
   { key: 'residents', icon: '🏠', label: '我的居民' },
   { key: 'conversations', icon: '💬', label: '对话历史' },
   { key: 'transactions', icon: '🪙', label: '代币明细' },
+  { key: 'achievements', icon: '🏆', label: '成就' },
   { key: 'settings', icon: '⚙️', label: '设置' },
 ]
 

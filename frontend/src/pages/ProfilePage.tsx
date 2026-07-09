@@ -6,6 +6,7 @@ import { ConversationHistory } from '../components/profile/ConversationHistory'
 import { TransactionHistory } from '../components/profile/TransactionHistory'
 import { ResidentEditor } from '../components/profile/ResidentEditor'
 import { SettingsPanel } from '../components/profile/SettingsPanel'
+import { AchievementsPanel } from '../components/profile/AchievementsPanel'
 import { useGameStore } from '../stores/gameStore'
 
 export function ProfilePage() {
@@ -38,6 +39,7 @@ export function ProfilePage() {
           )}
           {profileTab === 'conversations' && <ConversationHistory />}
           {profileTab === 'transactions' && <TransactionHistory />}
+          {profileTab === 'achievements' && <AchievementsPanel />}
           {profileTab === 'settings' && <SettingsPanel />}
         </div>
       </div>
