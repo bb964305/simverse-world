@@ -5,6 +5,7 @@ import random
 import zipfile
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -70,6 +71,114 @@ async def resident_goals(slug: str, db: AsyncSession = Depends(get_db)):
     if not resident:
         raise HTTPException(status_code=404, detail="Resident not found")
     return await get_goals(db, resident.id)
+
+
+# ── C1 soul card: card / export / import ─────────────────────────────
+
+CARD_SCHEMA_VERSION = 1
+IMPORT_DAILY_CAP = 3
+
+
+@router.get("/{slug}/card")
+async def resident_card(slug: str, db: AsyncSession = Depends(get_db)):
+    """Public shareable card summary."""
+    from fastapi import HTTPException
+    from sqlalchemy import select as _select
+    from app.models.memory import Memory
+    resident = await get_resident_by_slug(db, slug)
+    if not resident:
+        raise HTTPException(status_code=404, detail="Resident not found")
+    sbti = (resident.meta_json or {}).get("sbti", {})
+    soul_first = (resident.soul_md or "").strip().split("\n\n")[0][:200]
+    top = (await db.execute(
+        _select(Memory.content).where(
+            Memory.resident_id == resident.id, Memory.source == "reflection",
+        ).order_by(Memory.importance.desc()).limit(1)
+    )).scalar_one_or_none()
+    return {
+        "slug": resident.slug, "name": resident.name,
+        "soul_excerpt": soul_first,
+        "sbti_type": sbti.get("type"), "sbti_name": sbti.get("type_name"),
+        "star_rating": resident.star_rating, "portrait_url": resident.portrait_url,
+        "total_conversations": resident.total_conversations,
+        "signature_reflection": top,
+    }
+
+
+@router.get("/{slug}/export")
+async def resident_export(slug: str, request: Request, db: AsyncSession = Depends(get_db)):
+    """Full export — owner only."""
+    from fastapi import HTTPException
+    user = await _require_user_auth(request, db)
+    resident = await get_resident_by_slug(db, slug)
+    if not resident:
+        raise HTTPException(status_code=404, detail="Resident not found")
+    if resident.creator_id != user.id:
+        raise HTTPException(status_code=403, detail="Not your resident")
+    return {
+        "schema_version": CARD_SCHEMA_VERSION,
+        "name": resident.name,
+        "ability_md": resident.ability_md,
+        "persona_md": resident.persona_md,
+        "soul_md": resident.soul_md,
+        "sbti": (resident.meta_json or {}).get("sbti"),
+    }
+
+
+class ImportBody(BaseModel):
+    schema_version: int = CARD_SCHEMA_VERSION
+    name: str
+    ability_md: str = ""
+    persona_md: str = ""
+    soul_md: str = ""
+    sbti: dict | None = None
+
+
+@router.post("/import")
+async def resident_import(body: ImportBody, request: Request, db: AsyncSession = Depends(get_db)):
+    from fastapi import HTTPException
+    from datetime import datetime, UTC
+    from sqlalchemy import select as _select, func as _func
+    from app.services.forge_service import allocate_resident_location, _generate_slug, SPRITE_KEYS
+    from app.services.shop_effects import _has_sensitive
+    import random as _random
+
+    user = await _require_user_auth(request, db)
+    if not body.name.strip() or not (body.ability_md or body.persona_md or body.soul_md):
+        raise HTTPException(status_code=400, detail="name and at least one layer are required")
+    # Lightweight anti-abuse (full LLM validation_stage deferred to vm212).
+    if _has_sensitive(body.name) or _has_sensitive(body.persona_md) or _has_sensitive(body.soul_md):
+        raise HTTPException(status_code=400, detail="content contains disallowed words")
+
+    # Daily cap (shared with forge creations for this user today).
+    today = datetime.now(UTC).date()
+    made_today = (await db.execute(
+        _select(_func.count()).select_from(Resident).where(
+            Resident.creator_id == user.id, _func.date(Resident.created_at) == today,
+        )
+    )).scalar() or 0
+    if made_today >= IMPORT_DAILY_CAP:
+        raise HTTPException(status_code=429, detail="Daily creation limit reached")
+
+    slug = _generate_slug(body.name)
+    if await get_resident_by_slug(db, slug):
+        slug = f"{slug}-{_random.randbytes(3).hex()}"
+    district, tx, ty, home = await allocate_resident_location(
+        db, ability_text=body.ability_md, persona_text=body.persona_md, soul_text=body.soul_md,
+    )
+    meta = {"origin": "import"}
+    if body.sbti:
+        meta["sbti"] = body.sbti
+    resident = Resident(
+        slug=slug, name=body.name.strip(), district=district, status="idle", heat=0,
+        creator_id=user.id, ability_md=body.ability_md, persona_md=body.persona_md,
+        soul_md=body.soul_md, meta_json=meta, sprite_key=_random.choice(SPRITE_KEYS),
+        tile_x=tx, tile_y=ty, home_location_id=home,
+    )
+    db.add(resident)
+    await db.commit()
+    await db.refresh(resident)
+    return {"slug": resident.slug, "name": resident.name}
 
 
 @router.post("/import", response_model=ResidentImportResponse)
