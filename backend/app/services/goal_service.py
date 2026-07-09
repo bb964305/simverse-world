@@ -145,4 +145,19 @@ async def _on_resolved(db, resident_id, goal, verdict) -> None:
         resident_id, "reflection", f"我{verb}我的人生目标「{goal.title}」，这让我对自己有了新的认识。",
         importance=0.9, source="reflection",
     )
-    # A4 bulletin post / E13 settlement / E11 feed hook in here once those land.
+    # E13: settle any investments in this goal on the verdict.
+    try:
+        from app.services.investment_service import settle_goal_investments
+        await settle_goal_investments(db, goal.id, verdict)
+    except Exception:
+        logger.warning("goal investment settlement failed", exc_info=True)
+    # E11: a resolved life goal is feed-worthy.
+    try:
+        from app.services.feed_service import push
+        from app.models.resident import Resident
+        res = await db.get(Resident, resident_id)
+        if res:
+            await push(res.slug, "goal_achieved" if verdict == "achieved" else "goal_milestone",
+                       {"title": goal.title, "verdict": verdict})
+    except Exception:
+        logger.warning("goal feed push failed", exc_info=True)
