@@ -9,7 +9,7 @@ import asyncio
 import logging
 
 from app.database import async_session
-from app.services.world_event_service import flip_active_events
+from app.services.world_event_service import flip_active_events, write_collective_memories
 from app.ws.manager import manager
 
 logger = logging.getLogger(__name__)
@@ -22,6 +22,13 @@ async def event_cron_loop():
         try:
             async with async_session() as db:
                 changes = await flip_active_events(db)
+                # A2: on start, give active residents a shared collective memory.
+                for event, phase in changes:
+                    if phase == "start":
+                        try:
+                            await write_collective_memories(db, event)
+                        except Exception:
+                            logger.warning("collective memory write failed", exc_info=True)
             for event, phase in changes:
                 await manager.broadcast({
                     "type": "world_event",

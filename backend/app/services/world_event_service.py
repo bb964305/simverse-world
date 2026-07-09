@@ -86,3 +86,24 @@ async def flip_active_events(db: AsyncSession) -> list[tuple[dict, str]]:
         await db.commit()
         invalidate_active_cache()
     return changes
+
+
+async def write_collective_memories(db: AsyncSession, event: dict) -> int:
+    """A2: on a world event start, give every active resident a shared memory
+    (batch, no LLM). 'active' = not sleeping. Returns count written."""
+    from app.models.resident import Resident
+    from app.models.memory import Memory
+
+    residents = (await db.execute(
+        select(Resident.id).where(Resident.status != "sleeping")
+    )).scalars().all()
+    content = (event.get("description") or event.get("title") or "")[:200]
+    if not content or not residents:
+        return 0
+    for rid in residents:
+        db.add(Memory(
+            resident_id=rid, type="event", content=content,
+            importance=0.5, source="world_event",
+        ))
+    await db.commit()
+    return len(residents)

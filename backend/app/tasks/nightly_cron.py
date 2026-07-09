@@ -44,6 +44,16 @@ async def run_nightly_jobs() -> None:
     except Exception:
         logger.error("Commission expiry failed", exc_info=True)
 
+    # A2: schedule upcoming holidays / random news (idempotent).
+    try:
+        from app.tasks.event_templates import ensure_scheduled_events
+        async with async_session() as db:
+            n = await ensure_scheduled_events(db)
+        if n:
+            logger.info("Scheduled %d world events", n)
+    except Exception:
+        logger.error("Event scheduling failed", exc_info=True)
+
     # A1: weekly life-goal evaluation (Sundays only).
     if datetime.now(UTC).weekday() == 6:
         try:
