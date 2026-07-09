@@ -77,7 +77,10 @@ async def test_effect_dispatch_by_kind(db_session):
     from app.services import shop_effects
     from app.services.shop_service import purchase
 
-    shop_effects._reset_for_tests()
+    # Save/restore the registry so we don't wipe the built-in D2 handlers.
+    saved_e, saved_p = dict(shop_effects._effects), dict(shop_effects._prechecks)
+    shop_effects._effects.clear()
+    shop_effects._prechecks.clear()
     seen = {}
 
     @shop_effects.register("gift")
@@ -92,7 +95,8 @@ async def test_effect_dispatch_by_kind(db_session):
         assert result["effect"] == {"boost": 0.1}
         assert seen["called"][1] == "flower" and seen["called"][3] == {"target": "klaus"}
     finally:
-        shop_effects._reset_for_tests()
+        shop_effects._effects.clear(); shop_effects._effects.update(saved_e)
+        shop_effects._prechecks.clear(); shop_effects._prechecks.update(saved_p)
 
 
 @pytest.mark.anyio
