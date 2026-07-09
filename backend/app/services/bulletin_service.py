@@ -98,6 +98,13 @@ async def maybe_create_journal_post(db, resident) -> BulletinPost | None:
     content = recent or "今天很平静，没什么特别的事，但平静也是一种幸福。"
     post = await create_post(db, "journal", "今日随笔", content, author_resident_id=resident.id)
 
+    # E11: surface the creation to followers.
+    try:
+        from app.services.feed_service import push
+        await push(resident.slug, "creation", {"post_id": post.id, "title": post.title})
+    except Exception:
+        logger.warning("feed push (creation) failed", exc_info=True)
+
     try:
         from app.memory.service import MemoryService
         await MemoryService(db).add_memory(

@@ -265,6 +265,13 @@ class EvolutionService:
                                user_id=trigger_user, resident_id=resident.id)
             except Exception:
                 logger.warning("personality_shifted emit failed", exc_info=True)
+            # E11: a dramatic shift is feed-worthy for followers.
+            if old_type != new_type:
+                try:
+                    from app.services.feed_service import push
+                    await push(resident.slug, "personality_shift", {"old": old_type, "new": new_type})
+                except Exception:
+                    logger.warning("feed push (personality) failed", exc_info=True)
 
         if old_type != new_type:
             logger.info(
