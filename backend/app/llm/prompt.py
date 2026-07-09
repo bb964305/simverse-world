@@ -42,6 +42,7 @@ def assemble_system_prompt(
     memory_context: dict | None = None,
     world_events: list[dict] | None = None,
     life_goal: dict | None = None,
+    recent_dream: str | None = None,
 ) -> str:
     """Assemble the three-layer system prompt from resident data.
 
@@ -88,6 +89,11 @@ def assemble_system_prompt(
     if life_goal and life_goal.get("title"):
         parts.append("")
         parts.append(f"你的人生目标：{life_goal['title']}（进度 {life_goal.get('progress', 0):.0%}）")
+
+    # E2: last night's dream (if any), so "睡得好吗" gets a surprising answer.
+    if recent_dream:
+        parts.append("")
+        parts.append(f"昨晚你做了个梦：{recent_dream}")
 
     parts.append("请始终保持角色扮演，用你的人格风格回应访客。回复简洁，不超过200字。")
     return "\n".join(parts)

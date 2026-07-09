@@ -44,6 +44,15 @@ async def run_nightly_jobs() -> None:
     except Exception:
         logger.error("Commission expiry failed", exc_info=True)
 
+    # E2: generate dreams for active residents.
+    try:
+        from app.services.dream_service import run_nightly_dreams
+        n = await run_nightly_dreams()
+        if n:
+            logger.info("Generated %d dreams", n)
+    except Exception:
+        logger.error("Dream generation failed", exc_info=True)
+
     # E7: deliver due time capsules.
     try:
         from app.services.capsule_service import deliver_due_capsules
