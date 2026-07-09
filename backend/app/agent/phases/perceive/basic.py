@@ -42,4 +42,14 @@ class BasicPerceivePlugin:
         except Exception:
             ctx.world_events = []
 
+        # E4: notice nearby online players (own session, fail-open, 4h dedup).
+        try:
+            from app.services.witness_service import record_witnesses
+            await record_witnesses(
+                ctx.resident.id, ctx.resident.tile_x, ctx.resident.tile_y,
+                ctx.resident.home_location_id,
+            )
+        except Exception:
+            pass
+
         return ctx
