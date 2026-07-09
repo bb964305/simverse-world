@@ -41,7 +41,11 @@
   - **已完成 子提交 8/8**（`8ca98d2`）：顺手修。E-17/E-26 互聊 chat_turn max_tokens 100→150（100 会截半句污染 history；summary 150→200 已被合并调用 max 800 吸收）；E-28 event 记忆入库限长 80 字（`EVENT_MEMORY_MAX_CHARS`，关系/反思不限）；E-20 deep forge extraction 输入截断 8000 字。+3 测试。
   - **全量验证（2026-07-09）**：全套件分 3 块（/tmp 可写 DB 绕开挂载盘 dev DB 的 `disk I/O error`）= **零新增失败**，仅剩既有基线（portrait/preset_import + 沙盒无外网的 import/map_integration/research_stage/resident_edit）。前端 `tsc --noEmit` 过。
   - **沙盒说明**：Python 3.12 via `uv`（仓库要求 ≥3.11，宿主 3.10 缺 `datetime.UTC`，venv 建在 `/tmp/svenv` 因挂载盘禁删/禁 hardlink）；测试用 `--timeout-method=signal` 隔离沙盒无外网的网络用例；用到全局 engine 的用例须 `DATABASE_URL` 指 `/tmp` 可写库（挂载盘上的 `skills_world_dev.db` 读即 disk I/O error）。⚠️ 迁移 013 全链 + 真 PG 复验仍留 vm212。
-- [ ] P1-4 前端路由懒加载 + manualChunks
+- [x] P1-4 前端路由懒加载 + manualChunks — `cbd72af`（lazy pages）+ `6c8d3f3`（build config + visualizer）
+  - **改动**：`App.tsx` 把 GamePage/ForgePage/ProfilePage/OnboardingPage/AdminPage 改 `React.lazy(() => import('./pages/Xxx').then(m => ({ default: m.XxxPage })))`（各 page 仍具名导出，未动导出方式）+ 外层 `<Suspense fallback>`；LoginPage/AuthCallbackPage 保持 eager。`vite.config.ts` 加 `build.rollupOptions.output.manualChunks` 拆 phaser 独立 chunk + 装 `rollup-plugin-visualizer`（devDep，`ANALYZE=1` 才产 `dist/stats.html`）。
+  - **量化（vite build 产物，raw / gzip）**：首屏入口 JS `index.js` **2,659.37 kB / 795.46 kB → 232.54 kB / 74.48 kB**（含预载 rolldown-runtime 0.68 + gameStore 9.84 后总首屏 ≈243 kB / 78.6 kB）= **降 ~91%（raw）/ ~90.6%（gzip）**，远超规格 ≥60% 目标。重包全部下沉为按需异步 chunk：phaser 1,198.74 kB（仅 `/`）、ProfilePage 含 md-editor 1,087.07 kB + 34 kB CSS（仅 `/profile`）、AdminPage 52.28、ForgePage 28.97、GamePage 28.21。
+  - **偏差**：① 规格称 md-editor 在 ForgePage——实为 `ProfilePage → ResidentEditor`（代码为准），故懒加载对象改覆盖 ProfilePage（顺带 OnboardingPage），把 md-editor/admin/phaser 三大重包全数移出首屏。② 规格给的 `manualChunks: { phaser: ['phaser'] }` **对象形式在 rolldown-vite 下报 `manualChunks is not a function`**——改函数形式 `manualChunks(id){ if (id.includes('node_modules/phaser')) return 'phaser' }`。③ **未**再拆 md-editor 独立 manualChunk：试过后 rolldown 会把该 chunk 提升为入口 `modulepreload`（登录页照下 1MB，反成回归）；改让 md-editor 随 ProfilePage 异步 chunk 走即达标（已离首屏路径）。
+  - **验证**：`npx tsc --noEmit` 过、`tsc -b` 过；`eslint` = 基线 7 errors/3 warnings（App.tsx 零新增）。`npm run build` **编译与分包全部正常**（`--outDir /tmp` 三次实测出上述 chunk 表）——唯一失败在 `vite:prepare-out-dir` 清空挂载盘旧 `frontend/dist/` 时 `EPERM unlink`（挂载盘禁删，**非** rolldown MODULE_NOT_FOUND 基线、非代码问题）；outDir 指 `/tmp` 即全绿。
 - [ ] P1-5 apiFetch 超时/取消 + Forge 轮询改 WS 推送
 
 ## 底座周（FEATURE_SPECS §1，迁移 012-016）
