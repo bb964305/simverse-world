@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
-from app.routers import auth, users, residents, forge, profile, search, bulletin, onboarding, sprites, avatar, settings as settings_router, media as media_router, events as events_router
+from app.routers import auth, users, residents, forge, profile, search, bulletin, onboarding, sprites, avatar, settings as settings_router, media as media_router, events as events_router, notifications as notifications_router
 from app.routers.admin import router as admin_router
 from app.ws.handlers import websocket_handler
 from app.tasks.heat_cron import heat_cron_loop
@@ -35,6 +35,7 @@ async def lifespan(app):
         import app.models.memory  # noqa: F401
         import app.models.personality_history  # noqa: F401
         import app.models.world_event  # noqa: F401
+        import app.models.notification  # noqa: F401
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
@@ -103,6 +104,7 @@ app.include_router(avatar.router)
 app.include_router(settings_router.router)
 app.include_router(media_router.router)
 app.include_router(events_router.router)
+app.include_router(notifications_router.router)
 app.include_router(admin_router)
 
 

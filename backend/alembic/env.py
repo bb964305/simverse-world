@@ -13,6 +13,7 @@ from app.models.conversation import Conversation, Message
 from app.models.transaction import Transaction
 from app.models.llm_usage import LLMUsage
 from app.models.world_event import WorldEvent
+from app.models.notification import Notification
 
 config = context.config
 if config.config_file_name is not None:
