@@ -46,3 +46,7 @@ class Resident(Base):
 
     # --- Housing (Map Awareness) ---
     home_location_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    # --- Emotion engine (E1) ---
+    # {"valence": -1..1, "arousal": 0..1, "label": str, "updated_at": iso}
+    mood_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)

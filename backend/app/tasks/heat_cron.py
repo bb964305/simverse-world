@@ -14,6 +14,12 @@ async def heat_cron_loop():
         try:
             async with async_session() as db:
                 changes = await recalculate_heat(db)
+                # E1: regress moods toward neutral hourly (~48h back to calm).
+                try:
+                    from app.services.mood_service import decay_all
+                    await decay_all(db)
+                except Exception:
+                    logger.warning("mood decay failed", exc_info=True)
             for change in changes:
                 await manager.broadcast({
                     "type": "resident_status",

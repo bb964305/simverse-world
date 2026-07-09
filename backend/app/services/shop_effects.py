@@ -202,6 +202,13 @@ async def _gift_effect(db, user_id, item, qty, context):
         if share > 0:
             await reward(db, resident.creator_id, share, f"gift_share:{item.code}")
 
+    # E1: receiving a gift lifts the resident's mood.
+    try:
+        from app.services.mood_service import apply_mood_event
+        await apply_mood_event(db, resident, dv=0.25, da=0.1)
+    except Exception:
+        logger.warning("gift mood bump failed", exc_info=True)
+
     return {"gift": item.code, "resident_slug": slug, "relationship_boost": boost, "creator_share": share}
 
 

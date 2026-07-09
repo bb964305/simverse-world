@@ -111,6 +111,16 @@ def build_decision_prompt(
         titles = "、".join(e.get("title", "") for e in world_events if e.get("title"))
         if titles:
             user += f"\n\n当前世界事件：{titles}"
+    # E1: current mood + a soft behavior hint (prompt hint, not a hard filter).
+    mood = resident.mood_json or {}
+    label = mood.get("label")
+    if label:
+        user += f"\n\n当前心情：{label}"
+        valence = float(mood.get("valence", 0))
+        if valence < -0.4:
+            user += "（心情低落，可能更想独处、回家、写点东西或小憩）"
+        elif valence > 0.5:
+            user += "（心情很好，可能更想social、找人聊天）"
     return system, user
 
 

@@ -49,6 +49,13 @@ async def handle_rate_chat(ctx: ConnectionContext, data: dict) -> None:
                 from app.services.scoring_service import compute_star_rating
                 resident.star_rating = compute_star_rating(resident)
                 await db.commit()
+                # E1: a good/bad rating nudges the resident's mood.
+                if rating_value >= 4:
+                    from app.services.mood_service import apply_mood_event
+                    await apply_mood_event(db, resident, dv=0.15)
+                elif rating_value <= 2:
+                    from app.services.mood_service import apply_mood_event
+                    await apply_mood_event(db, resident, dv=-0.15)
 
         # Reward creator 5 SC for 4+ star rating
         if rating_value >= 4 and conv.resident_id:

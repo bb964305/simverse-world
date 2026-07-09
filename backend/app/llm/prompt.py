@@ -76,5 +76,11 @@ def assemble_system_prompt(
             parts.append("## 当前世界事件（正在发生的事）")
             parts.extend(lines)
 
+    # E1: let the resident's current mood color the tone of their reply.
+    mood_label = (resident.mood_json or {}).get("label")
+    if mood_label:
+        parts.append("")
+        parts.append(f"你现在的心情是「{mood_label}」，让语气自然体现出来。")
+
     parts.append("请始终保持角色扮演，用你的人格风格回应访客。回复简洁，不超过200字。")
     return "\n".join(parts)
