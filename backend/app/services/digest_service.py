@@ -145,6 +145,114 @@ async def generate_village_digest(db: AsyncSession, day: date_type | None = None
     return digest
 
 
+# ── E14 personal weekly recap ────────────────────────────────────────
+
+WEEKLY_SYSTEM = (
+    "你是私人回顾编辑。用第二人称给玩家写一段温暖的本周回顾，≤400 字，中文，"
+    "结合下面的数据，突出与居民的连接。不要罗列数字，讲成故事。"
+)
+
+# 12 reproducible behavior tags (LLM only polishes copy, the tag itself is rule-based).
+WEEKLY_TAGS = [
+    "沉睡者", "城市漫游者", "社交名流", "健谈者", "深夜访客", "探索先锋",
+    "长情之人", "新面孔收藏家", "安静的观察者", "热心肠", "梦想合伙人", "小镇常客",
+]
+
+
+def _personality_tag(chat_count: int, distinct: int, explore: int) -> str:
+    if chat_count == 0 and explore == 0:
+        return "沉睡者"
+    if explore >= 5:
+        return "城市漫游者"
+    if distinct >= 5:
+        return "社交名流"
+    if chat_count >= 10:
+        return "健谈者"
+    if distinct >= 3:
+        return "新面孔收藏家"
+    if explore >= 2:
+        return "探索先锋"
+    if chat_count >= 3:
+        return "小镇常客"
+    return "安静的观察者"
+
+
+def _week_sunday(today: date_type) -> date_type:
+    return today - timedelta(days=(today.weekday() + 1) % 7)
+
+
+async def generate_weekly_recap(db: AsyncSession, user_id: str) -> Digest:
+    """Lazily generate this week's personal recap (idempotent per week)."""
+    from app.models.conversation import Conversation
+    from app.models.user import User
+    from app.models.achievement import UserAchievement
+    from app.models.location_visit import LocationVisit
+
+    today = datetime.now(UTC).date()
+    week_key = _week_sunday(today)
+    existing = (await db.execute(
+        select(Digest).where(Digest.scope == "personal", Digest.user_id == user_id, Digest.date == week_key)
+    )).scalar_one_or_none()
+    if existing is not None:
+        return existing
+
+    week_start = datetime(week_key.year, week_key.month, week_key.day, tzinfo=UTC)
+    convs = (await db.execute(
+        select(Conversation).where(Conversation.user_id == user_id, Conversation.started_at >= week_start)
+    )).scalars().all()
+    chat_count = len(convs)
+    turns = sum((c.turns or 0) for c in convs)
+    distinct = len({c.resident_id for c in convs})
+
+    mem_rows = (await db.execute(
+        select(Memory.content).where(Memory.related_user_id == user_id, Memory.created_at >= week_start)
+        .order_by(Memory.importance.desc()).limit(3)
+    )).scalars().all()
+    ach_count = (await db.execute(
+        select(func.count()).select_from(UserAchievement).where(
+            UserAchievement.user_id == user_id, UserAchievement.unlocked_at >= week_start,
+        )
+    )).scalar() or 0
+    explore = (await db.execute(
+        select(func.count()).select_from(LocationVisit).where(LocationVisit.user_id == user_id)
+    )).scalar() or 0
+
+    tag = _personality_tag(chat_count, distinct, explore)
+    stats = {"chats": chat_count, "turns": turns, "distinct_residents": distinct,
+             "achievements": int(ach_count), "explored": int(explore), "tag": tag}
+
+    if chat_count < 2:
+        title = f"{week_key} 本周回顾"
+        content = f"# {title}\n\n本周太安静了，几乎没有和居民互动。下周多出来走走，会有新的故事在等你。\n\n本周人格标签：**{tag}**"
+    else:
+        material = (f"对话 {chat_count} 次 / {turns} 轮，认识了 {distinct} 位居民；"
+                    f"被写进 {len(mem_rows)} 条记忆；解锁成就 {ach_count} 个。\n"
+                    + "记忆摘录：\n" + "\n".join(f"- {m}" for m in mem_rows))
+        client = get_client("system")
+        model = settings.effective_model
+        resp = await client.messages.create(
+            model=model, max_tokens=600, system=WEEKLY_SYSTEM,
+            messages=[{"role": "user", "content": f"本周人格标签：{tag}\n{material}"}],
+        )
+        body = _extract_text(resp).strip()
+        await record_usage("weekly_recap", model=model, owner="system", response=resp)
+        title = f"{week_key} 本周回顾"
+        content = f"# {title}\n\n{body}\n\n本周人格标签：**{tag}**"
+
+    digest = Digest(scope="personal", date=week_key, user_id=user_id, title=title,
+                    content_md=content, stats_json=stats)
+    db.add(digest)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        return (await db.execute(
+            select(Digest).where(Digest.scope == "personal", Digest.user_id == user_id, Digest.date == week_key)
+        )).scalar_one()
+    await db.refresh(digest)
+    return digest
+
+
 def serialize(d: Digest) -> dict:
     return {
         "id": d.id,
