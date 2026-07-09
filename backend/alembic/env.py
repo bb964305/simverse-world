@@ -27,6 +27,7 @@ from app.models.feed import Follow, FeedEvent
 from app.models.season import Season, SeasonScript, Poll, Vote, SeasonScore
 from app.models.goal_investment import GoalInvestment
 from app.models.debate import Debate, DebateStake
+# C3 剧本季 reuses the seasons family (027) — no new migration.
 
 config = context.config
 if config.config_file_name is not None:

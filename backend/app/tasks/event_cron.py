@@ -29,6 +29,17 @@ async def event_cron_loop():
                             await write_collective_memories(db, event)
                         except Exception:
                             logger.warning("collective memory write failed", exc_info=True)
+                # C3: fire due script acts + settle finished seasons.
+                try:
+                    from app.services.script_service import fire_due_scripts, settle_due_seasons
+                    fired = await fire_due_scripts(db)
+                    settled = await settle_due_seasons(db)
+                    if fired:
+                        logger.info("Event cron: fired %d script act(s)", len(fired))
+                    if settled:
+                        logger.info("Event cron: settled %d season(s)", len(settled))
+                except Exception:
+                    logger.warning("C3 script/season cron step failed", exc_info=True)
             for event, phase in changes:
                 await manager.broadcast({
                     "type": "world_event",

@@ -50,9 +50,34 @@ async def get_active_events_cached(db: AsyncSession) -> list[dict]:
         # Fail open: never let a query error break perceive/dialogue.
         logger.warning("world_event active query failed", exc_info=True)
         return _cache["events"]
+
+    # C3: the active season's world-view patch rides along as a synthetic event
+    # so it lands in every resident prompt without touching each consumer.
+    try:
+        wv = await _active_season_worldview(db)
+        if wv:
+            events = events + [wv]
+    except Exception:
+        logger.warning("season world-view injection failed", exc_info=True)
     _cache["ts"] = now
     _cache["events"] = events
     return events
+
+
+async def _active_season_worldview(db: AsyncSession) -> dict | None:
+    """C3: the active season's ``payload_json['world_view']`` as an event dict."""
+    from app.models.season import Season
+
+    season = (await db.execute(
+        select(Season).where(Season.status == "active").order_by(Season.starts_at.desc())
+    )).scalars().first()
+    if season is None:
+        return None
+    wv = (season.payload_json or {}).get("world_view")
+    if not wv:
+        return None
+    return {"id": f"season:{season.id}", "type": "season", "title": season.title,
+            "description": wv, "payload_json": {}, "starts_at": None, "ends_at": None}
 
 
 async def flip_active_events(db: AsyncSession) -> list[tuple[dict, str]]:
