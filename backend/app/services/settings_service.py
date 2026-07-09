@@ -7,6 +7,7 @@ and LLM connection testing.
 from __future__ import annotations
 
 import copy
+import json
 import time
 from typing import Any
 
@@ -63,10 +64,31 @@ def merge_settings_json(existing: dict, patch: dict) -> dict:
     return result
 
 
+def coerce_settings_json(raw: Any) -> dict:
+    """Normalize a raw ``User.settings_json`` value into a dict.
+
+    On real Postgres the column is physically ``text`` (historical drift from
+    migration 003) while the model declares ``JSON``; under asyncpg the value
+    comes back as an *unparsed* JSON string rather than a dict, so a bare
+    ``.items()`` on it 500s. This only reproduces on real PG (sqlite deserializes
+    it), which is why it slipped past unit tests. Parse defensively so every read
+    path gets a dict regardless of the underlying column type.
+    """
+    if not raw:
+        return {}
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return raw if isinstance(raw, dict) else {}
+
+
 def get_effective_settings(user: User) -> dict:
     """Return settings_json with defaults filled in for missing keys."""
     defaults = build_settings_defaults()
-    return merge_settings_json(defaults, user.settings_json or {})
+    return merge_settings_json(defaults, coerce_settings_json(user.settings_json))
 
 
 # ─── Account Operations ──────────────────────────────────────────
@@ -180,7 +202,7 @@ async def patch_settings_group(
     Patch a single group inside settings_json.
     Also handles reply_mode which lives on Resident, not settings_json.
     """
-    current = user.settings_json or {}
+    current = coerce_settings_json(user.settings_json)
     patched = merge_settings_json(current, {group: updates})
     user.settings_json = patched
     await db.commit()
@@ -234,7 +256,7 @@ async def update_llm_settings(
     if temperature is not None:
         llm_patch["temperature"] = temperature
     if llm_patch:
-        current = user.settings_json or {}
+        current = coerce_settings_json(user.settings_json)
         user.settings_json = merge_settings_json(current, {"llm": llm_patch})
 
     await db.commit()
