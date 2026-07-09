@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { deepForgeStart, deepForgeStatus, apiFetch } from '../../services/api'
 import type { DeepForgeStage, DeepForgeStatusResponse } from '../../services/api'
 import { useGameStore } from '../../stores/gameStore'
+import { onWSMessage } from '../../services/ws'
 
 interface DeepForgeProps {
   onStateUpdate?: (state: DeepForgeStatusResponse) => void
@@ -38,47 +39,60 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
   const [result, setResult] = useState<DeepForgeStatusResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const unsubRef = useRef<(() => void) | null>(null)
   const forgeIdRef = useRef<string | null>(null)
 
-  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
+  useEffect(() => () => { unsubRef.current?.() }, [])
 
-  const pollStatus = useCallback((forgeId: string) => {
+  // P1-5: drive stage updates off WS pushes instead of a 3s poll. Each
+  // forge_progress advances the stage indicator; on the terminal signal we do a
+  // single status fetch to pull the full result (resident_id, rating, error).
+  const subscribeStatus = useCallback((forgeId: string) => {
     const token = localStorage.getItem('token') ?? ''
 
-    pollRef.current = setInterval(() => {
-      void (async () => {
-        try {
-          const status = await deepForgeStatus(token, forgeId)
-          onStateUpdate?.(status)
+    const finalize = async () => {
+      try {
+        const status = await deepForgeStatus(token, forgeId)
+        onStateUpdate?.(status)
+        const stage = status.stage ?? status.status
+        setCurrentStage(stage)
 
-          const stage = status.stage ?? status.status
-          setCurrentStage(stage)
-
-          if (stage === 'done') {
-            clearInterval(pollRef.current!)
-            setUiStatus('done')
-            setResult(status)
-            // Refresh balance (forge reward was added server-side)
-            const token = useGameStore.getState().token
-            if (token) {
-              apiFetch<{ soul_coin_balance: number }>('/users/me', {
-                headers: { Authorization: `Bearer ${token}` },
-              }).then((u) => useGameStore.getState().updateBalance(u.soul_coin_balance)).catch(() => {})
-            }
-            if (status.resident_id) {
-              setTimeout(() => onComplete?.(status.resident_id!), 300)
-            }
-          } else if (stage === 'error') {
-            clearInterval(pollRef.current!)
-            setUiStatus('error')
-            setError(status.error ?? '深度蒸馏过程中出现错误')
+        if (stage === 'done') {
+          unsubRef.current?.(); unsubRef.current = null
+          setUiStatus('done')
+          setResult(status)
+          // Refresh balance (forge reward was added server-side)
+          const t = useGameStore.getState().token
+          if (t) {
+            apiFetch<{ soul_coin_balance: number }>('/users/me', {
+              headers: { Authorization: `Bearer ${t}` },
+            }).then((u) => useGameStore.getState().updateBalance(u.soul_coin_balance)).catch(() => {})
           }
-        } catch {
-          // Network error — keep polling
+          if (status.resident_id) {
+            setTimeout(() => onComplete?.(status.resident_id!), 300)
+          }
+        } else if (stage === 'error') {
+          unsubRef.current?.(); unsubRef.current = null
+          setUiStatus('error')
+          setError(status.error ?? '深度蒸馏过程中出现错误')
         }
-      })()
-    }, 3000)
+      } catch {
+        // Transient fetch failure — a later WS event (or the terminal one) retriggers.
+      }
+    }
+
+    unsubRef.current = onWSMessage((data) => {
+      if (data.forge_id !== forgeId) return
+      if (data.type === 'forge_progress') {
+        // status field mirrors the DeepForge STAGES keys (researching, …).
+        if (typeof data.status === 'string') setCurrentStage(data.status as DeepForgeStage)
+      } else if (data.type === 'forge_done' || data.type === 'forge_error') {
+        void finalize()
+      }
+    })
+
+    // Catch-up: the pipeline may have advanced before we subscribed.
+    void finalize()
   }, [onStateUpdate, onComplete])
 
   const handleStart = async () => {
@@ -95,7 +109,7 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
         user_material: userMaterial.trim() || undefined,
       })
       forgeIdRef.current = resp.forge_id
-      pollStatus(resp.forge_id)
+      subscribeStatus(resp.forge_id)
     } catch (e) {
       setUiStatus('error')
       setError(e instanceof Error ? e.message : '请求失败，请重试')
@@ -103,7 +117,7 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
   }
 
   const handleRetry = () => {
-    if (pollRef.current) clearInterval(pollRef.current)
+    unsubRef.current?.(); unsubRef.current = null
     setUiStatus('idle')
     setCurrentStage(null)
     setResult(null)

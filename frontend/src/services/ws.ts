@@ -92,6 +92,11 @@ export function connectWS(): void {
           direction: (p.direction as string) || 'down',
         }))
       }
+      // Forge progress (P1-5): forge_progress / forge_done / forge_error are
+      // consumed by the Forge components (DeepForge/QuickForge/ForgeChat) via
+      // onWSMessage below — no store state to update here, they flow through as
+      // listener events, replacing the old setInterval status polling.
+
       // If no listeners registered yet, queue important messages for replay
       if (wsListeners.size === 0 && QUEUED_TYPES.has(data.type as string)) {
         earlyMessageQueue.push(data)

@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { forgeStart, forgeAnswer, forgeStatus } from '../../services/api'
 import type { ForgeStatusResponse } from '../../services/api'
+import { onWSMessage } from '../../services/ws'
 
 interface ForgeChatProps {
   onStateUpdate: (state: ForgeStatusResponse) => void
@@ -29,7 +30,7 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
-  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const unsubRef = useRef<(() => void) | null>(null)
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -41,11 +42,13 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
 
   useEffect(() => {
     return () => {
-      if (pollTimerRef.current) clearInterval(pollTimerRef.current)
+      unsubRef.current?.()
     }
   }, [])
 
-  const pollStatus = useCallback((fid: string) => {
+  // P1-5: WS-driven generation status. Each forge_progress advances the caption;
+  // the terminal signal triggers one status fetch to render the final result.
+  const subscribeStatus = useCallback((fid: string) => {
     const STAGES = [
       '正在分析能力描述...',
       '正在构建人格模型...',
@@ -55,53 +58,61 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
     ]
     let stageIdx = 0
 
-    pollTimerRef.current = setInterval(() => {
-      void (async () => {
-        try {
-          const status = await forgeStatus(fid)
-          onStateUpdate(status)
+    const finalize = async () => {
+      try {
+        const status = await forgeStatus(fid)
+        onStateUpdate(status)
 
-          if (stageIdx < STAGES.length) {
-            setGeneratingProgress(STAGES[stageIdx])
-            stageIdx++
+        if (status.status === 'done') {
+          unsubRef.current?.(); unsubRef.current = null
+          setIsGenerating(false)
+          setIsDone(true)
+          setGeneratingProgress('')
+
+          const stars = '⭐'.repeat(status.star_rating)
+          const districtMap: Record<string, string> = {
+            engineering: '工程街区', product: '产品街区',
+            academy: '学院区', free: '自由区',
           }
+          setMessages(prev => [...prev, {
+            role: 'bot',
+            text: `炼化完成！${status.name} 已成功入住 Simverse World！\n\n` +
+                  `评级：${stars}\n` +
+                  `街区：${districtMap[status.district] ?? status.district}\n\n` +
+                  `你获得了 50 🪙 Soul Coin 奖励！`,
+          }])
 
-          if (status.status === 'done') {
-            if (pollTimerRef.current) clearInterval(pollTimerRef.current)
-            setIsGenerating(false)
-            setIsDone(true)
-            setGeneratingProgress('')
-
-            const stars = '⭐'.repeat(status.star_rating)
-            const districtMap: Record<string, string> = {
-              engineering: '工程街区', product: '产品街区',
-              academy: '学院区', free: '自由区',
-            }
-            setMessages(prev => [...prev, {
-              role: 'bot',
-              text: `炼化完成！${status.name} 已成功入住 Simverse World！\n\n` +
-                    `评级：${stars}\n` +
-                    `街区：${districtMap[status.district] ?? status.district}\n\n` +
-                    `你获得了 50 🪙 Soul Coin 奖励！`,
-            }])
-
-            if (status.resident_id) {
-              setTimeout(() => onComplete(status.resident_id!), 100)
-            }
-          } else if (status.status === 'error') {
-            if (pollTimerRef.current) clearInterval(pollTimerRef.current)
-            setIsGenerating(false)
-            setError(status.error ?? '生成过程中出现错误')
-            setMessages(prev => [...prev, {
-              role: 'bot',
-              text: `抱歉，炼化过程出现了问题：${status.error ?? '未知错误'}。请刷新页面重试。`,
-            }])
+          if (status.resident_id) {
+            setTimeout(() => onComplete(status.resident_id!), 100)
           }
-        } catch {
-          // Network error — keep polling
+        } else if (status.status === 'error') {
+          unsubRef.current?.(); unsubRef.current = null
+          setIsGenerating(false)
+          setError(status.error ?? '生成过程中出现错误')
+          setMessages(prev => [...prev, {
+            role: 'bot',
+            text: `抱歉，炼化过程出现了问题：${status.error ?? '未知错误'}。请刷新页面重试。`,
+          }])
         }
-      })()
-    }, 3000)
+      } catch {
+        // Transient fetch failure — a later WS event retriggers.
+      }
+    }
+
+    unsubRef.current = onWSMessage((data) => {
+      if (data.forge_id !== fid) return
+      if (data.type === 'forge_progress') {
+        if (stageIdx < STAGES.length) {
+          setGeneratingProgress(STAGES[stageIdx])
+          stageIdx++
+        }
+      } else if (data.type === 'forge_done' || data.type === 'forge_error') {
+        void finalize()
+      }
+    })
+
+    // Catch-up in case generation already advanced before we subscribed.
+    void finalize()
   }, [onStateUpdate, onComplete])
 
   const send = async () => {
@@ -134,7 +145,7 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
             role: 'bot',
             text: '所有信息已收集完毕！正在为你炼化这位居民，请稍等（约 30-60 秒）...',
           }])
-          pollStatus(forgeId)
+          subscribeStatus(forgeId)
         } else {
           setMessages(prev => [...prev, { role: 'bot', text: resp.question! }])
           const status = await forgeStatus(forgeId)

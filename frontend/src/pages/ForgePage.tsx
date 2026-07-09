@@ -1,10 +1,11 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { TopNav } from '../components/TopNav'
 import { ForgeChat } from '../components/forge/ForgeChat'
 import { ForgePreview } from '../components/forge/ForgePreview'
 import { QuickForge } from '../components/forge/QuickForge'
 import { DeepForge } from '../components/forge/DeepForge'
+import { connectWS } from '../services/ws'
 import type { ForgeStatusResponse, DeepForgeStatusResponse } from '../services/api'
 
 type Mode = 'guided' | 'quick' | 'deep'
@@ -13,6 +14,14 @@ export function ForgePage() {
   const navigate = useNavigate()
   const [forgeState, setForgeState] = useState<ForgeStatusResponse | null>(null)
   const [mode, setMode] = useState<Mode>('guided')
+
+  // Forge progress now arrives over WS (P1-5). GamePage owns the socket, but
+  // navigating to /forge unmounts GamePage and tears it down — so re-establish
+  // it here. connectWS is idempotent; we intentionally do not disconnect on
+  // unmount so the connection persists across authenticated routes.
+  useEffect(() => {
+    connectWS()
+  }, [])
 
   const handleStateUpdate = useCallback((state: ForgeStatusResponse | DeepForgeStatusResponse) => {
     // ForgePreview uses ForgeStatusResponse shape; DeepForgeStatusResponse is compatible for preview

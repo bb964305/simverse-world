@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { forgeQuick, forgeStatus } from '../../services/api'
 import type { ForgeStatusResponse } from '../../services/api'
+import { onWSMessage } from '../../services/ws'
 
 interface QuickForgeProps {
   onStateUpdate: (state: ForgeStatusResponse) => void
@@ -35,37 +36,49 @@ export function QuickForge({ onStateUpdate, onComplete }: QuickForgeProps) {
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<ForgeStatusResponse | null>(null)
 
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const unsubRef = useRef<(() => void) | null>(null)
   const stageRef = useRef(0)
 
-  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
+  useEffect(() => () => { unsubRef.current?.() }, [])
 
-  const pollStatus = useCallback((forgeId: string) => {
+  // P1-5: WS-driven instead of a 3s poll. forge_progress advances the rolling
+  // stage caption; the terminal signal triggers one status fetch for the result.
+  const subscribeStatus = useCallback((forgeId: string) => {
     stageRef.current = 0
-    pollRef.current = setInterval(async () => {
+
+    const finalize = async () => {
       try {
         const status = await forgeStatus(forgeId)
         onStateUpdate(status)
-
-        if (stageRef.current < GENERATION_STAGES.length) {
-          setProgress(GENERATION_STAGES[stageRef.current])
-          stageRef.current++
-        }
-
         if (status.status === 'done') {
-          clearInterval(pollRef.current!)
+          unsubRef.current?.(); unsubRef.current = null
           setIsGenerating(false)
           setIsDone(true)
           setProgress('')
           setResult(status)
           if (status.resident_id) setTimeout(() => onComplete(status.resident_id!), 300)
         } else if (status.status === 'error') {
-          clearInterval(pollRef.current!)
+          unsubRef.current?.(); unsubRef.current = null
           setIsGenerating(false)
           setError(status.error ?? '生成失败，请重试')
         }
-      } catch { /* keep polling */ }
-    }, 3000)
+      } catch { /* transient — a later WS event retriggers */ }
+    }
+
+    unsubRef.current = onWSMessage((data) => {
+      if (data.forge_id !== forgeId) return
+      if (data.type === 'forge_progress') {
+        if (stageRef.current < GENERATION_STAGES.length) {
+          setProgress(GENERATION_STAGES[stageRef.current])
+          stageRef.current++
+        }
+      } else if (data.type === 'forge_done' || data.type === 'forge_error') {
+        void finalize()
+      }
+    })
+
+    // Catch-up in case the pipeline already finished before we subscribed.
+    void finalize()
   }, [onStateUpdate, onComplete])
 
   const handleSubmit = async () => {
@@ -83,8 +96,8 @@ export function QuickForge({ onStateUpdate, onComplete }: QuickForgeProps) {
       const forgeId = resp.forge_id
       if (!forgeId) throw new Error('No forge_id returned')
 
-      // Poll for results
-      pollStatus(forgeId)
+      // Listen for WS progress/completion
+      subscribeStatus(forgeId)
     } catch (e) {
       setIsGenerating(false)
       setError(e instanceof Error ? e.message : '请求失败')
