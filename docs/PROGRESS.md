@@ -59,7 +59,13 @@
   - **三注入点**：① perceive → `TickContext.world_events`（60s 缓存、fail-open）→ `build_decision_prompt` 追加「当前世界事件：{titles}」；② `llm/prompt.py::assemble_system_prompt` 加活跃事件段落，玩家聊天 handler 在 open session 内取缓存并传入；③ cron 翻转广播（前端 banner 归 A2，S1 只发广播）。
   - **API**：公共 `GET /events/active`；管理端 `GET/POST/PATCH/DELETE /admin/events`（require_admin，POST 建为 inactive 让 cron 统一翻转+广播）。均注册进 `main.py`/admin `__init__`。
   - **验证**：新增 `test_world_events.py` 8 例（flip start/end/no-change + 缓存读写/失效 + decide/player prompt 注入 + cron loop 广播）全绿；全量选择性套件（排除 6 个预存网络/基线文件）**484 passed / 0 新失败**。⚠️ 全链 `alembic upgrade head` + 真 PG 复验留 vm212（沙盒无 pgvector）。
-- [ ] S2 事件钩子 bus + 成就引擎（achievements 表 + 6 个埋点）
+- [x] S2 事件钩子 bus + 成就引擎（achievements 表 + 埋点）— `c1be808`（引擎）+ `cc76ceb`（chat_completed 埋点）+ `81a67b3`（测试）
+  - **bus**：`app/events/bus.py` = 进程内 `on()`/`emit(db,event,**kw)` 发布器，逐个 await handler，单个失败 `logger.warning(exc_info)` 不阻断（供 S2/S5/后续 B1/D1/D3 复用）。
+  - **表/迁移**：Achievement(code pk/title/description/icon/points/reward_sc/hidden) + UserAchievement(id/user_id[index]/code/progress_json/unlocked_at/UniqueConstraint(user_id,code))；迁移 **016**（down=015）。up/down sqlite 隔离实测通过。
+  - **引擎**：`app/events/achievements.py` —— **in-code `ACHIEVEMENT_DEFS` 为引擎真相源**（reward/文案），achievements 表由其 seed（便于运营改文案）。`unlock`（一次性）/`increment`（计数型）均**用独立短 session**（不耦合发射方事务），幂等靠 UniqueConstraint（含 IntegrityError 兜底）；解锁 → `coin_service.reward` + S4 `notify` + WS `achievement_unlocked`。`get_user_achievements` 合并 defs+进度（hidden 未解锁显示 ??? ）。seed 脚本 `seed/achievements.py` + dev 启动幂等 seed（fail-open）。
+  - **埋点**：`chat_completed`（`ws/handlers/chat.py` end_chat 提交后 emit，user_id/resident_id/turns）→ 解锁 `first_chat` + 计数 `conversationalist_10`。**偏差/记录**：spec 列 6 埋点，其余按归属分散——`location_first_visit` 由 **S5**（下一任务）发射（checker `explorer_5` 已注册待触发）；`login_streak`（需 D3 的连登字段，现 daily_reward 无 streak）、`memory_written_about_user`/`personality_shifted`（热路径 mid-transaction，避免额外开销）、`commission_completed`（B1）留各自 feature 落地时补 emit（bus/引擎已就绪，接一行 emit 即可）。
+  - **API**：`GET /achievements`（defs+我的进度合并）。
+  - **验证**：新增 `test_achievements.py` 6 例（bus 隔离 / first_chat 解锁+奖励+WS / 幂等不重复奖励 / 计数到 10 解锁 / 合并进度 / API）全绿；全量选择性套件 **495 passed / 0 新失败**（顺带把 dev 启动 seed 包 try/except 保证 `test_create_all_switch` 不受影响）。⚠️ 全链迁移 + 真 PG 复验留 vm212。
 - [ ] S3 商店管线（items/purchases + shop_service）
 - [x] S4 通知中心（notifications + NotificationDrawer）— `83062ba`（后端）+ `3838f05`（前端）
   - **表/迁移**：`models/notification.py`（id/user_id[index]/kind[String30]/title/body/payload_json/read_at[nullable]/created_at[index]）；迁移 **015**（down=014）。user_id 普通索引列（非 FK）。015 单表 up/down sqlite 隔离实测通过。
