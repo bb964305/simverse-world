@@ -108,6 +108,12 @@ async def websocket_handler(ws: WebSocket):
 
     ctx = ConnectionContext(user_id=user_id, user_name=user_name)
 
+    # A3: a resident may proactively greet a returning player — fire-and-forget
+    # so it never blocks the connection loop.
+    import asyncio
+    from app.services.greeting_service import maybe_greet
+    asyncio.create_task(maybe_greet(user_id))
+
     try:
         while True:
             raw = await ws.receive_text()
