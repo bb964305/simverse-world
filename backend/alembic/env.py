@@ -24,6 +24,7 @@ from app.models.resident_goal import ResidentGoal
 from app.models.bulletin_post import BulletinPost
 from app.models.time_capsule import TimeCapsule
 from app.models.feed import Follow, FeedEvent
+from app.models.season import Season, SeasonScript, Poll, Vote, SeasonScore
 
 config = context.config
 if config.config_file_name is not None:
