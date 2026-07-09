@@ -15,6 +15,7 @@ const ForgePage = lazy(() => import('./pages/ForgePage').then((m) => ({ default:
 const ProfilePage = lazy(() => import('./pages/ProfilePage').then((m) => ({ default: m.ProfilePage })))
 const OnboardingPage = lazy(() => import('./pages/OnboardingPage').then((m) => ({ default: m.OnboardingPage })))
 const AdminPage = lazy(() => import('./pages/AdminPage').then((m) => ({ default: m.AdminPage })))
+const GraphPage = lazy(() => import('./pages/GraphPage').then((m) => ({ default: m.GraphPage })))
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const token = useGameStore((s) => s.token)
@@ -53,6 +54,7 @@ export default function App() {
           <Route path="/forge" element={<ProtectedRoute><ForgePage /></ProtectedRoute>} />
           <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
           <Route path="/admin" element={<ProtectedRoute><AdminPage /></ProtectedRoute>} />
+          <Route path="/graph" element={<ProtectedRoute><GraphPage /></ProtectedRoute>} />
         </Routes>
       </Suspense>
     </BrowserRouter>

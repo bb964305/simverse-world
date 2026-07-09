@@ -769,3 +769,11 @@ export interface ResidentGoalData {
 export function getResidentGoals(slug: string): Promise<{ active: ResidentGoalData | null; resolved: ResidentGoalData[] }> {
   return apiFetch(`/residents/${encodeURIComponent(slug)}/goals`)
 }
+
+// ── Relationship graph (C2) ─────────────────────────────────────────
+export interface GraphNode { slug: string; name: string; portrait_url: string | null; district: string }
+export interface GraphEdge { a: string; b: string; strength: number; label: string; mutual: boolean }
+
+export function getRelationshipGraph(minImportance = 0.3): Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }> {
+  return apiFetch(`/graph/relationships?min_importance=${minImportance}`)
+}
