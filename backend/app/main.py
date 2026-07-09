@@ -47,6 +47,7 @@ async def lifespan(app):
         import app.models.digest  # noqa: F401
         import app.models.daily_quest  # noqa: F401
         import app.models.commission  # noqa: F401
+        import app.models.resident_goal  # noqa: F401
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         # Seed achievement definitions (idempotent) so GET /achievements + the

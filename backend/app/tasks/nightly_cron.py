@@ -43,7 +43,34 @@ async def run_nightly_jobs() -> None:
             logger.info("Expired %d commissions", n)
     except Exception:
         logger.error("Commission expiry failed", exc_info=True)
-    # Future: A1 weekly eval, E2 dreams, E7 capsule delivery — each own try/except.
+
+    # A1: weekly life-goal evaluation (Sundays only).
+    if datetime.now(UTC).weekday() == 6:
+        try:
+            await run_weekly_goal_eval()
+        except Exception:
+            logger.error("Weekly goal eval failed", exc_info=True)
+    # Future: E2 dreams, E7 capsule delivery — each own try/except.
+
+
+async def run_weekly_goal_eval() -> None:
+    """Evaluate every resident that has an active life goal (A1)."""
+    from sqlalchemy import select
+    from app.models.resident_goal import ResidentGoal
+    from app.services.goal_service import weekly_evaluate
+
+    async with async_session() as db:
+        resident_ids = (await db.execute(
+            select(ResidentGoal.resident_id).where(
+                ResidentGoal.kind == "life", ResidentGoal.status == "active",
+            )
+        )).scalars().all()
+    for rid in resident_ids:
+        try:
+            async with async_session() as db:
+                await weekly_evaluate(db, rid)
+        except Exception:
+            logger.warning("goal eval failed for %s", rid, exc_info=True)
 
 
 async def nightly_cron_loop() -> None:

@@ -184,6 +184,15 @@ async def handle_chat_msg(ctx: ConnectionContext, data: dict) -> None:
         # to fold into the dialogue system prompt below.
         from app.services.world_event_service import get_active_events_cached
         active_events = await get_active_events_cached(db)
+
+        # A1: the resident's current life goal, so players can chat about it.
+        active_goal_dict = None
+        try:
+            from app.services.goal_service import get_active_goal, serialize as _ser_goal
+            _goal = await get_active_goal(db, ctx.resident.id)
+            active_goal_dict = _ser_goal(_goal) if _goal else None
+        except Exception:
+            active_goal_dict = None
     # Session closed — no DB connection held during LLM streaming below.
 
     await manager.send(ctx.user_id, {
@@ -199,6 +208,7 @@ async def handle_chat_msg(ctx: ConnectionContext, data: dict) -> None:
     ctx.chat_messages.append({"role": "user", "content": text})
     system_prompt = assemble_system_prompt(
         ctx.resident, memory_context=ctx.memory_context, world_events=active_events,
+        life_goal=active_goal_dict,
     )
     # B2: if this chat started from an encounter, splice the scene in.
     if ctx.encounter_context:

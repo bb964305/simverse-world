@@ -41,10 +41,12 @@ def assemble_system_prompt(
     resident: Resident,
     memory_context: dict | None = None,
     world_events: list[dict] | None = None,
+    life_goal: dict | None = None,
 ) -> str:
     """Assemble the three-layer system prompt from resident data.
 
-    Optionally includes memory context and active world events (S1) if provided.
+    Optionally includes memory context, active world events (S1), and the
+    resident's current life goal (A1) if provided.
     """
     parts = [
         f"你是 {resident.name}，住在 Simverse World 的{resident.district}街区。",
@@ -81,6 +83,11 @@ def assemble_system_prompt(
     if mood_label:
         parts.append("")
         parts.append(f"你现在的心情是「{mood_label}」，让语气自然体现出来。")
+
+    # A1: the resident's life goal, so a player can chat about it.
+    if life_goal and life_goal.get("title"):
+        parts.append("")
+        parts.append(f"你的人生目标：{life_goal['title']}（进度 {life_goal.get('progress', 0):.0%}）")
 
     parts.append("请始终保持角色扮演，用你的人格风格回应访客。回复简洁，不超过200字。")
     return "\n".join(parts)

@@ -753,3 +753,19 @@ export function acceptCommission(id: string): Promise<CommissionData> {
 export function abandonCommission(id: string): Promise<{ ok: boolean }> {
   return apiFetch(`/commissions/${id}/abandon`, { method: 'POST' })
 }
+
+// ── Resident life goals (A1) ────────────────────────────────────────
+export interface ResidentGoalData {
+  id: string
+  kind: string
+  title: string
+  motivation: string
+  status: string
+  progress: number
+  milestones: Array<{ title: string; done: boolean; at?: string }>
+  resolved_at: string | null
+}
+
+export function getResidentGoals(slug: string): Promise<{ active: ResidentGoalData | null; resolved: ResidentGoalData[] }> {
+  return apiFetch(`/residents/${encodeURIComponent(slug)}/goals`)
+}

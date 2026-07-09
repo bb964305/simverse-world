@@ -61,6 +61,17 @@ async def list_all(db: AsyncSession = Depends(get_db)):
     return [ResidentListItem.model_validate(r, from_attributes=True) for r in residents]
 
 
+@router.get("/{slug}/goals")
+async def resident_goals(slug: str, db: AsyncSession = Depends(get_db)):
+    """A1: a resident's active life goal + recent resolved goals (public)."""
+    from fastapi import HTTPException
+    from app.services.goal_service import get_goals
+    resident = await get_resident_by_slug(db, slug)
+    if not resident:
+        raise HTTPException(status_code=404, detail="Resident not found")
+    return await get_goals(db, resident.id)
+
+
 @router.post("/import", response_model=ResidentImportResponse)
 async def import_resident(
     request: Request,
