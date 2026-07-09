@@ -150,6 +150,14 @@ async def resident_chat(
         # old five calls. It persists memories/relationships and runs evolution.
         summary_data = await svc.process_chat_wrapup(initiator, target, dialog_text)
 
+        # E3: each may pass a third-party rumor to the other (best-effort).
+        try:
+            from app.services.gossip_service import maybe_gossip
+            await maybe_gossip(svc.db, initiator, target)
+            await maybe_gossip(svc.db, target, initiator)
+        except Exception:
+            logger.warning("gossip handoff failed", exc_info=True)
+
         _set_cooldown(initiator, target)
 
         return {
