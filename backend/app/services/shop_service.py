@@ -22,6 +22,8 @@ ITEM_DEFS: list[dict] = [
     {"code": "decor_lamp", "kind": "decor", "name": "落地灯", "description": "家园装饰", "icon": "🪔", "price_sc": 30, "payload_json": {"sprite": "lamp_01", "w": 1, "h": 1}},
     {"code": "decor_plant", "kind": "decor", "name": "盆栽", "description": "家园装饰", "icon": "🪴", "price_sc": 40, "payload_json": {"sprite": "plant_01", "w": 1, "h": 1}},
     {"code": "decor_rug", "kind": "decor", "name": "地毯", "description": "家园装饰", "icon": "🟫", "price_sc": 60, "payload_json": {"sprite": "rug_01", "w": 2, "h": 2}},
+    {"code": "tip_5sc", "kind": "tip", "name": "打赏 5", "description": "给创作打赏 5 SC", "icon": "💰", "price_sc": 5, "payload_json": {}},
+    {"code": "tip_20sc", "kind": "tip", "name": "打赏 20", "description": "给创作打赏 20 SC", "icon": "💎", "price_sc": 20, "payload_json": {}},
 ]
 
 

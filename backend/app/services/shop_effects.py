@@ -216,3 +216,34 @@ async def _gift_effect(db, user_id, item, qty, context):
 async def _decor_effect(db, user_id, item, qty, context):
     """Decor purchase is inventory-only (B3 reads the purchases table); no-op."""
     return {"stored": item.code, "qty": qty}
+
+
+@register("tip")
+async def _tip_effect(db, user_id, item, qty, context):
+    """A4: tip a bulletin post → tips_sc += amount, creator gets 80% share."""
+    from sqlalchemy import select
+    from app.models.bulletin_post import BulletinPost
+    from app.models.resident import Resident
+    from app.services.coin_service import reward
+    from app.events.bus import emit
+
+    post_id = (context or {}).get("post_id")
+    if not post_id:
+        return None
+    post = await db.get(BulletinPost, post_id)
+    if post is None:
+        return None
+    amount = item.price_sc * qty
+    post.tips_sc += amount
+    await db.commit()
+
+    share = 0
+    if post.author_resident_id:
+        resident = (await db.execute(select(Resident).where(Resident.id == post.author_resident_id))).scalar_one_or_none()
+        if resident and resident.creator_id and resident.creator_id not in ("system", user_id):
+            share = int(amount * 0.8)
+            if share > 0:
+                await reward(db, resident.creator_id, share, f"tip_share:{post_id}")
+
+    await emit(db, "purchase_tip", user_id=user_id, post_id=post_id)  # D1 patron
+    return {"tips_sc": post.tips_sc, "creator_share": share}

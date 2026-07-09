@@ -21,6 +21,7 @@ from app.models.digest import Digest
 from app.models.daily_quest import DailyQuest
 from app.models.commission import Commission
 from app.models.resident_goal import ResidentGoal
+from app.models.bulletin_post import BulletinPost
 
 config = context.config
 if config.config_file_name is not None:

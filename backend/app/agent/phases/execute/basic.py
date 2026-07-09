@@ -62,6 +62,13 @@ class BasicExecutePlugin:
                 if ctx.resident.status not in ("chatting", "socializing"):
                     ctx.resident.status = "idle"
                     await ctx.db.commit()
+                # A4: a JOURNAL action may become a published creation (rule-gated).
+                if action == ActionType.JOURNAL:
+                    try:
+                        from app.services.bulletin_service import maybe_create_journal_post
+                        await maybe_create_journal_post(ctx.db, ctx.resident)
+                    except Exception:
+                        logger.warning("journal post attempt failed for %s", ctx.resident.slug, exc_info=True)
         except Exception as e:
             logger.warning("Execute failed for %s: %s", ctx.resident.slug, e)
 
