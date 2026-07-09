@@ -251,6 +251,21 @@ class EvolutionService:
         await self.db.refresh(resident)
         await self.db.refresh(history)
 
+        # D1: a dramatic personality shift fires the soul_shaper event, credited
+        # to the player who triggered it (via the trigger memory's related_user).
+        if trigger_type == "shift" and trigger_memory_id:
+            try:
+                from app.models.memory import Memory
+                from app.events.bus import emit
+                trigger_user = (await self.db.execute(
+                    select(Memory.related_user_id).where(Memory.id == trigger_memory_id)
+                )).scalar_one_or_none()
+                if trigger_user:
+                    await emit(self.db, "personality_shifted",
+                               user_id=trigger_user, resident_id=resident.id)
+            except Exception:
+                logger.warning("personality_shifted emit failed", exc_info=True)
+
         if old_type != new_type:
             logger.info(
                 "Type migration: %s → %s for resident %s",

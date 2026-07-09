@@ -67,7 +67,7 @@ async def test_first_chat_unlocks_and_rewards(db_session, ach_session):
     assert ua.unlocked_at is not None
 
     await db_session.refresh(user)
-    assert user.soul_coin_balance == 10  # first_chat reward
+    assert user.soul_coin_balance == 20  # first_chat reward
     assert any(c.args[1]["type"] == "achievement_unlocked" for c in send.call_args_list)
 
 
@@ -83,7 +83,7 @@ async def test_unlock_is_idempotent(db_session, ach_session):
     assert first == "first_chat"
     assert second is None
     await db_session.refresh(user)
-    assert user.soul_coin_balance == 10  # rewarded once, not twice
+    assert user.soul_coin_balance == 20  # rewarded once, not twice
 
 
 @pytest.mark.anyio
@@ -93,12 +93,12 @@ async def test_counting_unlocks_at_target(db_session, ach_session):
     user = await _mk_user(db_session, "count@test.com")
     with patch("app.events.achievements.manager.send", new_callable=AsyncMock):
         for i in range(9):
-            assert await increment(user.id, "conversationalist_10", 10) is None
+            assert await increment(user.id, "memory_keeper_10", 10) is None
         # 10th increment unlocks
-        assert await increment(user.id, "conversationalist_10", 10) == "conversationalist_10"
+        assert await increment(user.id, "memory_keeper_10", 10) == "memory_keeper_10"
 
     ua = (await db_session.execute(
-        select(UserAchievement).where(UserAchievement.code == "conversationalist_10")
+        select(UserAchievement).where(UserAchievement.code == "memory_keeper_10")
     )).scalar_one()
     assert ua.unlocked_at is not None
     assert ua.progress_json["count"] == 10
@@ -115,9 +115,46 @@ async def test_get_user_achievements_merges_progress(db_session, ach_session):
     merged = await get_user_achievements(db_session, user.id)
     by_code = {m["code"]: m for m in merged}
     assert by_code["first_chat"]["unlocked"] is True
-    assert by_code["conversationalist_10"]["unlocked"] is False
+    assert by_code["memory_keeper_10"]["unlocked"] is False
     # every definition is represented
-    assert len(merged) >= 3
+    assert len(merged) == 12
+
+
+# ── D1: one case per achievement (fake events → unlock) ──────────────
+
+D1_CASES = [
+    ("first_chat", [("chat_completed", {"resident_id": "r1", "turns": 1})]),
+    ("deep_talk", [("chat_completed", {"resident_id": "r1", "turns": 10})]),
+    ("remembered", [("memory_written_about_user", {})]),
+    ("memory_keeper_10", [("memory_written_about_user", {})] * 10),
+    ("soul_shaper", [("personality_shifted", {})]),
+    ("week_streak", [("login_streak", {"streak": 7})]),
+    ("explorer_5", [("location_first_visit", {})] * 5),
+    ("explorer_all", [("location_first_visit", {})] * 20),
+    ("errand_runner", [("commission_completed", {})]),
+    ("patron", [("purchase_tip", {})]),
+    ("socialite", [("chat_completed", {"resident_id": f"r{i}", "turns": 1}) for i in range(10)]),
+    ("dreamt_of", [("dream_generated", {})]),
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("code,emits", D1_CASES, ids=[c[0] for c in D1_CASES])
+async def test_each_achievement_unlocks(db_session, ach_session, code, emits):
+    from app.events.bus import emit
+    import app.events.achievements as ach
+
+    user = await _mk_user(db_session, f"{code}@d1.com")
+    with patch.object(ach.manager, "send", new_callable=AsyncMock):
+        for event, kw in emits:
+            await emit(None, event, user_id=user.id, **kw)
+
+    ua = (await db_session.execute(
+        select(UserAchievement).where(
+            UserAchievement.user_id == user.id, UserAchievement.code == code,
+        )
+    )).scalar_one_or_none()
+    assert ua is not None and ua.unlocked_at is not None, f"{code} should be unlocked"
 
 
 @pytest.mark.anyio

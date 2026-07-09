@@ -22,15 +22,31 @@ from app.ws.manager import manager
 
 logger = logging.getLogger(__name__)
 
-# Starter set proving the engine (D1 expands to the full 12). Each dict is the
-# authoritative definition used at unlock time.
+# First 12 achievements (D1). In-code defs are the engine's authoritative source
+# (reward/copy); the achievements table is seeded from them.
 ACHIEVEMENT_DEFS: list[dict] = [
-    {"code": "first_chat", "title": "初次相遇", "description": "第一次和居民对话", "icon": "💬", "points": 1, "reward_sc": 10, "hidden": False},
-    {"code": "conversationalist_10", "title": "健谈者", "description": "累计完成 10 次对话", "icon": "🗣️", "points": 3, "reward_sc": 30, "hidden": False},
-    {"code": "explorer_5", "title": "城市漫游者", "description": "探索 5 个不同的地点", "icon": "🧭", "points": 3, "reward_sc": 30, "hidden": False},
+    {"code": "first_chat", "title": "初次相遇", "description": "第一次和居民对话", "icon": "💬", "points": 1, "reward_sc": 20, "hidden": False},
+    {"code": "deep_talk", "title": "促膝长谈", "description": "单次对话达到 10 轮", "icon": "🗣️", "points": 2, "reward_sc": 30, "hidden": False},
+    {"code": "remembered", "title": "被记住", "description": "第一次被居民写进记忆", "icon": "📝", "points": 2, "reward_sc": 20, "hidden": False},
+    {"code": "memory_keeper_10", "title": "念念不忘", "description": "被 10 条居民记忆记住", "icon": "🧠", "points": 4, "reward_sc": 50, "hidden": False},
+    {"code": "soul_shaper", "title": "灵魂塑造者", "description": "首次触发居民人格跳变", "icon": "✨", "points": 8, "reward_sc": 100, "hidden": False},
+    {"code": "week_streak", "title": "七日之约", "description": "连续登录 7 天", "icon": "📅", "points": 4, "reward_sc": 50, "hidden": False},
+    {"code": "explorer_5", "title": "城市漫游者", "description": "到访 5 个不同的地点", "icon": "🧭", "points": 3, "reward_sc": 30, "hidden": False},
+    {"code": "explorer_all", "title": "踏遍全城", "description": "到访全部地点", "icon": "🗺️", "points": 8, "reward_sc": 100, "hidden": False},
+    {"code": "errand_runner", "title": "跑腿达人", "description": "完成第一个委托", "icon": "📜", "points": 3, "reward_sc": 30, "hidden": False},
+    {"code": "patron", "title": "赞助人", "description": "首次打赏创作", "icon": "💝", "points": 1, "reward_sc": 10, "hidden": False},
+    {"code": "socialite", "title": "社交名流", "description": "与 10 位不同居民聊过", "icon": "🎭", "points": 4, "reward_sc": 50, "hidden": False},
+    {"code": "dreamt_of", "title": "入梦之人", "description": "首次被居民梦到", "icon": "🌙", "points": 5, "reward_sc": 66, "hidden": True},
 ]
 
 _DEF_BY_CODE: dict[str, dict] = {d["code"]: d for d in ACHIEVEMENT_DEFS}
+
+# Target for "visit all locations" — every distinct named, bounded map location.
+try:
+    from app.agent.map_data import LOCATIONS as _LOCATIONS
+    ALL_LOCATIONS_TARGET = len([lid for lid, l in _LOCATIONS.items() if l.get("bounds")])
+except Exception:  # pragma: no cover
+    ALL_LOCATIONS_TARGET = 20
 
 
 async def _grant_rewards(db, user_id: str, code: str) -> None:
@@ -111,7 +127,44 @@ async def increment(user_id: str, code: str, target: int) -> str | None:
         return None
 
 
-# ── Checkers (registered on domain events) ───────────────────────────
+async def increment_distinct(user_id: str, code: str, target: int, member: str) -> str | None:
+    """Bump a distinct-set achievement; unlock when the set reaches target."""
+    now = datetime.now(UTC)
+    async with async_session() as db:
+        existing = (await db.execute(
+            select(UserAchievement).where(
+                UserAchievement.user_id == user_id, UserAchievement.code == code,
+            )
+        )).scalar_one_or_none()
+        if existing and existing.unlocked_at is not None:
+            return None
+        seen = list((existing.progress_json or {}).get("seen", [])) if existing else []
+        if member not in seen:
+            seen.append(member)
+        count = len(seen)
+        reached = count >= target
+        progress = {"seen": seen, "count": count, "target": target}
+        if existing:
+            existing.progress_json = progress
+            if reached:
+                existing.unlocked_at = now
+        else:
+            db.add(UserAchievement(
+                user_id=user_id, code=code, progress_json=progress,
+                unlocked_at=now if reached else None,
+            ))
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            return None
+        if reached:
+            await _grant_rewards(db, user_id, code)
+            return code
+        return None
+
+
+# ── Checkers (registered on domain events, D1) ───────────────────────
 
 @on("chat_completed")
 async def _ach_first_chat(db, user_id: str = "", **kw) -> None:
@@ -120,16 +173,69 @@ async def _ach_first_chat(db, user_id: str = "", **kw) -> None:
 
 
 @on("chat_completed")
-async def _ach_conversationalist(db, user_id: str = "", **kw) -> None:
+async def _ach_deep_talk(db, user_id: str = "", turns: int = 0, **kw) -> None:
+    if user_id and turns >= 10:
+        await unlock(user_id, "deep_talk")
+
+
+@on("chat_completed")
+async def _ach_socialite(db, user_id: str = "", resident_id: str | None = None, **kw) -> None:
+    if user_id and resident_id:
+        await increment_distinct(user_id, "socialite", 10, resident_id)
+
+
+@on("memory_written_about_user")
+async def _ach_remembered(db, user_id: str = "", **kw) -> None:
     if user_id:
-        await increment(user_id, "conversationalist_10", 10)
+        await unlock(user_id, "remembered")
+
+
+@on("memory_written_about_user")
+async def _ach_memory_keeper(db, user_id: str = "", **kw) -> None:
+    if user_id:
+        await increment(user_id, "memory_keeper_10", 10)
+
+
+@on("personality_shifted")
+async def _ach_soul_shaper(db, user_id: str = "", **kw) -> None:
+    if user_id:
+        await unlock(user_id, "soul_shaper")
+
+
+@on("login_streak")
+async def _ach_week_streak(db, user_id: str = "", streak: int = 0, **kw) -> None:
+    if user_id and streak >= 7:
+        await unlock(user_id, "week_streak")
 
 
 @on("location_first_visit")
-async def _ach_explorer(db, user_id: str = "", **kw) -> None:
-    # Fires once S5 LocationTracker emits location_first_visit.
+async def _ach_explorer_5(db, user_id: str = "", **kw) -> None:
     if user_id:
         await increment(user_id, "explorer_5", 5)
+
+
+@on("location_first_visit")
+async def _ach_explorer_all(db, user_id: str = "", **kw) -> None:
+    if user_id:
+        await increment(user_id, "explorer_all", ALL_LOCATIONS_TARGET)
+
+
+@on("commission_completed")
+async def _ach_errand_runner(db, user_id: str = "", **kw) -> None:
+    if user_id:
+        await unlock(user_id, "errand_runner")
+
+
+@on("purchase_tip")
+async def _ach_patron(db, user_id: str = "", **kw) -> None:
+    if user_id:
+        await unlock(user_id, "patron")
+
+
+@on("dream_generated")
+async def _ach_dreamt_of(db, user_id: str = "", **kw) -> None:
+    if user_id:
+        await unlock(user_id, "dreamt_of")
 
 
 # ── Seed + query ─────────────────────────────────────────────────────

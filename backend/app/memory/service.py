@@ -68,6 +68,13 @@ class MemoryService:
         self.db.add(mem)
         await self.db.commit()
         await self.db.refresh(mem)
+        # S2/D1: a memory that references a player fires the domain event that
+        # drives the "remembered" / "memory_keeper" achievements. Post-commit;
+        # handlers run in their own sessions and never affect this write.
+        if related_user_id:
+            from app.events.bus import emit
+            await emit(self.db, "memory_written_about_user",
+                       user_id=related_user_id, resident_id=resident_id, memory_id=mem.id)
         return mem
 
     async def get_memories(
