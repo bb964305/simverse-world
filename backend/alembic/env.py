@@ -15,6 +15,7 @@ from app.models.llm_usage import LLMUsage
 from app.models.world_event import WorldEvent
 from app.models.notification import Notification
 from app.models.achievement import Achievement, UserAchievement
+from app.models.shop import Item, Purchase
 
 config = context.config
 if config.config_file_name is not None:

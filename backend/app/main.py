@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
-from app.routers import auth, users, residents, forge, profile, search, bulletin, onboarding, sprites, avatar, settings as settings_router, media as media_router, events as events_router, notifications as notifications_router, achievements as achievements_router
+from app.routers import auth, users, residents, forge, profile, search, bulletin, onboarding, sprites, avatar, settings as settings_router, media as media_router, events as events_router, notifications as notifications_router, achievements as achievements_router, shop as shop_router
 # Import the achievement checkers so their @on(...) handlers register on the bus.
 import app.events.achievements  # noqa: F401
 from app.routers.admin import router as admin_router
@@ -39,6 +39,7 @@ async def lifespan(app):
         import app.models.world_event  # noqa: F401
         import app.models.notification  # noqa: F401
         import app.models.achievement  # noqa: F401
+        import app.models.shop  # noqa: F401
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         # Seed achievement definitions (idempotent) so GET /achievements + the
@@ -119,6 +120,7 @@ app.include_router(media_router.router)
 app.include_router(events_router.router)
 app.include_router(notifications_router.router)
 app.include_router(achievements_router.router)
+app.include_router(shop_router.router)
 app.include_router(admin_router)
 
 
