@@ -77,7 +77,11 @@
   - **API**：`GET /notifications?unread_only=&cursor=`（created_at 游标翻页 + `unread_count` + `next_cursor`）、`POST /notifications/read {ids}`（幂等置 read_at，返回新 unread_count）。
   - **前端**：`gameStore` 加 notifications/unreadCount 切片 + 3 actions；`ws.ts` 加 `notification` 分支（addNotification 自增未读）；`api.ts` getNotifications/markNotificationsRead；新组件 `NotificationDrawer.tsx`；`TopNav` 铃铛 + 未读角标（mount 拉一次 seed 离线通知）。
   - **验证**：新增 `test_notifications.py` 5 例（persist / 在线推 WS / 吞 WS 失败 / list+mark_read API / 需鉴权）全绿；全量选择性套件 **489 passed / 0 新失败**；前端 tsc 过、lint 基线 7err/3warn、build 正常。⚠️ 全链迁移 + 真 PG 复验留 vm212。
-- [ ] S5 LocationTracker（location_visits + move 钩子）
+- [x] S5 LocationTracker（location_visits + move 钩子）— `abf88ce`（实现）+ `c049b68`（测试）
+  - **表/迁移**：LocationVisit(id/user_id[index]/location_id/visit_count/first_visited_at/last_visited_at/UniqueConstraint(user_id,location_id))；迁移 **018**（down=017）。up/down sqlite 隔离实测通过。
+  - **服务**：`services/location_tracker.py` —— 启动从 `map_data.LOCATIONS` bbox 展开预算 O(1) `tile→location` 表（5152 tiles）。`on_move(user_id,tile_x,tile_y)` **纯内存**：命中新命名位置才入 `asyncio.Queue`（同位置/开阔地立即返回，不查库）。`location_consumer_loop` 后台消费者（**在每个 API worker 起**，move 落在持有 socket 的 worker，故不受 run_background_tasks 闸门约束，在 main.py lifespan 无条件启动）upsert visit_count，首访（DB 权威：insert 成功=首访，含 IntegrityError 竞态兜底）`emit("location_first_visit")` **恰一次**（B2 偶遇判定后续接入）。
+  - **接线**：`ws/handlers/movement.py` move 快路径加 `on_move(pixel_to_tile(x,y))`（TILE_SIZE=32）。**兑现 S2 承诺**：location_first_visit 现已发射 → S2 `explorer_5` 成就触发。
+  - **验证**：新增 `test_location_tracker.py` 4 例（tile 查找 / on_move 仅新位置入队+开阔地重置+重入 / 消费者首访 insert 再访 increment + emit 恰一次 / 5 次首访解锁 explorer_5 端到端）全绿；全量选择性套件 **504 passed / 0 新失败**。⚠️ 全链迁移 + 真 PG 复验、move P99 压测留 vm212。
 
 ## 批次 1 — 体感与经济
 - [ ] A3 居民主动找玩家 · [ ] A5 村落日报 🔥 · [ ] D2 消耗场景 · [ ] D1 成就（12 个 seed）
