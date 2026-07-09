@@ -4,7 +4,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
-from app.routers import auth, users, residents, forge, profile, search, bulletin, onboarding, sprites, avatar, settings as settings_router, media as media_router, events as events_router, notifications as notifications_router
+from app.routers import auth, users, residents, forge, profile, search, bulletin, onboarding, sprites, avatar, settings as settings_router, media as media_router, events as events_router, notifications as notifications_router, achievements as achievements_router
+# Import the achievement checkers so their @on(...) handlers register on the bus.
+import app.events.achievements  # noqa: F401
 from app.routers.admin import router as admin_router
 from app.ws.handlers import websocket_handler
 from app.tasks.heat_cron import heat_cron_loop
@@ -36,8 +38,19 @@ async def lifespan(app):
         import app.models.personality_history  # noqa: F401
         import app.models.world_event  # noqa: F401
         import app.models.notification  # noqa: F401
+        import app.models.achievement  # noqa: F401
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        # Seed achievement definitions (idempotent) so GET /achievements + the
+        # ops-editable table are populated in dev. Fail-open: a seed hiccup must
+        # never block startup.
+        try:
+            from app.database import async_session
+            from app.events.achievements import seed_achievements
+            async with async_session() as _db:
+                await seed_achievements(_db)
+        except Exception:
+            logger.warning("achievement seed skipped", exc_info=True)
 
     # WS pub/sub subscriber (P0-3b): every API worker relays broadcast/direct
     # envelopes from Redis to its own local sockets. Runs regardless of
@@ -105,6 +118,7 @@ app.include_router(settings_router.router)
 app.include_router(media_router.router)
 app.include_router(events_router.router)
 app.include_router(notifications_router.router)
+app.include_router(achievements_router.router)
 app.include_router(admin_router)
 
 
