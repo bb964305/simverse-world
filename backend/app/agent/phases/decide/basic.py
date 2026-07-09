@@ -149,6 +149,7 @@ class BasicDecidePlugin:
             today_actions=today_actions,
             available_actions=ctx.available_actions,
             max_daily_actions=settings.agent_max_daily_actions,
+            world_events=ctx.world_events,
         )
 
         if ctx.current_plan and self.plan_adherence_hint:

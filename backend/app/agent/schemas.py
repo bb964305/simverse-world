@@ -62,6 +62,7 @@ class TickContext:
     memories: list[Memory] = field(default_factory=list)
     today_actions: list[str] = field(default_factory=list)
     available_actions: list[ActionType] = field(default_factory=list)
+    world_events: list[dict] = field(default_factory=list)  # S1: active world events (60s-cached)
     skip_remaining: bool = False
     # Budget circuit breaker (P1-1): when the breaker is at its 95%+ tier the
     # loop sets this so decide hard-follows the plan (no LLM interrupt) — the

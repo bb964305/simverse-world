@@ -35,4 +35,11 @@ class BasicPerceivePlugin:
             logger.warning("Perceive failed for %s: %s", ctx.resident.slug, e)
             ctx.skip_remaining = True
 
+        # S1: active world events (60s-cached, fail-open) for the decision prompt.
+        try:
+            from app.services.world_event_service import get_active_events_cached
+            ctx.world_events = await get_active_events_cached(ctx.db)
+        except Exception:
+            ctx.world_events = []
+
         return ctx

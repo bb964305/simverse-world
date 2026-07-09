@@ -178,6 +178,11 @@ async def handle_chat_msg(ctx: ConnectionContext, data: dict) -> None:
             select(User.soul_coin_balance).where(User.id == ctx.user_id)
         )
         balance = result.scalar_one()
+
+        # S1: fetch active world events (60s-cached) while the session is open,
+        # to fold into the dialogue system prompt below.
+        from app.services.world_event_service import get_active_events_cached
+        active_events = await get_active_events_cached(db)
     # Session closed — no DB connection held during LLM streaming below.
 
     await manager.send(ctx.user_id, {
@@ -191,7 +196,9 @@ async def handle_chat_msg(ctx: ConnectionContext, data: dict) -> None:
     media_type = data.get("media_type") or None
 
     ctx.chat_messages.append({"role": "user", "content": text})
-    system_prompt = assemble_system_prompt(ctx.resident, memory_context=ctx.memory_context)
+    system_prompt = assemble_system_prompt(
+        ctx.resident, memory_context=ctx.memory_context, world_events=active_events,
+    )
 
     # E-08: only send the last N turns to the model. ctx.chat_messages keeps the
     # full history (for persistence), but sending all of it re-pays for the whole

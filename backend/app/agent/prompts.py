@@ -56,6 +56,7 @@ def build_decision_prompt(
     today_actions: list[str],
     available_actions: list[ActionType],
     max_daily_actions: int,
+    world_events: list[dict] | None = None,
 ) -> tuple[str, str]:
     """Build (system_prompt, user_prompt) for the resident decision step."""
     from app.agent.map_data import get_location_at
@@ -105,6 +106,11 @@ def build_decision_prompt(
         recent_memories_text=memory_text,
         today_actions_text=today_text,
     )
+    # S1: fold any active world events into the decision prompt.
+    if world_events:
+        titles = "、".join(e.get("title", "") for e in world_events if e.get("title"))
+        if titles:
+            user += f"\n\n当前世界事件：{titles}"
     return system, user
 
 

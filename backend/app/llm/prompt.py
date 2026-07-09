@@ -37,10 +37,14 @@ def format_memory_context(ctx: dict) -> str:
     return "\n".join(sections) if sections else ""
 
 
-def assemble_system_prompt(resident: Resident, memory_context: dict | None = None) -> str:
+def assemble_system_prompt(
+    resident: Resident,
+    memory_context: dict | None = None,
+    world_events: list[dict] | None = None,
+) -> str:
     """Assemble the three-layer system prompt from resident data.
 
-    Optionally includes memory context if provided.
+    Optionally includes memory context and active world events (S1) if provided.
     """
     parts = [
         f"你是 {resident.name}，住在 Simverse World 的{resident.district}街区。",
@@ -64,6 +68,13 @@ def assemble_system_prompt(resident: Resident, memory_context: dict | None = Non
         if memory_text:
             parts.append("## 记忆（你记得的事）")
             parts.append(memory_text)
+
+    if world_events:
+        lines = [f"- {e.get('title', '')}：{e.get('description', '')}".rstrip("：") for e in world_events if e.get("title")]
+        if lines:
+            parts.append("")
+            parts.append("## 当前世界事件（正在发生的事）")
+            parts.extend(lines)
 
     parts.append("请始终保持角色扮演，用你的人格风格回应访客。回复简洁，不超过200字。")
     return "\n".join(parts)
