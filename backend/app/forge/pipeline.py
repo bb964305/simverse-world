@@ -11,6 +11,9 @@ from app.forge.extraction_stage import ExtractionStage
 from app.forge.build_stage import BuildStage
 from app.forge.validation_stage import ValidationStage
 from app.forge.refinement_stage import RefinementStage
+from app.forge.progress import (
+    notify_forge_progress, notify_forge_done, notify_forge_error,
+)
 from app.config import settings
 
 
@@ -81,14 +84,18 @@ class ForgePipeline:
             # Create Resident from completed session
             await self._create_resident(session)
             session.status = "done"
+            await self._db.commit()
+            await notify_forge_done(session.user_id, session.id)
         except Exception as e:
             session.status = "error"
             session.refinement_log = {
                 **(session.refinement_log or {}),
                 "error": str(e),
             }
+            await self._db.commit()
+            await notify_forge_error(session.user_id, session.id, str(e))
+            return session
 
-        await self._db.commit()
         return session
 
     async def _create_resident(self, session: ForgeSession):
@@ -135,6 +142,7 @@ class ForgePipeline:
         session.status = "building"
         session.current_stage = "build"
         await self._db.commit()
+        await notify_forge_progress(session.user_id, session.id, "build", "building")
 
         raw_text = session.research_data.get("raw_text", "")
         user_material = session.research_data.get("user_material", "")
@@ -157,6 +165,7 @@ class ForgePipeline:
         session.status = "researching"
         session.current_stage = "research"
         await self._db.commit()
+        await notify_forge_progress(session.user_id, session.id, "research", "researching")
 
         research = ResearchStage(searxng_url=self._searxng_url)
         research_results = await research.run(session.character_name, user_material)
@@ -172,6 +181,7 @@ class ForgePipeline:
         session.status = "extracting"
         session.current_stage = "extraction"
         await self._db.commit()
+        await notify_forge_progress(session.user_id, session.id, "extraction", "extracting")
 
         extraction = ExtractionStage(llm_client=self._user_client, model=self._model)
         extraction_result = await extraction.run(research_text, session.character_name)
@@ -182,6 +192,7 @@ class ForgePipeline:
         session.status = "building"
         session.current_stage = "build"
         await self._db.commit()
+        await notify_forge_progress(session.user_id, session.id, "build", "building")
 
         build = BuildStage(llm_client=self._user_client, model=self._model)
         build_result = await build.run(
@@ -196,6 +207,7 @@ class ForgePipeline:
         session.status = "validating"
         session.current_stage = "validation"
         await self._db.commit()
+        await notify_forge_progress(session.user_id, session.id, "validation", "validating")
 
         validation = ValidationStage(llm_client=self._user_client, model=self._model)
         validation_report = await validation.run(
@@ -211,6 +223,7 @@ class ForgePipeline:
         session.status = "refining"
         session.current_stage = "refinement"
         await self._db.commit()
+        await notify_forge_progress(session.user_id, session.id, "refinement", "refining")
 
         refinement = RefinementStage(llm_client=self._user_client, model=self._model)
         refined = await refinement.run(

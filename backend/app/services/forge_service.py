@@ -31,6 +31,9 @@ from app.agent.map_data import LOCATIONS as _MAP_LOCATIONS, get_location_id_at, 
 from app.llm.client import get_client
 from app.llm.json_extract import extract_json_object
 from app.llm.metering import record_usage
+from app.forge.progress import (
+    notify_forge_progress, notify_forge_done, notify_forge_error,
+)
 
 
 def _extract_text(response) -> str:
@@ -281,6 +284,7 @@ async def run_generation_pipeline(forge_id: str, db: AsyncSession) -> None:
         model = _settings.effective_model
 
         # Generate ability.md
+        await notify_forge_progress(session["user_id"], forge_id, "ability", "generating")
         ability_resp = await client.messages.create(
             model=model, max_tokens=1500, system=ABILITY_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": ABILITY_USER_TEMPLATE.format(
@@ -292,6 +296,7 @@ async def run_generation_pipeline(forge_id: str, db: AsyncSession) -> None:
         await record_usage("forge_ability", model=model, owner="system", response=ability_resp)
 
         # Generate persona.md
+        await notify_forge_progress(session["user_id"], forge_id, "persona", "generating")
         persona_resp = await client.messages.create(
             model=model, max_tokens=2000, system=PERSONA_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": PERSONA_USER_TEMPLATE.format(
@@ -304,6 +309,7 @@ async def run_generation_pipeline(forge_id: str, db: AsyncSession) -> None:
         await record_usage("forge_persona", model=model, owner="system", response=persona_resp)
 
         # Generate soul.md
+        await notify_forge_progress(session["user_id"], forge_id, "soul", "generating")
         soul_resp = await client.messages.create(
             model=model, max_tokens=1500, system=SOUL_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": SOUL_USER_TEMPLATE.format(
@@ -316,12 +322,14 @@ async def run_generation_pipeline(forge_id: str, db: AsyncSession) -> None:
         await record_usage("forge_soul", model=model, owner="system", response=soul_resp)
 
         # Score quality
+        await notify_forge_progress(session["user_id"], forge_id, "scoring", "generating")
         star_rating = await _score_quality(
             client, model, name,
             session["ability_md"], session["persona_md"], session["soul_md"],
         )
         session["star_rating"] = star_rating
 
+        await notify_forge_progress(session["user_id"], forge_id, "placing", "generating")
         district, tile_x, tile_y, home_loc_id = await allocate_resident_location(
             db,
             requested_location_id=await _assign_district(client, model, name, ability_desc, personality_desc),
@@ -369,10 +377,12 @@ async def run_generation_pipeline(forge_id: str, db: AsyncSession) -> None:
         await reward(db, session["user_id"], 50, "forge_creation")
 
         session["status"] = "done"
+        await notify_forge_done(session["user_id"], forge_id)
 
     except Exception as e:
         session["status"] = "error"
         session["error"] = str(e)
+        await notify_forge_error(session["user_id"], forge_id, str(e))
 
 
 async def run_quick_pipeline(forge_id: str, db: AsyncSession) -> None:
@@ -387,6 +397,7 @@ async def run_quick_pipeline(forge_id: str, db: AsyncSession) -> None:
     try:
         name = session["name"]
         raw_text = session["answers"].get("2", "")
+        await notify_forge_progress(session["user_id"], forge_id, "build", "generating")
 
         from app.config import settings as _settings
         import anthropic
@@ -516,6 +527,7 @@ asyncio.run(call_llm())
         await reward(db, session["user_id"], 50, "forge_creation")
 
         session["status"] = "done"
+        await notify_forge_done(session["user_id"], forge_id)
         logging.info(f"Quick forge: '{name}' done — {district}, {session['star_rating']}★")
 
     except Exception as e:
@@ -523,6 +535,7 @@ asyncio.run(call_llm())
         logging.error(f"Quick forge error: {e}\n{traceback.format_exc()}")
         session["status"] = "error"
         session["error"] = str(e)
+        await notify_forge_error(session["user_id"], forge_id, str(e))
 
 
 def _parse_combined_output(session: dict, text: str) -> None:
