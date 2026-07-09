@@ -671,3 +671,27 @@ export function updatePlayerPosition(tileX: number, tileY: number): Promise<{ ti
     body: JSON.stringify({ tile_x: tileX, tile_y: tileY }),
   })
 }
+
+// ── Notifications (S4) ──────────────────────────────────────────────
+import type { NotificationItem } from '../stores/gameStore'
+
+export interface NotificationListResponse {
+  notifications: NotificationItem[]
+  unread_count: number
+  next_cursor: string | null
+}
+
+export function getNotifications(opts: { unreadOnly?: boolean; cursor?: string } = {}): Promise<NotificationListResponse> {
+  const params = new URLSearchParams()
+  if (opts.unreadOnly) params.set('unread_only', 'true')
+  if (opts.cursor) params.set('cursor', opts.cursor)
+  const qs = params.toString()
+  return apiFetch(`/notifications${qs ? `?${qs}` : ''}`)
+}
+
+export function markNotificationsRead(ids: string[]): Promise<{ unread_count: number }> {
+  return apiFetch('/notifications/read', {
+    method: 'POST',
+    body: JSON.stringify({ ids }),
+  })
+}

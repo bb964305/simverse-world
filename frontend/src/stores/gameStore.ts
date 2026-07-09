@@ -28,9 +28,21 @@ export interface PlayerChatMessage {
   timestamp: number
 }
 
+export interface NotificationItem {
+  id: string
+  kind: string
+  title: string
+  body: string
+  payload: Record<string, unknown>
+  read: boolean
+  created_at: string | null
+}
+
 interface GameState {
   user: User | null
   token: string | null
+  notifications: NotificationItem[]
+  unreadCount: number
   playerSpriteKey: string
   chatOpen: boolean
   chatResident: { slug: string; name: string; role: string } | null
@@ -64,11 +76,16 @@ interface GameState {
   removeOnlinePlayer: (id: string) => void
   clearOnlinePlayers: () => void
   setSpawnPosition: (x: number, y: number) => void
+  setNotifications: (items: NotificationItem[], unread: number) => void
+  addNotification: (item: NotificationItem) => void
+  setUnreadCount: (n: number) => void
 }
 
 export const useGameStore = create<GameState>((set) => ({
   user: (() => { try { return JSON.parse(localStorage.getItem('user') || 'null') } catch { return null } })(),
   token: localStorage.getItem('token'),
+  notifications: [],
+  unreadCount: 0,
   playerSpriteKey: '埃迪',
   chatOpen: false,
   chatResident: null,
@@ -112,6 +129,9 @@ export const useGameStore = create<GameState>((set) => ({
   addPlayerChatMessage: (msg) => set((s) => ({ playerChatMessages: [...s.playerChatMessages, msg] })),
   setInputFocused: (v) => set({ inputFocused: v }),
   updateBalance: (balance) => set((s) => s.user ? { user: { ...s.user, soul_coin_balance: balance } } : {}),
+  setNotifications: (items, unread) => set({ notifications: items, unreadCount: unread }),
+  addNotification: (item) => set((s) => ({ notifications: [item, ...s.notifications], unreadCount: s.unreadCount + 1 })),
+  setUnreadCount: (n) => set({ unreadCount: n }),
   setProfileTab: (tab) => set({ profileTab: tab }),
   setOnlinePlayer: (p) => set((s) => {
     const next = new Map(s.onlinePlayers)

@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useGameStore } from '../stores/gameStore'
 import { SearchDropdown } from './SearchDropdown'
+import { NotificationDrawer } from './NotificationDrawer'
 import { bridge } from '../game/phaserBridge'
 import { disconnectWS } from '../services/ws'
+import { getNotifications } from '../services/api'
 
 function useClock() {
   const [time, setTime] = useState(() => new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }))
@@ -24,6 +26,26 @@ export function TopNav() {
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const avatarRef = useRef<HTMLDivElement>(null)
   const clock = useClock()
+  const unreadCount = useGameStore((s) => s.unreadCount)
+  const setNotifications = useGameStore((s) => s.setNotifications)
+  const [notifOpen, setNotifOpen] = useState(false)
+  const notifRef = useRef<HTMLDivElement>(null)
+
+  // Seed the unread badge on mount (notifications produced while offline).
+  useEffect(() => {
+    getNotifications()
+      .then((r) => setNotifications(r.notifications, r.unread_count))
+      .catch(() => {})
+  }, [setNotifications])
+
+  useEffect(() => {
+    if (!notifOpen) return
+    const handler = (e: MouseEvent) => {
+      if (notifRef.current && !notifRef.current.contains(e.target as Node)) setNotifOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [notifOpen])
 
   useEffect(() => {
     if (!dropdownOpen) return
@@ -81,6 +103,28 @@ export function TopNav() {
           color: 'var(--accent-green)', fontSize: 13,
           background: '#53d76915', padding: '4px 12px', borderRadius: 16,
         }}>🪙 {balance}</span>
+        <div ref={notifRef} style={{ position: 'relative' }}>
+          <button
+            onClick={() => setNotifOpen((v) => !v)}
+            title="通知"
+            style={{
+              position: 'relative', background: 'var(--bg-input)', border: 'none',
+              width: 30, height: 30, borderRadius: '50%', cursor: 'pointer',
+              fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}
+          >
+            🔔
+            {unreadCount > 0 && (
+              <span style={{
+                position: 'absolute', top: -4, right: -4, minWidth: 16, height: 16,
+                padding: '0 4px', borderRadius: 8, background: 'var(--accent-red)',
+                color: 'white', fontSize: 10, fontWeight: 700,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>{unreadCount > 99 ? '99+' : unreadCount}</span>
+            )}
+          </button>
+          {notifOpen && <NotificationDrawer onClose={() => setNotifOpen(false)} />}
+        </div>
         <div ref={avatarRef} style={{ position: 'relative' }}>
           <div
             onClick={() => setDropdownOpen((v) => !v)}

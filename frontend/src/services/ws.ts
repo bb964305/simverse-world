@@ -92,6 +92,20 @@ export function connectWS(): void {
           direction: (p.direction as string) || 'down',
         }))
       }
+      // Notification (S4): push a live notification into the store; the bell
+      // badge reads unreadCount and the drawer reads the list.
+      if (data.type === 'notification' && typeof data.id === 'string') {
+        useGameStore.getState().addNotification({
+          id: data.id as string,
+          kind: (data.kind as string) || 'system',
+          title: (data.title as string) || '',
+          body: (data.body as string) || '',
+          payload: (data.payload as Record<string, unknown>) || {},
+          read: false,
+          created_at: (data.created_at as string) ?? null,
+        })
+      }
+
       // Forge progress (P1-5): forge_progress / forge_done / forge_error are
       // consumed by the Forge components (DeepForge/QuickForge/ForgeChat) via
       // onWSMessage below — no store state to update here, they flow through as
