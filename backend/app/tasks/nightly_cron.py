@@ -44,6 +44,16 @@ async def run_nightly_jobs() -> None:
     except Exception:
         logger.error("Commission expiry failed", exc_info=True)
 
+    # E7: deliver due time capsules.
+    try:
+        from app.services.capsule_service import deliver_due_capsules
+        async with async_session() as db:
+            n = await deliver_due_capsules(db)
+        if n:
+            logger.info("Delivered %d time capsules", n)
+    except Exception:
+        logger.error("Capsule delivery failed", exc_info=True)
+
     # A2: schedule upcoming holidays / random news (idempotent).
     try:
         from app.tasks.event_templates import ensure_scheduled_events

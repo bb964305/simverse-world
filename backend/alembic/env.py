@@ -22,6 +22,7 @@ from app.models.daily_quest import DailyQuest
 from app.models.commission import Commission
 from app.models.resident_goal import ResidentGoal
 from app.models.bulletin_post import BulletinPost
+from app.models.time_capsule import TimeCapsule
 
 config = context.config
 if config.config_file_name is not None:
