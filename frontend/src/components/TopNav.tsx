@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useGameStore } from '../stores/gameStore'
 import { SearchDropdown } from './SearchDropdown'
 import { NotificationDrawer } from './NotificationDrawer'
+import { DigestModal } from './DigestModal'
 import { bridge } from '../game/phaserBridge'
 import { disconnectWS } from '../services/ws'
 import { getNotifications } from '../services/api'
@@ -30,6 +31,9 @@ export function TopNav() {
   const setNotifications = useGameStore((s) => s.setNotifications)
   const [notifOpen, setNotifOpen] = useState(false)
   const notifRef = useRef<HTMLDivElement>(null)
+  const digestUnread = useGameStore((s) => s.digestUnread)
+  const setDigestUnread = useGameStore((s) => s.setDigestUnread)
+  const [digestOpen, setDigestOpen] = useState(false)
 
   // Seed the unread badge on mount (notifications produced while offline).
   useEffect(() => {
@@ -103,6 +107,23 @@ export function TopNav() {
           color: 'var(--accent-green)', fontSize: 13,
           background: '#53d76915', padding: '4px 12px', borderRadius: 16,
         }}>🪙 {balance}</span>
+        <button
+          onClick={() => { setDigestOpen(true); setDigestUnread(false) }}
+          title="村落日报"
+          style={{
+            position: 'relative', background: 'var(--bg-input)', border: 'none',
+            width: 30, height: 30, borderRadius: '50%', cursor: 'pointer',
+            fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+        >
+          📰
+          {digestUnread && (
+            <span style={{
+              position: 'absolute', top: -2, right: -2, width: 9, height: 9,
+              borderRadius: '50%', background: 'var(--accent-red)',
+            }} />
+          )}
+        </button>
         <div ref={notifRef} style={{ position: 'relative' }}>
           <button
             onClick={() => setNotifOpen((v) => !v)}
@@ -181,6 +202,7 @@ export function TopNav() {
           )}
         </div>
       </div>
+      {digestOpen && <DigestModal onClose={() => setDigestOpen(false)} />}
     </nav>
   )
 }

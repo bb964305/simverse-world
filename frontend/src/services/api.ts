@@ -713,3 +713,18 @@ export interface AchievementEntry {
 export function getAchievements(): Promise<{ achievements: AchievementEntry[] }> {
   return apiFetch('/achievements')
 }
+
+// ── Digest (A5) ─────────────────────────────────────────────────────
+export interface DigestData {
+  id: string
+  scope: string
+  date: string
+  title: string
+  content_md: string
+  stats: Record<string, unknown>
+  created_at: string | null
+}
+
+export function getLatestDigest(): Promise<{ digest: DigestData | null }> {
+  return apiFetch('/digest/latest')
+}

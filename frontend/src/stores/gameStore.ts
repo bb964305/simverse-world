@@ -82,6 +82,8 @@ interface GameState {
   achievementToast: { code: string; title: string; reward_sc: number } | null
   showAchievementToast: (t: { code: string; title: string; reward_sc: number }) => void
   clearAchievementToast: () => void
+  digestUnread: boolean
+  setDigestUnread: (v: boolean) => void
 }
 
 export const useGameStore = create<GameState>((set) => ({
@@ -90,6 +92,7 @@ export const useGameStore = create<GameState>((set) => ({
   notifications: [],
   unreadCount: 0,
   achievementToast: null,
+  digestUnread: false,
   playerSpriteKey: '埃迪',
   chatOpen: false,
   chatResident: null,
@@ -139,6 +142,8 @@ export const useGameStore = create<GameState>((set) => ({
   achievementToast: null,
   showAchievementToast: (t) => set({ achievementToast: t }),
   clearAchievementToast: () => set({ achievementToast: null }),
+  digestUnread: false,
+  setDigestUnread: (v) => set({ digestUnread: v }),
   setProfileTab: (tab) => set({ profileTab: tab }),
   setOnlinePlayer: (p) => set((s) => {
     const next = new Map(s.onlinePlayers)

@@ -106,6 +106,11 @@ export function connectWS(): void {
         })
       }
 
+      // Village digest ready (A5): light up the newspaper icon's red dot.
+      if (data.type === 'digest_ready') {
+        useGameStore.getState().setDigestUnread(true)
+      }
+
       // Achievement unlocked (D1): pop a celebratory toast. The durable copy
       // also arrives as an S4 notification (bell), so no store list needed here.
       if (data.type === 'achievement_unlocked' && typeof data.code === 'string') {
