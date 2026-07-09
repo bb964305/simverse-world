@@ -273,6 +273,9 @@ class MainScene extends Phaser.Scene {
       if (msg.type === 'resident_chat_end') {
         this._handleResidentChatEnd(msg as { initiator_slug: string; target_slug: string; summary: string; mood?: string })
       }
+      if (msg.type === 'resident_greeting') {
+        this._handleResidentGreeting(msg as { resident_slug: string; text: string })
+      }
     })
 
     // Listen for camera pan requests from React UI (search, bulletin board)
@@ -605,6 +608,22 @@ class MainScene extends Phaser.Scene {
         this.time.delayedCall(5000, () => summaryBubble.destroy())
       }
     }
+  }
+
+  private _handleResidentGreeting(msg: { resident_slug: string; text: string }): void {
+    // A3: show the greeting as a speech bubble over the resident for ~6s.
+    const idx = this.residents.findIndex(r => r.slug === msg.resident_slug)
+    if (idx < 0) return
+    const sprite = this.npcSprites[idx]
+    if (!sprite) return
+    const bubble = this.add.text(sprite.x, sprite.y - 74, `👋 ${msg.text}`, {
+      fontSize: '11px',
+      backgroundColor: '#7c3aeedd',
+      padding: { x: 8, y: 4 },
+      color: '#f5f3ff',
+      wordWrap: { width: 170 },
+    }).setOrigin(0.5).setDepth(11)
+    this.time.delayedCall(6000, () => bubble.destroy())
   }
 
   private _handleResidentStatusUpdate(msg: {
