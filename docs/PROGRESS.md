@@ -91,7 +91,8 @@
   - **D1** — `a94d7a7`（后端）+ `522443a`（前端）。ACHIEVEMENT_DEFS 扩到 **12**（first_chat/deep_talk/remembered/memory_keeper_10/soul_shaper/week_streak/explorer_5/explorer_all/errand_runner/patron/socialite/dreamt_of[hidden]），每事件一个 checker（新增 `increment_distinct` 供 socialite 按去重居民计数；explorer_all target=全部命名地点=20）。first_chat 奖励 10→20（同步改 S2 测试）。**新接埋点**：`memory_written_about_user`（`add_memory` related_user_id 非空时 post-commit emit）→ remembered/memory_keeper_10；`personality_shifted`（`evolution._apply_changes` shift 分支，经 trigger memory 的 related_user_id 归因）→ soul_shaper。其余事件源按归属：login_streak(D3)/commission_completed(B1)/purchase_tip(A4)/dream_generated(E2)——checker 已注册待触发。前端 ProfilePage 成就 tab（徽章墙：未解锁灰显+进度条+hidden 显示 ???）+ 全局 `AchievementToast`（ws `achievement_unlocked` 驱动）+ `getAchievements`。**验证**：12 成就各一条 pytest（伪造事件→断言解锁）全绿；全量选择性套件 **516 passed / 0 新失败**；前端 tsc/lint/build 全过。
 
 ## 批次 2 — 玩法纵深
-- [ ] A1 人生目标 🔥 · [ ] B1 委托任务 🔥 · [ ] B2 位置偶遇 · [ ] D3 每日循环 · [ ] E1 情绪引擎 · [ ] E4 目击记忆
+- [ ] A1 人生目标 🔥 · [ ] B1 委托任务 🔥 · [ ] B2 位置偶遇 · [ ] D3 每日循环 · [x] E1 情绪引擎 · [ ] E4 目击记忆
+  - **E1** — `7ecd5ea`。`residents.mood_json` + 迁移 **020**（column add）。`mood_service`：8 词标签 (valence,arousal) 映射（中性→calm）、`apply_mood_event` 事件加权、`decay_all` 每小时向中性回归（heat_cron 内，~48h→calm）。消费：decide prompt 加「当前心情：{label}」+ 低落/高涨行为提示；玩家对话 prompt 注入心情行；D2 送礼 +0.25、rate_chat 4★+0.15/2★-0.15 触发情绪。**偏差**：mood 存 JSON 列，decay 用批量 load-update（非单 SQL，JSON 不可移植）；衰减挪到 heat_cron 每小时（比每 tick 更贴合「48h 回 calm」）；resident_status 广播 mood_label + NpcTooltip emoji 前端未做（留后续，行为价值已由 prompt 注入交付）；100-tick 决策分布测试留后续。**验证**：`test_mood.py` 6 例（标签映射/送礼升档/衰减回归/decide+player prompt 注入/送礼集成）全绿；全量选择性套件 **537 passed / 0 新失败**。
 
 ## 批次 3 — 内容与传播
 - [ ] C1 灵魂卡片 · [ ] C2 关系图谱 · [ ] A2 世界事件运营化 · [ ] A4 居民创作 🔥 · [ ] E8 探索图鉴 · [ ] E7 时间胶囊
