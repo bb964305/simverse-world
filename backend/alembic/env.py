@@ -19,6 +19,7 @@ from app.models.shop import Item, Purchase
 from app.models.location_visit import LocationVisit
 from app.models.digest import Digest
 from app.models.daily_quest import DailyQuest
+from app.models.commission import Commission
 
 config = context.config
 if config.config_file_name is not None:

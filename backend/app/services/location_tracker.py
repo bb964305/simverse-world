@@ -116,6 +116,12 @@ async def process_one(user_id: str, location_id: str) -> None:
             await maybe_encounter(db, user_id, location_id)
         except Exception:
             logger.warning("encounter check failed for %s@%s", user_id, location_id, exc_info=True)
+        # B1: entering a location may complete a visit_location commission.
+        try:
+            from app.services.commission_service import check_visit_commissions
+            await check_visit_commissions(db, user_id, location_id)
+        except Exception:
+            logger.warning("commission visit check failed for %s@%s", user_id, location_id, exc_info=True)
 
 
 async def location_consumer_loop() -> None:

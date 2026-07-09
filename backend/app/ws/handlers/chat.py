@@ -320,7 +320,8 @@ async def handle_end_chat(ctx: ConnectionContext, data: dict) -> None:
     # S2: fire the chat_completed domain event (achievements, etc.). Handlers run
     # in their own sessions; a handler failure never affects the chat teardown.
     from app.events.bus import emit
-    await emit(None, "chat_completed", user_id=ctx.user_id, resident_id=resident_id, turns=conv_turns)
+    await emit(None, "chat_completed", user_id=ctx.user_id, resident_id=resident_id,
+               turns=conv_turns, conversation_id=conv_id)
 
     # Release the resident lock
     await manager.unlock_resident(resident_id)

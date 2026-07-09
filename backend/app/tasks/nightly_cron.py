@@ -33,6 +33,16 @@ async def run_nightly_jobs() -> None:
         logger.info("Nightly digest ready: %s", digest.title)
     except Exception:
         logger.error("Nightly village digest failed", exc_info=True)
+
+    # B1: expire stale commissions.
+    try:
+        from app.services.commission_service import expire_commissions
+        async with async_session() as db:
+            n = await expire_commissions(db)
+        if n:
+            logger.info("Expired %d commissions", n)
+    except Exception:
+        logger.error("Commission expiry failed", exc_info=True)
     # Future: A1 weekly eval, E2 dreams, E7 capsule delivery — each own try/except.
 
 
