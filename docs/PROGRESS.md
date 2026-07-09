@@ -109,7 +109,8 @@
   - **C2** — `c36aad0`。**无表**。`GET /graph/relationships?min_importance=`：**Python 侧聚合**（非 PG array_agg，sqlite 可跑）type=relationship 记忆 → 节点(居民)+边(MAX importance 为 strength，最近 content 为 label，双向 mutual 去重取两向最大)，模块级 10 分钟缓存；玩家自己的边仅本人可见（related_user_id，隐私）。前端懒加载 `/graph` GraphPage 自研力导向 canvas（斥力+弹簧+阻尼，不引 d3）。**验证**：`test_graph.py` 4 例（冷启动空 / 双向去重取 max / min_importance 过滤 / 玩家边仅本人）全绿；全量选择性套件 **570 passed / 0 新失败**；前端 tsc/lint(基线)/build 过。
 
 ## 批次 4 — 记忆放大器
-- [ ] E2 梦境 🔥 · [ ] E3 谣言传播 🔥 · [ ] E14 周报 🔥 · [ ] E11 关注动态流 · [ ] E10 合影 · [ ] E5 TTS 🔥
+- [ ] E2 梦境 🔥 · [ ] E3 谣言传播 🔥 · [ ] E14 周报 🔥 · [x] E11 关注动态流 · [ ] E10 合影 · [ ] E5 TTS 🔥
+  - **E11** — `6789708`。`follows` + `feed_events` 表 + 迁移 **026**。`feed_service`：`push(slug,kind,payload)`（**自有 session**，写 FeedEvent + 向在线关注者实时 `manager.send(feed_event)`，供各功能一行接入）、`list_feed`（JOIN follows，`created_at+id` 二级游标）、`follow/unfollow`（上限 50）。**已接 push 点**：A4 创作 + 人格跳变；其余(A1 目标/E9 辩论/E1 情绪剧变)是一行 push，随功能补。`GET /feed`、`POST/DELETE /follows/{slug}`。**偏差**：ProfilePage 动态 tab `FeedList` + 关注按钮 + 铃铛合流前端未做（API 已就绪）。**验证**：`test_feed.py` 5 例（关注/取关幂等 / 上限 50 / feed 仅关注 / push 写库+在线推送 / 取关后清空）全绿；全量选择性套件 **594 passed / 0 新失败**。
 
 ## 赛季装配（一次版本发布）
 - [ ] 迁移 022（seasons 全家）· [ ] E12 赛季榜 · [ ] C3 剧本季 🔥 · [ ] E9 辩论擂台 🔥 · [ ] E13 目标投资
