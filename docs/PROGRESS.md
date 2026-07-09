@@ -53,7 +53,12 @@
   - **验证**：前端 `tsc --noEmit` 过、`eslint` = 基线 7err/3warn（改动文件零新增，`_residentId` 为预存）、`vite build` 分包不变（首屏 index 232.54kB）。后端新增 `test_forge_progress.py` 5 例（helper 信封/吞异常 + 深度五阶段+done + quick build+done + 失败发 error）全绿；forge 相关 22 例（17 既有+5 新）全绿；全量（排除 6 个预存网络/基线文件 import/map_integration/research_stage/resident_edit/portrait/preset_import）**476 passed / 0 新失败**。⚠️ 真实浏览器 E2E（WS 到达 forge 页、三种模式跑通）留 vm212（玩家交互链路可用）。
 
 ## 底座周（FEATURE_SPECS §1，迁移 012-016）
-- [ ] S1 世界事件总线（world_events + event_cron + 三注入点）
+- [x] S1 世界事件总线（world_events + event_cron + 三注入点）— `2ce797d`（bus 基建）+ `ce7a78a`（prompt 注入）+ `0f53189`（测试）
+  - **表/迁移**：`models/world_event.py`（id/type/title/description/payload_json/starts_at/ends_at/created_by/is_active[index]/created_at）；迁移 **014**（`down_revision=013_add_llm_usage`）——**底座周迁移号整体 +2**：spec 的 012/013 已被 sync_schema_drift/llm_usage 占用，故 S1=014、后续 S4=015/S2=016/S3=017/S5=018（spec §40 允许非号码序）。`created_by` 用普通 String 列（非硬 FK），沿用 llm_usage 规避 vm212 FK 类 bug 的做法。迁移 014 单表 up/down 在 sqlite 隔离实测通过。
+  - **服务/cron**：`services/world_event_service.py`（`get_active_events_cached` 60s 进程缓存 + `flip_active_events` 按时间翻转返回 (event, "start"|"end")）；`tasks/event_cron.py`（60s，`run_background_tasks` 闸门，翻转后 `manager.broadcast({type:world_event,event,phase})` 经 Redis pub/sub 扇出）——在 `main.py` lifespan 与 `agent/main.py` 双注册（单实例跑）。
+  - **三注入点**：① perceive → `TickContext.world_events`（60s 缓存、fail-open）→ `build_decision_prompt` 追加「当前世界事件：{titles}」；② `llm/prompt.py::assemble_system_prompt` 加活跃事件段落，玩家聊天 handler 在 open session 内取缓存并传入；③ cron 翻转广播（前端 banner 归 A2，S1 只发广播）。
+  - **API**：公共 `GET /events/active`；管理端 `GET/POST/PATCH/DELETE /admin/events`（require_admin，POST 建为 inactive 让 cron 统一翻转+广播）。均注册进 `main.py`/admin `__init__`。
+  - **验证**：新增 `test_world_events.py` 8 例（flip start/end/no-change + 缓存读写/失效 + decide/player prompt 注入 + cron loop 广播）全绿；全量选择性套件（排除 6 个预存网络/基线文件）**484 passed / 0 新失败**。⚠️ 全链 `alembic upgrade head` + 真 PG 复验留 vm212（沙盒无 pgvector）。
 - [ ] S2 事件钩子 bus + 成就引擎（achievements 表 + 6 个埋点）
 - [ ] S3 商店管线（items/purchases + shop_service）
 - [ ] S4 通知中心（notifications + NotificationDrawer）
