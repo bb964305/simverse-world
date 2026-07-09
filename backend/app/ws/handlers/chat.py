@@ -311,6 +311,12 @@ async def handle_end_chat(ctx: ConnectionContext, data: dict) -> None:
         prev_status = fresh_resident.status if fresh_resident else "idle"
         fresh_resident_name = fresh_resident.name if fresh_resident else ""
         conv_id = fresh_conv.id if fresh_conv else ""
+        conv_turns = fresh_conv.turns if fresh_conv else 0
+
+    # S2: fire the chat_completed domain event (achievements, etc.). Handlers run
+    # in their own sessions; a handler failure never affects the chat teardown.
+    from app.events.bus import emit
+    await emit(None, "chat_completed", user_id=ctx.user_id, resident_id=resident_id, turns=conv_turns)
 
     # Release the resident lock
     await manager.unlock_resident(resident_id)
