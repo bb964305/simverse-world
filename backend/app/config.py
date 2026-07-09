@@ -93,6 +93,12 @@ class Settings(BaseSettings):
     portrait_llm_api_key: str = ""
     portrait_llm_timeout: int = 180
 
+    # --- TTS (E5) ---
+    tts_base_url: str = ""
+    tts_api_key: str = ""
+    tts_model: str = "tts-1"
+    tts_daily_free_quota: int = 30
+
     # --- System LLM advanced params (Plan 1) ---
     system_llm_temperature: float = 0.3
     system_llm_timeout: int = 30
