@@ -40,6 +40,7 @@ async def lifespan(app):
         import app.models.notification  # noqa: F401
         import app.models.achievement  # noqa: F401
         import app.models.shop  # noqa: F401
+        import app.models.location_visit  # noqa: F401
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         # Seed achievement definitions (idempotent) so GET /achievements + the
@@ -58,6 +59,12 @@ async def lifespan(app):
     # run_background_tasks — this process owns live WebSocket clients even when
     # the agent loops live in the standalone worker.
     subscriber_task = asyncio.create_task(manager.run_subscriber())
+
+    # S5: the location-visit consumer runs on every API worker (move messages
+    # arrive on the worker that owns the user's socket), independent of
+    # run_background_tasks. DB writes happen off the move hot path here.
+    from app.services.location_tracker import location_consumer_loop
+    location_task = asyncio.create_task(location_consumer_loop())
 
     # Background loops run in-process only in single-process mode (P0-3):
     # with RUN_BACKGROUND_TASKS=false they are owned by the standalone
@@ -78,6 +85,7 @@ async def lifespan(app):
         )
     yield
     subscriber_task.cancel()
+    location_task.cancel()
     for task in background_tasks:
         task.cancel()
     await close_client()

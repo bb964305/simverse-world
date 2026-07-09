@@ -16,6 +16,7 @@ from app.models.world_event import WorldEvent
 from app.models.notification import Notification
 from app.models.achievement import Achievement, UserAchievement
 from app.models.shop import Item, Purchase
+from app.models.location_visit import LocationVisit
 
 config = context.config
 if config.config_file_name is not None:

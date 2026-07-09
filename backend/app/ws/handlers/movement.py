@@ -1,6 +1,7 @@
 """Fast-path handlers that never touch the database: move, cancel_queue."""
 from app.ws.manager import manager
 from app.ws.handlers.context import ConnectionContext
+from app.services.location_tracker import on_move, pixel_to_tile
 
 
 async def handle_cancel_queue(ctx: ConnectionContext, data: dict) -> None:
@@ -13,6 +14,10 @@ async def handle_move(ctx: ConnectionContext, data: dict) -> None:
     y = float(data.get("y", 0))
     direction = str(data.get("direction", "down"))
     await manager.update_position(ctx.user_id, x, y, direction, ctx.user_name)
+    # S5: pure in-memory location check; only a new named location enqueues a
+    # visit for the background consumer (no DB touch on this hot path).
+    tile_x, tile_y = pixel_to_tile(x, y)
+    on_move(ctx.user_id, tile_x, tile_y)
     await manager.broadcast(
         {"type": "player_moved", "player_id": ctx.user_id,
          "name": ctx.user_name,
