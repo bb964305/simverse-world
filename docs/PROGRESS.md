@@ -84,7 +84,8 @@
   - **验证**：新增 `test_location_tracker.py` 4 例（tile 查找 / on_move 仅新位置入队+开阔地重置+重入 / 消费者首访 insert 再访 increment + emit 恰一次 / 5 次首访解锁 explorer_5 端到端）全绿；全量选择性套件 **504 passed / 0 新失败**。⚠️ 全链迁移 + 真 PG 复验、move P99 压测留 vm212。
 
 ## 批次 1 — 体感与经济
-- [ ] A3 居民主动找玩家 · [ ] A5 村落日报 🔥 · [ ] D2 消耗场景 · [ ] D1 成就（12 个 seed）
+- [ ] A3 居民主动找玩家 · [ ] A5 村落日报 🔥 · [ ] D2 消耗场景 · [x] D1 成就（12 个 seed）
+  - **D1** — `a94d7a7`（后端）+ `522443a`（前端）。ACHIEVEMENT_DEFS 扩到 **12**（first_chat/deep_talk/remembered/memory_keeper_10/soul_shaper/week_streak/explorer_5/explorer_all/errand_runner/patron/socialite/dreamt_of[hidden]），每事件一个 checker（新增 `increment_distinct` 供 socialite 按去重居民计数；explorer_all target=全部命名地点=20）。first_chat 奖励 10→20（同步改 S2 测试）。**新接埋点**：`memory_written_about_user`（`add_memory` related_user_id 非空时 post-commit emit）→ remembered/memory_keeper_10；`personality_shifted`（`evolution._apply_changes` shift 分支，经 trigger memory 的 related_user_id 归因）→ soul_shaper。其余事件源按归属：login_streak(D3)/commission_completed(B1)/purchase_tip(A4)/dream_generated(E2)——checker 已注册待触发。前端 ProfilePage 成就 tab（徽章墙：未解锁灰显+进度条+hidden 显示 ???）+ 全局 `AchievementToast`（ws `achievement_unlocked` 驱动）+ `getAchievements`。**验证**：12 成就各一条 pytest（伪造事件→断言解锁）全绿；全量选择性套件 **516 passed / 0 新失败**；前端 tsc/lint/build 全过。
 
 ## 批次 2 — 玩法纵深
 - [ ] A1 人生目标 🔥 · [ ] B1 委托任务 🔥 · [ ] B2 位置偶遇 · [ ] D3 每日循环 · [ ] E1 情绪引擎 · [ ] E4 目击记忆
