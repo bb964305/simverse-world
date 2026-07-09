@@ -14,6 +14,7 @@ from app.agent.loop import agent_loop
 from app.redis_client import close_redis
 from app.tasks.embedding_backfill import embedding_backfill_loop
 from app.tasks.heat_cron import heat_cron_loop
+from app.tasks.event_cron import event_cron_loop
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ async def main() -> None:
     tasks = [
         asyncio.create_task(agent_loop.run(), name="agent-loop"),
         asyncio.create_task(heat_cron_loop(), name="heat-cron"),
+        asyncio.create_task(event_cron_loop(), name="event-cron"),
         asyncio.create_task(embedding_backfill_loop(), name="embedding-backfill"),
     ]
     stop_task = asyncio.create_task(stop_event.wait(), name="stop-signal")

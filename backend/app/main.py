@@ -4,10 +4,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
-from app.routers import auth, users, residents, forge, profile, search, bulletin, onboarding, sprites, avatar, settings as settings_router, media as media_router
+from app.routers import auth, users, residents, forge, profile, search, bulletin, onboarding, sprites, avatar, settings as settings_router, media as media_router, events as events_router
 from app.routers.admin import router as admin_router
 from app.ws.handlers import websocket_handler
 from app.tasks.heat_cron import heat_cron_loop
+from app.tasks.event_cron import event_cron_loop
 from app.tasks.embedding_backfill import embedding_backfill_loop
 from app.agent.loop import agent_loop
 from app.http import close_client
@@ -33,6 +34,7 @@ async def lifespan(app):
         import app.models.pending_message  # noqa: F401
         import app.models.memory  # noqa: F401
         import app.models.personality_history  # noqa: F401
+        import app.models.world_event  # noqa: F401
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
@@ -49,6 +51,7 @@ async def lifespan(app):
     if settings.run_background_tasks:
         background_tasks = [
             asyncio.create_task(heat_cron_loop()),
+            asyncio.create_task(event_cron_loop()),
             asyncio.create_task(agent_loop.run()),
             asyncio.create_task(embedding_backfill_loop()),
         ]
@@ -99,6 +102,7 @@ app.include_router(sprites.router)
 app.include_router(avatar.router)
 app.include_router(settings_router.router)
 app.include_router(media_router.router)
+app.include_router(events_router.router)
 app.include_router(admin_router)
 
 
