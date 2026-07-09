@@ -20,6 +20,7 @@ class ConnectionContext:
     resident: Resident | None = None
     chat_messages: list[dict] = field(default_factory=list)
     memory_context: dict | None = None
+    encounter_context: str | None = None  # B2: scene context for this chat
 
     @property
     def in_chat(self) -> bool:
@@ -30,3 +31,4 @@ class ConnectionContext:
         self.resident = None
         self.chat_messages = []
         self.memory_context = None
+        self.encounter_context = None

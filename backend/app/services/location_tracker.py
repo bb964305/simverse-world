@@ -110,7 +110,12 @@ async def process_one(user_id: str, location_id: str) -> None:
         first = await _record_visit(db, user_id, location_id)
         if first:
             await emit(db, "location_first_visit", user_id=user_id, location_id=location_id)
-            # B2 encounter check hooks in here later.
+        # B2: entering a location may surface an encounter with a nearby resident.
+        try:
+            from app.services.encounter_service import maybe_encounter
+            await maybe_encounter(db, user_id, location_id)
+        except Exception:
+            logger.warning("encounter check failed for %s@%s", user_id, location_id, exc_info=True)
 
 
 async def location_consumer_loop() -> None:

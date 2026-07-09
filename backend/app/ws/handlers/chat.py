@@ -41,6 +41,7 @@ async def handle_start_chat(ctx: ConnectionContext, data: dict) -> None:
         await manager.send(ctx.user_id, {"type": "error", "message": "Invalid message format"})
         return
     slug = msg.resident_slug
+    ctx.encounter_context = msg.context  # B2: scene context for this chat, if any
 
     async with async_session() as db:
         result = await db.execute(select(Resident).where(Resident.slug == slug))
@@ -199,6 +200,9 @@ async def handle_chat_msg(ctx: ConnectionContext, data: dict) -> None:
     system_prompt = assemble_system_prompt(
         ctx.resident, memory_context=ctx.memory_context, world_events=active_events,
     )
+    # B2: if this chat started from an encounter, splice the scene in.
+    if ctx.encounter_context:
+        system_prompt += f"\n\n（当前场景：{ctx.encounter_context}）"
 
     # E-08: only send the last N turns to the model. ctx.chat_messages keeps the
     # full history (for persistence), but sending all of it re-pays for the whole

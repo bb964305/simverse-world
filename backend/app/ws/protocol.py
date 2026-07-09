@@ -6,6 +6,7 @@ class StartChat(BaseModel):
     type: Literal["start_chat"] = "start_chat"
     resident_slug: str
     wake: bool = False  # spend extra coins to wake a sleeping NPC
+    context: str | None = None  # B2: scene context from an encounter, spliced into the prompt
 
 
 class ChatMsg(BaseModel):
