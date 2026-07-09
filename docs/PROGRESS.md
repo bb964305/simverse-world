@@ -66,7 +66,11 @@
   - **埋点**：`chat_completed`（`ws/handlers/chat.py` end_chat 提交后 emit，user_id/resident_id/turns）→ 解锁 `first_chat` + 计数 `conversationalist_10`。**偏差/记录**：spec 列 6 埋点，其余按归属分散——`location_first_visit` 由 **S5**（下一任务）发射（checker `explorer_5` 已注册待触发）；`login_streak`（需 D3 的连登字段，现 daily_reward 无 streak）、`memory_written_about_user`/`personality_shifted`（热路径 mid-transaction，避免额外开销）、`commission_completed`（B1）留各自 feature 落地时补 emit（bus/引擎已就绪，接一行 emit 即可）。
   - **API**：`GET /achievements`（defs+我的进度合并）。
   - **验证**：新增 `test_achievements.py` 6 例（bus 隔离 / first_chat 解锁+奖励+WS / 幂等不重复奖励 / 计数到 10 解锁 / 合并进度 / API）全绿；全量选择性套件 **495 passed / 0 新失败**（顺带把 dev 启动 seed 包 try/except 保证 `test_create_all_switch` 不受影响）。⚠️ 全链迁移 + 真 PG 复验留 vm212。
-- [ ] S3 商店管线（items/purchases + shop_service）
+- [x] S3 商店管线（items/purchases + shop_service）— `8cf7632`
+  - **表/迁移**：Item(id/code[unique]/kind/name/description/icon/price_sc/payload_json/active) + Purchase(id/user_id[index]/item_code/qty/total_sc/context_json/created_at)；迁移 **017**（down=016）。up/down sqlite 隔离实测通过。
+  - **服务**：`shop_service.purchase(db,user_id,item_code,qty,context)` = 查 active Item → `charge()`（reason=`purchase:{code}`，不足抛 `ShopError`；charge 失败不留副作用）→ 写 Purchase → 按 `item.kind` 经 `shop_effects` 注册表分发效果（D2/B3/A3 各自 `@register(kind)`；效果 handler 失败隔离）。S3 本身不带内置效果（无 handler 的 kind = 合法 no-op）。
+  - **API**：公共 `GET /shop/catalog`、`POST /shop/purchase {item_code,qty,context}`（ShopError→400）；管理端 `GET/POST/PATCH /admin/items`（require_admin）。
+  - **验证**：新增 `test_shop.py` 5 例（成功扣费+Purchase+transaction / 余额不足 400 且零副作用 / 未知或下架 item / 按 kind 派发效果 / catalog+purchase API 含 400）全绿；全量选择性套件 **500 passed / 0 新失败**。⚠️ 全链迁移 + 真 PG 复验留 vm212。
 - [x] S4 通知中心（notifications + NotificationDrawer）— `83062ba`（后端）+ `3838f05`（前端）
   - **表/迁移**：`models/notification.py`（id/user_id[index]/kind[String30]/title/body/payload_json/read_at[nullable]/created_at[index]）；迁移 **015**（down=014）。user_id 普通索引列（非 FK）。015 单表 up/down sqlite 隔离实测通过。
   - **服务**：`services/notification_service.py::notify(db,user_id,kind,title,body,payload)` 写durable行（**提交自身写**，与 coin_service 一致）+ 若 `manager.is_online` 则 `manager.send({type:notification,...})`（best-effort，吞异常）。供 S2 成就解锁等复用。
