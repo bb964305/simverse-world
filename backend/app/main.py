@@ -49,10 +49,12 @@ async def lifespan(app):
         try:
             from app.database import async_session
             from app.events.achievements import seed_achievements
+            from app.services.shop_service import seed_items
             async with async_session() as _db:
                 await seed_achievements(_db)
+                await seed_items(_db)
         except Exception:
-            logger.warning("achievement seed skipped", exc_info=True)
+            logger.warning("achievement/item seed skipped", exc_info=True)
 
     # WS pub/sub subscriber (P0-3b): every API worker relays broadcast/direct
     # envelopes from Redis to its own local sockets. Runs regardless of
