@@ -118,7 +118,8 @@
   - **E11** — `6789708`。`follows` + `feed_events` 表 + 迁移 **026**。`feed_service`：`push(slug,kind,payload)`（**自有 session**，写 FeedEvent + 向在线关注者实时 `manager.send(feed_event)`，供各功能一行接入）、`list_feed`（JOIN follows，`created_at+id` 二级游标）、`follow/unfollow`（上限 50）。**已接 push 点**：A4 创作 + 人格跳变；其余(A1 目标/E9 辩论/E1 情绪剧变)是一行 push，随功能补。`GET /feed`、`POST/DELETE /follows/{slug}`。**偏差**：ProfilePage 动态 tab `FeedList` + 关注按钮 + 铃铛合流前端未做（API 已就绪）。**验证**：`test_feed.py` 5 例（关注/取关幂等 / 上限 50 / feed 仅关注 / push 写库+在线推送 / 取关后清空）全绿；全量选择性套件 **594 passed / 0 新失败**。
 
 ## 赛季装配（一次版本发布）
-- [ ] 迁移 022（seasons 全家）· [ ] E12 赛季榜 · [ ] C3 剧本季 🔥 · [ ] E9 辩论擂台 🔥 · [ ] E13 目标投资
+- [x] 迁移（seasons 全家 = 027）· [x] E12 赛季榜 · [ ] C3 剧本季 🔥 · [ ] E9 辩论擂台 🔥 · [ ] E13 目标投资
+  - **seasons 全家 + E12** — `e87d127`。迁移 **027**（seasons/season_scripts/polls/votes/season_scores 五表，5 表 up/down sqlite 隔离实测通过；注意：spec 编号 022 已被基线占用，实际用 027）。`season_service`：缓存 active season、`add_points`（per-user 每日上限 100，Redis）、`leaderboard`+around_me、`settle_season`（final_ranks 快照 + top-3 SC 奖，幂等 payload.settled）。`season_scorer`（挂 S2 bus）：chat_completed（每日前 5 次×5）、commission_completed（15）、location_first_visit（10）。`GET /seasons/current(+/leaderboard?around_me=)`。**偏差**：成就 points/辩论/剧本季积分事件源未接（add_points 通用，随各功能补）；`SeasonLeaderboard` 前端未做。**验证**：`test_seasons.py` 5 例（每日封顶 100 / 无赛季不计 / chat 前 5 次 / around_me / 结算幂等+奖）全绿；全量选择性套件 **620 passed / 0 新失败**。
 
 ## Phase 3 — 持续项（穿插进行，不阻塞主线）
 - [ ] P1-3 分页与索引补齐 · [ ] P1-6 大文件拆分 · [ ] CI（GitHub Actions）· [ ] 前端测试底座 · [ ] Sentry + /metrics
