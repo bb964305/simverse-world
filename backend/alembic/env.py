@@ -17,6 +17,7 @@ from app.models.notification import Notification
 from app.models.achievement import Achievement, UserAchievement
 from app.models.shop import Item, Purchase
 from app.models.location_visit import LocationVisit
+from app.models.digest import Digest
 
 config = context.config
 if config.config_file_name is not None:

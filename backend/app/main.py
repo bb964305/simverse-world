@@ -4,13 +4,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
-from app.routers import auth, users, residents, forge, profile, search, bulletin, onboarding, sprites, avatar, settings as settings_router, media as media_router, events as events_router, notifications as notifications_router, achievements as achievements_router, shop as shop_router
+from app.routers import auth, users, residents, forge, profile, search, bulletin, onboarding, sprites, avatar, settings as settings_router, media as media_router, events as events_router, notifications as notifications_router, achievements as achievements_router, shop as shop_router, digest as digest_router
 # Import the achievement checkers so their @on(...) handlers register on the bus.
 import app.events.achievements  # noqa: F401
 from app.routers.admin import router as admin_router
 from app.ws.handlers import websocket_handler
 from app.tasks.heat_cron import heat_cron_loop
 from app.tasks.event_cron import event_cron_loop
+from app.tasks.nightly_cron import nightly_cron_loop
 from app.tasks.embedding_backfill import embedding_backfill_loop
 from app.agent.loop import agent_loop
 from app.http import close_client
@@ -41,6 +42,7 @@ async def lifespan(app):
         import app.models.achievement  # noqa: F401
         import app.models.shop  # noqa: F401
         import app.models.location_visit  # noqa: F401
+        import app.models.digest  # noqa: F401
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         # Seed achievement definitions (idempotent) so GET /achievements + the
@@ -76,6 +78,7 @@ async def lifespan(app):
         background_tasks = [
             asyncio.create_task(heat_cron_loop()),
             asyncio.create_task(event_cron_loop()),
+            asyncio.create_task(nightly_cron_loop()),
             asyncio.create_task(agent_loop.run()),
             asyncio.create_task(embedding_backfill_loop()),
         ]
@@ -131,6 +134,7 @@ app.include_router(events_router.router)
 app.include_router(notifications_router.router)
 app.include_router(achievements_router.router)
 app.include_router(shop_router.router)
+app.include_router(digest_router.router)
 app.include_router(admin_router)
 
 
