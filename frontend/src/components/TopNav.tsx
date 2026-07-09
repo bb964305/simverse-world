@@ -4,6 +4,7 @@ import { useGameStore } from '../stores/gameStore'
 import { SearchDropdown } from './SearchDropdown'
 import { NotificationDrawer } from './NotificationDrawer'
 import { DigestModal } from './DigestModal'
+import { CommissionModal } from './CommissionModal'
 import { bridge } from '../game/phaserBridge'
 import { disconnectWS } from '../services/ws'
 import { getNotifications } from '../services/api'
@@ -34,6 +35,7 @@ export function TopNav() {
   const digestUnread = useGameStore((s) => s.digestUnread)
   const setDigestUnread = useGameStore((s) => s.setDigestUnread)
   const [digestOpen, setDigestOpen] = useState(false)
+  const [commissionOpen, setCommissionOpen] = useState(false)
 
   // Seed the unread badge on mount (notifications produced while offline).
   useEffect(() => {
@@ -88,6 +90,11 @@ export function TopNav() {
           padding: '5px 12px', borderRadius: 'var(--radius)', fontSize: 12,
           fontWeight: 600, cursor: 'pointer',
         }}>📋 公告板</button>
+        <button onClick={() => setCommissionOpen(true)} style={{
+          background: 'none', color: '#10b981', border: '1px solid #10b98144',
+          padding: '5px 12px', borderRadius: 'var(--radius)', fontSize: 12,
+          fontWeight: 600, cursor: 'pointer',
+        }}>🗒️ 委托板</button>
         {user?.is_admin && (
           <button onClick={() => navigate('/admin')} style={{
             background: 'none', color: '#ef4444', border: '1px solid #ef444444',
@@ -203,6 +210,7 @@ export function TopNav() {
         </div>
       </div>
       {digestOpen && <DigestModal onClose={() => setDigestOpen(false)} />}
+      {commissionOpen && <CommissionModal onClose={() => setCommissionOpen(false)} />}
     </nav>
   )
 }

@@ -728,3 +728,28 @@ export interface DigestData {
 export function getLatestDigest(): Promise<{ digest: DigestData | null }> {
   return apiFetch('/digest/latest')
 }
+
+// ── Commissions (B1) ────────────────────────────────────────────────
+export interface CommissionData {
+  id: string
+  issuer_resident_id: string
+  kind: string
+  title: string
+  payload: Record<string, unknown>
+  reward_sc: number
+  status: string
+  acceptor_user_id: string | null
+  expires_at: string | null
+}
+
+export function getCommissions(status = 'open'): Promise<{ commissions: CommissionData[] }> {
+  return apiFetch(`/commissions?status=${encodeURIComponent(status)}`)
+}
+
+export function acceptCommission(id: string): Promise<CommissionData> {
+  return apiFetch(`/commissions/${id}/accept`, { method: 'POST' })
+}
+
+export function abandonCommission(id: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/commissions/${id}/abandon`, { method: 'POST' })
+}
