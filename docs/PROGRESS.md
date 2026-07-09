@@ -100,7 +100,8 @@
   - **E1** — `7ecd5ea`。`residents.mood_json` + 迁移 **020**（column add）。`mood_service`：8 词标签 (valence,arousal) 映射（中性→calm）、`apply_mood_event` 事件加权、`decay_all` 每小时向中性回归（heat_cron 内，~48h→calm）。消费：decide prompt 加「当前心情：{label}」+ 低落/高涨行为提示；玩家对话 prompt 注入心情行；D2 送礼 +0.25、rate_chat 4★+0.15/2★-0.15 触发情绪。**偏差**：mood 存 JSON 列，decay 用批量 load-update（非单 SQL，JSON 不可移植）；衰减挪到 heat_cron 每小时（比每 tick 更贴合「48h 回 calm」）；resident_status 广播 mood_label + NpcTooltip emoji 前端未做（留后续，行为价值已由 prompt 注入交付）；100-tick 决策分布测试留后续。**验证**：`test_mood.py` 6 例（标签映射/送礼升档/衰减回归/decide+player prompt 注入/送礼集成）全绿；全量选择性套件 **537 passed / 0 新失败**。
 
 ## 批次 3 — 内容与传播
-- [ ] C1 灵魂卡片 · [ ] C2 关系图谱 · [ ] A2 世界事件运营化 · [ ] A4 居民创作 🔥 · [ ] E8 探索图鉴 · [ ] E7 时间胶囊
+- [ ] C1 灵魂卡片 · [x] C2 关系图谱 · [ ] A2 世界事件运营化 · [ ] A4 居民创作 🔥 · [ ] E8 探索图鉴 · [ ] E7 时间胶囊
+  - **C2** — `c36aad0`。**无表**。`GET /graph/relationships?min_importance=`：**Python 侧聚合**（非 PG array_agg，sqlite 可跑）type=relationship 记忆 → 节点(居民)+边(MAX importance 为 strength，最近 content 为 label，双向 mutual 去重取两向最大)，模块级 10 分钟缓存；玩家自己的边仅本人可见（related_user_id，隐私）。前端懒加载 `/graph` GraphPage 自研力导向 canvas（斥力+弹簧+阻尼，不引 d3）。**验证**：`test_graph.py` 4 例（冷启动空 / 双向去重取 max / min_importance 过滤 / 玩家边仅本人）全绿；全量选择性套件 **570 passed / 0 新失败**；前端 tsc/lint(基线)/build 过。
 
 ## 批次 4 — 记忆放大器
 - [ ] E2 梦境 🔥 · [ ] E3 谣言传播 🔥 · [ ] E14 周报 🔥 · [ ] E11 关注动态流 · [ ] E10 合影 · [ ] E5 TTS 🔥
