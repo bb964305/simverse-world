@@ -777,3 +777,110 @@ export interface GraphEdge { a: string; b: string; strength: number; label: stri
 export function getRelationshipGraph(minImportance = 0.3): Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }> {
   return apiFetch(`/graph/relationships?min_importance=${minImportance}`)
 }
+
+// ── Seasons & Polls (E12/C3) ────────────────────────────────────────
+export interface SeasonInfo {
+  id: string
+  title: string
+  theme: string
+  status: string
+  ends_at: string | null
+}
+
+export interface LeaderboardRow {
+  rank: number
+  user_id: string
+  points: number
+  breakdown: Record<string, number>
+}
+
+export interface LeaderboardAroundRow {
+  rank: number
+  user_id: string
+  points: number
+}
+
+export interface LeaderboardResponse {
+  top: LeaderboardRow[]
+  around_me?: { my_rank: number; rows: LeaderboardAroundRow[] }
+}
+
+export interface PollData {
+  id: string
+  season_id: string
+  question: string
+  options: string[]
+  closes_at: string | null
+}
+
+export function getCurrentSeason(): Promise<{ season: SeasonInfo | null }> {
+  return apiFetch('/seasons/current')
+}
+
+export function getSeasonLeaderboard(aroundMe = true): Promise<LeaderboardResponse> {
+  return apiFetch(`/seasons/current/leaderboard?around_me=${aroundMe}`)
+}
+
+export function getOpenPolls(): Promise<{ polls: PollData[] }> {
+  return apiFetch('/polls/open')
+}
+
+export function votePoll(pollId: string, optionIdx: number): Promise<{ ok: boolean }> {
+  return apiFetch(`/polls/${pollId}/vote`, {
+    method: 'POST',
+    body: JSON.stringify({ option_idx: optionIdx }),
+  })
+}
+
+// ── Debates (E9) ────────────────────────────────────────────────────
+export type DebateSide = 'a' | 'b'
+// Lifecycle (backend debate_service.py): announced → live → voting → settled.
+// Stakes only in "announced", free votes only in "voting"; winner a|b|draw.
+export type DebateStatus = 'announced' | 'live' | 'voting' | 'settled'
+
+export interface DebateTurn {
+  round: number
+  side: DebateSide
+  speaker: string
+  text: string
+}
+
+export interface DebateView {
+  id: string
+  topic: string
+  status: DebateStatus
+  resident_a_slug: string
+  resident_b_slug: string
+  pool_a: number
+  pool_b: number
+  votes_a: number
+  votes_b: number
+  winner: string | null
+  transcript: DebateTurn[]
+}
+
+export function getDebates(): Promise<{ debates: DebateView[] }> {
+  return apiFetch('/debates')
+}
+
+export function getDebate(debateId: string): Promise<DebateView> {
+  return apiFetch(`/debates/${debateId}`)
+}
+
+export function stakeDebate(
+  debateId: string,
+  side: DebateSide,
+  amount: number,
+): Promise<{ id: string; side: DebateSide; amount: number }> {
+  return apiFetch(`/debates/${debateId}/stake`, {
+    method: 'POST',
+    body: JSON.stringify({ side, amount }),
+  })
+}
+
+export function voteDebate(debateId: string, side: DebateSide): Promise<{ ok: boolean }> {
+  return apiFetch(`/debates/${debateId}/vote`, {
+    method: 'POST',
+    body: JSON.stringify({ side }),
+  })
+}

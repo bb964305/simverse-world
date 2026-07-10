@@ -90,6 +90,16 @@ export function TopNav() {
           padding: '5px 12px', borderRadius: 'var(--radius)', fontSize: 12,
           fontWeight: 600, cursor: 'pointer',
         }}>📋 公告板</button>
+        <button onClick={() => navigate('/seasons')} style={{
+          background: 'none', color: '#eab308', border: '1px solid #eab30844',
+          padding: '5px 12px', borderRadius: 'var(--radius)', fontSize: 12,
+          fontWeight: 600, cursor: 'pointer',
+        }}>🏆 赛季</button>
+        <button onClick={() => navigate('/debates')} style={{
+          background: 'none', color: '#a78bfa', border: '1px solid #a78bfa44',
+          padding: '5px 12px', borderRadius: 'var(--radius)', fontSize: 12,
+          fontWeight: 600, cursor: 'pointer',
+        }}>⚔️ 辩论</button>
         <button onClick={() => setCommissionOpen(true)} style={{
           background: 'none', color: '#10b981', border: '1px solid #10b98144',
           padding: '5px 12px', borderRadius: 'var(--radius)', fontSize: 12,
