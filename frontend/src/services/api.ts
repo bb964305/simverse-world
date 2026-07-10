@@ -1,6 +1,6 @@
 import { useGameStore } from '../stores/gameStore'
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
 // Requests that hang longer than this are aborted so the UI never spins forever.
 const DEFAULT_TIMEOUT_MS = 15000
@@ -961,4 +961,58 @@ export interface WeeklyRecapData {
 
 export function getWeeklyRecap(): Promise<{ digest: WeeklyRecapData }> {
   return apiFetch('/digest/weekly/me')
+}
+
+// ── TTS (E5) ────────────────────────────────────────────────────────
+export interface TTSResponse {
+  url: string
+  duration: number
+  cached: boolean
+  voice: string
+}
+
+// 429 = daily quota exhausted (surface as inline notice, not a hard error).
+export function ttsSpeak(resident_slug: string, text: string): Promise<TTSResponse> {
+  return apiFetch('/tts', {
+    method: 'POST',
+    body: JSON.stringify({ resident_slug, text }),
+  })
+}
+
+// ── Daily quest & login streak (D3) ─────────────────────────────────
+export interface DailyQuestData {
+  id: string
+  date: string
+  quest: {
+    resident_slug: string
+    resident_name: string
+    topic: string
+    min_turns: number
+  }
+  status: 'pending' | 'done'
+  reward_sc: number
+}
+
+export interface DailyQuestResponse {
+  quest: DailyQuestData | null
+  login_streak: number
+}
+
+export function getDailyQuest(): Promise<DailyQuestResponse> {
+  return apiFetch('/daily/quest')
+}
+
+// ── Active world events (A2) ────────────────────────────────────────
+export interface ActiveEventData {
+  id: string
+  type: string
+  title: string
+  description: string
+  payload_json: Record<string, unknown> | null
+  starts_at: string | null
+  ends_at: string | null
+}
+
+export function getActiveEvents(): Promise<{ events: ActiveEventData[] }> {
+  return apiFetch('/events/active')
 }

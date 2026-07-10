@@ -3,13 +3,22 @@ import { bridge } from '../game/phaserBridge'
 import { STATUS_CONFIG } from '../game/StatusVisuals'
 import { useGameStore } from '../stores/gameStore'
 import { isFollowed, toggleFollow } from '../services/follows'
+import { getResidentGoals } from '../services/api'
+import type { ResidentGoalData } from '../services/api'
 import type { ResidentData } from '../game/GameScene'
+
+// Goal cache (A1): as the player walks around, 'npc:nearby' fires per NPC —
+// cache the last N slugs for a short TTL so we don't refetch on every pass.
+const goalCache = new Map<string, { goal: ResidentGoalData | null; at: number }>()
+const GOAL_CACHE_TTL_MS = 60_000
+const GOAL_CACHE_MAX = 20
 
 export function NpcTooltip() {
   const [npc, setNpc] = useState<ResidentData | null>(null)
   const [followed, setFollowedState] = useState(false)
   const [followBusy, setFollowBusy] = useState(false)
   const [followError, setFollowError] = useState<string | null>(null)
+  const [goal, setGoal] = useState<ResidentGoalData | null>(null)
   const chatOpen = useGameStore((s) => s.chatOpen)
 
   useEffect(() => {
@@ -23,6 +32,37 @@ export function NpcTooltip() {
       setFollowError(null)
     }
   }, [npc])
+
+  // Active life goal (A1) — fetch only when the slug actually changes; serve
+  // from the TTL cache when fresh. Silent-fail: the tooltip must never break.
+  const npcSlug = npc?.slug ?? null
+  useEffect(() => {
+    if (!npcSlug) {
+      setGoal(null)
+      return
+    }
+    const cached = goalCache.get(npcSlug)
+    if (cached && Date.now() - cached.at < GOAL_CACHE_TTL_MS) {
+      setGoal(cached.goal)
+      return
+    }
+    setGoal(null)
+    let cancelled = false
+    getResidentGoals(npcSlug)
+      .then((r) => {
+        // Re-insert so Map iteration order doubles as LRU-ish eviction order.
+        goalCache.delete(npcSlug)
+        goalCache.set(npcSlug, { goal: r.active, at: Date.now() })
+        while (goalCache.size > GOAL_CACHE_MAX) {
+          const oldest = goalCache.keys().next().value
+          if (oldest === undefined) break
+          goalCache.delete(oldest)
+        }
+        if (!cancelled) setGoal(r.active)
+      })
+      .catch(() => { /* silent — tooltip stays functional without goal data */ })
+    return () => { cancelled = true }
+  }, [npcSlug])
 
   if (!npc || chatOpen) return null
 
@@ -41,6 +81,9 @@ export function NpcTooltip() {
   }
 
   const cfg = STATUS_CONFIG[npc.status] ?? STATUS_CONFIG.idle
+  // Goal card derived values (A1)
+  const goalPct = goal ? Math.round(Math.min(1, Math.max(0, goal.progress)) * 100) : 0
+  const latestDoneMilestone = goal?.milestones?.filter((m) => m.done).pop() ?? null
 
   return (
     <div style={{
@@ -65,6 +108,36 @@ export function NpcTooltip() {
         </div>
         <span style={{ marginLeft: 'auto', fontSize: 11 }}>{cfg.label}</span>
       </div>
+      {/* Active life goal (A1) — only when the resident has one */}
+      {goal && (
+        <div style={{
+          marginTop: 8, padding: '6px 8px', background: 'var(--bg-input)',
+          borderRadius: 6, border: '1px solid var(--border)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: '#d4d4d8' }}>
+            <span>🎯</span>
+            <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 600 }}>
+              {goal.title}
+            </span>
+          </div>
+          <div style={{ marginTop: 5, height: 4, background: '#27272a', borderRadius: 2, overflow: 'hidden' }}>
+            <div style={{
+              height: '100%', width: `${goalPct}%`,
+              background: 'var(--accent-green)', borderRadius: 2,
+              transition: 'width 0.3s ease',
+            }} />
+          </div>
+          <div style={{ marginTop: 3, fontSize: 10, color: 'var(--text-muted)' }}>进度 {goalPct}%</div>
+          {latestDoneMilestone && (
+            <div style={{
+              marginTop: 2, fontSize: 10, color: 'var(--text-muted)',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>
+              ✓ {latestDoneMilestone.title}
+            </div>
+          )}
+        </div>
+      )}
       {/* Follow toggle (E11) */}
       <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
         <button

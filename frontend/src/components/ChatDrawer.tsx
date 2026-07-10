@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { bridge } from '../game/phaserBridge'
 import { useGameStore } from '../stores/gameStore'
 import { sendWS, onWSMessage, sendPlayerChat } from '../services/ws'
+import { ttsSpeak, API_BASE } from '../services/api'
 import type { ResidentData } from '../game/GameScene'
 import { RatingPopup } from './RatingPopup'
 
@@ -10,6 +11,32 @@ interface Message {
   sender: string
   text: string
 }
+
+// TTS (E5): a single module-level audio element — starting a new playback
+// always stops the previous one, so two clips never overlap.
+let ttsAudio: HTMLAudioElement | null = null
+
+function stopTtsAudio(): void {
+  if (ttsAudio) {
+    ttsAudio.pause()
+    ttsAudio.src = ''
+    ttsAudio = null
+  }
+}
+
+// Create + register + play in module scope so the component never reassigns
+// the module-level element during render/handlers (react-hooks/globals).
+function playTtsAudio(url: string, handlers: { onEnded: () => void; onError: () => void }): Promise<void> {
+  stopTtsAudio()
+  const audio = new Audio(url)
+  ttsAudio = audio
+  audio.onended = handlers.onEnded
+  audio.onerror = handlers.onError
+  return audio.play()
+}
+
+// Per-message TTS button state, keyed by message index.
+type TtsState = { idx: number; status: 'loading' | 'playing' | 'quota' | 'error' } | null
 
 export function ChatDrawer() {
   const {
@@ -43,6 +70,42 @@ export function ChatDrawer() {
   // Track whether we have an active conversation (for close logic)
   const [hasActiveConv, setHasActiveConv] = useState(false)
 
+  // TTS button state (E5) — only one clip at a time, so a single slot suffices.
+  const [tts, setTts] = useState<TtsState>(null)
+
+  // Stop any playing TTS when the drawer closes (external-system sync only;
+  // the button state is reset in the conversation-reset callbacks below,
+  // which also clear `messages` and thus the indexes tts points at).
+  useEffect(() => {
+    if (!chatOpen) stopTtsAudio()
+  }, [chatOpen])
+
+  const handleTts = async (idx: number, text: string) => {
+    // Clicking the currently-playing message stops it.
+    if (tts?.idx === idx && tts.status === 'playing') {
+      stopTtsAudio()
+      setTts(null)
+      return
+    }
+    if (tts?.status === 'loading') return
+    const slug = useGameStore.getState().chatResident?.slug
+    if (!slug) return
+    stopTtsAudio()
+    setTts({ idx, status: 'loading' })
+    try {
+      const resp = await ttsSpeak(slug, text.slice(0, 300))
+      await playTtsAudio(`${API_BASE}${resp.url}`, {
+        onEnded: () => setTts((cur) => (cur?.idx === idx && cur.status === 'playing' ? null : cur)),
+        onError: () => setTts((cur) => (cur?.idx === idx ? { idx, status: 'error' } : cur)),
+      })
+      setTts({ idx, status: 'playing' })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : ''
+      // apiFetch throws "API 429: ..." when the daily quota is exhausted.
+      setTts({ idx, status: msg.includes('API 429') ? 'quota' : 'error' })
+    }
+  }
+
   // Listen for NPC interact events from Phaser
   useEffect(() => {
     return bridge.on('npc:interact', (data: unknown) => {
@@ -58,6 +121,7 @@ export function ChatDrawer() {
         setMessages([])
         setStreamingText('')
         streamingRef.current = ''
+        setTts(null)
         setHasActiveConv(true)
       }
     })
@@ -74,6 +138,7 @@ export function ChatDrawer() {
           setMessages([])
           setStreamingText('')
           streamingRef.current = ''
+          setTts(null)
         }
         setHasActiveConv(true)
       } else if (data.type === 'chat_reply') {
@@ -123,6 +188,7 @@ export function ChatDrawer() {
         setMessages([])
         setStreamingText('')
         streamingRef.current = ''
+        setTts(null)
         setHasActiveConv(true)
       }
     })
@@ -281,7 +347,36 @@ export function ChatDrawer() {
                   ? { background: 'var(--accent-red)', color: 'white', alignSelf: 'flex-end', borderBottomRightRadius: 4 }
                   : { background: 'var(--bg-input)', color: '#d4d4d8', alignSelf: 'flex-start', borderBottomLeftRadius: 4 }),
               }}>
-                {m.role === 'npc' && <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>{m.sender}</div>}
+                {m.role === 'npc' && (
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span>{m.sender}</span>
+                    {/* TTS (E5): 🔊 idle / ⏳ loading / 🔈 playing (click stops) / ⚠️ error */}
+                    <button
+                      onClick={() => void handleTts(i, m.text)}
+                      disabled={tts?.idx === i && tts.status === 'loading'}
+                      title={
+                        tts?.idx === i && tts.status === 'error' ? '播放失败，请稍后重试'
+                          : tts?.idx === i && tts.status === 'playing' ? '停止朗读'
+                          : '朗读'
+                      }
+                      style={{
+                        background: 'none', border: 'none', padding: 0, fontSize: 11,
+                        lineHeight: 1, color: 'var(--text-muted)',
+                        cursor: tts?.idx === i && tts.status === 'loading' ? 'wait' : 'pointer',
+                      }}
+                      onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--accent-red)' }}
+                      onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--text-muted)' }}
+                    >
+                      {tts?.idx === i && tts.status === 'loading' ? '⏳'
+                        : tts?.idx === i && tts.status === 'playing' ? '🔈'
+                        : tts?.idx === i && tts.status === 'error' ? '⚠️'
+                        : '🔊'}
+                    </button>
+                    {tts?.idx === i && tts.status === 'quota' && (
+                      <span style={{ fontSize: 10, color: 'var(--accent-red)' }}>今日配额已用完</span>
+                    )}
+                  </div>
+                )}
                 {m.text}
               </div>
             ))}
