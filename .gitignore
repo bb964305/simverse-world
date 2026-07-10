@@ -48,3 +48,8 @@ seed_local.py
 # Screenshots
 *.png
 .omx/
+
+# Agent/session workspaces + runtime artifacts
+.claude/
+.omo/
+*.db-journal
