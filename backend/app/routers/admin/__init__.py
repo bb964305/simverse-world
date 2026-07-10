@@ -9,6 +9,7 @@ from app.routers.admin.economy import router as economy_router
 from app.routers.admin.system_config import router as system_config_router
 from app.routers.admin.events import router as events_router
 from app.routers.admin.items import router as items_router
+from app.routers.admin.llm_usage import router as llm_usage_router
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 router.include_router(dashboard_router)
@@ -19,3 +20,4 @@ router.include_router(economy_router)
 router.include_router(system_config_router)
 router.include_router(events_router)
 router.include_router(items_router)
+router.include_router(llm_usage_router)
