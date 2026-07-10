@@ -122,6 +122,38 @@ async def economy_stats(
     return EconomyStatsResponse(**stats)
 
 
+@router.get("/series")
+async def economy_series(
+    days: int = Query(30, ge=1, le=180),
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Daily issued/consumed/net over a trailing window (通胀曲线). Days with
+    no transactions are zero-filled so the curve has a stable x-axis."""
+    from datetime import datetime, timedelta, UTC
+
+    from sqlalchemy import case
+
+    since = datetime.now(UTC) - timedelta(days=days - 1)
+    day_expr = func.date(Transaction.created_at)
+    # case() instead of scalar max()/min() — portable across sqlite and PG.
+    issued_expr = func.coalesce(func.sum(case((Transaction.amount > 0, Transaction.amount), else_=0)), 0)
+    consumed_expr = func.coalesce(func.sum(case((Transaction.amount < 0, -Transaction.amount), else_=0)), 0)
+    rows = (await db.execute(
+        select(day_expr, issued_expr, consumed_expr)
+        .where(Transaction.created_at >= since)
+        .group_by(day_expr)
+        .order_by(day_expr)
+    )).all()
+    by_day = {str(d): (int(issued or 0), int(consumed or 0)) for d, issued, consumed in rows}
+    series = []
+    for i in range(days):
+        day = (since + timedelta(days=i)).date().isoformat()
+        issued, consumed = by_day.get(day, (0, 0))
+        series.append({"date": day, "issued": issued, "consumed": consumed, "net": issued - consumed})
+    return {"days": days, "series": series}
+
+
 @router.get("/transactions")
 async def transaction_log(
     offset: int = Query(0, ge=0),

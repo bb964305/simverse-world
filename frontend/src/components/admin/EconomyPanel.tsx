@@ -4,9 +4,11 @@ import {
   getAdminTransactions,
   getAdminEconomyConfig,
   updateAdminEconomyConfig,
+  getAdminEconomySeries,
   type AdminEconomyStats,
   type AdminTransaction,
   type AdminEconomyConfig,
+  type EconomySeriesPoint,
 } from '../../services/api'
 
 // ─── Shared sub-components ────────────────────────────────────────
@@ -122,6 +124,106 @@ function EconomyStatsSection({ token }: { token: string }) {
       <StatCard label="用户总数" value={stats.total_users} />
       <StatCard label="用户平均余额" value={stats.avg_balance} />
     </div>
+  )
+}
+
+// ─── Inflation curve (通胀曲线) ──────────────────────────────────
+
+const CURVE_W = 820
+const CURVE_H = 180
+const CURVE_PAD = 28
+
+function polyline(points: EconomySeriesPoint[], pick: (p: EconomySeriesPoint) => number, maxY: number): string {
+  const innerW = CURVE_W - CURVE_PAD * 2
+  const innerH = CURVE_H - CURVE_PAD * 2
+  const stepX = points.length > 1 ? innerW / (points.length - 1) : 0
+  return points
+    .map((p, i) => {
+      const x = CURVE_PAD + i * stepX
+      const y = CURVE_PAD + innerH - (maxY > 0 ? (pick(p) / maxY) * innerH : 0)
+      return `${x.toFixed(1)},${y.toFixed(1)}`
+    })
+    .join(' ')
+}
+
+function InflationCurveSection({ token }: { token: string }) {
+  const [days, setDays] = useState(30)
+  const [series, setSeries] = useState<EconomySeriesPoint[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    void (async () => {
+      setLoading(true)
+      setError(null)
+      try {
+        const data = await getAdminEconomySeries(token, days)
+        setSeries(data.series)
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : '加载失败')
+      } finally {
+        setLoading(false)
+      }
+    })()
+  }, [token, days])
+
+  const maxY = Math.max(1, ...series.map((p) => Math.max(p.issued, p.consumed)))
+  const hasData = series.some((p) => p.issued > 0 || p.consumed > 0)
+
+  return (
+    <SectionCard>
+      <div style={{ display: 'flex', alignItems: 'center' }}>
+        <SectionHeader icon="📈" title="通胀曲线（每日发行 / 消耗）" />
+        <div style={{ display: 'flex', gap: 4, marginLeft: 'auto', marginBottom: 20 }}>
+          {[7, 30, 90].map((d) => (
+            <button key={d} onClick={() => setDays(d)} style={{
+              padding: '3px 10px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
+              background: days === d ? 'var(--accent)' : 'var(--bg-input)',
+              border: '1px solid var(--border)',
+              color: days === d ? 'white' : 'var(--text-muted)',
+            }}>{d}天</button>
+          ))}
+        </div>
+      </div>
+
+      {loading ? (
+        <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '12px 0' }}>加载中...</div>
+      ) : error ? (
+        <div style={{ color: '#ff6b6b', fontSize: 13, padding: '12px 0' }}>{error}</div>
+      ) : !hasData ? (
+        <div style={{ color: 'var(--text-muted)', fontSize: 13, textAlign: 'center', padding: '24px 0' }}>
+          窗口期内没有交易记录。
+        </div>
+      ) : (
+        <>
+          <svg viewBox={`0 0 ${CURVE_W} ${CURVE_H}`} style={{ width: '100%', height: 'auto', display: 'block' }}>
+            {/* baseline + max gridlines */}
+            <line x1={CURVE_PAD} y1={CURVE_H - CURVE_PAD} x2={CURVE_W - CURVE_PAD} y2={CURVE_H - CURVE_PAD}
+              stroke="var(--border)" strokeWidth="1" />
+            <line x1={CURVE_PAD} y1={CURVE_PAD} x2={CURVE_W - CURVE_PAD} y2={CURVE_PAD}
+              stroke="var(--border)" strokeWidth="1" strokeDasharray="4 4" />
+            <text x={CURVE_PAD} y={CURVE_PAD - 6} fill="var(--text-muted)" fontSize="10">{maxY}</text>
+            <text x={CURVE_PAD} y={CURVE_H - CURVE_PAD + 14} fill="var(--text-muted)" fontSize="10">
+              {series[0]?.date.slice(5)}
+            </text>
+            <text x={CURVE_W - CURVE_PAD} y={CURVE_H - CURVE_PAD + 14} fill="var(--text-muted)" fontSize="10" textAnchor="end">
+              {series[series.length - 1]?.date.slice(5)}
+            </text>
+            <polyline points={polyline(series, (p) => p.issued, maxY)}
+              fill="none" stroke="#53d769" strokeWidth="2" strokeLinejoin="round" />
+            <polyline points={polyline(series, (p) => p.consumed, maxY)}
+              fill="none" stroke="#ff6b6b" strokeWidth="2" strokeLinejoin="round" />
+          </svg>
+          <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 11, color: 'var(--text-muted)' }}>
+            <span><span style={{ color: '#53d769' }}>—</span> 发行</span>
+            <span><span style={{ color: '#ff6b6b' }}>—</span> 消耗</span>
+            <span style={{ marginLeft: 'auto' }}>
+              窗口净流通 {series.reduce((acc, p) => acc + p.net, 0).toLocaleString()} 🪙
+            </span>
+          </div>
+        </>
+      )}
+    </SectionCard>
   )
 }
 
@@ -447,6 +549,9 @@ export function EconomyPanel({ token }: EconomyPanelProps) {
 
       {/* Stat Cards */}
       <EconomyStatsSection token={token} />
+
+      {/* Inflation curve */}
+      <InflationCurveSection token={token} />
 
       {/* Transaction Log */}
       <TransactionLogSection token={token} />

@@ -1056,3 +1056,65 @@ export function getAdminLlmUsageSummary(token: string, hours: number): Promise<L
     headers: { Authorization: `Bearer ${token}` },
   })
 }
+
+// ─── Shop API (S3/D2) ────────────────────────────────────────────
+
+export interface ShopItemData {
+  code: string
+  kind: string
+  name: string
+  description: string
+  icon: string | null
+  price_sc: number
+  payload: Record<string, unknown>
+  active: boolean
+}
+
+export interface ShopInventoryRow {
+  item_code: string
+  qty: number
+  total_sc: number
+  name: string
+  icon: string | null
+  kind: string
+}
+
+export interface ShopPurchaseResult {
+  ok: boolean
+  item_code: string
+  qty: number
+  total_sc: number
+  effect: Record<string, unknown> | null
+}
+
+export function getShopCatalog(): Promise<{ items: ShopItemData[] }> {
+  return apiFetch('/shop/catalog')
+}
+
+export function getShopInventory(): Promise<{ inventory: ShopInventoryRow[] }> {
+  return apiFetch('/shop/inventory')
+}
+
+export function purchaseShopItem(
+  item_code: string, qty = 1, context?: Record<string, unknown>,
+): Promise<ShopPurchaseResult> {
+  return apiFetch('/shop/purchase', {
+    method: 'POST',
+    body: JSON.stringify({ item_code, qty, context: context ?? null }),
+  })
+}
+
+// ─── Admin economy series (通胀曲线) ─────────────────────────────
+
+export interface EconomySeriesPoint {
+  date: string
+  issued: number
+  consumed: number
+  net: number
+}
+
+export function getAdminEconomySeries(token: string, days = 30): Promise<{ days: number; series: EconomySeriesPoint[] }> {
+  return apiFetch(`/admin/economy/series?days=${days}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}

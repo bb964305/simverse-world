@@ -118,3 +118,14 @@ async def test_shop_api_catalog_and_purchase(client, db_session):
     # Now broke → 400.
     bad = await client.post("/shop/purchase", json={"item_code": "lamp", "qty": 100}, headers=headers)
     assert bad.status_code == 400
+
+    # D2 inventory aggregates my purchases with item display fields.
+    inv = await client.get("/shop/inventory", headers=headers)
+    assert inv.status_code == 200
+    rows = inv.json()["inventory"]
+    assert len(rows) == 1
+    assert rows[0]["item_code"] == "lamp"
+    assert rows[0]["qty"] == 1
+    assert rows[0]["total_sc"] == 30
+    assert rows[0]["name"] == "鲜花"
+    assert rows[0]["kind"] == "decor"

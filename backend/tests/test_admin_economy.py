@@ -71,3 +71,34 @@ async def test_economy_config_update(db_session):
 
     value2 = await svc.get("economy.daily_reward", default=5)
     assert value2 == 10
+
+
+@pytest.mark.anyio
+async def test_economy_series_daily_buckets(client, db_session):
+    """/admin/economy/series zero-fills days and splits issued/consumed."""
+    from datetime import datetime, timedelta, UTC
+    from app.services.auth_service import create_token
+
+    admin = User(name="adm", email="adm-series@test.com", is_admin=True, is_banned=False)
+    u = User(name="s1", email="s1@test.com", is_admin=False, is_banned=False)
+    db_session.add_all([admin, u])
+    await db_session.commit()
+
+    now = datetime.now(UTC)
+    db_session.add(Transaction(user_id=u.id, amount=100, reason="signup", created_at=now))
+    db_session.add(Transaction(user_id=u.id, amount=-30, reason="chat", created_at=now))
+    db_session.add(Transaction(user_id=u.id, amount=50, reason="daily",
+                               created_at=now - timedelta(days=2)))
+    await db_session.commit()
+
+    headers = {"Authorization": f"Bearer {create_token(admin.id)}"}
+    resp = await client.get("/admin/economy/series?days=7", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["days"] == 7
+    assert len(body["series"]) == 7  # zero-filled, stable x-axis
+    today = body["series"][-1]
+    assert today["issued"] == 100 and today["consumed"] == 30 and today["net"] == 70
+    two_ago = body["series"][-3]
+    assert two_ago["issued"] == 50 and two_ago["consumed"] == 0
+    assert all(p["issued"] == 0 and p["consumed"] == 0 for p in body["series"][:4])

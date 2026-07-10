@@ -6,6 +6,7 @@ import { NotificationDrawer } from './NotificationDrawer'
 import { DigestModal } from './DigestModal'
 import { CommissionModal } from './CommissionModal'
 import { BulletinBoard } from './BulletinBoard'
+import { ShopModal } from './ShopModal'
 import { bridge } from '../game/phaserBridge'
 import { disconnectWS, onWSMessage } from '../services/ws'
 import { getNotifications, getDailyQuest, getActiveEvents, getMe } from '../services/api'
@@ -45,6 +46,7 @@ export function TopNav() {
   const setDigestUnread = useGameStore((s) => s.setDigestUnread)
   const [digestOpen, setDigestOpen] = useState(false)
   const [commissionOpen, setCommissionOpen] = useState(false)
+  const [shopOpen, setShopOpen] = useState(false)
 
   // Login streak + daily quest popup (D3)
   const [streakOpen, setStreakOpen] = useState(false)
@@ -209,6 +211,11 @@ export function TopNav() {
           padding: '5px 12px', borderRadius: 'var(--radius)', fontSize: 12,
           fontWeight: 600, cursor: 'pointer',
         }}>⚔️ 辩论</button>
+        <button onClick={() => setShopOpen(true)} style={{
+          background: 'none', color: '#f472b6', border: '1px solid #f472b644',
+          padding: '5px 12px', borderRadius: 'var(--radius)', fontSize: 12,
+          fontWeight: 600, cursor: 'pointer',
+        }}>🛒 商店</button>
         <button onClick={() => setCommissionOpen(true)} style={{
           background: 'none', color: '#10b981', border: '1px solid #10b98144',
           padding: '5px 12px', borderRadius: 'var(--radius)', fontSize: 12,
@@ -408,6 +415,7 @@ export function TopNav() {
       </div>
       {digestOpen && <DigestModal onClose={() => setDigestOpen(false)} />}
       {commissionOpen && <CommissionModal onClose={() => setCommissionOpen(false)} />}
+      {shopOpen && <ShopModal onClose={() => setShopOpen(false)} />}
       {/* Mounted here (not GamePage) so the 公告板 button works on every
           authenticated page — the modal is self-contained (bridge + API). */}
       <BulletinBoard />
