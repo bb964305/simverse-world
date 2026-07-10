@@ -142,6 +142,26 @@ export function connectWS(): void {
         })
       }
 
+      // Follow feed (E11): a followed resident did something notable. Merge it
+      // into the bell (store notification, client-side id since there is no
+      // durable row) and let the fan-out below deliver it to FeedList too.
+      if (data.type === 'feed_event' && typeof data.resident_slug === 'string') {
+        const payload = (data.payload as Record<string, unknown>) || {}
+        const body = (typeof payload.title === 'string' && payload.title)
+          || (typeof payload.text === 'string' && payload.text)
+          || (data.kind as string)
+          || ''
+        useGameStore.getState().addNotification({
+          id: `feed-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          kind: 'feed',
+          title: '你关注的居民有新动态',
+          body: `${data.resident_slug as string}：${body}`,
+          payload,
+          read: false,
+          created_at: new Date().toISOString(),
+        })
+      }
+
       // Forge progress (P1-5): forge_progress / forge_done / forge_error are
       // consumed by the Forge components (DeepForge/QuickForge/ForgeChat) via
       // onWSMessage below — no store state to update here, they flow through as

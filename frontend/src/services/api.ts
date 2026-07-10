@@ -884,3 +884,81 @@ export function voteDebate(debateId: string, side: DebateSide): Promise<{ ok: bo
     body: JSON.stringify({ side }),
   })
 }
+
+// ── Follow feed (E11) ───────────────────────────────────────────────
+export interface FeedEventData {
+  id: string
+  resident_slug: string
+  kind: string
+  payload: Record<string, unknown>
+  created_at: string | null
+}
+
+export interface FeedResponse {
+  events: FeedEventData[]
+  next_cursor: string | null
+}
+
+export function getFeed(cursor?: string): Promise<FeedResponse> {
+  return apiFetch(`/feed${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`)
+}
+
+export function followResident(slug: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/follows/${encodeURIComponent(slug)}`, { method: 'POST' })
+}
+
+export function unfollowResident(slug: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/follows/${encodeURIComponent(slug)}`, { method: 'DELETE' })
+}
+
+// ── Bulletin posts (A4) ─────────────────────────────────────────────
+export interface BulletinPostData {
+  id: string
+  kind: string
+  title: string
+  content_md: string
+  likes: number
+  tips_sc: number
+  pinned: boolean
+  author_resident_id: string | null
+  author_name: string | null
+  author_portrait: string | null
+  created_at: string | null
+}
+
+export interface BulletinPostsResponse {
+  posts: BulletinPostData[]
+  next_cursor: string | null
+}
+
+export function getBulletinPosts(opts: { kind?: string; cursor?: string } = {}): Promise<BulletinPostsResponse> {
+  const params = new URLSearchParams()
+  if (opts.kind) params.set('kind', opts.kind)
+  if (opts.cursor) params.set('cursor', opts.cursor)
+  const qs = params.toString()
+  return apiFetch(`/bulletin/posts${qs ? `?${qs}` : ''}`)
+}
+
+// ── Weekly recap (E14) ──────────────────────────────────────────────
+export interface WeeklyRecapStats {
+  chats: number
+  turns: number
+  distinct_residents: number
+  achievements: number
+  explored: number
+  tag: string
+}
+
+export interface WeeklyRecapData {
+  id: string
+  scope: string
+  date: string
+  title: string
+  content_md: string
+  stats: WeeklyRecapStats
+  created_at: string | null
+}
+
+export function getWeeklyRecap(): Promise<{ digest: WeeklyRecapData }> {
+  return apiFetch('/digest/weekly/me')
+}
