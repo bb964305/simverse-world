@@ -146,7 +146,7 @@ export function NpcTooltip() {
           )}
         </div>
       )}
-      {/* Follow toggle (E11) */}
+      {/* Follow toggle (E11) + group photo (E10) */}
       <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
         <button
           onClick={() => void handleFollow()}
@@ -160,6 +160,17 @@ export function NpcTooltip() {
           }}
         >
           {followed ? '✓ 已关注' : '♥ 关注'}
+        </button>
+        <button
+          onClick={() => bridge.emit('photo:take', { residentSlug: npc.slug })}
+          title="合影"
+          style={{
+            padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+            cursor: 'pointer', background: 'var(--bg-input)',
+            border: '1px solid var(--border)', color: 'var(--text-secondary)',
+          }}
+        >
+          📸 合影
         </button>
       </div>
       {followError && (

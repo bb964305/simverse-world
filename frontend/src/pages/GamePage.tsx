@@ -3,6 +3,7 @@ import { TopNav } from '../components/TopNav'
 import { ChatDrawer } from '../components/ChatDrawer'
 import { NpcTooltip } from '../components/NpcTooltip'
 import { CoinNotification } from '../components/CoinNotification'
+import { PhotoBooth } from '../components/PhotoBooth'
 import { MinimapOverlay } from '../components/minimap/MinimapOverlay'
 import { useGameStore } from '../stores/gameStore'
 import { connectWS, disconnectWS } from '../services/ws'
@@ -67,6 +68,7 @@ export function GamePage() {
       <NpcTooltip />
       <ChatDrawer />
       <CoinNotification />
+      <PhotoBooth />
     </>
   )
 }

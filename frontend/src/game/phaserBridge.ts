@@ -24,3 +24,5 @@ export const bridge = new PhaserBridge()
 // Phaser → React  minimap:texture    { dataUrl: string }
 // React → Phaser  minimap:teleport   { tileX: number, tileY: number, residentSlug?: string }
 // Phaser → React  teleport:complete  { tileX: number, tileY: number }
+// React → Phaser  photo:take         { residentSlug: string }            (E10 group photo)
+// Phaser → React  photo:result       { dataUrl: string, residentSlug: string }

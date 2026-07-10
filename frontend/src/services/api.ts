@@ -1161,3 +1161,12 @@ export function createCapsule(
     body: JSON.stringify({ carrier_resident_slug, deliver_on, content }),
   })
 }
+
+// ─── Group photo (E10) ───────────────────────────────────────────
+
+export function logPhoto(resident_slug: string, media_url?: string): Promise<{ resident_slug: string; quip: string }> {
+  return apiFetch('/photos/log', {
+    method: 'POST',
+    body: JSON.stringify({ resident_slug, media_url: media_url ?? null }),
+  })
+}

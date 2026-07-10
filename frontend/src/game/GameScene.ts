@@ -294,6 +294,26 @@ class MainScene extends Phaser.Scene {
       this.teleportTo(tileX, tileY)
     })
 
+    // E10 group photo: snapshot the canvas area framing the player + NPC.
+    bridge.on('photo:take', (data: unknown) => {
+      const { residentSlug } = data as { residentSlug: string }
+      const idx = this.residents.findIndex((r) => r.slug === residentSlug)
+      const npc = idx >= 0 ? this.npcSprites[idx] : null
+      if (!npc || !this.player) return
+      const cam = this.cameras.main
+      const midX = ((this.player.x + npc.x) / 2 - cam.worldView.x) * cam.zoom
+      const midY = ((this.player.y + npc.y) / 2 - cam.worldView.y) * cam.zoom
+      const w = Math.min(480, cam.width * cam.zoom)
+      const h = Math.min(360, cam.height * cam.zoom)
+      const x = Math.max(0, Math.min(midX - w / 2, cam.width * cam.zoom - w))
+      const y = Math.max(0, Math.min(midY - h / 2, cam.height * cam.zoom - h))
+      const residentName = this.residents[idx].name
+      this.game.renderer.snapshotArea(Math.round(x), Math.round(y), Math.round(w), Math.round(h), (image) => {
+        const img = image as HTMLImageElement
+        if (img.src) bridge.emit('photo:result', { dataUrl: img.src, residentSlug, residentName })
+      })
+    })
+
     this.mapReady = true
 
     // Generate minimap texture after world is set up
