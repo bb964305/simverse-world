@@ -790,6 +790,7 @@ export interface SeasonInfo {
 export interface LeaderboardRow {
   rank: number
   user_id: string
+  name?: string
   points: number
   breakdown: Record<string, number>
 }
@@ -797,6 +798,7 @@ export interface LeaderboardRow {
 export interface LeaderboardAroundRow {
   rank: number
   user_id: string
+  name?: string
   points: number
 }
 
@@ -811,6 +813,7 @@ export interface PollData {
   question: string
   options: string[]
   closes_at: string | null
+  my_vote?: number
 }
 
 export function getCurrentSeason(): Promise<{ season: SeasonInfo | null }> {
@@ -1015,6 +1018,21 @@ export interface ActiveEventData {
 
 export function getActiveEvents(): Promise<{ events: ActiveEventData[] }> {
   return apiFetch('/events/active')
+}
+
+// ─── Current user ────────────────────────────────────────────────
+
+export interface MeResponse {
+  id: string
+  name: string
+  email: string
+  avatar: string | null
+  soul_coin_balance: number
+  is_admin: boolean
+}
+
+export function getMe(): Promise<MeResponse> {
+  return apiFetch('/users/me')
 }
 
 // ─── Admin LLM Usage API ─────────────────────────────────────────

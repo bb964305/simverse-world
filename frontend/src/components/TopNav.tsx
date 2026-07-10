@@ -5,9 +5,10 @@ import { SearchDropdown } from './SearchDropdown'
 import { NotificationDrawer } from './NotificationDrawer'
 import { DigestModal } from './DigestModal'
 import { CommissionModal } from './CommissionModal'
+import { BulletinBoard } from './BulletinBoard'
 import { bridge } from '../game/phaserBridge'
 import { disconnectWS, onWSMessage } from '../services/ws'
-import { getNotifications, getDailyQuest, getActiveEvents } from '../services/api'
+import { getNotifications, getDailyQuest, getActiveEvents, getMe } from '../services/api'
 import type { DailyQuestResponse, ActiveEventData } from '../services/api'
 
 // Streak reward ladder (D3): SC amounts for each day of the 7-day cycle.
@@ -67,6 +68,16 @@ export function TopNav() {
       .then((r) => setNotifications(r.notifications, r.unread_count))
       .catch(() => {})
   }, [setNotifications])
+
+  // Refresh the balance from the server on mount — the persisted store copy
+  // goes stale whenever coins move outside a coin_update WS frame (stakes,
+  // purchases made on other pages, or plain reloads).
+  const updateBalance = useGameStore((s) => s.updateBalance)
+  useEffect(() => {
+    getMe()
+      .then((me) => updateBalance(me.soul_coin_balance))
+      .catch(() => {})
+  }, [updateBalance])
 
   // D3: fetch quest/streak on mount; A2: fetch active events (60s server cache).
   useEffect(() => {
@@ -397,6 +408,9 @@ export function TopNav() {
       </div>
       {digestOpen && <DigestModal onClose={() => setDigestOpen(false)} />}
       {commissionOpen && <CommissionModal onClose={() => setCommissionOpen(false)} />}
+      {/* Mounted here (not GamePage) so the 公告板 button works on every
+          authenticated page — the modal is self-contained (bridge + API). */}
+      <BulletinBoard />
     </nav>
     {/* Active world-event banner (A2) — slim strip right below the nav.
         Overlays the map's top edge on purpose; the page does not reflow. */}

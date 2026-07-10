@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { TopNav } from '../components/TopNav'
-import { onWSMessage } from '../services/ws'
+import { connectWS, onWSMessage } from '../services/ws'
+import { useGameStore } from '../stores/gameStore'
 import {
   getDebates,
   getDebate,
+  getMe,
   stakeDebate,
   voteDebate,
   type DebateView,
@@ -175,6 +177,9 @@ function DebateDetail({ debate, onChanged }: { debate: DebateView; onChanged: ()
     try {
       await stakeDebate(debate.id, stakeSide, amount)
       setActionOk(`下注成功：${stakeSide === 'a' ? '正方' : '反方'} 🪙 ${amount}`)
+      // Stakes charge coins server-side without a coin_update WS frame —
+      // refresh so the TopNav balance doesn't go stale.
+      getMe().then((me) => useGameStore.getState().updateBalance(me.soul_coin_balance)).catch(() => {})
       onChanged()
     } catch (e) {
       setActionErr(errDetail(e))
@@ -380,6 +385,13 @@ export function DebatesPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [detail, setDetail] = useState<DebateView | null>(null)
   const [detailErr, setDetailErr] = useState('')
+
+  // Live debate_turn/voting_open frames arrive over WS. GamePage owns the
+  // socket but tears it down on unmount — re-establish here (idempotent, and
+  // intentionally not disconnected on unmount; same pattern as ForgePage).
+  useEffect(() => {
+    connectWS()
+  }, [])
 
   const loadList = useCallback(() => {
     getDebates()

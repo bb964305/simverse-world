@@ -130,7 +130,7 @@ export function FeedList() {
           background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10,
           padding: '32px 20px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 13,
         }}>
-          还没有关注任何居民 — 在地图上与居民互动时点击关注
+          还没有新动态 — 关注居民后，他们的创作和变化会出现在这里（在地图上与居民互动时点击关注）
         </div>
       ) : (
         <>

@@ -112,7 +112,10 @@ function SeasonHeader({ season, loading, error }: { season: SeasonInfo | null; l
 type PollVoteState = { kind: 'voted'; idx: number } | { kind: 'already' }
 
 function PollCard({ poll }: { poll: PollData }) {
-  const [state, setState] = useState<PollVoteState | null>(null)
+  // my_vote from the server restores the ✓已投 marker across reloads.
+  const [state, setState] = useState<PollVoteState | null>(
+    poll.my_vote != null ? { kind: 'voted', idx: poll.my_vote } : null,
+  )
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
 
@@ -188,8 +191,8 @@ function truncateId(uid: string): string {
 }
 
 function LeaderboardRowView({
-  rank, userId, points, breakdown, isMe,
-}: { rank: number; userId: string; points: number; breakdown?: Record<string, number>; isMe: boolean }) {
+  rank, userId, name, points, breakdown, isMe,
+}: { rank: number; userId: string; name?: string; points: number; breakdown?: Record<string, number>; isMe: boolean }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 12, padding: '8px 12px',
@@ -204,11 +207,11 @@ function LeaderboardRowView({
         {rank <= 3 ? ['🥇', '🥈', '🥉'][rank - 1] : `#${rank}`}
       </span>
       <span style={{
-        flex: '0 0 110px', fontFamily: 'monospace', fontSize: 12,
+        flex: '0 0 110px', fontSize: 12,
         color: isMe ? 'var(--accent-red)' : 'var(--text-primary)',
         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-      }} title={userId}>
-        {truncateId(userId)}{isMe && '（我）'}
+      }} title={name || userId}>
+        {name || truncateId(userId)}{isMe && '（我）'}
       </span>
       <span style={{
         width: 80, textAlign: 'right', fontVariantNumeric: 'tabular-nums',
@@ -266,6 +269,7 @@ function LeaderboardSection() {
             key={row.user_id}
             rank={row.rank}
             userId={row.user_id}
+            name={row.name}
             points={row.points}
             breakdown={row.breakdown}
             isMe={row.user_id === myId}
@@ -281,6 +285,7 @@ function LeaderboardSection() {
                 key={row.user_id}
                 rank={row.rank}
                 userId={row.user_id}
+                name={row.name}
                 points={row.points}
                 isMe={row.user_id === myId}
               />
