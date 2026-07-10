@@ -16,8 +16,15 @@ class VoteBody(BaseModel):
 
 
 @router.get("/open")
-async def list_open_polls(season_id: str | None = None, db: AsyncSession = Depends(get_db)):
-    return {"polls": await open_polls(db, season_id)}
+async def list_open_polls(request: Request, season_id: str | None = None, db: AsyncSession = Depends(get_db)):
+    # Auth is optional here: with a valid token each poll carries my_vote so
+    # the UI can restore the voted state across reloads.
+    user_id = None
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        user = await get_current_user(db, auth.removeprefix("Bearer "))
+        user_id = user.id if user else None
+    return {"polls": await open_polls(db, season_id, user_id=user_id)}
 
 
 @router.post("/{poll_id}/vote")

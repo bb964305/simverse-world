@@ -93,10 +93,12 @@ async def create_player_resident(
     db.add(resident)
     await db.flush()  # ensure resident.id is persisted before FK reference
 
-    # Bind to user and set initial position (tile coords)
+    # Bind to user and set initial position. users.last_x/last_y are PIXEL
+    # coords everywhere else (spawn read in ws connection, disconnect persist,
+    # teleport in routers/residents.py) — convert from the allocator's tiles.
     user.player_resident_id = resident.id
-    user.last_x = spawn_x
-    user.last_y = spawn_y
+    user.last_x = spawn_x * TILE_SIZE + TILE_SIZE // 2
+    user.last_y = spawn_y * TILE_SIZE + TILE_SIZE // 2
 
     await db.commit()
     await db.refresh(resident)

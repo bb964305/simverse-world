@@ -106,6 +106,19 @@ async def leaderboard(db, season_id: str, user_id: str | None = None, around_me:
             around = [{"rank": i + 1, "user_id": uid, "points": pts}
                       for i, (uid, pts) in enumerate(all_scores) if lo <= i + 1 <= hi]
             result["around_me"] = {"my_rank": my_rank, "rows": around}
+
+    # Attach display names so the UI never has to show raw user ids.
+    from app.models.user import User
+    ids = {r["user_id"] for r in result["top"]}
+    ids.update(r["user_id"] for r in result.get("around_me", {}).get("rows", []))
+    if ids:
+        names = dict((await db.execute(
+            select(User.id, User.name).where(User.id.in_(ids))
+        )).all())
+        for r in result["top"]:
+            r["name"] = names.get(r["user_id"], "")
+        for r in result.get("around_me", {}).get("rows", []):
+            r["name"] = names.get(r["user_id"], "")
     return result
 
 

@@ -11,6 +11,7 @@ from app.services.onboarding_service import (
     CENTRAL_PLAZA_X,
     CENTRAL_PLAZA_Y,
     SPAWN_RADIUS,
+    TILE_SIZE,
 )
 
 
@@ -89,8 +90,12 @@ async def test_create_player_resident_spawn_near_plaza(db_session):
     )
 
     await db_session.refresh(user)
-    dx = abs(user.last_x - CENTRAL_PLAZA_X)
-    dy = abs(user.last_y - CENTRAL_PLAZA_Y)
+    # users.last_x/last_y are PIXEL coords (spawn read, disconnect persist and
+    # teleport all use pixels) — the resident keeps tile coords.
+    assert user.last_x == resident.tile_x * TILE_SIZE + TILE_SIZE // 2
+    assert user.last_y == resident.tile_y * TILE_SIZE + TILE_SIZE // 2
+    dx = abs(resident.tile_x - CENTRAL_PLAZA_X)
+    dy = abs(resident.tile_y - CENTRAL_PLAZA_Y)
     assert dx <= SPAWN_RADIUS
     assert dy <= SPAWN_RADIUS
 

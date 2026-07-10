@@ -104,7 +104,7 @@ async def fire_due_scripts(db) -> list[dict]:
 # --------------------------------------------------------------------------- #
 # Polls                                                                        #
 # --------------------------------------------------------------------------- #
-async def open_polls(db, season_id: str | None = None) -> list[dict]:
+async def open_polls(db, season_id: str | None = None, user_id: str | None = None) -> list[dict]:
     now = datetime.now(UTC)
     stmt = select(Poll).where(Poll.status == "open")
     if season_id is not None:
@@ -121,6 +121,15 @@ async def open_polls(db, season_id: str | None = None) -> list[dict]:
             "id": poll.id, "season_id": poll.season_id, "question": poll.question,
             "options": poll.options_json or [], "closes_at": poll.closes_at.isoformat() if poll.closes_at else None,
         })
+    # Let the UI restore the ✓已投 marker across reloads (my_vote = option idx).
+    if user_id and out:
+        votes = dict((await db.execute(
+            select(Vote.poll_id, Vote.option_idx)
+            .where(Vote.user_id == user_id, Vote.poll_id.in_([p["id"] for p in out]))
+        )).all())
+        for p in out:
+            if p["id"] in votes:
+                p["my_vote"] = votes[p["id"]]
     return out
 
 

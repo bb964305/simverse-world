@@ -72,6 +72,23 @@ async def test_leaderboard_around_me(db_session):
 
 
 @pytest.mark.anyio
+async def test_leaderboard_rows_carry_names(db_session):
+    from app.services.season_service import leaderboard
+    season = await _season(db_session)
+    named = User(name="小明", email="named@s.com")
+    db_session.add(named)
+    await db_session.commit()
+    db_session.add(SeasonScore(season_id=season.id, user_id=named.id, points=50, updated_at=datetime.now(UTC)))
+    db_session.add(SeasonScore(season_id=season.id, user_id="ghost", points=10, updated_at=datetime.now(UTC)))
+    await db_session.commit()
+
+    lb = await leaderboard(db_session, season.id, user_id=named.id, around_me=True)
+    assert lb["top"][0]["name"] == "小明"
+    assert lb["top"][1]["name"] == ""  # unknown id degrades to empty, not a crash
+    assert lb["around_me"]["rows"][0]["name"] == "小明"
+
+
+@pytest.mark.anyio
 async def test_settle_idempotent_with_bonus(db_session):
     from app.services.season_service import settle_season
     season = await _season(db_session)

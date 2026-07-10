@@ -100,6 +100,13 @@ async def test_open_polls_and_vote(db_session):
     v = (await db_session.execute(select(Vote).where(Vote.poll_id == p.id))).scalar_one()
     assert v.option_idx == 1
 
+    # With user_id the listing carries my_vote (UI restores ✓已投 on reload);
+    # without it (or for a non-voter) the key is absent.
+    mine = await ss.open_polls(db_session, s.id, user_id=u.id)
+    assert mine[0]["my_vote"] == 1
+    anon = await ss.open_polls(db_session, s.id)
+    assert "my_vote" not in anon[0]
+
 
 @pytest.mark.anyio
 async def test_vote_dedup_and_validation(db_session):
