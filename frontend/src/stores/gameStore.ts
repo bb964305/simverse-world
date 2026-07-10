@@ -49,7 +49,7 @@ interface GameState {
   chatTarget: ChatTarget | null
   playerChatMessages: PlayerChatMessage[]
   inputFocused: boolean
-  profileTab: 'residents' | 'conversations' | 'transactions' | 'achievements' | 'feed' | 'recap' | 'settings'
+  profileTab: 'residents' | 'conversations' | 'transactions' | 'achievements' | 'feed' | 'recap' | 'codex' | 'settings'
   onlinePlayers: Map<string, OnlinePlayer>
   spawnX: number
   spawnY: number
@@ -71,7 +71,7 @@ interface GameState {
   addPlayerChatMessage: (msg: PlayerChatMessage) => void
   setInputFocused: (v: boolean) => void
   updateBalance: (balance: number) => void
-  setProfileTab: (tab: 'residents' | 'conversations' | 'transactions' | 'achievements' | 'feed' | 'recap' | 'settings') => void
+  setProfileTab: (tab: 'residents' | 'conversations' | 'transactions' | 'achievements' | 'feed' | 'recap' | 'codex' | 'settings') => void
   setOnlinePlayer: (p: OnlinePlayer) => void
   removeOnlinePlayer: (id: string) => void
   clearOnlinePlayers: () => void

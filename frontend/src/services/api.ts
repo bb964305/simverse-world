@@ -1118,3 +1118,20 @@ export function getAdminEconomySeries(token: string, days = 30): Promise<{ days:
     headers: { Authorization: `Bearer ${token}` },
   })
 }
+
+// ─── Exploration codex (E8) ──────────────────────────────────────
+
+export interface CodexLocation {
+  location_id: string
+  name: string
+  visited: boolean
+  visit_count: number
+  secret_found: boolean
+  has_secret: boolean
+  lore: string | null
+  bounds: [number, number, number, number]
+}
+
+export function getExplorationCodex(): Promise<{ total: number; visited: number; locations: CodexLocation[] }> {
+  return apiFetch('/exploration/me')
+}

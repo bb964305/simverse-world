@@ -9,6 +9,7 @@ import { SettingsPanel } from '../components/profile/SettingsPanel'
 import { AchievementsPanel } from '../components/profile/AchievementsPanel'
 import { FeedList } from '../components/profile/FeedList'
 import { WeeklyRecap } from '../components/profile/WeeklyRecap'
+import { ExplorationCodex } from '../components/profile/ExplorationCodex'
 import { useGameStore } from '../stores/gameStore'
 
 export function ProfilePage() {
@@ -44,6 +45,7 @@ export function ProfilePage() {
           {profileTab === 'achievements' && <AchievementsPanel />}
           {profileTab === 'feed' && <FeedList />}
           {profileTab === 'recap' && <WeeklyRecap />}
+          {profileTab === 'codex' && <ExplorationCodex />}
           {profileTab === 'settings' && <SettingsPanel />}
         </div>
       </div>

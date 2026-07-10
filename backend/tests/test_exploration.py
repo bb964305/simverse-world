@@ -87,3 +87,6 @@ async def test_codex_api(client, db_session):
     academy = next(e for e in body["locations"] if e["location_id"] == "academy")
     assert academy["visited"] and academy["secret_found"] and academy["visit_count"] == 3
     assert body["visited"] >= 1
+    # Every entry carries a tile-space rect for the codex minimap silhouette.
+    assert len(academy["bounds"]) == 4
+    assert all(len(e["bounds"]) == 4 for e in body["locations"])

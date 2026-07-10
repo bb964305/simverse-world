@@ -1,6 +1,6 @@
 import { useGameStore } from '../../stores/gameStore'
 
-type Tab = 'residents' | 'conversations' | 'transactions' | 'achievements' | 'feed' | 'recap' | 'settings'
+type Tab = 'residents' | 'conversations' | 'transactions' | 'achievements' | 'feed' | 'recap' | 'codex' | 'settings'
 
 const NAV_ITEMS: { key: Tab; icon: string; label: string }[] = [
   { key: 'residents', icon: '🏠', label: '我的居民' },
@@ -9,6 +9,7 @@ const NAV_ITEMS: { key: Tab; icon: string; label: string }[] = [
   { key: 'achievements', icon: '🏆', label: '成就' },
   { key: 'feed', icon: '📡', label: '动态' },
   { key: 'recap', icon: '📅', label: '本周回顾' },
+  { key: 'codex', icon: '🗺️', label: '探索图鉴' },
   { key: 'settings', icon: '⚙️', label: '设置' },
 ]
 

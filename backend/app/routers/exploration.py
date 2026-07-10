@@ -40,6 +40,8 @@ async def my_codex(request: Request, db: AsyncSession = Depends(get_db)):
             "secret_found": f"{loc_id}:secret" in by_loc,
             "has_secret": loc_id in HIDDEN_SPOTS,
             "lore": LORE.get(loc_id) if v is not None else None,
+            # Tile-space rect so the codex can draw the minimap silhouette.
+            "bounds": list(loc["bounds"]),
         })
     visited = sum(1 for e in entries if e["visited"])
     return {"total": len(entries), "visited": visited, "locations": entries}
