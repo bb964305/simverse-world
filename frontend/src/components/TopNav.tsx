@@ -397,6 +397,19 @@ export function TopNav() {
                 👤 个人主页
               </button>
               <button
+                onClick={() => { setDropdownOpen(false); navigate('/capsules') }}
+                style={{
+                  display: 'block', width: '100%', textAlign: 'left',
+                  padding: '9px 14px', fontSize: 13,
+                  color: 'var(--text-primary)', background: 'none', border: 'none',
+                  cursor: 'pointer',
+                }}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--bg-input)' }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'none' }}
+              >
+                💌 时间胶囊
+              </button>
+              <button
                 onClick={handleLogout}
                 style={{
                   display: 'block', width: '100%', textAlign: 'left',

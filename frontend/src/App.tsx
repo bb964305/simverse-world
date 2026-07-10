@@ -18,6 +18,7 @@ const AdminPage = lazy(() => import('./pages/AdminPage').then((m) => ({ default:
 const GraphPage = lazy(() => import('./pages/GraphPage').then((m) => ({ default: m.GraphPage })))
 const SeasonsPage = lazy(() => import('./pages/SeasonsPage').then((m) => ({ default: m.SeasonsPage })))
 const DebatesPage = lazy(() => import('./pages/DebatesPage').then((m) => ({ default: m.DebatesPage })))
+const CapsulesPage = lazy(() => import('./pages/CapsulesPage').then((m) => ({ default: m.CapsulesPage })))
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const token = useGameStore((s) => s.token)
@@ -59,6 +60,7 @@ export default function App() {
           <Route path="/graph" element={<ProtectedRoute><GraphPage /></ProtectedRoute>} />
           <Route path="/seasons" element={<ProtectedRoute><SeasonsPage /></ProtectedRoute>} />
           <Route path="/debates" element={<ProtectedRoute><DebatesPage /></ProtectedRoute>} />
+          <Route path="/capsules" element={<ProtectedRoute><CapsulesPage /></ProtectedRoute>} />
         </Routes>
       </Suspense>
     </BrowserRouter>

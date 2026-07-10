@@ -1135,3 +1135,29 @@ export interface CodexLocation {
 export function getExplorationCodex(): Promise<{ total: number; visited: number; locations: CodexLocation[] }> {
   return apiFetch('/exploration/me')
 }
+
+// ─── Time capsules (E7) ──────────────────────────────────────────
+
+export interface CapsuleData {
+  id: string
+  carrier_resident_slug: string
+  deliver_on: string
+  status: 'sealed' | 'delivered'
+  content: string | null
+  resident_note: string | null
+  delivered_at: string | null
+  created_at: string | null
+}
+
+export function getCapsules(): Promise<{ capsules: CapsuleData[] }> {
+  return apiFetch('/capsules')
+}
+
+export function createCapsule(
+  carrier_resident_slug: string, deliver_on: string, content: string,
+): Promise<CapsuleData> {
+  return apiFetch('/capsules', {
+    method: 'POST',
+    body: JSON.stringify({ carrier_resident_slug, deliver_on, content }),
+  })
+}
