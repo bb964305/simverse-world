@@ -1170,3 +1170,39 @@ export function logPhoto(resident_slug: string, media_url?: string): Promise<{ r
     body: JSON.stringify({ resident_slug, media_url: media_url ?? null }),
   })
 }
+
+// ─── Admin world events (A2) ─────────────────────────────────────
+
+export interface AdminWorldEvent {
+  id: string
+  type: string
+  title: string
+  description: string
+  payload_json: Record<string, unknown>
+  starts_at: string | null
+  ends_at: string | null
+  is_active: boolean
+  created_by: string | null
+}
+
+export function getAdminEvents(token: string): Promise<{ events: AdminWorldEvent[] }> {
+  return apiFetch('/admin/events', { headers: { Authorization: `Bearer ${token}` } })
+}
+
+export function createAdminEvent(
+  token: string,
+  data: { type: string; title: string; description: string; starts_at: string; ends_at: string },
+): Promise<AdminWorldEvent> {
+  return apiFetch('/admin/events', {
+    method: 'POST',
+    body: JSON.stringify({ ...data, payload_json: {} }),
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export function deleteAdminEvent(token: string, id: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/admin/events/${id}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
