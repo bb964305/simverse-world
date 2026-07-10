@@ -41,6 +41,7 @@ export interface ResidentData {
   token_cost_per_turn: number
   star_rating: number
   heat: number
+  mood_label?: string
 }
 
 let gameInstance: Phaser.Game | null = null
@@ -262,7 +263,7 @@ class MainScene extends Phaser.Scene {
         this.cameras.main.centerOn(x, y)
       }
       if (msg.type === 'resident_status') {
-        this._handleResidentStatusUpdate(msg as { resident_slug: string; status: string })
+        this._handleResidentStatusUpdate(msg as { resident_slug: string; status: string; mood_label?: string })
       }
       if (msg.type === 'resident_move') {
         this._handleResidentMove(msg as { resident_slug: string; tile_x: number; tile_y: number; status: string })
@@ -629,6 +630,7 @@ class MainScene extends Phaser.Scene {
   private _handleResidentStatusUpdate(msg: {
     resident_slug: string
     status: string
+    mood_label?: string
   }): void {
     const idx = this.residents.findIndex(r => r.slug === msg.resident_slug)
     if (idx < 0) return
@@ -636,6 +638,9 @@ class MainScene extends Phaser.Scene {
     if (!sprite) return
 
     this.residents[idx].status = msg.status
+    // __residentData points at the same object, so the tooltip's npc:nearby
+    // emit picks the fresh mood up on the next proximity pass.
+    if (msg.mood_label) this.residents[idx].mood_label = msg.mood_label
     clearStatusVisuals(this, sprite)
     applyStatusVisuals(this, sprite, msg.status, sprite.x, sprite.y)
   }

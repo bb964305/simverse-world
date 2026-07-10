@@ -170,6 +170,7 @@ class AgentLoop:
                 "type": "resident_status",
                 "resident_slug": resident.slug,
                 "status": resident.status,
+                "mood_label": resident.mood_label,
             })
 
     async def _initiate_chat(

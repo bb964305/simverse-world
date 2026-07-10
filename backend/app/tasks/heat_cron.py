@@ -26,6 +26,7 @@ async def heat_cron_loop():
                     "resident_slug": change["slug"],
                     "status": change["new_status"],
                     "heat": change["heat"],
+                    "mood_label": change.get("mood_label", "calm"),
                 })
             if changes:
                 logger.info(f"Heat cron: {len(changes)} status changes")

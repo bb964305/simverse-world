@@ -191,7 +191,8 @@ async def _cleanup(ctx: ConnectionContext) -> None:
                     await db.commit()
                 # Also broadcast status reset so other clients update visuals
                 await manager.broadcast(
-                    {"type": "resident_status", "resident_slug": r.slug if r else "", "status": r.status if r else "idle"},
+                    {"type": "resident_status", "resident_slug": r.slug if r else "", "status": r.status if r else "idle",
+                     "mood_label": r.mood_label if r else "calm"},
                 )
         except Exception:
             pass

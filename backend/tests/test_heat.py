@@ -50,7 +50,10 @@ async def test_transitions_to_popular(db_session, test_resident, make_conversati
     changes = await recalculate_heat(db_session)
     await db_session.refresh(test_resident)
     assert test_resident.status == "popular"
-    assert any(c["slug"] == test_resident.slug and c["new_status"] == "popular" for c in changes)
+    change = next(c for c in changes if c["slug"] == test_resident.slug)
+    assert change["new_status"] == "popular"
+    # resident_status broadcasts carry the E1 mood word (no mood yet → calm).
+    assert change["mood_label"] == "calm"
 
 
 @pytest.mark.anyio

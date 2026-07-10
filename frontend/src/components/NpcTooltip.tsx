@@ -7,6 +7,12 @@ import { getResidentGoals } from '../services/api'
 import type { ResidentGoalData } from '../services/api'
 import type { ResidentData } from '../game/GameScene'
 
+// E1 mood word → emoji (backend label set in mood_service.label_for).
+const MOOD_EMOJI: Record<string, string> = {
+  calm: '😌', content: '😊', excited: '🤩', annoyed: '😤',
+  furious: '😠', gloomy: '😔', anxious: '😰', tired: '😴',
+}
+
 // Goal cache (A1): as the player walks around, 'npc:nearby' fires per NPC —
 // cache the last N slugs for a short TTL so we don't refetch on every pass.
 const goalCache = new Map<string, { goal: ResidentGoalData | null; at: number }>()
@@ -106,7 +112,9 @@ export function NpcTooltip() {
             )}
           </div>
         </div>
-        <span style={{ marginLeft: 'auto', fontSize: 11 }}>{cfg.label}</span>
+        <span style={{ marginLeft: 'auto', fontSize: 11 }} title={npc.mood_label ?? 'calm'}>
+          {MOOD_EMOJI[npc.mood_label ?? 'calm'] ?? '😌'} {cfg.label}
+        </span>
       </div>
       {/* Active life goal (A1) — only when the resident has one */}
       {goal && (

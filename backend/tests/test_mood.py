@@ -17,6 +17,14 @@ def test_label_for_quadrants():
     assert label_for(-0.6, 0.2) == "gloomy"
 
 
+def test_mood_label_property_defaults_to_calm():
+    r = Resident(slug="m1", name="m", district="d", status="idle",
+                 tile_x=0, tile_y=0, soul_md="", persona_md="", ability_md="")
+    assert r.mood_label == "calm"
+    r.mood_json = {"valence": 0.7, "arousal": 0.8, "label": "excited", "updated_at": "x"}
+    assert r.mood_label == "excited"
+
+
 async def _resident(db, slug="klaus", mood=None):
     r = Resident(slug=slug, name="克劳斯", creator_id="system",
                  district="central_plaza", status="idle", tile_x=1, tile_y=1, mood_json=mood)

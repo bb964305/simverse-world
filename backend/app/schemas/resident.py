@@ -15,6 +15,7 @@ class ResidentListItem(BaseModel):
     star_rating: int
     token_cost_per_turn: int
     meta_json: dict | None
+    mood_label: str = "calm"
 
     model_config = {"from_attributes": True}
 

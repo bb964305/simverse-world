@@ -91,7 +91,8 @@ async def handle_start_chat(ctx: ConnectionContext, data: dict) -> None:
             resident.last_conversation_at = datetime.now(UTC)
             # Broadcast wake-up to all players (including self)
             await manager.broadcast(
-                {"type": "resident_status", "resident_slug": slug, "status": "chatting"},
+                {"type": "resident_status", "resident_slug": slug, "status": "chatting",
+                 "mood_label": resident.mood_label},
             )
 
         conv = Conversation(user_id=ctx.user_id, resident_id=resident.id)
@@ -113,7 +114,8 @@ async def handle_start_chat(ctx: ConnectionContext, data: dict) -> None:
 
     await manager.send(ctx.user_id, {"type": "chat_started", "resident_slug": slug})
     await manager.broadcast(
-        {"type": "resident_status", "resident_slug": slug, "status": "chatting"},
+        {"type": "resident_status", "resident_slug": slug, "status": "chatting",
+         "mood_label": ctx.resident.mood_label},
         exclude=ctx.user_id,
     )
 
@@ -332,6 +334,7 @@ async def handle_end_chat(ctx: ConnectionContext, data: dict) -> None:
 
         prev_status = fresh_resident.status if fresh_resident else "idle"
         fresh_resident_name = fresh_resident.name if fresh_resident else ""
+        fresh_resident_mood = fresh_resident.mood_label if fresh_resident else "calm"
         conv_id = fresh_conv.id if fresh_conv else ""
         conv_turns = fresh_conv.turns if fresh_conv else 0
 
@@ -359,7 +362,8 @@ async def handle_end_chat(ctx: ConnectionContext, data: dict) -> None:
         })
 
     await manager.broadcast(
-        {"type": "resident_status", "resident_slug": resident_slug, "status": prev_status},
+        {"type": "resident_status", "resident_slug": resident_slug, "status": prev_status,
+         "mood_label": fresh_resident_mood},
         exclude=ctx.user_id,
     )
 

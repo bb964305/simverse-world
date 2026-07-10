@@ -70,6 +70,7 @@ async def recalculate_heat(db: AsyncSession) -> list[dict]:
                 "old_status": old_status,
                 "new_status": new_status,
                 "heat": new_heat,
+                "mood_label": resident.mood_label,
             })
 
     await db.commit()

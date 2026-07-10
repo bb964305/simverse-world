@@ -50,3 +50,8 @@ class Resident(Base):
     # --- Emotion engine (E1) ---
     # {"valence": -1..1, "arousal": 0..1, "label": str, "updated_at": iso}
     mood_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    @property
+    def mood_label(self) -> str:
+        """Current mood word (E1 label set); residents without mood are calm."""
+        return str((self.mood_json or {}).get("label") or "calm")

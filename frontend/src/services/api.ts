@@ -181,6 +181,7 @@ export interface ResidentListItem {
   star_rating: number
   token_cost_per_turn: number
   meta_json: Record<string, unknown> | null
+  mood_label?: string
 }
 
 export interface OnboardingResidentResponse {
