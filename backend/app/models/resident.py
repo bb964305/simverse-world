@@ -11,7 +11,7 @@ class Resident(Base):
     slug: Mapped[str] = mapped_column(String(100), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(100))
     district: Mapped[str] = mapped_column(String(50), default="free")
-    status: Mapped[str] = mapped_column(String(20), default="idle")
+    status: Mapped[str] = mapped_column(String(20), default="idle", index=True)  # P1-3: hot filter
     heat: Mapped[int] = mapped_column(Integer, default=0)
     model_tier: Mapped[str] = mapped_column(String(20), default="standard")
     token_cost_per_turn: Mapped[int] = mapped_column(Integer, default=1)

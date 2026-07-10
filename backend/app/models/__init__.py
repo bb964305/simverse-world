@@ -1,0 +1,32 @@
+"""Import every model module so Base.metadata / mapper configuration is
+complete in any process that touches the ORM (API, agent-worker, scripts).
+
+Mapper configuration resolves cross-table FKs lazily at first query; a process
+that only imports some models (e.g. the agent-worker) blows up with
+NoReferencedTableError on relationships into un-imported tables.
+"""
+import app.models.user  # noqa: F401
+import app.models.resident  # noqa: F401
+import app.models.conversation  # noqa: F401
+import app.models.transaction  # noqa: F401
+import app.models.system_config  # noqa: F401
+import app.models.forge_session  # noqa: F401
+import app.models.pending_message  # noqa: F401
+import app.models.memory  # noqa: F401
+import app.models.personality_history  # noqa: F401
+import app.models.llm_usage  # noqa: F401
+import app.models.world_event  # noqa: F401
+import app.models.notification  # noqa: F401
+import app.models.achievement  # noqa: F401
+import app.models.shop  # noqa: F401
+import app.models.location_visit  # noqa: F401
+import app.models.digest  # noqa: F401
+import app.models.daily_quest  # noqa: F401
+import app.models.commission  # noqa: F401
+import app.models.resident_goal  # noqa: F401
+import app.models.bulletin_post  # noqa: F401
+import app.models.time_capsule  # noqa: F401
+import app.models.feed  # noqa: F401
+import app.models.season  # noqa: F401
+import app.models.goal_investment  # noqa: F401
+import app.models.debate  # noqa: F401

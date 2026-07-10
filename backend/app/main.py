@@ -31,30 +31,7 @@ async def lifespan(app):
     if settings.auto_create_tables:
         from app.database import engine, Base
         # Import all models so Base.metadata knows about them
-        import app.models.user  # noqa: F401
-        import app.models.resident  # noqa: F401
-        import app.models.conversation  # noqa: F401
-        import app.models.transaction  # noqa: F401
-        import app.models.system_config  # noqa: F401
-        import app.models.forge_session  # noqa: F401
-        import app.models.pending_message  # noqa: F401
-        import app.models.memory  # noqa: F401
-        import app.models.personality_history  # noqa: F401
-        import app.models.world_event  # noqa: F401
-        import app.models.notification  # noqa: F401
-        import app.models.achievement  # noqa: F401
-        import app.models.shop  # noqa: F401
-        import app.models.location_visit  # noqa: F401
-        import app.models.digest  # noqa: F401
-        import app.models.daily_quest  # noqa: F401
-        import app.models.commission  # noqa: F401
-        import app.models.resident_goal  # noqa: F401
-        import app.models.bulletin_post  # noqa: F401
-        import app.models.time_capsule  # noqa: F401
-        import app.models.feed  # noqa: F401
-        import app.models.season  # noqa: F401
-        import app.models.goal_investment  # noqa: F401
-        import app.models.debate  # noqa: F401
+        import app.models  # noqa: F401
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         # Seed achievement definitions (idempotent) so GET /achievements + the

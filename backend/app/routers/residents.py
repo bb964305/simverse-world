@@ -4,7 +4,7 @@ import re
 import random
 import zipfile
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,8 +57,12 @@ def _parse_skill_md(content: str) -> dict:
 
 
 @router.get("", response_model=list[ResidentListItem])
-async def list_all(db: AsyncSession = Depends(get_db)):
-    residents = await list_residents(db)
+async def list_all(
+    db: AsyncSession = Depends(get_db),
+    limit: int | None = Query(None, ge=1, le=500, description="page size; omit for the full roster"),
+    offset: int = Query(0, ge=0),
+):
+    residents = await list_residents(db, limit=limit, offset=offset)
     return [ResidentListItem.model_validate(r, from_attributes=True) for r in residents]
 
 

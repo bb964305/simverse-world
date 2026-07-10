@@ -20,8 +20,12 @@ services:
   # queues, the agent daily-action counter, the WS rate limiter, and the
   # realtime pub/sub broadcast channel all live here. Required now that the
   # API runs multiple workers and the agent loops run in a separate process.
+  # NOTE: must stay >= redis 8 — on vm212 this compose project (`deploy`) is
+  # shared with the sub2api stack, whose redis 8 data lives in the
+  # deploy_redis_data volume; a redis 7 image cannot load RDB format v14 and
+  # crash-loops, taking sub2api's redis down with it.
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     restart: unless-stopped
     ports:
       - "127.0.0.1:6379:6379"

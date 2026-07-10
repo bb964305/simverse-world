@@ -145,6 +145,12 @@ class Settings(BaseSettings):
     rest_rate_limit_forge_per_minute: int = 10     # forge start/quick (by IP)
     rest_rate_limit_llm_test_per_minute: int = 5   # settings/llm/test (by IP)
 
+    # --- Observability (OPTIMIZATION_PLAN P1-3 / P2) ---
+    slow_query_ms: int = 0        # log SQL slower than N ms (0 = disabled)
+    metrics_enabled: bool = True  # expose GET /metrics (Prometheus text)
+    sentry_dsn: str = ""          # set to enable Sentry (opt-in; no-op if empty)
+    sentry_traces_sample_rate: float = 0.0
+
     model_config = {"env_file": ".env"}
 
 

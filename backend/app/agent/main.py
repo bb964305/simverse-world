@@ -10,6 +10,7 @@ import asyncio
 import logging
 import signal
 
+import app.models  # noqa: F401 — full mapper registry so cross-table FKs resolve
 from app.agent.loop import agent_loop
 from app.redis_client import close_redis
 from app.tasks.embedding_backfill import embedding_backfill_loop
