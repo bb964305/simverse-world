@@ -1016,3 +1016,24 @@ export interface ActiveEventData {
 export function getActiveEvents(): Promise<{ events: ActiveEventData[] }> {
   return apiFetch('/events/active')
 }
+
+// ─── Admin LLM Usage API ─────────────────────────────────────────
+
+export interface LlmUsageScenario {
+  calls: number
+  input_tokens: number
+  output_tokens: number
+  est_cost_usd: number
+}
+
+export interface LlmUsageSummary {
+  hours: number
+  scenarios: Record<string, LlmUsageScenario>
+  total: LlmUsageScenario
+}
+
+export function getAdminLlmUsageSummary(token: string, hours: number): Promise<LlmUsageSummary> {
+  return apiFetch(`/admin/llm-usage/summary?hours=${hours}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}

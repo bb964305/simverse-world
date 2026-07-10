@@ -7,6 +7,7 @@ import { UsersPanel } from '../components/admin/UsersPanel'
 import { ResidentsPanel } from '../components/admin/ResidentsPanel'
 import { ForgeMonitorPanel } from '../components/admin/ForgeMonitorPanel'
 import { EconomyPanel } from '../components/admin/EconomyPanel'
+import { LlmUsagePanel } from '../components/admin/LlmUsagePanel'
 import { SystemConfigPanel } from '../components/admin/SystemConfigPanel'
 import { useGameStore } from '../stores/gameStore'
 
@@ -32,6 +33,8 @@ export function AdminPage() {
         return token ? <ForgeMonitorPanel token={token} /> : null
       case 'economy':
         return token ? <EconomyPanel token={token} /> : null
+      case 'llm':
+        return token ? <LlmUsagePanel token={token} /> : null
       case 'system':
         return token ? <SystemConfigPanel token={token as string} /> : null
       default:
