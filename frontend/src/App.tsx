@@ -5,6 +5,7 @@ import { LoginPage } from './pages/LoginPage'
 import { AuthCallbackPage } from './pages/AuthCallbackPage'
 import { AchievementToast } from './components/AchievementToast'
 import { EncounterCard } from './components/EncounterCard'
+import { ErrorBoundary } from './components/ErrorBoundary'
 
 // Heavy pages are code-split so the login/first-load bundle stays lean:
 // GamePage pulls in Phaser (~1.4MB), ProfilePage pulls in @uiw/react-md-editor
@@ -48,6 +49,7 @@ export default function App() {
     <BrowserRouter>
       <AchievementToast />
       <EncounterCard />
+      <ErrorBoundary>
       <Suspense fallback={<PageFallback />}>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
@@ -63,6 +65,7 @@ export default function App() {
           <Route path="/capsules" element={<ProtectedRoute><CapsulesPage /></ProtectedRoute>} />
         </Routes>
       </Suspense>
+      </ErrorBoundary>
     </BrowserRouter>
   )
 }
