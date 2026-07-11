@@ -4,6 +4,7 @@ import anthropic
 from app.config import settings
 from app.llm.json_extract import extract_json_object
 from app.llm.metering import Meter, estimate_tokens, record_from_meter
+from app.observability import observe_llm_error
 
 _system_client: anthropic.AsyncAnthropic | None = None
 _default_user_client: anthropic.AsyncAnthropic | None = None
@@ -133,7 +134,12 @@ async def chat(
     if not settings.llm_thinking:
         kwargs["thinking"] = {"type": "disabled"}
     t0 = time.perf_counter()
-    resp = await client.messages.create(**kwargs)
+    try:
+        resp = await client.messages.create(**kwargs)
+    except Exception:
+        # Failure-rate signal for /metrics; callers keep their own fallbacks.
+        observe_llm_error(meter.scenario if meter is not None else "unmetered")
+        raise
     latency_ms = int((time.perf_counter() - t0) * 1000)
     text = extract_text(resp)
     if meter is not None:
@@ -178,24 +184,30 @@ async def stream_chat(
         kwargs["thinking"] = {"type": "disabled"}
     collected: list[str] = []
     t0 = time.perf_counter()
-    async with client.messages.stream(**kwargs) as stream:
-        async for text in stream.text_stream:
+    try:
+        async with client.messages.stream(**kwargs) as stream:
+            async for text in stream.text_stream:
+                if meter is not None:
+                    collected.append(text)
+                yield text
             if meter is not None:
-                collected.append(text)
-            yield text
-        if meter is not None:
-            latency_ms = int((time.perf_counter() - t0) * 1000)
-            final = None
-            try:
-                final = await stream.get_final_message()
-            except Exception:
+                latency_ms = int((time.perf_counter() - t0) * 1000)
                 final = None
-            await record_from_meter(
-                meter,
-                model=resolved_model,
-                owner=owner,
-                response=final,
-                est_input_tokens=_estimate_input_tokens(system_prompt, messages),
-                est_output_tokens=estimate_tokens("".join(collected)),
-                latency_ms=latency_ms,
-            )
+                try:
+                    final = await stream.get_final_message()
+                except Exception:
+                    final = None
+                await record_from_meter(
+                    meter,
+                    model=resolved_model,
+                    owner=owner,
+                    response=final,
+                    est_input_tokens=_estimate_input_tokens(system_prompt, messages),
+                    est_output_tokens=estimate_tokens("".join(collected)),
+                    latency_ms=latency_ms,
+                )
+    except Exception:
+        # Counts both connect-time and mid-stream failures (GeneratorExit from
+        # a consumer cancel is BaseException and passes through untouched).
+        observe_llm_error(meter.scenario if meter is not None else "unmetered")
+        raise

@@ -19,6 +19,8 @@ dependencies = [
     "pyyaml>=6.0",
     "python-multipart>=0.0.9",
     "slowapi>=0.1.9",
+    "prometheus-fastapi-instrumentator>=7.0",
+    "sentry-sdk>=2.0",
 ]
 
 [project.optional-dependencies]

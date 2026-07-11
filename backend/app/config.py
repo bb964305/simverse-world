@@ -45,6 +45,15 @@ class Settings(BaseSettings):
     # flag only gates whether the telemetry rows are persisted at all.
     llm_metering_enabled: bool = True
 
+    # --- Observability (Phase 3) ---
+    # Sentry stays inert unless a DSN is provided (sentry_sdk imported lazily).
+    sentry_dsn: str = ""
+    sentry_environment: str = "dev"
+    sentry_traces_sample_rate: float = 0.0
+    # Exposes GET /metrics (Prometheus). Per-process registry; see
+    # app/observability.py for the multi-worker caveat.
+    metrics_enabled: bool = True
+
     # --- Budget circuit breaker (P1-1, E-24/E-18) ---
     # Global daily spend cap (USD). Background LLM work degrades in three tiers
     # as this fills: >=80% throttle (tick x2), >=95% rule-only (force plan, no

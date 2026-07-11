@@ -1,4 +1,5 @@
 import { Component, type ReactNode } from 'react'
+import { captureError } from '../services/monitoring'
 
 interface Props {
   children: ReactNode
@@ -22,8 +23,8 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error) {
-    // Surfaced in console for local debugging; Sentry hook can attach here later.
     console.error('[ErrorBoundary]', error)
+    captureError(error) // no-op unless VITE_SENTRY_DSN is configured
   }
 
   handleRetry = () => {

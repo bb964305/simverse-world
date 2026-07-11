@@ -20,8 +20,13 @@ from app.agent.loop import agent_loop
 from app.http import close_client
 from app.redis_client import close_redis
 from app.ws.manager import manager
+from app.observability import init_sentry, wire_runtime_gauges
 
 logger = logging.getLogger(__name__)
+
+# Sentry must initialise before the app object so its FastAPI/Starlette
+# integration can wrap request handling. No-op without SENTRY_DSN.
+init_sentry("api")
 
 
 @asynccontextmanager
@@ -137,6 +142,18 @@ app.include_router(goals_router.router)
 app.include_router(debates_router.router)
 app.include_router(polls_router.router)
 app.include_router(admin_router)
+
+# --- Observability (Phase 3): GET /metrics + runtime gauges ---
+# Instrumentator adds per-handler HTTP latency/count metrics; our own domain
+# metrics (LLM latency/failures, tick duration, WS online, pool usage) live in
+# app.observability and are fed from their respective chokepoints.
+if settings.metrics_enabled:
+    from prometheus_fastapi_instrumentator import Instrumentator  # noqa: E402
+
+    Instrumentator(excluded_handlers=["/metrics"]).instrument(app).expose(
+        app, include_in_schema=False
+    )
+    wire_runtime_gauges()
 
 
 @app.websocket("/ws")

@@ -16,6 +16,7 @@
 #   { "type": "resident_status", "resident_slug": str, "status": str }
 import asyncio
 import logging
+import time
 from datetime import datetime
 
 from sqlalchemy import select
@@ -26,6 +27,7 @@ from app.agent.chat import resident_chat
 from app.agent.registry import registry
 from app.agent.scheduler import build_schedule, should_tick
 from app.agent.tick import resident_tick
+from app.observability import observe_tick_round
 from app.config import settings
 from app.database import async_session
 from app.llm.budget import BudgetTier, background_tier
@@ -56,10 +58,12 @@ class AgentLoop:
                 await asyncio.sleep(settings.agent_tick_interval)
                 continue
             tier = BudgetTier.NORMAL
+            t0 = time.perf_counter()
             try:
                 tier = await self._tick_round()
             except Exception as e:
                 logger.error("AgentLoop tick_round error: %s", e, exc_info=True)
+            observe_tick_round(time.perf_counter() - t0)
             # Budget throttle (E-24, ≥80%/≥95%): halve background frequency.
             sleep_mult = 2 if tier in (BudgetTier.THROTTLE, BudgetTier.RULE_ONLY) else 1
             await asyncio.sleep(settings.agent_tick_interval * sleep_mult)

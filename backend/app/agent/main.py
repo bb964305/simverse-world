@@ -12,6 +12,7 @@ import signal
 
 import app.models  # noqa: F401 — full mapper registry so cross-table FKs resolve
 from app.agent.loop import agent_loop
+from app.observability import init_sentry
 from app.redis_client import close_redis
 from app.tasks.embedding_backfill import embedding_backfill_loop
 from app.tasks.heat_cron import heat_cron_loop
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 async def main() -> None:
     """Run all background loops until SIGTERM/SIGINT or cancellation."""
+    init_sentry("agent-worker")  # no-op without SENTRY_DSN
     logger.info(
         "agent-worker starting: agent_loop + heat_cron_loop + embedding_backfill_loop"
     )

@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 from app.config import settings
 from app.llm.pricing import compute_cost
+from app.observability import observe_llm_call
 # Imported eagerly so the table is registered on Base.metadata (tests'
 # create_all) whenever the LLM client is loaded. The runtime insert below
 # re-imports locally to keep the write path independent of import order.
@@ -117,10 +118,22 @@ async def record_usage(
     (``source="usage"``); otherwise ``est_*_tokens`` are used
     (``source="estimated"``).
     """
+    # Prometheus counters/latency first (in-process, no I/O): live metrics
+    # stay meaningful even when DB persistence is toggled off — the
+    # llm_metering_enabled flag only gates the telemetry *rows*.
+    try:
+        usage = usage_from_response(response) if response is not None else None
+    except Exception:
+        usage = None
+    observe_llm_call(
+        scenario,
+        source="usage" if usage is not None else "estimated",
+        parse_ok=parse_ok,
+        latency_ms=latency_ms,
+    )
     if not settings.llm_metering_enabled:
         return
     try:
-        usage = usage_from_response(response) if response is not None else None
         if usage is not None:
             source = "usage"
             in_tok = usage["input_tokens"]
