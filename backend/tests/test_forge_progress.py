@@ -3,7 +3,7 @@
 Covers the shared notify helpers (envelope shape + failure-swallowing) and the
 deep/quick/error paths of the canonical pipeline (app/forge/pipeline.py), which
 drives the DeepForge component. The guided/quick legacy paths in
-services/forge_service.py reuse the exact same helpers at the same points.
+app/forge/legacy_pipeline.py reuse the exact same helpers at the same points.
 """
 
 import pytest

@@ -16,10 +16,8 @@ from app.schemas.forge import (
     DeepStartRequest, DeepStartResponse, DeepStatusResponse,
 )
 from app.services.auth_service import get_current_user
-from app.services.forge_service import (
-    start_forge, submit_answer, get_status, run_generation_pipeline,
-    run_quick_pipeline,
-)
+from app.forge.legacy_sessions import start_forge, submit_answer, get_status
+from app.forge.legacy_pipeline import run_generation_pipeline, run_quick_pipeline
 from app.forge.pipeline import ForgePipeline
 from app.llm.client import get_client as get_llm_client
 from app.llm.budget import forge_blocked
@@ -111,7 +109,7 @@ async def forge_quick(
     forge_id_data = start_forge(user.id, req.name.strip())
     forge_id = forge_id_data["forge_id"]
 
-    from app.services.forge_service import _sessions
+    from app.forge.legacy_sessions import _sessions
     forge_session = _sessions[forge_id]
     forge_session["answers"]["2"] = req.raw_text
     forge_session["step"] = 5

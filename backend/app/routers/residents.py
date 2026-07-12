@@ -18,7 +18,7 @@ from app.services.version_service import create_version_snapshot, get_versions
 from app.services.auth_service import get_current_user
 from app.services.scoring_service import compute_star_rating
 from app.services.sbti_service import compute_sbti, update_meta_with_sbti
-from app.services.forge_service import allocate_resident_location, _generate_slug, SPRITE_KEYS
+from app.services.resident_placement import allocate_resident_location, _generate_slug, SPRITE_KEYS
 
 router = APIRouter(prefix="/residents", tags=["residents"])
 
@@ -143,7 +143,7 @@ async def resident_import(body: ImportBody, request: Request, db: AsyncSession =
     from fastapi import HTTPException
     from datetime import datetime, UTC
     from sqlalchemy import select as _select, func as _func
-    from app.services.forge_service import allocate_resident_location, _generate_slug, SPRITE_KEYS
+    from app.services.resident_placement import allocate_resident_location, _generate_slug, SPRITE_KEYS
     from app.services.shop_effects import _has_sensitive
     import random as _random
 

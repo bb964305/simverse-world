@@ -120,7 +120,7 @@ def test_full_housing_assignment_flow():
 @pytest.mark.anyio
 async def test_find_available_tile_uses_canonical_occupancy_bucket(db_session):
     """Legacy aliases must not select central-plaza slots while checking another bucket."""
-    from app.services.forge_service import _find_available_tile, LOCATION_TILE_SLOTS
+    from app.services.resident_placement import _find_available_tile, LOCATION_TILE_SLOTS
 
     occupied_x, occupied_y = LOCATION_TILE_SLOTS["central_plaza"][0]
     db_session.add(

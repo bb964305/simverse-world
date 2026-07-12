@@ -218,11 +218,11 @@ async def reforge_character(
 ):
     """
     POST /settings/character/reforge — re-run forge pipeline on player resident.
-    Delegates to forge_service (Plan 2). Returns 501 if forge not available.
+    Delegates to the forge pipeline (Plan 2). Returns 501 if forge not available.
     """
     user, resident, db = await _require_resident(request, db)
     try:
-        from app.services.forge_service import start_forge_session
+        from app.forge.legacy_sessions import start_forge_session
         session = await start_forge_session(db, resident.id, user.id)
         return {"message": "Reforge started", "forge_session_id": session.id}
     except (ImportError, AttributeError):

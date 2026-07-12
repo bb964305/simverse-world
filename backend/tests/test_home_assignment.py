@@ -29,10 +29,10 @@ async def test_allocate_home_returns_location_id():
 
 @pytest.mark.asyncio
 async def test_allocate_resident_location_returns_home():
-    from app.services.forge_service import allocate_resident_location
+    from app.services.resident_placement import allocate_resident_location
     mock_db = AsyncMock()
-    with patch("app.services.forge_service._find_available_tile", return_value=(75, 56)):
-        with patch("app.services.forge_service.allocate_home", return_value="house_a"):
+    with patch("app.services.resident_placement._find_available_tile", return_value=(75, 56)):
+        with patch("app.services.resident_placement.allocate_home", return_value="house_a"):
             result = await allocate_resident_location(mock_db, requested_location_id="central_plaza")
     assert len(result) == 4
     location_id, tile_x, tile_y, home_id = result
@@ -42,9 +42,9 @@ async def test_allocate_resident_location_returns_home():
 
 @pytest.mark.asyncio
 async def test_allocate_resident_location_no_housing_when_disabled():
-    from app.services.forge_service import allocate_resident_location
+    from app.services.resident_placement import allocate_resident_location
     mock_db = AsyncMock()
-    with patch("app.services.forge_service._find_available_tile", return_value=(75, 56)):
+    with patch("app.services.resident_placement._find_available_tile", return_value=(75, 56)):
         result = await allocate_resident_location(mock_db, requested_location_id="central_plaza", assign_housing=False)
     assert len(result) == 4
     assert result[3] is None

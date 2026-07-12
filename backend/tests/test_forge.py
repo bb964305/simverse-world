@@ -71,7 +71,7 @@ async def test_forge_answers_advance_to_generating(client, auth_headers):
 
 @pytest.mark.anyio
 async def test_score_content_completeness():
-    from app.services.forge_service import _compute_star_rating_fallback
+    from app.forge.legacy_helpers import _compute_star_rating_fallback
 
     # Sparse = 1 star
     assert _compute_star_rating_fallback("# 能力\n暂无", "# 人格\n暂无", "# 灵魂\n暂无") == 1

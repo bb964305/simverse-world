@@ -100,7 +100,7 @@ class ForgePipeline:
 
     async def _create_resident(self, session: ForgeSession):
         """Create a Resident from a completed forge session."""
-        from app.services.forge_service import SPRITE_KEYS, allocate_resident_location
+        from app.services.resident_placement import SPRITE_KEYS, allocate_resident_location
         from app.services.coin_service import reward
         from app.services.scoring_service import compute_star_rating
 

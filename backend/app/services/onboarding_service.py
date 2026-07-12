@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.map_data import get_location_by_id
 from app.models.user import User
 from app.models.resident import Resident
-from app.services.forge_service import allocate_resident_location
+from app.services.resident_placement import allocate_resident_location
 
 # Central Plaza spawn point (tile coordinates)
 CENTRAL_PLAZA_LOCATION_ID = "central_plaza"

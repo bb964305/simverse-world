@@ -8,7 +8,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.resident import Resident
-from app.services.forge_service import allocate_resident_location, normalize_location_id
+from app.services.resident_placement import allocate_resident_location, normalize_location_id
 
 SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000001"
 _OVERRIDES_PATH = Path(__file__).with_name("generated") / "preset_character_overrides.json"
