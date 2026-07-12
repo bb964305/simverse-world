@@ -39,8 +39,8 @@ async def test_claim_daily_reward_already_claimed_today(db_session, test_user):
 
 @pytest.mark.anyio
 async def test_consecutive_login_advances_streak(db_session, test_user):
-    from datetime import date
-    test_user.last_login_date = date.today() - timedelta(days=1)
+    from datetime import datetime, UTC
+    test_user.last_login_date = datetime.now(UTC).date() - timedelta(days=1)
     test_user.login_streak = 1
     await db_session.commit()
     result = await claim_daily_reward(db_session, test_user.id)
@@ -48,8 +48,8 @@ async def test_consecutive_login_advances_streak(db_session, test_user):
 
 @pytest.mark.anyio
 async def test_broken_streak_resets_to_one(db_session, test_user):
-    from datetime import date
-    test_user.last_login_date = date.today() - timedelta(days=3)  # gap
+    from datetime import datetime, UTC
+    test_user.last_login_date = datetime.now(UTC).date() - timedelta(days=3)  # gap
     test_user.login_streak = 5
     await db_session.commit()
     result = await claim_daily_reward(db_session, test_user.id)
@@ -57,8 +57,8 @@ async def test_broken_streak_resets_to_one(db_session, test_user):
 
 @pytest.mark.anyio
 async def test_streak_caps_at_day_7(db_session, test_user):
-    from datetime import date
-    test_user.last_login_date = date.today() - timedelta(days=1)
+    from datetime import datetime, UTC
+    test_user.last_login_date = datetime.now(UTC).date() - timedelta(days=1)
     test_user.login_streak = 9  # already past the cap
     await db_session.commit()
     result = await claim_daily_reward(db_session, test_user.id)

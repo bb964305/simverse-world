@@ -13,6 +13,37 @@ from app.database import Base, get_db
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _global_engine_tables():
+    """Create tables on the GLOBAL app engine once per session (PLAN_P3 批次 0).
+
+    A few handlers open sessions via ``app.database.async_session`` directly
+    (e.g. ws chat in test_rate_limit), hitting the real DATABASE_URL — on a
+    fresh file (CI uses /tmp/ci_dev.db) no migration has run, so the first
+    such test dies with "no such table". Previously masked by pre-initialized
+    local db files / full-suite ordering. Idempotent (create_all skips
+    existing tables) and fail-open: a broken/read-only dev DB must not kill
+    unrelated tests. The pool is disposed so no loop-bound connection leaks
+    into per-test event loops.
+    """
+    import asyncio
+    import warnings
+
+    async def _create():
+        from app.database import Base as _base, engine as _engine
+        try:
+            async with _engine.begin() as conn:
+                await conn.run_sync(_base.metadata.create_all)
+        finally:
+            await _engine.dispose()
+
+    try:
+        asyncio.run(_create())
+    except Exception as exc:  # pragma: no cover - fail-open by design
+        warnings.warn(f"global-engine create_all skipped: {exc}")
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _fake_redis():
     """Install a fresh in-memory fakeredis for every test (P0-3b).
