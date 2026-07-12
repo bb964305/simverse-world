@@ -142,7 +142,25 @@
 - [x] 前端测试底座 — `014fdb8`：Vitest + RTL（vitest.config.ts + jsdom），首批覆盖 gameStore / api 封装 / ErrorBoundary（路由级兜底组件一并落地，挂 App.tsx）。
 - [x] CI（GitHub Actions）— `e02de65`：3 job = 后端选择性 pytest（sqlite+fakeredis，排除口径与本文件一致）/ 真 pgvector 全链 alembic 迁移+注册冒烟（兑现发现区 testcontainers 建议）/ 前端 tsc+vitest+eslint 基线闸门(7err/3warn 零新增)+build（Node 22 锁定，绕 rolldown v25 坑）。⚠️ 尚未在真 Actions 跑过首绿——随 PLAN_P3 批次 0 推送验证。
 - [x] Sentry + /metrics — `30d7334`：`app/observability.py`（prometheus_client 域指标：LLM 延迟/失败、tick 时长、WS 在线、池占用；sentry_sdk 懒加载，无 DSN 零开销）+ main.py `/metrics`（instrumentator，`metrics_enabled` 开关）+ agent worker init；前端 `services/monitoring.ts`（@sentry/react 动态 import，无 DSN 不拉包）。⚠️ 生产 DSN 接线随 PLAN_P3 批次 4。
-- [ ] P1-6 大文件拆分 — **主体未做**（api.ts 1208 / SettingsPanel 808 / UsersPanel 620 / forge_service.py 669[DEPRECATED 但 6 端点仍走它] / 双 forge prompt 294+262），执行计划见 `docs/PLAN_P3.md` 批次 1（本批含未提交 WIP：profile/settings/ 三文件、admin/users/helpers.ts）
+- [x] P1-6 大文件拆分 — PLAN_P3 批次 1（2026-07-13，4 提交，纯重构零行为变化）：**SettingsPanel 808→60**（`f32c2c1`，profile/settings/ 6 分区子组件 + useSectionForm，续接 WIP）；**UsersPanel 620→128**（`fd5cd0d`，admin/users/ 表格/弹窗/操作 hook）；**forge_service 669→31 行 shim**（`3739d27`，legacy_{sessions,pipeline,prompts,helpers} + resident_placement 中性工具模块，routers/tests 全迁新路径，llm/forge_prompts 归一为 15 行 shim→legacy_prompts）；**api.ts 1208→15 行 barrel**（`ab20823`，api/ 按域 9 模块，全库约 40 处调用点零改动）。拆后全部文件 <400 行。
+
+### PLAN_P3 批次 2-3 执行记录（2026-07-13）
+- **批次 2 P1-3 扫尾** — `a83779a`：分页审计全 routers，拉齐三处真实无界增长列表（admin /events 加 limit/offset[A2 cron ~4-5 事件/天无界积累]、my_capsules 上限 200、my_residents 上限 500）；其余 `.all()` 为天然有界（items/config/exploration）/聚合/带 10min 缓存整图语义（graph），豁免有注释。**评分聚合决策：不做增量维护**——rating.py 的 avg 按 resident_id 过滤，030 复合索引已使其为索引内聚合。
+- **批次 3 工程化扩展**（4 提交）：
+  - **TS strict + eslint 清零** — `tsconfig.app.json` 开 `strict: true`（实测零错，直接开启）；eslint 7err/3warn 全部修复**零 disable**（setState-in-effect ×4 改惰性初始化/渲染期派生/guarded prev-comparison、exhaustive-deps 用稳定 store action 直加依赖 + `useEffectEvent(close)`、DistrictZones 非组件导出拆 districtZonesData.ts、2 处未使用变量删除）；CI eslint 闸门 7/3→**0/0 零容忍**。
+  - **WS 指数退避 + ConnectionBanner** — 3s×2 至 30s 封顶 ±20% jitter，**auth_ok 才重置**（TCP 通但鉴权被踢不重置）；主动断开（disconnectWS 先置 null）天然不触发。gameStore 加 wsStatus 切片；ConnectionBanner 挂 App.tsx 全局（Game/Forge/Debates 三页都 connectWS）。+5 vitest（ws.test.ts）。
+  - **GameScene 泄漏审计修 4 处** — onWSMessage/bridge.on×3 未退订（StrictMode 每重挂载泄一份 scene graph）、StatusVisuals 模块级 visualRegistry 跨重建积累死引用（新增 releaseAllStatusVisuals）、async create() 销毁竞态（isShutdown 守卫）；统一 SHUTDOWN/DESTROY→幂等 teardown。无问题项（Phaser 自管 timer/相机事件、无 window 监听）已审计确认。
+  - **.env.example↔Settings 一致性闸门** — 新增 test_env_example_consistency.py（双向：example 键必须是真实字段 + 字段必须有文档或进 UNDOCUMENTED_OK 白名单），随 CI backend job 自动跑；首跑即抓到 **52 个漂移键**（含 vm212 实际在用的 AGENT_ENABLED/LLM_BASE_URL/预算熔断全家），已全部补进 .env.example；顺带删 config.py 里 metrics/sentry 的**重复定义块**（50-55 与 157-161 双定义）。
+  - **agent 行为结构化日志** — 决策：**不建 agent_events 表**（llm_usage+WS 广播已覆盖成本与视觉回放），最小落法 = `_handle_action` chokepoint 打 `agent.events` logger 单行 JSON（ts/resident/action/target/reason/suppress_chat），fail-open。
+- **顺手修 3 个（批次 1 验证中发现）**：① `e21075d` test_daily_reward 用本地 `date.today()` 而服务用 UTC——本地时区 00:00-08:00 窗口内必挂（沙盒 CST 复现），改 UTC 对齐；conftest 加 session 级全局 engine 幂等建表——**CI 全新库文件首跑必踩**"no such table"（此前被已初始化的本地库文件掩盖）；② `45be03f` **witness 真 bug**：dedup `_last_witness.get(key, 0.0)` 默认 0 + `time.monotonic()`=开机秒数 → **开机 <4h 的机器上首条目击记忆恒被误杀**（CI/新 VM 必现，vm212 长 uptime 侥幸），改成员判定。
+- **最终验证（2026-07-13）**：后端选择性套件 5 块 **663 passed / 0 failed / 1 deselected**（排除口径同 CI）；前端四连全绿：tsc(strict) ✅ / vitest 4 files 21 tests ✅ / **eslint 0 problems** ✅ / vite build ✅（outDir /tmp，分包正常）。
+
+### PLAN_P3 批次 0/4 —— 本机执行清单（沙盒无 push 凭据，需 Jimmy）
+1. **push**：`git push origin feat/rate-limiting-p1 && git push origin feat/rate-limiting-p1:master`（本地领先 origin 15 提交：3 个 Phase 3 已有 + 12 个本轮）
+2. **CI 首绿**：push 后看 GitHub Actions 三 job（backend pytest / pg 迁移冒烟 / 前端四连），有环境问题回报即修
+3. **Sentry DSN**：建前后端两个 Sentry 项目 → vm212 `.env` 加 `SENTRY_DSN=`、前端构建注入 `VITE_SENTRY_DSN` → 触发一次测试异常验证上报；顺带 vm212 验证 `GET /metrics` 与 `SLOW_QUERY_MS` 阈值
+4. **docs 纳管确认**：FEATURE_SPECS/OPTIMIZATION_PLAN/KICKOFF_PROMPT* 仍未入 git，建议入库（PROGRESS 多处引用）
+5. **沙盒 git 锁残留**：`.git/HEAD.lock`、`.git/index.lock` 是 mount EPERM 残留（本机可直接 `rm`），本轮提交经 /tmp 索引 + commit-tree 绕过，历史正常
 
 ## 发现（施工中发现的新问题，不当场处理）
 - **成本优化研究完成（2026-07-07）**：28 条实验，产出在 `docs/research/`（REPORT=结论与 P1-1 建议、LOG=实验台账、DIRECTOR_ROADMAP/CALLMAP=Opus 统筹产物）。关键输入给 P1-1：计量字段清单、熔断阈值、杠杆排序（计划优先跳过 decide 省 29-37% 为最大项）；缓存/Batch 判定为不可用杠杆。**开放问题需 Jimmy**：部署机 .env 的 LLM_BASE_URL（验证端点是否 Anthropic 原生，F-02）。顺手修清单：互聊 max_tokens 100→150（截断污染 history 风险）、互聊 history 双注入（chat.py 一行）、玩家聊天 chat_messages 无截断。
