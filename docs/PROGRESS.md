@@ -138,7 +138,11 @@
 - **发现（本轮）**：① Cowork 自动化 tab 在后台窗口时 `document.visibilityState=hidden` → Chrome 停发 rAF → **Phaser 完全冻结**（React 照常）——浏览器自动化验证 Phaser 交互必须把 tab 置前台；② CDP 瞬发按键 Phaser `isDown` 采样不到，需 JS 派发 keydown/keyup 且 **KeyboardEvent 构造器忽略 keyCode，要 defineProperty 强设**；③ 后端多处 naive-UTC isoformat 无 Z 后缀，前端新代码解析时间一律先补 Z（EventsPanel 已修，其它页面待排查）。
 
 ## Phase 3 — 持续项（穿插进行，不阻塞主线）
-- [ ] P1-3 分页与索引补齐 · [ ] P1-6 大文件拆分 · [ ] CI（GitHub Actions）· [ ] 前端测试底座 · [ ] Sentry + /metrics
+- [x] P1-3 分页与索引补齐 — `fee7126`（2026-07-10，已随 Kickoff V4 部署 vm212，alembic=030）：慢查询日志（`database.py` sync-engine events，`slow_query_ms` 阈值开关）、迁移 **030**（residents.status / conversations.resident_id+rating 索引）、residents 列表 limit/offset 分页、loop 居民拉取列裁剪（id+meta_json）。扫尾（分页审计+评分聚合决策）随 PLAN_P3 批次 2。
+- [x] 前端测试底座 — `014fdb8`：Vitest + RTL（vitest.config.ts + jsdom），首批覆盖 gameStore / api 封装 / ErrorBoundary（路由级兜底组件一并落地，挂 App.tsx）。
+- [x] CI（GitHub Actions）— `e02de65`：3 job = 后端选择性 pytest（sqlite+fakeredis，排除口径与本文件一致）/ 真 pgvector 全链 alembic 迁移+注册冒烟（兑现发现区 testcontainers 建议）/ 前端 tsc+vitest+eslint 基线闸门(7err/3warn 零新增)+build（Node 22 锁定，绕 rolldown v25 坑）。⚠️ 尚未在真 Actions 跑过首绿——随 PLAN_P3 批次 0 推送验证。
+- [x] Sentry + /metrics — `30d7334`：`app/observability.py`（prometheus_client 域指标：LLM 延迟/失败、tick 时长、WS 在线、池占用；sentry_sdk 懒加载，无 DSN 零开销）+ main.py `/metrics`（instrumentator，`metrics_enabled` 开关）+ agent worker init；前端 `services/monitoring.ts`（@sentry/react 动态 import，无 DSN 不拉包）。⚠️ 生产 DSN 接线随 PLAN_P3 批次 4。
+- [ ] P1-6 大文件拆分 — **主体未做**（api.ts 1208 / SettingsPanel 808 / UsersPanel 620 / forge_service.py 669[DEPRECATED 但 6 端点仍走它] / 双 forge prompt 294+262），执行计划见 `docs/PLAN_P3.md` 批次 1（本批含未提交 WIP：profile/settings/ 三文件、admin/users/helpers.ts）
 
 ## 发现（施工中发现的新问题，不当场处理）
 - **成本优化研究完成（2026-07-07）**：28 条实验，产出在 `docs/research/`（REPORT=结论与 P1-1 建议、LOG=实验台账、DIRECTOR_ROADMAP/CALLMAP=Opus 统筹产物）。关键输入给 P1-1：计量字段清单、熔断阈值、杠杆排序（计划优先跳过 decide 省 29-37% 为最大项）；缓存/Batch 判定为不可用杠杆。**开放问题需 Jimmy**：部署机 .env 的 LLM_BASE_URL（验证端点是否 Anthropic 原生，F-02）。顺手修清单：互聊 max_tokens 100→150（截断污染 history 风险）、互聊 history 双注入（chat.py 一行）、玩家聊天 chat_messages 无截断。
