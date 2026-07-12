@@ -15,9 +15,10 @@
 # resident_status:
 #   { "type": "resident_status", "resident_slug": str, "status": str }
 import asyncio
+import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, UTC
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,6 +36,9 @@ from app.models.resident import Resident
 from app.ws.manager import manager
 
 logger = logging.getLogger(__name__)
+# One JSON line per acted tick (see _handle_action) — dedicated name so ops can
+# route/filter behavior replay separately from app logs.
+events_logger = logging.getLogger("agent.events")
 
 
 class AgentLoop:
@@ -151,6 +155,24 @@ class AgentLoop:
         ``suppress_chat`` (budget RULE_ONLY tier) pauses inter-resident chat
         initiation — a planned CHAT would otherwise fire an 11–13 call wrap-up.
         """
+        # Structured behavior log (PLAN_P3 批次 3, "agent_events" 最小落法):
+        # one JSON line per acted tick at the single post-tick chokepoint.
+        # Answers "为什么居民做了这件事" without a new table — llm_usage rows
+        # and WS broadcasts already cover cost and visual replay; grep/ship
+        # this logger ("agent.events") for behavior replay.
+        try:
+            events_logger.info(json.dumps({
+                "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+                "resident": resident.slug,
+                "action": action_result.action.value,
+                "target_slug": action_result.target_slug,
+                "target_tile": list(action_result.target_tile) if action_result.target_tile else None,
+                "reason": action_result.reason,
+                "suppress_chat": suppress_chat,
+            }, ensure_ascii=False))
+        except Exception:  # never let telemetry break the tick
+            pass
+
         movement_actions = {ActionType.WANDER, ActionType.GO_HOME, ActionType.VISIT_DISTRICT}
 
         if action_result.action in movement_actions:
