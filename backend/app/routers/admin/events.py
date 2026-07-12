@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,8 +52,14 @@ def _serialize(e: WorldEvent) -> dict:
 async def list_events(
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
+    # P1-3 audit: A2 cron schedules ~4-5 events/day so this table grows
+    # without bound; newest-first + page params keep the panel snappy.
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
 ):
-    result = await db.execute(select(WorldEvent).order_by(WorldEvent.starts_at.desc()))
+    result = await db.execute(
+        select(WorldEvent).order_by(WorldEvent.starts_at.desc()).limit(limit).offset(offset)
+    )
     return {"events": [_serialize(e) for e in result.scalars().all()]}
 
 

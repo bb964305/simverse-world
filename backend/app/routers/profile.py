@@ -33,6 +33,9 @@ async def list_my_residents(
         select(Resident)
         .where(Resident.creator_id == user.id)
         .order_by(desc(Resident.created_at))
+        # P1-3 audit: per-user growth is slow (creation capped at 3/day) but
+        # unbounded over time; safety cap far above any realistic roster.
+        .limit(500)
     )
     residents = result.scalars().all()
     return [MyResidentItem.model_validate(r, from_attributes=True) for r in residents]

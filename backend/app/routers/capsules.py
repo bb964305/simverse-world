@@ -46,6 +46,8 @@ async def my_capsules(request: Request, db: AsyncSession = Depends(get_db)):
     user = await _require_user(request, db)
     rows = (await db.execute(
         select(TimeCapsule).where(TimeCapsule.user_id == user.id).order_by(TimeCapsule.deliver_on)
+        # P1-3 audit: per-user but unbounded over time; cap keeps the payload sane.
+        .limit(200)
     )).scalars().all()
     return {"capsules": [serialize(c, include_content=True) for c in rows]}
 
