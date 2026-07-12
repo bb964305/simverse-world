@@ -67,7 +67,12 @@ async def record_witnesses(resident_id: str, tile_x: int, tile_y: int, home_loca
         if abs(ptile[0] - tile_x) + abs(ptile[1] - tile_y) > WITNESS_RADIUS_TILES:
             continue
         key = (resident_id, uid)
-        if now_mono - _last_witness.get(key, 0.0) < WITNESS_DEDUP_SECONDS:
+        # Membership check, not a 0.0 default: time.monotonic() is seconds
+        # since boot, so on a machine up < 4h the 0.0 default made
+        # `now - 0.0 < WITNESS_DEDUP_SECONDS` always true and silently
+        # suppressed every first-ever witness (bit CI/fresh VMs).
+        last_seen = _last_witness.get(key)
+        if last_seen is not None and now_mono - last_seen < WITNESS_DEDUP_SECONDS:
             continue
         _last_witness[key] = now_mono
         phrase = _situation(home_location_id, ptile)
