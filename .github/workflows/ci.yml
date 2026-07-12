@@ -6,7 +6,7 @@
 #   2. pg-migration-smoke — 真 Postgres(pgvector)全链 alembic 迁移 + 注册冒烟。
 #                          动机见 PROGRESS 发现区:sqlite 测试(FK 不强制 +
 #                          create_all 不走迁移)曾掩盖 4 类"仅真 PG 会炸"的 bug
-#   3. frontend         — tsc + vitest + eslint 基线闸门(7err/3warn 零新增)+ build
+#   3. frontend         — tsc + vitest + eslint 零容忍闸门(0err/0warn)+ build
 name: CI
 
 on:
@@ -136,13 +136,13 @@ jobs:
       - name: Unit tests (vitest)
         run: npm test
       - name: ESLint baseline gate
-        # 基线 7 errors / 3 warnings 全部预存(setState-in-effect 等非平凡修复),
-        # 闸门语义 = "零新增"。修掉存量后请同步下调基线数字。
+        # 存量 7 errors / 3 warnings 已全部修复,基线降为 0/0,
+        # 闸门语义 = "零容忍":任何 error/warning 都会让 CI 失败。
         run: |
           npx eslint src --format json --output-file /tmp/eslint.json || true
           node -e "
             const fs = require('fs');
-            const BASELINE_ERRORS = 7, BASELINE_WARNINGS = 3;
+            const BASELINE_ERRORS = 0, BASELINE_WARNINGS = 0;
             const results = JSON.parse(fs.readFileSync('/tmp/eslint.json', 'utf8'));
             const errors = results.reduce((s, f) => s + f.errorCount, 0);
             const warnings = results.reduce((s, f) => s + f.warningCount, 0);

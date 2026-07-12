@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 
 interface SbtiInfo {
   type: string
@@ -32,43 +32,49 @@ const STATUS_LABELS: Record<string, string> = {
 }
 
 export function ResidentCard({ resident, onEdit, lastWsMessage }: ResidentCardProps) {
-  const [isFlashing, setIsFlashing] = useState(false)
+  // flashSeq: 0 = idle; each accepted WS type-change bumps it so the timer
+  // effect below re-arms (the old clearTimeout + setTimeout per message).
+  const [flashSeq, setFlashSeq] = useState(0)
   const [displayedType, setDisplayedType] = useState<SbtiInfo | undefined>(
     resident.meta_json?.sbti ?? undefined
   )
-  const flashTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // React to resident_type_changed WS messages
-  useEffect(() => {
+  // React to resident_type_changed WS messages. Formerly an effect with deps
+  // [lastWsMessage, resident.id]; now the same check as a render-time state
+  // adjustment (react-hooks/set-state-in-effect). prevWs starts as null so
+  // the first render processes the current message, matching the old
+  // effect's initial run on mount.
+  const [prevWs, setPrevWs] = useState<{ msg: ResidentCardProps['lastWsMessage']; id: string } | null>(null)
+  if (prevWs === null || prevWs.msg !== lastWsMessage || prevWs.id !== resident.id) {
+    setPrevWs({ msg: lastWsMessage, id: resident.id })
     if (
       lastWsMessage?.type === 'resident_type_changed' &&
       lastWsMessage.resident_id === resident.id
     ) {
       setDisplayedType({ type: lastWsMessage.new_type, type_name: lastWsMessage.type_name })
-      setIsFlashing(true)
-
-      if (flashTimeoutRef.current) {
-        clearTimeout(flashTimeoutRef.current)
-      }
-      flashTimeoutRef.current = setTimeout(() => {
-        setIsFlashing(false)
-      }, 1500)
+      setFlashSeq((n) => n + 1)
     }
-  }, [lastWsMessage, resident.id])
+  }
 
-  // Sync displayed type with prop updates (e.g. after page reload)
+  // Sync displayed type with prop updates (e.g. after page reload). Formerly
+  // an effect keyed on sbti.type; now the identical comparison during render.
+  const sbti = resident.meta_json?.sbti
+  const [prevSbtiType, setPrevSbtiType] = useState(sbti?.type)
+  if (sbti?.type !== prevSbtiType) {
+    setPrevSbtiType(sbti?.type)
+    if (sbti) setDisplayedType(sbti)
+  }
+
+  // Flash timer: re-arms whenever flashSeq bumps (extending the flash on
+  // rapid messages, as before); cleanup covers both the old "clear previous
+  // timer on new message" and "clear on unmount" paths.
   useEffect(() => {
-    if (resident.meta_json?.sbti) {
-      setDisplayedType(resident.meta_json.sbti)
-    }
-  }, [resident.meta_json?.sbti?.type])
+    if (flashSeq === 0) return
+    const timer = setTimeout(() => setFlashSeq(0), 1500)
+    return () => clearTimeout(timer)
+  }, [flashSeq])
 
-  // Cleanup timeout on unmount
-  useEffect(() => {
-    return () => {
-      if (flashTimeoutRef.current) clearTimeout(flashTimeoutRef.current)
-    }
-  }, [])
+  const isFlashing = flashSeq > 0
 
   return (
     <div style={{

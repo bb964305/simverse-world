@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { bridge } from '../../game/phaserBridge'
 import type { ResidentData } from '../../game/GameScene'
 import { STATUS_CONFIG } from '../../game/StatusVisuals'
-import { DISTRICTS, type DistrictKey } from './DistrictZones'
+import { DISTRICTS, type DistrictKey } from './districtZonesData'
 
 const API = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 

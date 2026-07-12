@@ -28,7 +28,7 @@ export function ForgePage() {
     setForgeState(state as ForgeStatusResponse)
   }, [])
 
-  const handleComplete = useCallback((_residentId: string) => {
+  const handleComplete = useCallback(() => {
     navigate('/')
   }, [navigate])
 

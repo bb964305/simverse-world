@@ -88,9 +88,17 @@ export function DashboardPanel() {
   }, [token])
 
   useEffect(() => {
-    void fetchData()
+    // Kick off the initial fetch from a zero-delay timer callback so the
+    // effect body performs no synchronous setState
+    // (react-hooks/set-state-in-effect). The data arrives asynchronously
+    // either way, so the rendered first frame (placeholder state) and the
+    // refresh-button path are unchanged.
+    const initial = setTimeout(() => { void fetchData() }, 0)
     const interval = setInterval(() => { void fetchData() }, 30_000)
-    return () => clearInterval(interval)
+    return () => {
+      clearTimeout(initial)
+      clearInterval(interval)
+    }
   }, [fetchData])
 
   const formatTime = (d: Date) =>

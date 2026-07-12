@@ -7,7 +7,7 @@ interface RatingPopupProps {
   onSkip: () => void
 }
 
-export function RatingPopup({ residentName, conversationId: _, onRate, onSkip }: RatingPopupProps) {
+export function RatingPopup({ residentName, onRate, onSkip }: RatingPopupProps) {
   const [hovered, setHovered] = useState(0)
   const [selected, setSelected] = useState(0)
 

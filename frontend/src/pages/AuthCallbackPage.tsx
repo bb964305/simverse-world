@@ -5,16 +5,17 @@ import { useGameStore } from '../stores/gameStore'
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
 export function AuthCallbackPage() {
-  const [error, setError] = useState('')
+  // The callback URL never changes while this page is mounted, so read the
+  // token once (lazy init) and derive the initial error from it — this
+  // replaces the old synchronous setError inside the effect
+  // (react-hooks/set-state-in-effect) with identical rendered output.
+  const [token] = useState(() => new URLSearchParams(window.location.search).get('token'))
+  const [error, setError] = useState(token ? '' : '登录失败：未收到 token')
   const setAuth = useGameStore((s) => s.setAuth)
   const navigate = useNavigate()
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    const token = params.get('token')
-
     if (!token) {
-      setError('登录失败：未收到 token')
       const timer = setTimeout(() => navigate('/login', { replace: true }), 2000)
       return () => clearTimeout(timer)
     }
@@ -40,7 +41,7 @@ export function AuthCallbackPage() {
     }
 
     fetchUser()
-  }, [navigate, setAuth])
+  }, [token, navigate, setAuth])
 
   return (
     <div style={{

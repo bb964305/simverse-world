@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import { bridge } from '../game/phaserBridge'
 import { useGameStore } from '../stores/gameStore'
 import { sendWS, onWSMessage, sendPlayerChat } from '../services/ws'
@@ -192,7 +192,9 @@ export function ChatDrawer() {
         setHasActiveConv(true)
       }
     })
-  }, [])
+    // openChat is a zustand store action — its identity is stable for the
+    // store's lifetime, so this effect still runs exactly once per mount.
+  }, [openChat])
 
   const send = () => {
     const text = input.trim()
@@ -250,9 +252,13 @@ export function ChatDrawer() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, streamingText, playerChatMessages])
 
-  // Escape key to close
+  // Escape key to close. `close` is recreated every render (it captures local
+  // state), so listing it as a dep would re-subscribe the listener on every
+  // render; useEffectEvent keeps the subscription keyed on chatOpen only while
+  // the handler always sees the latest close logic.
+  const closeOnEscape = useEffectEvent(close)
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape' && chatOpen) close() }
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape' && chatOpen) closeOnEscape() }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
   }, [chatOpen])

@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { MinimapCanvas } from './MinimapCanvas'
-import { DistrictZones, type DistrictKey } from './DistrictZones'
+import { DistrictZones } from './DistrictZones'
+import type { DistrictKey } from './districtZonesData'
 import { ResidentPanel } from './ResidentPanel'
 import { bridge } from '../../game/phaserBridge'
 
