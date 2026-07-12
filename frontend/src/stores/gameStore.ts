@@ -28,6 +28,13 @@ export interface PlayerChatMessage {
   timestamp: number
 }
 
+/**
+ * WS connection state for the UI. 'reconnecting' drives the ConnectionBanner;
+ * 'connected' means "no banner" (covers both an open socket and the idle state
+ * after a deliberate disconnectWS, e.g. logout/unmount).
+ */
+export type WsStatus = 'connected' | 'reconnecting'
+
 export interface NotificationItem {
   id: string
   kind: string
@@ -41,6 +48,8 @@ export interface NotificationItem {
 interface GameState {
   user: User | null
   token: string | null
+  wsStatus: WsStatus
+  setWsStatus: (status: WsStatus) => void
   notifications: NotificationItem[]
   unreadCount: number
   playerSpriteKey: string
@@ -92,6 +101,8 @@ interface GameState {
 export const useGameStore = create<GameState>((set) => ({
   user: (() => { try { return JSON.parse(localStorage.getItem('user') || 'null') } catch { return null } })(),
   token: localStorage.getItem('token'),
+  wsStatus: 'connected',
+  setWsStatus: (status) => set({ wsStatus: status }),
   notifications: [],
   unreadCount: 0,
   achievementToast: null,

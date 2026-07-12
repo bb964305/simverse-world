@@ -1,6 +1,6 @@
 import Phaser from 'phaser'
 import { bridge } from './phaserBridge'
-import { applyStatusVisuals, clearStatusVisuals, STATUS_CONFIG } from './StatusVisuals'
+import { applyStatusVisuals, clearStatusVisuals, releaseAllStatusVisuals, STATUS_CONFIG } from './StatusVisuals'
 import { useGameStore } from '../stores/gameStore'
 import { sendPosition, sendWS, onWSMessage } from '../services/ws'
 import { updatePlayerPosition } from '../services/api'
@@ -79,6 +79,36 @@ class MainScene extends Phaser.Scene {
   private mapReady = false
   private isTeleporting = false
   private otherPlayerSprites: Map<string, { sprite: Phaser.Physics.Arcade.Sprite; label: Phaser.GameObjects.Text }> = new Map()
+  // Unsubscribers for listeners registered on module-level singletons
+  // (ws.ts wsListeners, phaserBridge) — Phaser does NOT clean these up when
+  // the scene dies, so without explicit teardown every StrictMode
+  // destroyGame→initGame remount leaks a full scene graph via `this` captures.
+  private externalCleanups: Array<() => void> = []
+  private isShutdown = false
+
+  init() {
+    // Scene-level cleanup hooks. SHUTDOWN fires on scene stop/restart, DESTROY
+    // on game.destroy(true) (our destroyGame path) — register both, teardown
+    // is idempotent.
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, this.teardown, this)
+    this.events.once(Phaser.Scenes.Events.DESTROY, this.teardown, this)
+  }
+
+  private teardown(): void {
+    if (this.isShutdown) return
+    this.isShutdown = true
+    for (const unsub of this.externalCleanups) unsub()
+    this.externalCleanups = []
+    // Drop instance collections so a lingering async create() / snapshot
+    // callback can't resurrect dead sprites via them.
+    this.otherPlayerSprites.clear()
+    this._chatBubbles.clear()
+    this.npcSprites = []
+    this.npcLabels = []
+    // StatusVisuals keeps a module-level sprite→visuals registry; the objects
+    // themselves die with the scene, but the Map entries must be released here.
+    releaseAllStatusVisuals()
+  }
 
   preload() {
     const base = '/assets/village/tilemap/'
@@ -103,6 +133,11 @@ class MainScene extends Phaser.Scene {
     } catch {
       this.residents = []
     }
+
+    // The scene can be destroyed while the fetch above is in flight (React
+    // StrictMode mounts, then immediately unmounts → destroyGame). Touching
+    // this.textures / this.load on a dead scene throws, so bail out here.
+    if (this.isShutdown) return
 
     // Load resident sprites
     const spritesToLoad: string[] = []
@@ -164,6 +199,9 @@ class MainScene extends Phaser.Scene {
   }
 
   private setupWorld() {
+    // create() awaits before calling this — never build the world (or register
+    // external listeners below) on a scene that was destroyed mid-await.
+    if (this.isShutdown) return
     const map = this.make.tilemap({ key: 'map' })
 
     const tilesetMap: Record<string, Phaser.Tilemaps.Tileset | null> = {}
@@ -254,8 +292,10 @@ class MainScene extends Phaser.Scene {
     }) as { up: Phaser.Input.Keyboard.Key; down: Phaser.Input.Keyboard.Key; left: Phaser.Input.Keyboard.Key; right: Phaser.Input.Keyboard.Key }
     this.eKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.E)
 
-    // Handle late-arriving spawn_position and resident status updates
-    onWSMessage((msg) => {
+    // Handle late-arriving spawn_position and resident status updates.
+    // onWSMessage registers on a module-level Set — keep the unsubscriber and
+    // release it in teardown(), or the dead scene stays reachable forever.
+    this.externalCleanups.push(onWSMessage((msg) => {
       if (msg.type === 'spawn_position' && this.player && !this.isTeleporting) {
         const x = msg.x as number
         const y = msg.y as number
@@ -277,25 +317,26 @@ class MainScene extends Phaser.Scene {
       if (msg.type === 'resident_greeting') {
         this._handleResidentGreeting(msg as { resident_slug: string; text: string })
       }
-    })
+    }))
 
-    // Listen for camera pan requests from React UI (search, bulletin board)
-    bridge.on('camera:pan', (data: unknown) => {
+    // Listen for camera pan requests from React UI (search, bulletin board).
+    // bridge is a module singleton too — same teardown treatment as above.
+    this.externalCleanups.push(bridge.on('camera:pan', (data: unknown) => {
       const { tile_x, tile_y } = data as { tile_x: number; tile_y: number }
       const targetX = tile_x * TILE_SIZE + TILE_SIZE / 2
       const targetY = tile_y * TILE_SIZE + TILE_SIZE
       this.cameras.main.pan(targetX, targetY, 600, 'Power2')
       // Move player to the target location
       this.player.setPosition(targetX, targetY)
-    })
+    }))
 
-    bridge.on('minimap:teleport', (data: unknown) => {
+    this.externalCleanups.push(bridge.on('minimap:teleport', (data: unknown) => {
       const { tileX, tileY } = data as { tileX: number; tileY: number; residentSlug?: string }
       this.teleportTo(tileX, tileY)
-    })
+    }))
 
     // E10 group photo: snapshot the canvas area framing the player + NPC.
-    bridge.on('photo:take', (data: unknown) => {
+    this.externalCleanups.push(bridge.on('photo:take', (data: unknown) => {
       const { residentSlug } = data as { residentSlug: string }
       const idx = this.residents.findIndex((r) => r.slug === residentSlug)
       const npc = idx >= 0 ? this.npcSprites[idx] : null
@@ -312,7 +353,7 @@ class MainScene extends Phaser.Scene {
         const img = image as HTMLImageElement
         if (img.src) bridge.emit('photo:result', { dataUrl: img.src, residentSlug, residentName })
       })
-    })
+    }))
 
     this.mapReady = true
 

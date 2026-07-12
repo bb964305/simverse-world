@@ -2,6 +2,27 @@ import { useGameStore } from '../stores/gameStore'
 
 let socket: WebSocket | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+// Consecutive failed-connection counter driving the exponential backoff.
+// Reset to 0 when the server confirms auth (auth_ok) — that is the only
+// point where we know the connection is genuinely usable (a socket that
+// opens but fails auth gets closed by the server and must keep backing off).
+let reconnectAttempt = 0
+
+const RECONNECT_BASE_MS = 3000
+const RECONNECT_MAX_MS = 30000
+
+/**
+ * Exponential backoff delay for reconnect attempt N (0-based):
+ * 3s · 2^N capped at 30s, with ±20% jitter so a fleet of clients dropped by
+ * the same server restart doesn't reconnect in lockstep.
+ * Exported for tests.
+ */
+export function computeBackoffDelay(attempt: number): number {
+  const base = Math.min(RECONNECT_BASE_MS * 2 ** attempt, RECONNECT_MAX_MS)
+  const jitter = base * 0.2 * (Math.random() * 2 - 1)
+  return Math.round(base + jitter)
+}
+
 const wsListeners = new Set<(data: Record<string, unknown>) => void>()
 // Queue important messages that arrive before any listener is registered (e.g. daily_reward)
 const earlyMessageQueue: Record<string, unknown>[] = []
@@ -33,6 +54,12 @@ export function connectWS(): void {
   ws.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data as string) as Record<string, unknown>
+      // Server accepted our token — the connection is fully usable. Reset the
+      // reconnect backoff and clear the "reconnecting" banner.
+      if (data.type === 'auth_ok') {
+        reconnectAttempt = 0
+        useGameStore.getState().setWsStatus('connected')
+      }
       if (data.type === 'coin_update' && typeof data.balance === 'number') {
         useGameStore.getState().updateBalance(data.balance)
       }
@@ -181,11 +208,20 @@ export function connectWS(): void {
   ws.onclose = () => {
     // Only tear down + schedule a reconnect if this is still the active socket.
     // A stale socket from a raced re-connect closing must not null out the live
-    // one (which would leak the good socket and churn reconnects).
+    // one (which would leak the good socket and churn reconnects). This guard
+    // also covers deliberate disconnects: disconnectWS() nulls the module
+    // `socket` before close fires, so we neither reconnect nor show the banner.
     if (socket !== ws) return
     socket = null
     useGameStore.getState().clearOnlinePlayers()
-    reconnectTimer = setTimeout(connectWS, 3000)
+    // Passive drop: tell the UI and schedule a reconnect with exponential backoff.
+    useGameStore.getState().setWsStatus('reconnecting')
+    const delay = computeBackoffDelay(reconnectAttempt)
+    reconnectAttempt += 1
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null
+      connectWS()
+    }, delay)
   }
 
   ws.onerror = () => {
@@ -215,8 +251,15 @@ export function disconnectWS(): void {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
   }
-  socket?.close()
+  reconnectAttempt = 0
+  // Deliberate disconnect (logout / page unmount): null the module `socket`
+  // BEFORE closing so the socket's onclose sees `socket !== ws` and skips both
+  // the reconnect and the 'reconnecting' status.
+  const ws = socket
   socket = null
+  ws?.close()
+  // Hide the banner if a reconnect cycle was in flight when the user left.
+  useGameStore.getState().setWsStatus('connected')
 }
 
 let lastSentX = -1

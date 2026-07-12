@@ -25,6 +25,18 @@ const visualRegistry = new Map<Phaser.Physics.Arcade.Sprite, {
   timers: Phaser.Time.TimerEvent[]
 }>()
 
+/**
+ * Drop every registry entry WITHOUT touching the scene. For scene
+ * shutdown/destroy: Phaser destroys the tracked objects/timers itself there
+ * (they belong to the scene), but this module-level Map would otherwise keep
+ * referencing the dead sprites forever — a leak across React StrictMode
+ * destroyGame→initGame remounts. Safe to call even after scene plugins
+ * (tweens/time) are already torn down, since it only clears the Map.
+ */
+export function releaseAllStatusVisuals(): void {
+  visualRegistry.clear()
+}
+
 /** Remove all visual effects previously applied to a sprite */
 export function clearStatusVisuals(
   scene: Phaser.Scene,

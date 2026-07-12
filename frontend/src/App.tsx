@@ -4,6 +4,7 @@ import { useGameStore } from './stores/gameStore'
 import { LoginPage } from './pages/LoginPage'
 import { AuthCallbackPage } from './pages/AuthCallbackPage'
 import { AchievementToast } from './components/AchievementToast'
+import { ConnectionBanner } from './components/ConnectionBanner'
 import { EncounterCard } from './components/EncounterCard'
 import { ErrorBoundary } from './components/ErrorBoundary'
 
@@ -47,6 +48,7 @@ function PageFallback() {
 export default function App() {
   return (
     <BrowserRouter>
+      <ConnectionBanner />
       <AchievementToast />
       <EncounterCard />
       <ErrorBoundary>
