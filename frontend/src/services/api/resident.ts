@@ -99,6 +99,24 @@ export function ttsSpeak(resident_slug: string, text: string): Promise<TTSRespon
   })
 }
 
+// ── Soul card (C1, public share) ────────────────────────────────────
+// GET /residents/{slug}/card — no auth; mirrors backend resident_card().
+export interface ResidentCardData {
+  slug: string
+  name: string
+  soul_excerpt: string
+  sbti_type: string | null
+  sbti_name: string | null
+  star_rating: number
+  portrait_url: string | null
+  total_conversations: number
+  signature_reflection: string | null
+}
+
+export function getResidentCard(slug: string): Promise<ResidentCardData> {
+  return apiFetch(`/residents/${encodeURIComponent(slug)}/card`)
+}
+
 // ─── Exploration codex (E8) ──────────────────────────────────────
 
 export interface CodexLocation {

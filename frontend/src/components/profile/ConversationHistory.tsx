@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useGameStore } from '../../stores/gameStore'
+import { parseUTC } from '../../utils/time'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -37,7 +38,7 @@ export function ConversationHistory() {
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 600, fontSize: 14 }}>{c.resident_name}</div>
                 <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 2 }}>
-                  {new Date(c.started_at).toLocaleDateString('zh-CN')} · {c.turns} 轮对话
+                  {parseUTC(c.started_at).toLocaleDateString('zh-CN')} · {c.turns} 轮对话
                 </div>
               </div>
               {c.rating != null && <span style={{ fontSize: 12 }}>{'⭐'.repeat(c.rating)}</span>}

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { bridge } from '../game/phaserBridge'
 import { getBulletinPosts, type BulletinPostData } from '../services/api'
+import { parseUTC } from '../utils/time'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -58,9 +59,8 @@ function previewText(md: string): string {
 
 function relativeTime(iso: string | null): string {
   if (!iso) return ''
-  // SQLite may hand back naive UTC timestamps — pin them to UTC before parsing.
-  const hasTz = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso)
-  const ts = new Date(hasTz ? iso : `${iso}Z`).getTime()
+  // 后端 naive-UTC isoformat —— 统一走 parseUTC 补 Z（原地内联版收编进 utils/time）
+  const ts = parseUTC(iso).getTime()
   if (Number.isNaN(ts)) return ''
   const diffMin = Math.floor((Date.now() - ts) / 60000)
   if (diffMin < 1) return '刚刚'

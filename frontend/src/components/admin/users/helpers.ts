@@ -1,5 +1,7 @@
 // ─── Helpers ──────────────────────────────────────────────────────
 
+import { parseUTC } from '../../../utils/time'
+
 export function loginMethodIcon(method: string): string {
   if (method === 'github') return '🐙'
   if (method === 'linuxdo') return '🐧'
@@ -8,7 +10,8 @@ export function loginMethodIcon(method: string): string {
 }
 
 export function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString('zh-CN', {
+  // 后端 naive-UTC isoformat —— parseUTC 补 Z 防跨日偏移
+  return parseUTC(iso).toLocaleDateString('zh-CN', {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import MDEditor from '@uiw/react-md-editor'
 import { useGameStore } from '../../stores/gameStore'
+import { parseUTC } from '../../utils/time'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -178,7 +179,7 @@ export function ResidentEditor({ slug, onBack }: ResidentEditorProps) {
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <span style={{ fontWeight: 600, fontSize: 13 }}>v{v.version_number}</span>
                     <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
-                      {new Date(v.created_at).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })}
+                      {parseUTC(v.created_at).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })}
                     </span>
                   </div>
                   <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 4 }}>点击恢复此版本</div>

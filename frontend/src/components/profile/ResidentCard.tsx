@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { SoulCard } from '../SoulCard'
 
 interface SbtiInfo {
   type: string
@@ -76,6 +77,9 @@ export function ResidentCard({ resident, onEdit, lastWsMessage }: ResidentCardPr
 
   const isFlashing = flashSeq > 0
 
+  // C1: 灵魂卡片分享弹窗
+  const [shareOpen, setShareOpen] = useState(false)
+
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 14, padding: '14px 16px',
@@ -125,6 +129,17 @@ export function ResidentCard({ resident, onEdit, lastWsMessage }: ResidentCardPr
       </div>
 
       <button
+        onClick={() => setShareOpen(true)}
+        style={{
+          background: 'var(--bg-input)', border: '1px solid var(--border)',
+          color: 'var(--text-secondary)', padding: '6px 14px', borderRadius: 6,
+          fontSize: 12, cursor: 'pointer', flexShrink: 0,
+        }}
+      >
+        分享卡片
+      </button>
+
+      <button
         onClick={() => onEdit(resident.slug)}
         style={{
           background: 'var(--bg-input)', border: '1px solid var(--border)',
@@ -134,6 +149,8 @@ export function ResidentCard({ resident, onEdit, lastWsMessage }: ResidentCardPr
       >
         编辑
       </button>
+
+      {shareOpen && <SoulCard slug={resident.slug} onClose={() => setShareOpen(false)} />}
     </div>
   )
 }

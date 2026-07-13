@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { getFeed, unfollowResident, type FeedEventData } from '../../services/api'
 import { setFollowed } from '../../services/follows'
 import { onWSMessage } from '../../services/ws'
+import { parseUTC } from '../../utils/time'
 
 // Feed kinds and their payloads (backend feed_service.push call sites):
 //   creation           { post_id, title }        bulletin_service.maybe_create_journal_post
@@ -40,9 +41,8 @@ function payloadSummary(kind: string, payload: Record<string, unknown>): string 
 
 function relativeTime(iso: string | null): string {
   if (!iso) return ''
-  // SQLite may hand back naive UTC timestamps — pin them to UTC before parsing.
-  const hasTz = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(iso)
-  const ts = new Date(hasTz ? iso : `${iso}Z`).getTime()
+  // 后端 naive-UTC isoformat —— 统一走 parseUTC 补 Z（原地内联版收编进 utils/time）
+  const ts = parseUTC(iso).getTime()
   if (Number.isNaN(ts)) return ''
   const diffMin = Math.floor((Date.now() - ts) / 60000)
   if (diffMin < 1) return '刚刚'

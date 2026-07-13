@@ -10,6 +10,7 @@ import {
   type LeaderboardResponse,
   type PollData,
 } from '../services/api'
+import { parseUTC } from '../utils/time'
 
 // Pull the backend `detail` string out of an apiFetch error ("API 400: {json}").
 function errDetail(e: unknown): string {
@@ -29,7 +30,8 @@ function isNotFound(e: unknown): boolean {
 }
 
 function formatCountdown(endsAt: string, now: number): string {
-  const diff = new Date(endsAt).getTime() - now
+  // ends_at 是后端 naive-UTC isoformat —— parseUTC 补 Z 防倒计时偏移
+  const diff = parseUTC(endsAt).getTime() - now
   if (Number.isNaN(diff)) return '—'
   if (diff <= 0) return '已结束'
   const d = Math.floor(diff / 86_400_000)
@@ -179,7 +181,7 @@ function PollCard({ poll }: { poll: PollData }) {
       </div>
       {err && <div style={{ color: 'var(--accent-red)', fontSize: 12, marginTop: 8 }}>{err}</div>}
       <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 10 }}>
-        {poll.closes_at ? `截止时间：${new Date(poll.closes_at).toLocaleString('zh-CN')}` : '长期开放'}
+        {poll.closes_at ? `截止时间：${parseUTC(poll.closes_at).toLocaleString('zh-CN')}` : '长期开放'}
       </div>
     </div>
   )

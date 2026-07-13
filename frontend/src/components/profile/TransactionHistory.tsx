@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useGameStore } from '../../stores/gameStore'
+import { parseUTC } from '../../utils/time'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -33,7 +34,7 @@ export function TransactionHistory() {
             <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 16px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8 }}>
               <span style={{ fontWeight: 700, fontSize: 14, color: t.amount > 0 ? 'var(--accent-green)' : 'var(--accent-red)', minWidth: 50 }}>{t.amount > 0 ? '+' : ''}{t.amount}</span>
               <span style={{ flex: 1, fontSize: 13, color: 'var(--text-secondary)' }}>{t.reason}</span>
-              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{new Date(t.created_at).toLocaleDateString('zh-CN')}</span>
+              <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{parseUTC(t.created_at).toLocaleDateString('zh-CN')}</span>
             </div>
           ))}
         </div>

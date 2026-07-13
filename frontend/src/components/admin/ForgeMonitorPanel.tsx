@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { getAdminForgeActive, getAdminForgeHistory } from '../../services/api'
 import type { AdminForgeSession, AdminForgeHistoryItem } from '../../services/api'
+import { parseUTC } from '../../utils/time'
 
 // ─── Stage badge ─────────────────────────────────────────────────
 
@@ -71,7 +72,8 @@ function formatElapsed(seconds: number): string {
 
 function formatDateTime(iso: string): string {
   try {
-    return new Date(iso).toLocaleString('zh-CN', {
+    // 后端 naive-UTC isoformat —— parseUTC 补 Z 防显示偏移
+    return parseUTC(iso).toLocaleString('zh-CN', {
       month: '2-digit',
       day: '2-digit',
       hour: '2-digit',
