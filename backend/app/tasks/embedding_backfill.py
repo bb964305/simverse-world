@@ -73,6 +73,12 @@ async def backfill_missing_embeddings(
 
 async def embedding_backfill_loop() -> None:
     """Background task: clean zero-vectors once, then backfill NULLs hourly."""
+    from app.config import settings
+    if not settings.embedding_enabled:
+        # No endpoint on this deployment — exit instead of an hourly sweep
+        # where every generate_embedding() call fails (vm212 log spam).
+        logger.info("Embedding disabled (EMBEDDING_ENABLED=false); backfill loop not started")
+        return
     first_round = True
     while True:
         try:

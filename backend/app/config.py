@@ -131,7 +131,20 @@ class Settings(BaseSettings):
 
     allow_user_custom_llm: bool = False
 
-    # --- Ollama (local embedding) ---
+    # --- Embedding provider (PLAN_P3 后续批次 A) ---
+    # Master switch: false = no embedding calls at all (memory columns stay
+    # NULL, retrieval falls back to importance/recency). Set false on deploys
+    # with no embedding endpoint instead of letting calls fail-and-log.
+    embedding_enabled: bool = True
+    # OpenAI-compatible endpoint (百炼 compatible-mode / one-api / OpenAI).
+    # When set it takes priority over local Ollama below; `dimensions` is
+    # passed explicitly (fixes the qwen3-embedding 2560→1024 truncation).
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
+    embedding_model: str = "text-embedding-v4"
+    embedding_dimensions: int = 1024  # must match vector(1024) column
+
+    # --- Ollama (local embedding fallback) ---
     ollama_base_url: str = "http://localhost:11434"
     ollama_embed_model: str = "qwen3-embedding:4b"
     ollama_embed_dimensions: int = 1024
