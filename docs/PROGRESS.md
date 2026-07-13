@@ -184,6 +184,14 @@
 - **最终验证（2026-07-13）**：后端 5 块 **709 passed / 0 failed / 1 deselected**（排除口径同 CI）；前端四连：tsc(strict) ✅ / vitest 7 files 32 tests ✅ / eslint 0 ✅ / build ✅。
 - **本机执行清单（更新）**：① push 双 ref（本地领先 origin 8 提交）→ 盯 CI；② vm212：`alembic upgrade head`（新迁移 031）+ `.env` 配 EMBEDDING_*（修记忆管线）+ rebuild；③ Sentry DSN（沿上轮，仍待登录）；④ docs 纳管确认（沿上轮）。
 
+### 本机执行记录（2026-07-13 第二轮）
+- [x] **index 后遗症修复**：沙盒 commit-tree 老后遗症复发——`.git/index` 停在旧树（status 呈现 19 个新文件 staged-D + 大片 MM，物理文件全在且等于 HEAD），`git reset --mixed` 归位，零丢失（上轮是缺文件要 `reset --hard`，本轮文件齐全 mixed 即可）
+- [x] **push 双 ref + CI**：`c406166..4413bfd` → feat + master，CI 双 ref 一次绿（1m21s / 1m23s）
+- [x] **vm212 部署 + 迁移 031**：git archive 树覆盖（备份 backend.bak.\*）→ rebuild → `docker compose run --rm api alembic upgrade head` 先迁再 `up -d` → `alembic_version=031_add_home_decor`、`/health` ok、`/metrics` 200、公网 tunnel ok、`home_decor_json` 列可查（count=0 符合预期）
+- [x] **embedding 止血落地**：vm212 `.env` 无独立 embedding key（仅 Coding Plan key，条款禁后端自动化，不能挪用）→ 走止血路径 `EMBEDDING_ENABLED=false`（`.env` 备份 `.env.bak-20260713-embedding`）；agent-worker 的 Ollama 错误刷屏消失。**修完整记忆管线仍需 Jimmy 提供按量 embedding key**（百炼 compatible-mode text-embedding-v4 或任意 OpenAI 兼容端点），届时 `.env` 改配 `EMBEDDING_BASE_URL/API_KEY` + 重启即生效
+- [x] **止血暴露真 bug 当场修**：`6562651`——`main.py` 的 `asyncio.wait(FIRST_COMPLETED)` 把 backfill 禁用短路的**正常返回**当成退出信号 → 整个 agent-worker 停机 → 容器重启循环（agent/heat/event/nightly 四 loop 全部陪葬；注释写着 "not fatal" 但代码行为就是 fatal）。改 while-pending 续等剩余任务，任务 crash 仍 fail-loud；+2 生命周期测试（`test_agent_worker.py`，TDD 红→绿）。CI 口径本机 **711 passed / 1 deselected / exit 0**；push 后 CI 双 ref 绿；vm212 复部署后 worker 稳定 Up（原来 ~1s 一轮重启）
+- [ ] **Sentry DSN（仍阻塞，需 Jimmy）** / **docs 纳管（仍待确认）**——沿上轮不变
+
 ## 发现（施工中发现的新问题，不当场处理）
 - **成本优化研究完成（2026-07-07）**：28 条实验，产出在 `docs/research/`（REPORT=结论与 P1-1 建议、LOG=实验台账、DIRECTOR_ROADMAP/CALLMAP=Opus 统筹产物）。关键输入给 P1-1：计量字段清单、熔断阈值、杠杆排序（计划优先跳过 decide 省 29-37% 为最大项）；缓存/Batch 判定为不可用杠杆。**开放问题需 Jimmy**：部署机 .env 的 LLM_BASE_URL（验证端点是否 Anthropic 原生，F-02）。顺手修清单：互聊 max_tokens 100→150（截断污染 history 风险）、互聊 history 双注入（chat.py 一行）、玩家聊天 chat_messages 无截断。
 - 4 个预先存在的测试失败（HEAD 基线复现，与 P0-1 无关）：`test_forge.py::test_forge_answers_advance_to_generating`、`test_map_integration.py::test_decide_prompt_includes_remembered_residents`、`test_portrait.py::test_generate_portrait_success`（portrait_url 为 None）、`test_preset_import.py::test_seed_presets_creates_residents`（district 默认值断言 'free'，代码已改 'central_plaza'）——测试与代码漂移
