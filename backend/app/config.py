@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     # Exposes GET /metrics (Prometheus). Per-process registry; see
     # app/observability.py for the multi-worker caveat.
     metrics_enabled: bool = True
+    # Bearer token guarding GET /metrics (empty = open; set in deployments
+    # where /metrics is publicly reachable, e.g. behind the CF tunnel).
+    metrics_token: str = ""
 
     # --- Budget circuit breaker (P1-1, E-24/E-18) ---
     # Global daily spend cap (USD). Background LLM work degrades in three tiers

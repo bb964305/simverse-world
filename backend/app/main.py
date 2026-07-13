@@ -157,6 +157,19 @@ if settings.metrics_enabled:
     )
     wire_runtime_gauges()
 
+    # /metrics is publicly reachable through the CF tunnel; when METRICS_TOKEN
+    # is set, require `Authorization: Bearer <token>` (Prometheus scrape_config
+    # supports bearer_token). Empty token = open (dev). Token is read per
+    # request so tests/ops can flip it without a restart.
+    @app.middleware("http")
+    async def _metrics_auth(request, call_next):  # noqa: ANN001
+        if settings.metrics_token and request.url.path == "/metrics":
+            auth = request.headers.get("Authorization", "")
+            if auth != f"Bearer {settings.metrics_token}":
+                from fastapi.responses import PlainTextResponse
+                return PlainTextResponse("unauthorized", status_code=401)
+        return await call_next(request)
+
 
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
