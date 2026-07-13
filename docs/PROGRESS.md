@@ -205,6 +205,18 @@
 - **待 Jimmy（开世界的唯一硬前提）**：按量计费 LLM key。到位后按 BURNIN_PLAN §1 走金丝雀 → 24h → 48h。
 - **本机执行清单**：push 双 ref（本地领先 4 提交）→ 盯 CI（首次全量零排除口径）；vm212 下次部署时设 `METRICS_TOKEN`。
 
+## Kickoff V5 — vm212 burn-in 阶段 1 金丝雀（2026-07-13，本机 CC）
+- [x] **LLM key 决策（Jimmy 拍板，偏离 BURNIN_PLAN §1.1 记账）**：Jimmy 指示"llm 测试 API 就用 .env 里配置的"= 沿用百炼 **Coding Plan** key（qwen3.7-plus，`coding.dashscope.aliyuncs.com/apps/anthropic`）。影响：①条款风险 Jimmy 自担；②订阅制无按调用账单 → 阶段 3 "供应商控制台真实消费对账"不可执行，F-02 真实价目比值记 N/A（待换按量 key 后补）。**F-02 已答一半：端点回传真实 `response.usage`（llm_usage.source 全 'usage'）**，token 数可信，cost_usd 仍是 Anthropic 价目折算。
+- [x] **push 双 ref + CI**：`dde4916..2fb30c6`（5 提交）→ master + feat 同步；首次全量零排除口径 CI 双 ref 一把过。
+- [x] **部署 + 配置**：backend.bak.1783956749 备份 → git archive 树覆盖（md5 对拍）→ rebuild。`.env.bak-burnin-20260713-1536` 备份后写入 METRICS_TOKEN（验证 401/200；token 存 vm212 `/root/.burnin_metrics_token`）+ 金丝雀预算（GLOBAL 0.5/USER 0.5/FORGE 0.15）+ LLM_METERING_ENABLED=true。
+- [x] **§1.4 计量自检**：注册 burnin-smoke 账号 WS 真聊 2 轮 → player_chat 4 行 + extract/update_rel parse_ok=t 入库。金丝雀=全部 5 居民（世界总量即金丝雀规模，跳过置 sleeping；居民间无强关系记忆，互聊靠自然/手动）。
+- [x] **阶段 1 跑完（UTC 16:04:25 开闸 → 17:57 收尾，退出标准 5/5 全过）**：85 调用 $0.0926（预算占用 18.5%）；**parse_ok 100%**（71 行评估）；attempt>1 0%；worker RestartCount=0、tick 错误 0；Sentry vm212-test 4h 零新 issue；内存 1.5G/1.8G + swap 1.3→1.4G 无抖动。$/居民·天 $0.0185，**低于优化后预测区间下沿**（$0.0264–0.0367）。成本拐点 t+45–55min 如期（AGENT_MAX_DAILY_ACTIONS=20 烧完，events 23→4→0 条/10min）。
+- [x] **5.9 decide 计划跳过首验过**：重复同 reason = 跟计划零 LLM tick（E-09 生效证据），穿插 LLM 复议 ~16 行/15min；行为多样（WANDER/OBSERVE/NAP/IDLE）且天气感知（"烈日当空，找个阴凉处小憩"，E6 软提示可见生效）。decide 成本占比 61% 高于基线 32% 属分母效应（互聊 46% 大头缺席），绝对量被跳过压制。
+- [x] **5.8 chat_wrapup 首验过（手动触发，容器内 `resident_chat(klaus, adam)`，同 §5.6 姿势）**：8 轮 chat_turn + 合并 wrapup **parse_ok=t attempt=1**（E-05 qwen 嵌套 JSON 最大不确定点一把过，latency 11s）；summary 贴对话；双方记忆视角正确不串人、关系记忆双向落库方向合理；连带 evolution_drift×2 parse_ok=t（5.1 部分预验）。gossip 概率未掷中（阶段 2 自然验）。
+- [x] **前端行为可见性**：生产页（skills-world.stawky.workers.dev）目视——居民移动、状态 tooltip、天气 banner 随马尔可夫机翻转（烈日当空→多云）。已知小坑：首次进图 Phaser 画布偶发只渲染左上角，刷新即好（记跟进，非 burn-in 阻塞）。
+- [x] **进阶段 2（UTC 2026-07-13 17:57:30）**：BUDGET_GLOBAL_DAILY_USD 0.5→1.5 recreate，AgentLoop 重启确认。24h 窗口跨 00:30 UTC nightly（digest/dream/胶囊），待完成 §5 主体（5.1–5.7 全量 + 5.3 gossip 自然发生 + 5.4 手动周评估）。
+- **burn-in 新发现（记账不修）**：①**玩家 avatar 被 loop tick**——onboarding 建 `p-<slug>` resident（onboarding_service.py:151），loop 只排除 sleeping → 每个玩家离线自主行动烧全局预算（观测 p-新居民 NAP 决策多次）；E-13 并发悬崖与成本模型均未计入"每玩家+1 agent"，需产品决策（特性 or 排除）。②首轮真 LLM 时延偏高（extract 24.8s/update_rel 26.9s/wrapup 11s），未触发 tick 节奏阈值但比研究期数字慢，留意阶段 2。③docker exec 一次性进程发起的 LLM 调用不计入 api 进程 /metrics 计数（拓扑已知项的补充口径）。
+
 ## 发现（施工中发现的新问题，不当场处理）
 - **成本优化研究完成（2026-07-07）**：28 条实验，产出在 `docs/research/`（REPORT=结论与 P1-1 建议、LOG=实验台账、DIRECTOR_ROADMAP/CALLMAP=Opus 统筹产物）。关键输入给 P1-1：计量字段清单、熔断阈值、杠杆排序（计划优先跳过 decide 省 29-37% 为最大项）；缓存/Batch 判定为不可用杠杆。**开放问题需 Jimmy**：部署机 .env 的 LLM_BASE_URL（验证端点是否 Anthropic 原生，F-02）。顺手修清单：互聊 max_tokens 100→150（截断污染 history 风险）、互聊 history 双注入（chat.py 一行）、玩家聊天 chat_messages 无截断。
 - 4 个预先存在的测试失败（HEAD 基线复现，与 P0-1 无关）：`test_forge.py::test_forge_answers_advance_to_generating`、`test_map_integration.py::test_decide_prompt_includes_remembered_residents`、`test_portrait.py::test_generate_portrait_success`（portrait_url 为 None）、`test_preset_import.py::test_seed_presets_creates_residents`（district 默认值断言 'free'，代码已改 'central_plaza'）——测试与代码漂移
