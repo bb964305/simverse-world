@@ -111,6 +111,19 @@ def build_decision_prompt(
         titles = "、".join(e.get("title", "") for e in world_events if e.get("title"))
         if titles:
             user += f"\n\n当前世界事件：{titles}"
+        # E6: weather nudges outdoor actions with a soft hint — the schedule
+        # itself is untouched (see scheduler.build_schedule), the LLM just gets
+        # told the sky's opinion about WANDER/VISIT_DISTRICT.
+        kind = next((
+            (e.get("payload_json") or {}).get("kind")
+            for e in world_events if e.get("type") == "weather"
+        ), None)
+        if kind == "rain":
+            user += "\n（下雨，不太想出门——WANDER/VISIT_DISTRICT 这类室外行动能免则免）"
+        elif kind == "storm":
+            user += "\n（暴风雨，尽量待在室内，别选室外行动）"
+        elif kind == "snow":
+            user += "\n（下雪了，出门会踩一脚雪，不过看雪景也不错）"
     # E1: current mood + a soft behavior hint (prompt hint, not a hard filter).
     mood = resident.mood_json or {}
     label = mood.get("label")

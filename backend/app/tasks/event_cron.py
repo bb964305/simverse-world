@@ -21,6 +21,16 @@ async def event_cron_loop():
     while True:
         try:
             async with async_session() as db:
+                # E6: keep a weather segment scheduled. Created inactive with
+                # starts_at=now, so the flip below activates + broadcasts it in
+                # this same pass through the S1 pipeline (A2 template pattern).
+                try:
+                    from app.tasks.weather import ensure_weather_event
+                    scheduled = await ensure_weather_event(db)
+                    if scheduled is not None:
+                        logger.info("Event cron: scheduled weather '%s'", scheduled.title)
+                except Exception:
+                    logger.warning("E6 weather step failed", exc_info=True)
                 changes = await flip_active_events(db)
                 # A2: on start, give active residents a shared collective memory.
                 for event, phase in changes:

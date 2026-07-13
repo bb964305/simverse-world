@@ -3,7 +3,7 @@ import { bridge } from './phaserBridge'
 import { applyStatusVisuals, clearStatusVisuals, releaseAllStatusVisuals, STATUS_CONFIG } from './StatusVisuals'
 import { useGameStore } from '../stores/gameStore'
 import { sendPosition, sendWS, onWSMessage } from '../services/ws'
-import { updatePlayerPosition, getHomeDecor, decorEmoji, HOUSING_BOUNDS, type DecorItem } from '../services/api'
+import { updatePlayerPosition, getHomeDecor, decorEmoji, getActiveEvents, HOUSING_BOUNDS, type DecorItem } from '../services/api'
 
 const TILE_SIZE = 32
 const PLAYER_SPEED = 160
@@ -85,6 +85,11 @@ class MainScene extends Phaser.Scene {
   private decorTexts: Map<string, Phaser.GameObjects.Text[]> = new Map()
   private decorLoaded: Set<string> = new Set()
   private lastDecorScan = 0
+  // E6 weather: screen-space (scrollFactor 0) particle + tint layers driven by
+  // world_event(type=weather) broadcasts; at most one emitter alive at a time.
+  private weatherEmitter: Phaser.GameObjects.Particles.ParticleEmitter | null = null
+  private weatherOverlay: Phaser.GameObjects.Rectangle | null = null
+  private stormFlashTimer: Phaser.Time.TimerEvent | null = null
   // Unsubscribers for listeners registered on module-level singletons
   // (ws.ts wsListeners, phaserBridge) — Phaser does NOT clean these up when
   // the scene dies, so without explicit teardown every StrictMode
@@ -116,6 +121,10 @@ class MainScene extends Phaser.Scene {
     this.decorTexts.clear()
     this.decorLoaded.clear()
     this.decorLayer = null
+    // E6 weather: destroy the emitter/overlay and stop the storm flash timer
+    // here (SHUTDOWN fires before children are torn down), so a scene swap
+    // leaves no particles or ticking timers behind.
+    this._clearWeather()
     // StatusVisuals keeps a module-level sprite→visuals registry; the objects
     // themselves die with the scene, but the Map entries must be released here.
     releaseAllStatusVisuals()
@@ -334,7 +343,20 @@ class MainScene extends Phaser.Scene {
       if (msg.type === 'decor_updated') {
         this._handleDecorUpdated(msg as unknown as { resident_slug: string; home_location_id?: string | null; decor: DecorItem[] })
       }
+      if (msg.type === 'world_event') {
+        this._handleWorldEvent(msg as { event?: { type?: string; payload_json?: Record<string, unknown> | null }; phase?: string })
+      }
     }))
+
+    // E6: seed the weather layer from the currently active events (the WS
+    // broadcast only covers transitions that happen while we're connected).
+    getActiveEvents()
+      .then(({ events }) => {
+        if (this.isShutdown) return
+        const weather = events.find((e) => e.type === 'weather')
+        if (weather) this._applyWeatherFromPayload(weather.payload_json)
+      })
+      .catch(() => { /* weather is cosmetic — ignore fetch failures */ })
 
     // Listen for camera pan requests from React UI (search, bulletin board).
     // bridge is a module singleton too — same teardown treatment as above.
@@ -785,5 +807,110 @@ class MainScene extends Phaser.Scene {
     if (msg.mood_label) this.residents[idx].mood_label = msg.mood_label
     clearStatusVisuals(this, sprite)
     applyStatusVisuals(this, sprite, msg.status, sprite.x, sprite.y)
+  }
+
+  // ── E6 weather rendering ─────────────────────────────────────────
+
+  private _handleWorldEvent(msg: { event?: { type?: string; payload_json?: Record<string, unknown> | null }; phase?: string }): void {
+    const ev = msg.event
+    if (!ev || ev.type !== 'weather') return
+    if (msg.phase === 'end') {
+      // Segment ended; the next one's `start` broadcast re-dresses the sky.
+      this.applyWeather('sunny', 0)
+      return
+    }
+    this._applyWeatherFromPayload(ev.payload_json ?? null)
+  }
+
+  private _applyWeatherFromPayload(payload: Record<string, unknown> | null | undefined): void {
+    const kindRaw = payload ? payload['kind'] : undefined
+    const intensityRaw = payload ? payload['intensity'] : undefined
+    this.applyWeather(
+      typeof kindRaw === 'string' ? kindRaw : 'sunny',
+      typeof intensityRaw === 'number' ? intensityRaw : 0.5,
+    )
+  }
+
+  /** Swap the ambient weather layer: rain/snow particles (≤200 alive), cloudy tint, storm flashes. */
+  applyWeather(kind: string, intensity: number): void {
+    if (this.isShutdown) return
+    this._clearWeather()
+    const t = Math.max(0, Math.min(1, intensity))
+    const w = this.scale.width
+    const h = this.scale.height
+
+    if (kind === 'cloudy' || kind === 'rain' || kind === 'storm') {
+      const alpha = kind === 'cloudy' ? 0.1 + 0.15 * t : kind === 'rain' ? 0.15 : 0.28
+      this.weatherOverlay = this.add.rectangle(0, 0, w, h, 0x1e293b, alpha)
+        .setOrigin(0, 0).setScrollFactor(0).setDepth(19)
+    }
+
+    if (kind === 'rain' || kind === 'storm') {
+      // Alive ≈ lifespan / frequency; targets stay well under the 200 budget.
+      const aliveTarget = kind === 'storm' ? 180 : Math.round(90 + 80 * t)
+      this.weatherEmitter = this.add.particles(0, 0, this._weatherTexture('rain'), {
+        x: { min: -40, max: w + 40 },
+        y: -12,
+        lifespan: 2200,
+        speedY: { min: 340 + 160 * t, max: 460 + 200 * t },
+        speedX: { min: -60, max: -15 },
+        alpha: { min: 0.35, max: 0.7 },
+        scaleY: { min: 0.8, max: 1.5 },
+        quantity: 1,
+        frequency: 2200 / aliveTarget,
+        maxAliveParticles: 200,
+      })
+      this.weatherEmitter.setScrollFactor(0).setDepth(20)
+    } else if (kind === 'snow') {
+      const aliveTarget = Math.round(50 + 90 * t)
+      this.weatherEmitter = this.add.particles(0, 0, this._weatherTexture('snow'), {
+        x: { min: -20, max: w + 20 },
+        y: -8,
+        lifespan: 9000,
+        speedY: { min: 50 + 40 * t, max: 90 + 70 * t },
+        speedX: { min: -25, max: 25 },
+        alpha: { start: 0.85, end: 0.1 },
+        scale: { min: 0.5, max: 1.1 },
+        quantity: 1,
+        frequency: 9000 / aliveTarget,
+        maxAliveParticles: 200,
+      })
+      this.weatherEmitter.setScrollFactor(0).setDepth(20)
+    }
+
+    if (kind === 'storm') {
+      this.stormFlashTimer = this.time.addEvent({
+        delay: 3800 + Math.random() * 2400,
+        loop: true,
+        callback: () => this.cameras.main.flash(140, 255, 255, 255),
+      })
+    }
+  }
+
+  private _clearWeather(): void {
+    this.weatherEmitter?.destroy()
+    this.weatherEmitter = null
+    this.weatherOverlay?.destroy()
+    this.weatherOverlay = null
+    this.stormFlashTimer?.remove()
+    this.stormFlashTimer = null
+  }
+
+  /** Lazily generate the tiny white particle textures (2x9 rain streak / 3x3 snow flake). */
+  private _weatherTexture(kind: 'rain' | 'snow'): string {
+    const key = `weather-${kind}-px`
+    if (!this.textures.exists(key)) {
+      const g = this.make.graphics({}, false)
+      g.fillStyle(0xdbeafe, 1)
+      if (kind === 'rain') {
+        g.fillRect(0, 0, 2, 9)
+        g.generateTexture(key, 2, 9)
+      } else {
+        g.fillRect(0, 0, 3, 3)
+        g.generateTexture(key, 3, 3)
+      }
+      g.destroy()
+    }
+    return key
   }
 }

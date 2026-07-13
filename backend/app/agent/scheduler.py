@@ -24,7 +24,7 @@ def _dim(sbti_data: dict, key: str) -> int:
     return _LEVEL.get(dims.get(key, "M"), 1)
 
 
-def build_schedule(sbti_data: dict | None) -> DailySchedule:
+def build_schedule(sbti_data: dict | None, weather: dict | None = None) -> DailySchedule:
     """Derive a DailySchedule from SBTI dimensions.
 
     Algorithm:
@@ -33,7 +33,14 @@ def build_schedule(sbti_data: dict | None) -> DailySchedule:
     - peak_hours: 1-3 hours where resident is most active. Derived from Ac1 + A3.
     - social_slots: hours where social probability gets a +0.2 boost. From So1 + E2.
     - rest_ratio: driven by Ac3 inverted. Low Ac3 = high rest_ratio.
+
+    E6: ``weather`` (the active weather event's payload, e.g. {"kind": "rain"})
+    is accepted per the spec's API so the loop threads the current segment
+    through, but it deliberately does NOT shift wake/sleep windows or tick
+    probability — rain/storm influence behavior as a soft decide-prompt hint
+    (see prompts.build_decision_prompt), keeping the clock deterministic.
     """
+    del weather  # E6: no schedule effect by design — see docstring.
     if not sbti_data:
         return DailySchedule(
             wake_hour=8,

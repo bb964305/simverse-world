@@ -80,7 +80,7 @@ interface GameState {
   addPlayerChatMessage: (msg: PlayerChatMessage) => void
   setInputFocused: (v: boolean) => void
   updateBalance: (balance: number) => void
-  setProfileTab: (tab: 'residents' | 'conversations' | 'transactions' | 'achievements' | 'feed' | 'recap' | 'codex' | 'settings') => void
+  setProfileTab: (tab: 'residents' | 'creator' | 'conversations' | 'transactions' | 'achievements' | 'feed' | 'recap' | 'codex' | 'settings') => void
   setOnlinePlayer: (p: OnlinePlayer) => void
   removeOnlinePlayer: (id: string) => void
   clearOnlinePlayers: () => void

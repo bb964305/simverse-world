@@ -97,6 +97,13 @@ class AgentLoop:
                 )
             )
             rows = result.all()
+            # E6: current weather fetched once per round (60s-cached) and
+            # threaded into every schedule build below.
+            try:
+                from app.tasks.weather import get_current_weather
+                weather = await get_current_weather(db)
+            except Exception:
+                weather = None
         if not rows:
             return tier
 
@@ -111,7 +118,7 @@ class AgentLoop:
             """Run one resident's tick in its own session, bounded by semaphore."""
             # Evaluate schedule before acquiring semaphore (no DB needed)
             sbti_data = (meta_json or {}).get("sbti")
-            schedule = build_schedule(sbti_data)
+            schedule = build_schedule(sbti_data, weather=weather)
 
             if not should_tick(schedule, current_hour):
                 return None
