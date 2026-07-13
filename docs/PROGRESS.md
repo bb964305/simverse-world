@@ -170,7 +170,8 @@
 - [x] **push 双 ref**：`1106cae..0daed7c` → feat/rate-limiting-p1 + master
 - [x] **CI 首绿**（第二跑，双 ref success）：首跑红 2 处当场修——① `995ee5a` **encounter 同款 monotonic 真 bug**（witness 45be03f 的兄弟：`_cooldown.get(key, 0.0)` 在开机<1h 的 CI runner 上首次偶遇恒被误杀，本机/沙盒/vm212 长 uptime 全侥幸；+1 回归测试钉 monotonic=120s）；② `7a00974` pg 冒烟断言键名笔误 `token`→`access_token`（迁移+注册实际全通）
 - [x] **运行时冒烟顺手修**：`0daed7c` LoginPage 422 崩页（见上方顺手修条目）
-- [ ] **Sentry DSN（阻塞，需 Jimmy）**：本机无 sentry-cli/token，浏览器 sentry.io 无登录会话——需 Jimmy 登录 Sentry（或给 SENTRY_AUTH_TOKEN）后建前后端两项目；vm212 `.env` 加 `SENTRY_DSN` + 前端构建注入 `VITE_SENTRY_DSN` + 测试异常验证随其后；vm212 `/metrics`+`SLOW_QUERY_MS` 验证需先把本轮 master 部署上去（未擅自动生产）
+- [x] **vm212 部署 + /metrics + SLOW_QUERY_MS 验证**（2026-07-13，Jimmy 确认 vm212 为测试环境可自由操作）：`git archive HEAD` 精确树部署（备份 backend.bak.1783907900）→ rebuild api+agent-worker → `/health` ok、注册冒烟出 token、`GET /metrics` 200（28 指标族，`sv_llm_*`/`sv_agent_tick_*`/`sv_ws_online_local` 在场）、`SLOW_QUERY_MS=1` 实测日志输出（`slow query 15ms: SELECT residents...`）后回设 **500ms** 长期生效；CF Tunnel 公网门面 `/health`+`/metrics` 双 200。**发现**：① agent-worker 持续刷 `Ollama embedding error`——.env 无 embedding 端点配置，默认打容器内 localhost Ollama（预存，embedding 管线在 vm212 实际不可用）；② `/metrics` 经 tunnel 公网可见，测试环境无妨，转生产前建议加访问控制；③ vm212 SSH 会话偶发被远端断（长命令要 nohup 落远端日志）
+- [ ] **Sentry DSN（阻塞，需 Jimmy）**：本机无 sentry-cli/token，浏览器 sentry.io 无登录会话——需 Jimmy 登录 Sentry（或给 SENTRY_AUTH_TOKEN）后建前后端两项目；vm212 `.env` 加 `SENTRY_DSN`（deploy/.env，容器已在跑本轮代码，加了即生效）+ 前端构建注入 `VITE_SENTRY_DSN` + 测试异常验证随其后
 - [ ] **docs 纳管（待 Jimmy 确认）**：FEATURE_SPECS / OPTIMIZATION_PLAN / KICKOFF_PROMPT* 仍未入 git
 
 ## 发现（施工中发现的新问题，不当场处理）
