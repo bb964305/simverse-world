@@ -113,7 +113,7 @@ jobs:
           resp=$(curl -fsS -X POST http://127.0.0.1:8000/auth/register \
             -H 'Content-Type: application/json' \
             -d '{"name":"ci-smoke","email":"ci-smoke@example.com","password":"ci-password-123"}')
-          echo "$resp" | python -c "import sys,json; d=json.load(sys.stdin); assert d.get('token'), d; print('register smoke OK')"
+          echo "$resp" | python -c "import sys,json; d=json.load(sys.stdin); assert d.get('access_token'), d; print('register smoke OK')"
 
   frontend:
     name: Frontend · tsc + vitest + eslint 基线 + build
