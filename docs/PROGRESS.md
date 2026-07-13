@@ -164,6 +164,15 @@
 4. **docs 纳管确认**：FEATURE_SPECS/OPTIMIZATION_PLAN/KICKOFF_PROMPT* 仍未入 git，建议入库（PROGRESS 多处引用）
 5. **沙盒 git 锁残留**：`.git/HEAD.lock`、`.git/index.lock` 是 mount EPERM 残留（本机可直接 `rm`），本轮提交经 /tmp 索引 + commit-tree 绕过，历史正常
 
+### PLAN_P3 批次 0/4 本机执行记录（2026-07-13）
+- [x] **锁清理 + 工作区恢复**：rm 两个 .lock；index 停留在旧树 + 工作区缺 18 个新建文件（沙盒 commit-tree 绕过的后遗症，纯缺失零冲突），`git reset --hard HEAD` 恢复
+- [x] **本机独立复验**：后端 CI 口径 **663 passed / 1 deselected / exit 0**；前端四连 build/eslint/vitest 全 exit 0（本机 Node v25 需 `NODE_OPTIONS=--no-experimental-webstorage`，CI Node 22 不受影响）；真实运行时冒烟（fresh sqlite dev 库 + redis 容器 + 浏览器）：注册→onboarding→地图渲染→WS 连接→console 零错误全链通
+- [x] **push 双 ref**：`1106cae..0daed7c` → feat/rate-limiting-p1 + master
+- [x] **CI 首绿**（第二跑，双 ref success）：首跑红 2 处当场修——① `995ee5a` **encounter 同款 monotonic 真 bug**（witness 45be03f 的兄弟：`_cooldown.get(key, 0.0)` 在开机<1h 的 CI runner 上首次偶遇恒被误杀，本机/沙盒/vm212 长 uptime 全侥幸；+1 回归测试钉 monotonic=120s）；② `7a00974` pg 冒烟断言键名笔误 `token`→`access_token`（迁移+注册实际全通）
+- [x] **运行时冒烟顺手修**：`0daed7c` LoginPage 422 崩页（见上方顺手修条目）
+- [ ] **Sentry DSN（阻塞，需 Jimmy）**：本机无 sentry-cli/token，浏览器 sentry.io 无登录会话——需 Jimmy 登录 Sentry（或给 SENTRY_AUTH_TOKEN）后建前后端两项目；vm212 `.env` 加 `SENTRY_DSN` + 前端构建注入 `VITE_SENTRY_DSN` + 测试异常验证随其后；vm212 `/metrics`+`SLOW_QUERY_MS` 验证需先把本轮 master 部署上去（未擅自动生产）
+- [ ] **docs 纳管（待 Jimmy 确认）**：FEATURE_SPECS / OPTIMIZATION_PLAN / KICKOFF_PROMPT* 仍未入 git
+
 ## 发现（施工中发现的新问题，不当场处理）
 - **成本优化研究完成（2026-07-07）**：28 条实验，产出在 `docs/research/`（REPORT=结论与 P1-1 建议、LOG=实验台账、DIRECTOR_ROADMAP/CALLMAP=Opus 统筹产物）。关键输入给 P1-1：计量字段清单、熔断阈值、杠杆排序（计划优先跳过 decide 省 29-37% 为最大项）；缓存/Batch 判定为不可用杠杆。**开放问题需 Jimmy**：部署机 .env 的 LLM_BASE_URL（验证端点是否 Anthropic 原生，F-02）。顺手修清单：互聊 max_tokens 100→150（截断污染 history 风险）、互聊 history 双注入（chat.py 一行）、玩家聊天 chat_messages 无截断。
 - 4 个预先存在的测试失败（HEAD 基线复现，与 P0-1 无关）：`test_forge.py::test_forge_answers_advance_to_generating`、`test_map_integration.py::test_decide_prompt_includes_remembered_residents`、`test_portrait.py::test_generate_portrait_success`（portrait_url 为 None）、`test_preset_import.py::test_seed_presets_creates_residents`（district 默认值断言 'free'，代码已改 'central_plaza'）——测试与代码漂移
