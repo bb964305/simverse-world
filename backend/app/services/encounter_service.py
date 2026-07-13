@@ -48,7 +48,11 @@ async def maybe_encounter(db, user_id: str, location_id: str) -> dict | None:
     now = time.monotonic()
     today = datetime.now(UTC).date().isoformat()
 
-    if now - _cooldown.get((user_id, location_id), 0.0) < ENCOUNTER_COOLDOWN_SECONDS:
+    # Membership check, not a 0.0 default: time.monotonic() is seconds since
+    # boot, so on a machine up < 1h the 0.0 default made the first encounter
+    # look "on cooldown" and killed it (same bug as witness dedup, 45be03f).
+    last = _cooldown.get((user_id, location_id))
+    if last is not None and now - last < ENCOUNTER_COOLDOWN_SECONDS:
         return None
     if _daily.get((user_id, today), 0) >= ENCOUNTER_DAILY_CAP:
         return None
