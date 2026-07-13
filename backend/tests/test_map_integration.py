@@ -66,21 +66,30 @@ def test_decide_prompt_shows_boost():
     assert "REFLECT" in system
 
 
-def test_decide_prompt_includes_remembered_residents():
+def test_decide_prompt_includes_relationship_memories():
+    """Remembered relationships now reach decide via the memories section.
+
+    build_decision_prompt no longer takes a ``remembered_residents`` parameter
+    (test-code drift): relationship knowledge is injected as ``memories``
+    entries rendered verbatim under \u6700\u8fd1\u7684\u8bb0\u5fc6 as ``- [source] content``.
+    """
     resident = _make_resident(tile_x=63, tile_y=48)
-    remote = _make_resident(slug="remote-friend", tile_x=72, tile_y=14, home_location_id="house_a")
+    memory = MagicMock()
+    memory.source = "relationship"
+    memory.content = "remote-friend \u662f\u8001\u670b\u53cb\uff0c\u804a\u5929\u5f88\u6295\u7f18\uff0c\u5e38\u7ea6\u5728\u9152\u9986"
     system, user = build_decision_prompt(
         resident=resident,
         schedule_phase="\u4e0a\u5348",
         world_time="10:00",
         nearby_residents=[],
-        remembered_residents=[(remote, "\u8001\u670b\u53cb\uff0c\u804a\u5929\u5f88\u6295\u7f18")],
-        memories=[],
+        memories=[memory],
         today_actions=[],
         available_actions=[ActionType.VISIT_DISTRICT],
         max_daily_actions=20,
     )
-    assert "\u8bb0\u5fc6\u4e2d\u7684\u91cd\u8981\u5173\u7cfb" in user
+    assert "\u6700\u8fd1\u7684\u8bb0\u5fc6" in user
+    assert "[relationship]" in user
+    assert "\u8001\u670b\u53cb\uff0c\u804a\u5929\u5f88\u6295\u7f18" in user
     assert "\u9152\u9986" in user
 
 
@@ -141,28 +150,39 @@ async def test_find_available_tile_uses_canonical_occupancy_bucket(db_session):
 
 @pytest.mark.anyio
 async def test_import_resident_emits_canonical_location_id(client, auth_headers):
-    skill_content = """# Ability
-## Professional
-- Backend engineering expert with 10 years experience
-- Distributed systems and high availability architectures
+    """Legacy multipart import places the resident in a canonical location.
 
-# Persona
-## Layer 0: Core
-- Methodical, calm under pressure, very detail-oriented
-"""
-    files = {"file": ("SKILL.md", io.BytesIO(skill_content.encode()), "text/markdown")}
-    data = {"name": "Canonical Import", "slug": "canonical-import"}
+    Regression spec for the /import route collision: the C1 soul-card JSON
+    route once shadowed this multipart route (fixed by moving C1 to
+    /import-card). SBTI's LLM client is mocked to its fail-open path so the
+    pipeline runs offline.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+    sbti_client = MagicMock()
+    sbti_client.messages.create = AsyncMock(side_effect=RuntimeError("offline test"))
+    with patch("app.services.sbti_service.get_client", return_value=sbti_client):
+        skill_content = """# Ability
+    ## Professional
+    - Backend engineering expert with 10 years experience
+    - Distributed systems and high availability architectures
 
-    resp = await client.post("/residents/import", headers=auth_headers, files=files, data=data)
-    assert resp.status_code == 200
-    payload = resp.json()
-    detail = (await client.get("/residents/canonical-import")).json()
+    # Persona
+    ## Layer 0: Core
+    - Methodical, calm under pressure, very detail-oriented
+    """
+        files = {"file": ("SKILL.md", io.BytesIO(skill_content.encode()), "text/markdown")}
+        data = {"name": "Canonical Import", "slug": "canonical-import"}
 
-    assert payload["district"] == "workshop"
-    assert payload["district"] not in LEGACY_PLACEMENTS
-    x1, y1, x2, y2 = LOCATIONS["workshop"]["bounds"]
-    assert x1 <= detail["tile_x"] <= x2
-    assert y1 <= detail["tile_y"] <= y2
+        resp = await client.post("/residents/import", headers=auth_headers, files=files, data=data)
+        assert resp.status_code == 200
+        payload = resp.json()
+        detail = (await client.get("/residents/canonical-import")).json()
+
+        assert payload["district"] == "workshop"
+        assert payload["district"] not in LEGACY_PLACEMENTS
+        x1, y1, x2, y2 = LOCATIONS["workshop"]["bounds"]
+        assert x1 <= detail["tile_x"] <= x2
+        assert y1 <= detail["tile_y"] <= y2
 
 
 @pytest.mark.anyio

@@ -59,7 +59,7 @@ async def test_import_roundtrip_and_cap(client, db_session):
     }
     headers = {"Authorization": f"Bearer {create_token(owner.id)}"}
 
-    r1 = await client.post("/residents/import", json=payload, headers=headers)
+    r1 = await client.post("/residents/import-card", json=payload, headers=headers)
     assert r1.status_code == 200
     # exported card of the imported resident preserves SBTI + layers.
     slug = r1.json()["slug"]
@@ -68,13 +68,13 @@ async def test_import_roundtrip_and_cap(client, db_session):
 
     # daily cap: 2 more ok (total 3), 4th → 429.
     for i in range(2):
-        assert (await client.post("/residents/import", json={**payload, "name": f"r{i}"}, headers=headers)).status_code == 200
-    assert (await client.post("/residents/import", json={**payload, "name": "over"}, headers=headers)).status_code == 429
+        assert (await client.post("/residents/import-card", json={**payload, "name": f"r{i}"}, headers=headers)).status_code == 200
+    assert (await client.post("/residents/import-card", json={**payload, "name": "over"}, headers=headers)).status_code == 429
 
 
 @pytest.mark.anyio
 async def test_import_sensitive_blocked(client, db_session):
     owner = await _user(db_session, "sens@t.com")
-    r = await client.post("/residents/import", json={"name": "x", "persona_md": "fuck you", "soul_md": "x"},
+    r = await client.post("/residents/import-card", json={"name": "x", "persona_md": "fuck you", "soul_md": "x"},
                           headers={"Authorization": f"Bearer {create_token(owner.id)}"})
     assert r.status_code == 400

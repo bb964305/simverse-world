@@ -2,6 +2,41 @@ import pytest
 import json
 import io
 import zipfile
+from unittest.mock import AsyncMock, MagicMock, patch
+
+
+_COLLEAGUE_CONVERSION = """# Ability
+- Python backend development, API design
+===SPLIT===
+# Persona
+- Pragmatic, direct communication style
+===SPLIT===
+"""
+
+
+@pytest.fixture(autouse=True)
+def _offline_llm():
+    """Run the import pipeline fully offline.
+
+    - skill_import LLM conversion (non-standard formats) returns a canned
+      3-layer split matching the colleague-format test's assertions.
+    - compute_sbti's client raises -> the service's own fail-open path
+      (returns None, import proceeds without SBTI).
+    Standard 3-layer parsing never touches the LLM and is exercised for real.
+    """
+    conv_resp = MagicMock()
+    block = MagicMock()
+    block.text = _COLLEAGUE_CONVERSION
+    conv_resp.content = [block]
+    conv_client = MagicMock()
+    conv_client.messages.create = AsyncMock(return_value=conv_resp)
+
+    sbti_client = MagicMock()
+    sbti_client.messages.create = AsyncMock(side_effect=RuntimeError("offline test"))
+
+    with patch("app.services.skill_import_service.get_client", return_value=conv_client), \
+         patch("app.services.sbti_service.get_client", return_value=sbti_client):
+        yield
 
 
 @pytest.fixture

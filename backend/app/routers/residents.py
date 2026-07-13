@@ -138,7 +138,10 @@ class ImportBody(BaseModel):
     sbti: dict | None = None
 
 
-@router.post("/import")
+# C1 soul-card JSON import. Path is /import-card, NOT /import: a second
+# handler on /import shadowed the legacy multipart skill import (Starlette
+# first-match wins) and broke the frontend importSkill in prod.
+@router.post("/import-card")
 async def resident_import(body: ImportBody, request: Request, db: AsyncSession = Depends(get_db)):
     from fastapi import HTTPException
     from datetime import datetime, UTC

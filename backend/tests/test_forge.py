@@ -48,26 +48,58 @@ async def test_forge_status_returns_session(client, auth_headers):
 
 @pytest.mark.anyio
 async def test_forge_answers_advance_to_generating(client, auth_headers):
-    start = await client.post("/forge/start", json={"name": "张三"},
-                              headers=auth_headers)
-    forge_id = start.json()["forge_id"]
+    # The final answer schedules the background LLM pipeline
+    # (run_generation_pipeline). Offline, the real Anthropic client hangs into
+    # teardown ("task pending" error). Mock the LLM at the client boundary:
+    # the call parks on an event so status stays deterministically
+    # "generating", then raises so the background task drains before teardown.
+    import asyncio
+    from unittest.mock import MagicMock, patch
 
-    answers = [
-        "后端架构，擅长高并发系统",
-        "话少但犀利，评审会喜欢抛致命问题",
-        "相信代码是艺术品，经历过创业失败",
-        "跳过",
-    ]
-    for answer in answers:
-        resp = await client.post("/forge/answer", json={
-            "forge_id": forge_id, "answer": answer,
-        }, headers=auth_headers)
-        assert resp.status_code == 200
+    release = asyncio.Event()
+    llm_calls: list[dict] = []
 
-    # After Q5, status should be "generating"
-    resp = await client.get(f"/forge/status/{forge_id}", headers=auth_headers)
-    data = resp.json()
-    assert data["status"] == "generating"
+    async def fake_create(*args, **kwargs):
+        llm_calls.append(kwargs)
+        await release.wait()
+        raise RuntimeError("offline test: no LLM available")
+
+    mock_llm = MagicMock()
+    mock_llm.messages.create = fake_create
+
+    with patch("app.forge.legacy_pipeline.get_client", return_value=mock_llm):
+        start = await client.post("/forge/start", json={"name": "张三"},
+                                  headers=auth_headers)
+        forge_id = start.json()["forge_id"]
+
+        answers = [
+            "后端架构，擅长高并发系统",
+            "话少但犀利，评审会喜欢抛致命问题",
+            "相信代码是艺术品，经历过创业失败",
+            "跳过",
+        ]
+        for answer in answers:
+            resp = await client.post("/forge/answer", json={
+                "forge_id": forge_id, "answer": answer,
+            }, headers=auth_headers)
+            assert resp.status_code == 200
+
+        # After Q5, status should be "generating" (pipeline parked at the LLM)
+        resp = await client.get(f"/forge/status/{forge_id}", headers=auth_headers)
+        data = resp.json()
+        assert data["status"] == "generating"
+
+        # Drain the background task before teardown: unblock the mocked LLM,
+        # let the injected error surface, and wait for the terminal state.
+        release.set()
+        from app.forge.legacy_sessions import _sessions
+        for _ in range(500):
+            if _sessions[forge_id]["status"] != "generating":
+                break
+            await asyncio.sleep(0.01)
+        assert _sessions[forge_id]["status"] == "error"
+        assert llm_calls, "background pipeline never reached the (mocked) LLM"
+        await asyncio.sleep(0)  # let the task object finish before teardown
 
 @pytest.mark.anyio
 async def test_score_content_completeness():

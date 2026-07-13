@@ -1,8 +1,8 @@
 # CI — Phase 3 工程质量底座
 #
 # 三个独立 job:
-#   1. backend-tests    — 全量 pytest(sqlite + fakeredis),排除 docs/PROGRESS.md
-#                          记录的 6 个预存基线/网络文件 + 1 个 flaky 用例
+#   1. backend-tests    — 全量 pytest(sqlite + fakeredis)，排除清单已清零
+#                          (原 6 文件 + 1 flaky 全部离线化修复，见 job 内注释)
 #   2. pg-migration-smoke — 真 Postgres(pgvector)全链 alembic 迁移 + 注册冒烟。
 #                          动机见 PROGRESS 发现区:sqlite 测试(FK 不强制 +
 #                          create_all 不走迁移)曾掩盖 4 类"仅真 PG 会炸"的 bug
@@ -35,24 +35,17 @@ jobs:
           cache-dependency-path: backend/pyproject.toml
       - name: Install
         run: pip install -e ".[dev]" pytest-timeout
-      - name: Run selective suite
-        # 排除清单与 docs/PROGRESS.md 的"全量选择性套件"口径一致:
-        # import/map_integration/research_stage/resident_edit 需要外网/LLM,
-        # portrait/preset_import 是记录在案的测试-代码漂移;
-        # forge_answers_advance_to_generating 的后台 LLM 任务无外网时挂起。
-        # 修复任何一项后请同步收窄这里的排除。
+      - name: Run full suite
+        # 排除清单已清零(原 6 文件 + 1 flaky)。修复史: /import 路由双注册
+        # bug(C1 JSON 路由遮蔽 legacy multipart)已修——C1 迁至 /import-card;
+        # test_import/map_integration 补 LLM 边界 mock 离线化; portrait(未配
+        # 置守卫)/preset_import(district 漂移)对齐代码现行为; research_stage/
+        # resident_edit 本就可离线; forge flaky 改后台任务确定性排水。
         env:
           DATABASE_URL: sqlite+aiosqlite:////tmp/ci_dev.db
         run: >
           pytest tests -q
           --timeout=120 --timeout-method=signal
-          --ignore=tests/test_import.py
-          --ignore=tests/test_map_integration.py
-          --ignore=tests/test_research_stage.py
-          --ignore=tests/test_resident_edit.py
-          --ignore=tests/test_portrait.py
-          --ignore=tests/test_preset_import.py
-          --deselect tests/test_forge.py::test_forge_answers_advance_to_generating
 
   pg-migration-smoke:
     name: Backend · PG 全链迁移 + 注册冒烟 (pgvector)

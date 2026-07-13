@@ -35,7 +35,10 @@ async def test_seed_presets_creates_residents(db_session):
     assert xiaoyan.meta_json["is_preset"] is True
     assert xiaoyan.star_rating == 3
     assert xiaoyan.sprite_key == "克劳斯"
-    assert xiaoyan.district == "free"
+    # Canonical location ids replaced legacy district labels ("free") — the
+    # seed data pins xiao-yan to central_plaza and allocate_resident_location
+    # honors the requested id.
+    assert xiaoyan.district == "central_plaza"
 
 
 @pytest.mark.anyio

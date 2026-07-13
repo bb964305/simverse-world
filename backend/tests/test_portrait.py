@@ -50,7 +50,13 @@ async def test_generate_portrait_success():
         }]
     }
 
-    with patch("app.services.portrait_service.get_client") as mock_get_client:
+    # generate_portrait now short-circuits to None when the portrait LLM is
+    # unconfigured — inject a fake endpoint so the request path is exercised.
+    from app.config import settings
+
+    with patch.object(settings, "portrait_llm_base_url", "https://gemini.test/v1"), \
+         patch.object(settings, "portrait_llm_api_key", "test-key"), \
+         patch("app.services.portrait_service.get_client") as mock_get_client:
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(return_value=mock_response)
         mock_get_client.return_value = mock_client
@@ -67,12 +73,17 @@ async def test_generate_portrait_success():
 
 @pytest.mark.anyio
 async def test_generate_portrait_api_error():
-    """Should return None on API failure."""
+    """Should return None on API failure (with the endpoint configured, so the
+    500 branch is actually exercised rather than the unconfigured guard)."""
+    from app.config import settings
+
     mock_response = MagicMock()
     mock_response.status_code = 500
     mock_response.text = "Internal Server Error"
 
-    with patch("app.services.portrait_service.get_client") as mock_get_client:
+    with patch.object(settings, "portrait_llm_base_url", "https://gemini.test/v1"), \
+         patch.object(settings, "portrait_llm_api_key", "test-key"), \
+         patch("app.services.portrait_service.get_client") as mock_get_client:
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(return_value=mock_response)
         mock_get_client.return_value = mock_client
@@ -80,3 +91,19 @@ async def test_generate_portrait_api_error():
         url = await generate_portrait("fail-id", "Nobody", "")
 
     assert url is None
+    mock_client.post.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_generate_portrait_unconfigured_returns_none():
+    """Without PORTRAIT_LLM_BASE_URL / PORTRAIT_LLM_API_KEY the service must
+    degrade gracefully offline: no HTTP call, just None."""
+    from app.config import settings
+
+    with patch.object(settings, "portrait_llm_base_url", None), \
+         patch.object(settings, "portrait_llm_api_key", None), \
+         patch("app.services.portrait_service.get_client") as mock_get_client:
+        url = await generate_portrait("no-conf-id", "Nobody", "")
+
+    assert url is None
+    mock_get_client.assert_not_called()
