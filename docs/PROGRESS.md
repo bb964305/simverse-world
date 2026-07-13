@@ -154,6 +154,8 @@
   - **agent 行为结构化日志** — 决策：**不建 agent_events 表**（llm_usage+WS 广播已覆盖成本与视觉回放），最小落法 = `_handle_action` chokepoint 打 `agent.events` logger 单行 JSON（ts/resident/action/target/reason/suppress_chat），fail-open。
 - **顺手修 3 个（批次 1 验证中发现）**：① `e21075d` test_daily_reward 用本地 `date.today()` 而服务用 UTC——本地时区 00:00-08:00 窗口内必挂（沙盒 CST 复现），改 UTC 对齐；conftest 加 session 级全局 engine 幂等建表——**CI 全新库文件首跑必踩**"no such table"（此前被已初始化的本地库文件掩盖）；② `45be03f` **witness 真 bug**：dedup `_last_witness.get(key, 0.0)` 默认 0 + `time.monotonic()`=开机秒数 → **开机 <4h 的机器上首条目击记忆恒被误杀**（CI/新 VM 必现，vm212 长 uptime 侥幸），改成员判定。
 - **最终验证（2026-07-13）**：后端选择性套件 5 块 **663 passed / 0 failed / 1 deselected**（排除口径同 CI）；前端四连全绿：tsc(strict) ✅ / vitest 4 files 21 tests ✅ / **eslint 0 problems** ✅ / vite build ✅（outDir /tmp，分包正常）。
+- **顺手修 1 个（本机批次 4 运行时冒烟发现，预存 bug）**：LoginPage `setError(err.detail)` 在 FastAPI 422 时把 Pydantic detail 对象数组直接交给 JSX 渲染 → "Objects are not valid as a React child" 整页崩进 ErrorBoundary（真实浏览器注册非法邮箱复现）；归一为字符串（string 原样 / 数组取 msg 拼接 / 兜底"操作失败"），SeasonsPage/DebatesPage 已有同款防御写法，仅 LoginPage 漏。+3 RTL 用例（LoginPage.test.tsx），vitest 24/24。
+- **本机环境注记（2026-07-13）**：本机 Node v25 自带 webstorage 全局遮蔽 jsdom localStorage，vitest 需 `NODE_OPTIONS=--no-experimental-webstorage`（CI Node 22 不受影响）；本地 dev sqlite 库需 `AUTO_CREATE_TABLES=true` 重建（全链 alembic 在 sqlite 上有已记录的 ALTER 约束限制，仅真 PG 可走）。
 
 ### PLAN_P3 批次 0/4 —— 本机执行清单（沙盒无 push 凭据，需 Jimmy）
 1. **push**：`git push origin feat/rate-limiting-p1 && git push origin feat/rate-limiting-p1:master`（本地领先 origin 15 提交：3 个 Phase 3 已有 + 12 个本轮）

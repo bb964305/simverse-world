@@ -24,7 +24,15 @@ export function LoginPage() {
       })
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}))
-        setError(err.detail || '操作失败')
+        // FastAPI 422 puts a list of {loc,msg,...} objects in detail — never
+        // hand non-strings to JSX or the whole page crashes into ErrorBoundary.
+        const detail = err?.detail
+        const msg = typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((d) => d?.msg).filter(Boolean).join('；')
+            : ''
+        setError(msg || '操作失败')
         return
       }
       const data = await resp.json()
