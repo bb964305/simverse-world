@@ -55,6 +55,10 @@ class TickContext:
     nearby_known: dict[str, str] = field(default_factory=dict)  # resident_id -> relationship text
     current_plan: HourlyPlan | None = None
     daily_goal: DailyGoal | None = None
+    # A1: the resident's active life goal {"title", "progress"}, fetched
+    # lazily (fail-open) where needed — currently by the plan phase on
+    # plan-generation days so daily plans align with the long-term goal.
+    life_goal: dict | None = None
     action_result: ActionResult | None = None
     plan_followed: bool = True
     new_tile: tuple[int, int] | None = None

@@ -108,6 +108,26 @@ async def compose_digest(day: date_type, material: dict) -> tuple[str, str]:
     return title, text
 
 
+async def _pin_digest_bulletin(db: AsyncSession, digest: Digest) -> None:
+    """A5→A4: pin the fresh village digest on the bulletin board.
+
+    Unpins any previous digest pin first so only the latest stays pinned.
+    Author fields stay NULL (= system post; the board renders it as「系统」).
+    Called only when a *new* digest row was inserted, so it is idempotent per
+    day for free (regenerating the same day's digest returns early upstream).
+    """
+    from sqlalchemy import update
+    from app.models.bulletin_post import BulletinPost
+    from app.services.bulletin_service import create_post
+
+    await db.execute(
+        update(BulletinPost)
+        .where(BulletinPost.kind == "digest", BulletinPost.pinned.is_(True))
+        .values(pinned=False)
+    )
+    await create_post(db, "digest", digest.title, digest.content_md, pinned=True)
+
+
 async def generate_village_digest(db: AsyncSession, day: date_type | None = None) -> Digest:
     day = day or datetime.now(UTC).date()
 
@@ -137,6 +157,13 @@ async def generate_village_digest(db: AsyncSession, day: date_type | None = None
             select(Digest).where(Digest.scope == "village", Digest.date == day, Digest.user_id == "")
         )).scalar_one()
     await db.refresh(digest)
+
+    # A5→A4: pin the new digest on the bulletin board (best-effort; a bulletin
+    # failure must never break digest generation).
+    try:
+        await _pin_digest_bulletin(db, digest)
+    except Exception:
+        logger.warning("digest bulletin pin failed", exc_info=True)
 
     try:
         await manager.broadcast({"type": "digest_ready", "date": str(day)})

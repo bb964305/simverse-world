@@ -201,6 +201,20 @@ class BasicPlanPlugin:
             slot_count=len(slots_info),
         )
 
+        # A1: align the daily plan with the resident's active life goal.
+        # Lightweight single select, fail-open — a goal-fetch hiccup must
+        # never block plan generation (mirrors the chat-prompt injection).
+        try:
+            from app.services.goal_service import get_active_goal
+            goal_row = await get_active_goal(ctx.db, resident.id)
+            title = getattr(goal_row, "title", None)
+            if goal_row is not None and isinstance(title, str) and title:
+                progress = float(goal_row.progress or 0)
+                ctx.life_goal = {"title": title, "progress": progress}
+                user_prompt = f"你的长期目标：{title}（进度 {progress:.0%}）\n\n" + user_prompt
+        except Exception:
+            logger.debug("life goal fetch failed (fail-open)", exc_info=True)
+
         raw = await llm_chat(
             system_prompt, [{"role": "user", "content": user_prompt}], max_tokens=1200,
             meter=Meter(scenario="plan", resident_id=resident.id), expects_json=True,

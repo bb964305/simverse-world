@@ -161,3 +161,16 @@ async def _on_resolved(db, resident_id, goal, verdict) -> None:
                        {"title": goal.title, "verdict": verdict})
     except Exception:
         logger.warning("goal feed push failed", exc_info=True)
+    # A4: an achieved life goal is bulletin-worthy (kind=notice, not pinned).
+    if verdict == "achieved":
+        try:
+            from app.services.bulletin_service import create_post
+            res = await db.get(Resident, resident_id)
+            name = res.name if res else "一位居民"
+            await create_post(
+                db, "notice", f"{name} 实现了人生目标",
+                f"{name} 实现了自己的人生目标「{goal.title}」，全镇为之欢呼！",
+                author_resident_id=resident_id,
+            )
+        except Exception:
+            logger.warning("goal bulletin post failed", exc_info=True)
