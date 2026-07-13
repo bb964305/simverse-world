@@ -192,6 +192,12 @@
 - [x] **止血暴露真 bug 当场修**：`6562651`——`main.py` 的 `asyncio.wait(FIRST_COMPLETED)` 把 backfill 禁用短路的**正常返回**当成退出信号 → 整个 agent-worker 停机 → 容器重启循环（agent/heat/event/nightly 四 loop 全部陪葬；注释写着 "not fatal" 但代码行为就是 fatal）。改 while-pending 续等剩余任务，任务 crash 仍 fail-loud；+2 生命周期测试（`test_agent_worker.py`，TDD 红→绿）。CI 口径本机 **711 passed / 1 deselected / exit 0**；push 后 CI 双 ref 绿；vm212 复部署后 worker 稳定 Up（原来 ~1s 一轮重启）
 - [ ] **Sentry DSN（仍阻塞，需 Jimmy）** / **docs 纳管（仍待确认）**——沿上轮不变
 
+### 本机执行记录（2026-07-13 第三轮：docs 纳管 + vm212 本地 embedding 上线）
+- [x] **docs 纳管**：`efa04ef` FEATURE_SPECS / OPTIMIZATION_PLAN / KICKOFF_PROMPT×3 入库（Jimmy 确认"可以"），双 ref 推送
+- [x] **vm212 本地 embedding 上线（止血翻正，不再需要按量 key）**：新增 `ollama` 容器（`--network deploy_default --memory=1400m --memory-swap=4g -e OLLAMA_KEEP_ALIVE=3m`，端口不对外发布仅 compose 内网）+ `qwen3-embedding:0.6b`（**原生 1024 维 = vector(1024) 列宽，零截断**）；`.env` 翻回 `EMBEDDING_ENABLED=true` + `OLLAMA_BASE_URL=http://ollama:11434` + `OLLAMA_EMBED_MODEL/DIMENSIONS`。**实测数据**：冷启动 11.5s / 热调用 1.4s（双文本批），ollama 稳态 ~1.0GiB（cap 内；宿主仅 1.8G 内存，靠 swap 吸收，PG/api/sub2api 全程无恙）；worker 重启后 backfill 首轮 **18/21 条 NULL 记忆真实回填**（5 批全 200 OK），PG 侧余弦检索算子（`<=>`）实测可用。剩 3 条 NULL 均 type=relationship——backfill 设计内豁免（只扫 type='event'，关系记忆按 key 直取不走语义检索）
+- **注意事项**：vm212 内存边缘状态（1.8G 总量），ollama 靠容器 cap + KEEP_ALIVE=3m 空闲自动卸载共存；若后续观察到 swap 抖动拖慢整机，退路 = `EMBEDDING_ENABLED=false` 或换按量 key。转生产时建议独立节点或换按量 embedding API
+- [ ] **Sentry DSN（仍阻塞，需 Jimmy）**——需登录 sentry.io 建前后端两项目（或给 `SENTRY_AUTH_TOKEN`），后端 `SENTRY_DSN` 进 vm212 `.env`、前端 `VITE_SENTRY_DSN` 构建时注入
+
 ## 发现（施工中发现的新问题，不当场处理）
 - **成本优化研究完成（2026-07-07）**：28 条实验，产出在 `docs/research/`（REPORT=结论与 P1-1 建议、LOG=实验台账、DIRECTOR_ROADMAP/CALLMAP=Opus 统筹产物）。关键输入给 P1-1：计量字段清单、熔断阈值、杠杆排序（计划优先跳过 decide 省 29-37% 为最大项）；缓存/Batch 判定为不可用杠杆。**开放问题需 Jimmy**：部署机 .env 的 LLM_BASE_URL（验证端点是否 Anthropic 原生，F-02）。顺手修清单：互聊 max_tokens 100→150（截断污染 history 风险）、互聊 history 双注入（chat.py 一行）、玩家聊天 chat_messages 无截断。
 - 4 个预先存在的测试失败（HEAD 基线复现，与 P0-1 无关）：`test_forge.py::test_forge_answers_advance_to_generating`、`test_map_integration.py::test_decide_prompt_includes_remembered_residents`、`test_portrait.py::test_generate_portrait_success`（portrait_url 为 None）、`test_preset_import.py::test_seed_presets_creates_residents`（district 默认值断言 'free'，代码已改 'central_plaza'）——测试与代码漂移
