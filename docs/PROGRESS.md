@@ -174,6 +174,16 @@
 - [ ] **Sentry DSN（阻塞，需 Jimmy）**：本机无 sentry-cli/token，浏览器 sentry.io 无登录会话——需 Jimmy 登录 Sentry（或给 SENTRY_AUTH_TOKEN）后建前后端两项目；vm212 `.env` 加 `SENTRY_DSN`（deploy/.env，容器已在跑本轮代码，加了即生效）+ 前端构建注入 `VITE_SENTRY_DSN` + 测试异常验证随其后
 - [ ] **docs 纳管（待 Jimmy 确认）**：FEATURE_SPECS / OPTIMIZATION_PLAN / KICKOFF_PROMPT* 仍未入 git
 
+## PLAN_P3 后续轮 — embedding 修复 + 功能收尾三件 + 偏差清扫（2026-07-13，沙盒）
+- [x] **embedding 断链修复** — `9cff3c9`：OpenAI 兼容 provider（`EMBEDDING_BASE_URL/API_KEY/MODEL/DIMENSIONS`，显式 dimensions 退休 2560→1024 截断 hack）优先于 Ollama；`EMBEDDING_ENABLED=false` 全短路（backfill loop 不启动，vm212 刷屏止血）；失败日志 5min 限流。**vm212 落地**：`.env` 配 `EMBEDDING_BASE_URL`（百炼 compatible-mode）+ key，或暂设 `EMBEDDING_ENABLED=false`。
+- [x] **B3 家园装修 + D4 创作者仪表盘** — `a21b832`（共享 main.py/api barrel 注册行故合并提交）。B3：迁移 **031** home_decor_json、decor 服务（≤12 件/bbox/已购校验+`decor_updated` 广播+NPC 彩蛋记忆）、GameScene decorLayer emoji 渲染、DecorEditor（点选摆放）；**偏差**：玩家住房懒认领（onboarding 不分房，首次装修时分配）、无 decor 图集用 emoji、拖放简化为点选。D4：`/creator/stats` 单端点 30 天聚合（sqlite/PG 双兼容，周桶 Python 折叠）、CreatorDashboard + sparkline.ts 零依赖 SVG；**偏差**：收益口径补 `tip_share:%`（spec 的 purchase:tip% 是买家侧扣费）+ amount>0 守卫。
+- [x] **E6 天气与季节** — `884add9`：马尔可夫天气机（季节转移矩阵，snow 仅冬季，storm 经 rain 可达；inactive 建档由 S1 cron 同轮翻转广播）；decide prompt 按 kind 软提示（build_schedule 收 weather 参数但刻意不改作息，测试锁定）；GameScene 粒子渲染（雨/雪/阴/暴风闪白，≤200 粒子，teardown 零残留）。**偏差**：weather 事件 ~6 条/天累积 world_events 未加清理（记发现）。
+- [x] **偏差清扫**（4 提交）：B1 头顶❗委托标记+完成金币动画（`notification(kind=commission)` 帧+bridge 事件驱动刷新；委托无专门 WS 广播为已知限度）；C1 SoulCard canvas 分享卡（900×1200，taint 双保险，下载）+ **naive-UTC 解析统一 parseUTC**（8 文件 10 处偏移风险点，Kickoff V4 发现③销账）；E13 投资入口（NpcTooltip 目标卡 50-500）+ admin 投资池监控端点/区块 + E3 谣言链 admin API（routers/admin/gossip.py）+ RumorChainPanel 树状面板；A5 日报置顶公告贴（pin 唯一+幂等+系统作者）+ A1 收尾（plan prompt 注入人生目标[TickContext.life_goal] + achieved 发 notice 贴）。
+- **跳过项（记录理由）**：A3 挚友 LLM 个性化问候 / E2 真 LLM 组梦 / C1 LLM validation 反滥用门——均需真 LLM，vm212 侧随生产化验证；D2 SBTI 着色进合并 prompt——成本研究（E-21）判定不值；E9 debate_votes 表省略为既有决策。
+- **杂项**：`f121d0e` uv.lock 补记 observability 依赖（30d7334 漏更新）；某 agent 误写 dev db 已从 HEAD 恢复。
+- **最终验证（2026-07-13）**：后端 5 块 **709 passed / 0 failed / 1 deselected**（排除口径同 CI）；前端四连：tsc(strict) ✅ / vitest 7 files 32 tests ✅ / eslint 0 ✅ / build ✅。
+- **本机执行清单（更新）**：① push 双 ref（本地领先 origin 8 提交）→ 盯 CI；② vm212：`alembic upgrade head`（新迁移 031）+ `.env` 配 EMBEDDING_*（修记忆管线）+ rebuild；③ Sentry DSN（沿上轮，仍待登录）；④ docs 纳管确认（沿上轮）。
+
 ## 发现（施工中发现的新问题，不当场处理）
 - **成本优化研究完成（2026-07-07）**：28 条实验，产出在 `docs/research/`（REPORT=结论与 P1-1 建议、LOG=实验台账、DIRECTOR_ROADMAP/CALLMAP=Opus 统筹产物）。关键输入给 P1-1：计量字段清单、熔断阈值、杠杆排序（计划优先跳过 decide 省 29-37% 为最大项）；缓存/Batch 判定为不可用杠杆。**开放问题需 Jimmy**：部署机 .env 的 LLM_BASE_URL（验证端点是否 Anthropic 原生，F-02）。顺手修清单：互聊 max_tokens 100→150（截断污染 history 风险）、互聊 history 双注入（chat.py 一行）、玩家聊天 chat_messages 无截断。
 - 4 个预先存在的测试失败（HEAD 基线复现，与 P0-1 无关）：`test_forge.py::test_forge_answers_advance_to_generating`、`test_map_integration.py::test_decide_prompt_includes_remembered_residents`、`test_portrait.py::test_generate_portrait_success`（portrait_url 为 None）、`test_preset_import.py::test_seed_presets_creates_residents`（district 默认值断言 'free'，代码已改 'central_plaza'）——测试与代码漂移
