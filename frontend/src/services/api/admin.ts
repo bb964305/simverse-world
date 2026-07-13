@@ -242,6 +242,75 @@ export function getAdminLlmUsageSummary(token: string, hours: number): Promise<L
   })
 }
 
+// ─── Admin goal investment pools (E13) ───────────────────────────
+
+export interface AdminInvestmentTopGoal {
+  goal_id: string
+  title: string
+  resident_name: string
+  resident_slug: string
+  pooled: number
+  investments: number
+  progress: number
+}
+
+export interface AdminInvestmentsResponse {
+  total_pooled: number
+  investment_count: number
+  active_goal_count: number
+  investor_count: number
+  pool_cap: number
+  top_goals: AdminInvestmentTopGoal[]
+}
+
+export function getAdminInvestments(token: string): Promise<AdminInvestmentsResponse> {
+  return apiFetch('/admin/economy/investments', {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+// ─── Admin gossip / rumor chains (E3) ────────────────────────────
+
+export interface AdminGossipItem {
+  id: string
+  resident_id: string
+  resident_name: string | null
+  resident_slug: string | null
+  content: string
+  importance: number
+  hops: number
+  distorted: boolean
+  origin_memory_id: string | null
+  created_at: string | null
+}
+
+export interface AdminRumorChainNode {
+  id: string
+  resident_id: string
+  resident_name: string | null
+  resident_slug: string | null
+  content: string
+  hops: number
+  distorted: boolean
+  importance: number | null
+  created_at: string | null
+}
+
+export function getAdminGossipRecent(token: string, limit = 50): Promise<{ items: AdminGossipItem[] }> {
+  return apiFetch(`/admin/gossip/recent?limit=${limit}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export function getAdminRumorChain(
+  token: string,
+  memoryId: string,
+): Promise<{ origin_memory_id: string; chain: AdminRumorChainNode[] }> {
+  return apiFetch(`/admin/gossip/chains/${encodeURIComponent(memoryId)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
 // ─── Admin economy series (通胀曲线) ─────────────────────────────
 
 export interface EconomySeriesPoint {

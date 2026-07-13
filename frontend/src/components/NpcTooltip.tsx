@@ -3,7 +3,7 @@ import { bridge } from '../game/phaserBridge'
 import { STATUS_CONFIG } from '../game/StatusVisuals'
 import { useGameStore } from '../stores/gameStore'
 import { isFollowed, toggleFollow } from '../services/follows'
-import { getResidentGoals } from '../services/api'
+import { getResidentGoals, getMe, investInGoal } from '../services/api'
 import type { ResidentGoalData } from '../services/api'
 import type { ResidentData } from '../game/GameScene'
 
@@ -19,13 +19,34 @@ const goalCache = new Map<string, { goal: ResidentGoalData | null; at: number }>
 const GOAL_CACHE_TTL_MS = 60_000
 const GOAL_CACHE_MAX = 20
 
+// Goal investment (E13): backend enforces 50-500 SC per bet, 2000 SC pool cap.
+const INVEST_AMOUNTS = [50, 100, 200, 500]
+
+interface InvestNotice {
+  kind: 'ok' | 'err'
+  text: string
+}
+
+// apiFetch surfaces backend 400s as `API 400: {"detail":"..."}` — map the
+// known invest failures to short, human-readable Chinese.
+function investErrorText(err: unknown): string {
+  const msg = err instanceof Error ? err.message : ''
+  if (msg.includes('Insufficient')) return '灵魂币不足'
+  if (msg.includes('pool cap')) return '该目标投资池已满'
+  if (msg.includes('not an active life goal')) return '该目标已结束，无法投资'
+  return '投资失败，请稍后重试'
+}
+
 export function NpcTooltip() {
   const [npc, setNpc] = useState<ResidentData | null>(null)
   const [followed, setFollowedState] = useState(false)
   const [followBusy, setFollowBusy] = useState(false)
   const [followError, setFollowError] = useState<string | null>(null)
   const [goal, setGoal] = useState<ResidentGoalData | null>(null)
+  const [investBusy, setInvestBusy] = useState(false)
+  const [investNotice, setInvestNotice] = useState<InvestNotice | null>(null)
   const chatOpen = useGameStore((s) => s.chatOpen)
+  const updateBalance = useGameStore((s) => s.updateBalance)
 
   useEffect(() => {
     return bridge.on('npc:nearby', (data: unknown) => setNpc(data as ResidentData | null))
@@ -43,6 +64,7 @@ export function NpcTooltip() {
   // from the TTL cache when fresh. Silent-fail: the tooltip must never break.
   const npcSlug = npc?.slug ?? null
   useEffect(() => {
+    setInvestNotice(null)
     if (!npcSlug) {
       setGoal(null)
       return
@@ -83,6 +105,23 @@ export function NpcTooltip() {
       setFollowError(msg.includes('follow limit') ? '关注已达上限（50 位）' : '操作失败，请稍后重试')
     } finally {
       setFollowBusy(false)
+    }
+  }
+
+  // Invest in the active life goal (E13): charge via API, then refresh the
+  // balance through the store's existing mechanism (getMe → updateBalance).
+  const handleInvest = async (amount: number) => {
+    if (investBusy || !goal) return
+    setInvestBusy(true)
+    setInvestNotice(null)
+    try {
+      await investInGoal(goal.id, amount)
+      setInvestNotice({ kind: 'ok', text: `已投资 ${amount} 🪙，目标达成享 1.5 倍分红` })
+      getMe().then((me) => updateBalance(me.soul_coin_balance)).catch(() => {})
+    } catch (err) {
+      setInvestNotice({ kind: 'err', text: investErrorText(err) })
+    } finally {
+      setInvestBusy(false)
     }
   }
 
@@ -142,6 +181,34 @@ export function NpcTooltip() {
               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             }}>
               ✓ {latestDoneMilestone.title}
+            </div>
+          )}
+          {/* Goal investment (E13): pick an amount → invest → refresh balance */}
+          <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span style={{ fontSize: 10, color: 'var(--text-muted)', marginRight: 2 }}>💰 投资</span>
+            {INVEST_AMOUNTS.map((amt) => (
+              <button
+                key={amt}
+                onClick={() => void handleInvest(amt)}
+                disabled={investBusy}
+                title={`投资 ${amt} 灵魂币`}
+                style={{
+                  flex: 1, padding: '2px 0', borderRadius: 4, fontSize: 10, fontWeight: 600,
+                  cursor: investBusy ? 'default' : 'pointer', opacity: investBusy ? 0.5 : 1,
+                  background: 'var(--bg-input)', border: '1px solid var(--border)',
+                  color: '#eab308',
+                }}
+              >
+                {amt}
+              </button>
+            ))}
+          </div>
+          {investNotice && (
+            <div style={{
+              marginTop: 4, fontSize: 10, textAlign: 'center',
+              color: investNotice.kind === 'ok' ? 'var(--accent-green)' : 'var(--accent-red)',
+            }}>
+              {investNotice.text}
             </div>
           )}
         </div>

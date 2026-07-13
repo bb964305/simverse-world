@@ -74,6 +74,54 @@ async def test_economy_config_update(db_session):
 
 
 @pytest.mark.anyio
+async def test_economy_investments_aggregation(client, db_session):
+    """/admin/economy/investments sums active pools and ranks top goals."""
+    from app.services.auth_service import create_token
+    from app.models.resident import Resident
+    from app.models.goal_investment import GoalInvestment
+    from app.services.goal_service import create_goal
+
+    admin = User(name="adm", email="adm-inv@test.com", is_admin=True, is_banned=False)
+    u1 = User(name="i1", email="i1@test.com", is_admin=False, is_banned=False)
+    u2 = User(name="i2", email="i2@test.com", is_admin=False, is_banned=False)
+    db_session.add_all([admin, u1, u2])
+    await db_session.commit()
+
+    r = Resident(slug="klaus", name="克劳斯", creator_id="system", district="cafe",
+                 status="idle", tile_x=1, tile_y=1)
+    db_session.add(r)
+    await db_session.commit()
+    g1 = await create_goal(db_session, r.id, "开咖啡馆", "热爱咖啡", kind="life")
+    g2 = await create_goal(db_session, r.id, "环游世界", "想看世界", kind="life")
+
+    db_session.add_all([
+        GoalInvestment(goal_id=g1.id, user_id=u1.id, amount=100, status="active"),
+        GoalInvestment(goal_id=g1.id, user_id=u2.id, amount=200, status="active"),
+        GoalInvestment(goal_id=g2.id, user_id=u1.id, amount=50, status="active"),
+        GoalInvestment(goal_id=g2.id, user_id=u1.id, amount=500, status="paid"),  # settled: excluded
+    ])
+    await db_session.commit()
+
+    headers = {"Authorization": f"Bearer {create_token(admin.id)}"}
+    resp = await client.get("/admin/economy/investments", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total_pooled"] == 350
+    assert body["investment_count"] == 3
+    assert body["active_goal_count"] == 2
+    assert body["investor_count"] == 2
+    assert body["pool_cap"] == 2000
+    top = body["top_goals"]
+    assert [t["pooled"] for t in top] == [300, 50]  # ranked by pool size
+    assert top[0]["title"] == "开咖啡馆" and top[0]["resident_name"] == "克劳斯"
+    assert top[0]["investments"] == 2
+
+    # Non-admin → 403.
+    pleb_headers = {"Authorization": f"Bearer {create_token(u1.id)}"}
+    assert (await client.get("/admin/economy/investments", headers=pleb_headers)).status_code == 403
+
+
+@pytest.mark.anyio
 async def test_economy_series_daily_buckets(client, db_session):
     """/admin/economy/series zero-fills days and splits issued/consumed."""
     from datetime import datetime, timedelta, UTC

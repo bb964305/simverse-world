@@ -154,6 +154,73 @@ async def economy_series(
     return {"days": days, "series": series}
 
 
+@router.get("/investments")
+async def investment_pools(
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Goal investment pool monitor (E13): active pool totals + top-10 goals.
+
+    Plain SUM/COUNT/COUNT(DISTINCT) aggregates only — portable across sqlite
+    and PG (same constraint as the case()-based /series above).
+    """
+    from app.models.goal_investment import GoalInvestment
+    from app.models.resident import Resident
+    from app.models.resident_goal import ResidentGoal
+    from app.services.investment_service import GOAL_POOL_CAP
+
+    totals = (await db.execute(
+        select(
+            func.coalesce(func.sum(GoalInvestment.amount), 0),
+            func.count(GoalInvestment.id),
+            func.count(func.distinct(GoalInvestment.goal_id)),
+            func.count(func.distinct(GoalInvestment.user_id)),
+        ).where(GoalInvestment.status == "active")
+    )).one()
+
+    pooled_expr = func.coalesce(func.sum(GoalInvestment.amount), 0)
+    top_rows = (await db.execute(
+        select(
+            GoalInvestment.goal_id,
+            pooled_expr.label("pooled"),
+            func.count(GoalInvestment.id),
+            ResidentGoal.title,
+            ResidentGoal.progress,
+            Resident.name,
+            Resident.slug,
+        )
+        .join(ResidentGoal, ResidentGoal.id == GoalInvestment.goal_id)
+        .join(Resident, Resident.id == ResidentGoal.resident_id)
+        .where(GoalInvestment.status == "active")
+        .group_by(
+            GoalInvestment.goal_id, ResidentGoal.title,
+            ResidentGoal.progress, Resident.name, Resident.slug,
+        )
+        .order_by(pooled_expr.desc())
+        .limit(10)
+    )).all()
+
+    return {
+        "total_pooled": int(totals[0] or 0),
+        "investment_count": int(totals[1] or 0),
+        "active_goal_count": int(totals[2] or 0),
+        "investor_count": int(totals[3] or 0),
+        "pool_cap": GOAL_POOL_CAP,
+        "top_goals": [
+            {
+                "goal_id": goal_id,
+                "title": title,
+                "resident_name": name,
+                "resident_slug": slug,
+                "pooled": int(pooled or 0),
+                "investments": int(count or 0),
+                "progress": float(progress or 0.0),
+            }
+            for goal_id, pooled, count, title, progress, name, slug in top_rows
+        ],
+    }
+
+
 @router.get("/transactions")
 async def transaction_log(
     offset: int = Query(0, ge=0),

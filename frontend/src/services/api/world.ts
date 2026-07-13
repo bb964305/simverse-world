@@ -256,6 +256,24 @@ export function createCapsule(
   })
 }
 
+// ─── Goal investment (E13) ───────────────────────────────────────
+// Backend: POST /goals/{goal_id}/invest — 50-500 SC per bet, 2000 SC pool cap
+// per goal; 400s carry the reason (cap reached / insufficient coins).
+
+export interface GoalInvestmentResult {
+  id: string
+  goal_id: string
+  amount: number
+  status: string
+}
+
+export function investInGoal(goalId: string, amount: number): Promise<GoalInvestmentResult> {
+  return apiFetch(`/goals/${encodeURIComponent(goalId)}/invest`, {
+    method: 'POST',
+    body: JSON.stringify({ amount }),
+  })
+}
+
 // ─── Group photo (E10) ───────────────────────────────────────────
 
 export function logPhoto(resident_slug: string, media_url?: string): Promise<{ resident_slug: string; quip: string }> {

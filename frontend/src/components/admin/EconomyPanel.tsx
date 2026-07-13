@@ -5,10 +5,12 @@ import {
   getAdminEconomyConfig,
   updateAdminEconomyConfig,
   getAdminEconomySeries,
+  getAdminInvestments,
   type AdminEconomyStats,
   type AdminTransaction,
   type AdminEconomyConfig,
   type EconomySeriesPoint,
+  type AdminInvestmentsResponse,
 } from '../../services/api'
 
 // ─── Shared sub-components ────────────────────────────────────────
@@ -221,6 +223,123 @@ function InflationCurveSection({ token }: { token: string }) {
               窗口净流通 {series.reduce((acc, p) => acc + p.net, 0).toLocaleString()} 🪙
             </span>
           </div>
+        </>
+      )}
+    </SectionCard>
+  )
+}
+
+// ─── Goal investment pools (E13) ─────────────────────────────────
+
+function InvestmentPoolSection({ token }: { token: string }) {
+  const [data, setData] = useState<AdminInvestmentsResponse | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    void (async () => {
+      setLoading(true)
+      setError(null)
+      try {
+        const resp = await getAdminInvestments(token)
+        setData(resp)
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : '加载失败')
+      } finally {
+        setLoading(false)
+      }
+    })()
+  }, [token])
+
+  return (
+    <SectionCard>
+      <SectionHeader icon="🎯" title="目标投资池（E13）" />
+
+      {loading ? (
+        <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '12px 0' }}>加载中...</div>
+      ) : error || !data ? (
+        <div style={{ color: '#ff6b6b', fontSize: 13, padding: '12px 0' }}>{error ?? '加载失败'}</div>
+      ) : (
+        <>
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 16 }}>
+            <StatCard label="活跃池总额" value={data.total_pooled} color="var(--accent)" />
+            <StatCard label="投资笔数" value={data.investment_count} />
+            <StatCard label="被投目标数" value={data.active_goal_count} />
+            <StatCard label="投资人数" value={data.investor_count} />
+          </div>
+
+          {data.top_goals.length === 0 ? (
+            <div style={{ color: 'var(--text-muted)', fontSize: 13, textAlign: 'center', padding: '24px 0' }}>
+              暂无活跃投资。
+            </div>
+          ) : (
+            <>
+              {/* Header row */}
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 120px 90px 70px 140px',
+                gap: 8,
+                padding: '6px 12px',
+                fontSize: 11, fontWeight: 600, color: 'var(--text-muted)',
+                textTransform: 'uppercase', letterSpacing: '0.04em',
+              }}>
+                <span>目标</span>
+                <span>居民</span>
+                <span style={{ textAlign: 'right' }}>池金额</span>
+                <span style={{ textAlign: 'right' }}>笔数</span>
+                <span style={{ textAlign: 'right' }}>池上限占用</span>
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {data.top_goals.map((g) => {
+                  const capPct = Math.min(100, Math.round((g.pooled / data.pool_cap) * 100))
+                  return (
+                    <div
+                      key={g.goal_id}
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '1fr 120px 90px 70px 140px',
+                        gap: 8,
+                        padding: '8px 12px',
+                        background: 'var(--bg-input)',
+                        borderRadius: 6,
+                        border: '1px solid var(--border)',
+                        alignItems: 'center',
+                      }}
+                    >
+                      <span style={{ fontSize: 13, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {g.title}
+                      </span>
+                      <span style={{ fontSize: 12, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {g.resident_name}
+                      </span>
+                      <span style={{ fontSize: 13, fontWeight: 600, textAlign: 'right', color: '#53d769' }}>
+                        {g.pooled.toLocaleString()}
+                      </span>
+                      <span style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'right' }}>
+                        {g.investments}
+                      </span>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'flex-end' }}>
+                        <span style={{ width: 60, height: 5, background: 'var(--bg-card)', borderRadius: 3, overflow: 'hidden' }}>
+                          <span style={{
+                            display: 'block', height: '100%', width: `${capPct}%`,
+                            background: capPct >= 100 ? '#ff6b6b' : 'var(--accent)', borderRadius: 3,
+                          }} />
+                        </span>
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 34, textAlign: 'right' }}>
+                          {capPct}%
+                        </span>
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
+                单目标池上限 {data.pool_cap.toLocaleString()} 🪙 · 单笔 50-500 🪙 · 仅统计未结算（active）投资
+              </div>
+            </>
+          )}
         </>
       )}
     </SectionCard>
@@ -552,6 +671,9 @@ export function EconomyPanel({ token }: EconomyPanelProps) {
 
       {/* Inflation curve */}
       <InflationCurveSection token={token} />
+
+      {/* Goal investment pools (E13) */}
+      <InvestmentPoolSection token={token} />
 
       {/* Transaction Log */}
       <TransactionLogSection token={token} />

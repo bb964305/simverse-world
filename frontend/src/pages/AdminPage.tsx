@@ -9,6 +9,7 @@ import { ForgeMonitorPanel } from '../components/admin/ForgeMonitorPanel'
 import { EconomyPanel } from '../components/admin/EconomyPanel'
 import { EventsPanel } from '../components/admin/EventsPanel'
 import { LlmUsagePanel } from '../components/admin/LlmUsagePanel'
+import { RumorChainPanel } from '../components/admin/RumorChainPanel'
 import { SystemConfigPanel } from '../components/admin/SystemConfigPanel'
 import { useGameStore } from '../stores/gameStore'
 
@@ -38,6 +39,8 @@ export function AdminPage() {
         return token ? <LlmUsagePanel token={token} /> : null
       case 'events':
         return token ? <EventsPanel token={token} /> : null
+      case 'gossip':
+        return token ? <RumorChainPanel token={token} /> : null
       case 'system':
         return token ? <SystemConfigPanel token={token as string} /> : null
       default:
