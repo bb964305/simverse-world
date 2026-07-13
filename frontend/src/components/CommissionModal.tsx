@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { getCommissions, acceptCommission, abandonCommission, type CommissionData } from '../services/api'
+import { bridge } from '../game/phaserBridge'
 
 const KIND_LABEL: Record<string, string> = {
   deliver_message: '带个话',
@@ -30,6 +31,8 @@ export function CommissionModal({ onClose }: Props) {
     setError(null)
     try {
       await acceptCommission(id)
+      // B1: no WS broadcast covers accept — nudge GameScene to re-pull its ❗ markers.
+      bridge.emit('commissions:changed')
       load()
     } catch (e) {
       setError(e instanceof Error && e.message.includes('409') ? '手慢了，已被别人接走' : '接取失败')
@@ -37,7 +40,7 @@ export function CommissionModal({ onClose }: Props) {
   }
 
   const onAbandon = async (id: string) => {
-    try { await abandonCommission(id); load() } catch { /* ignore */ }
+    try { await abandonCommission(id); bridge.emit('commissions:changed'); load() } catch { /* ignore */ }
   }
 
   return (

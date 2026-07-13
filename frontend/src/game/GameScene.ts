@@ -3,7 +3,7 @@ import { bridge } from './phaserBridge'
 import { applyStatusVisuals, clearStatusVisuals, releaseAllStatusVisuals, STATUS_CONFIG } from './StatusVisuals'
 import { useGameStore } from '../stores/gameStore'
 import { sendPosition, sendWS, onWSMessage } from '../services/ws'
-import { updatePlayerPosition, getHomeDecor, decorEmoji, getActiveEvents, HOUSING_BOUNDS, type DecorItem } from '../services/api'
+import { updatePlayerPosition, getHomeDecor, decorEmoji, getActiveEvents, getCommissions, HOUSING_BOUNDS, type DecorItem } from '../services/api'
 
 const TILE_SIZE = 32
 const PLAYER_SPEED = 160
@@ -30,6 +30,7 @@ const TILESET_IMAGE_MAP: Record<string, string> = {
 }
 
 export interface ResidentData {
+  id: string
   slug: string
   name: string
   status: string
@@ -85,6 +86,10 @@ class MainScene extends Phaser.Scene {
   private decorTexts: Map<string, Phaser.GameObjects.Text[]> = new Map()
   private decorLoaded: Set<string> = new Set()
   private lastDecorScan = 0
+  // B1 commissions: '❗' over residents that currently have an open commission.
+  // Keyed by resident slug; each entry keeps its sprite so update() can make the
+  // marker follow (npc labels are static, but resident_move tweens sprites).
+  private commissionMarkers: Map<string, { text: Phaser.GameObjects.Text; sprite: Phaser.Physics.Arcade.Sprite }> = new Map()
   // E6 weather: screen-space (scrollFactor 0) particle + tint layers driven by
   // world_event(type=weather) broadcasts; at most one emitter alive at a time.
   private weatherEmitter: Phaser.GameObjects.Particles.ParticleEmitter | null = null
@@ -121,6 +126,9 @@ class MainScene extends Phaser.Scene {
     this.decorTexts.clear()
     this.decorLoaded.clear()
     this.decorLayer = null
+    // B1 commission markers die with the scene; drop the refs so a late
+    // getCommissions() resolution can't touch dead text objects.
+    this.commissionMarkers.clear()
     // E6 weather: destroy the emitter/overlay and stop the storm flash timer
     // here (SHUTDOWN fires before children are torn down), so a scene swap
     // leaves no particles or ticking timers behind.
@@ -346,6 +354,13 @@ class MainScene extends Phaser.Scene {
       if (msg.type === 'world_event') {
         this._handleWorldEvent(msg as { event?: { type?: string; payload_json?: Record<string, unknown> | null }; phase?: string })
       }
+      // B1: the backend emits no dedicated commission WS frame — the S4
+      // notification(kind=commission) pushed to the acceptor on completion is
+      // the only live signal, so it drives both the coin feedback and a
+      // marker re-pull (the completed commission's issuer may drop its ❗).
+      if (msg.type === 'notification' && msg.kind === 'commission') {
+        this._handleCommissionNotification(msg)
+      }
     }))
 
     // E6: seed the weather layer from the currently active events (the WS
@@ -357,6 +372,12 @@ class MainScene extends Phaser.Scene {
         if (weather) this._applyWeatherFromPayload(weather.payload_json)
       })
       .catch(() => { /* weather is cosmetic — ignore fetch failures */ })
+
+    // B1: seed the ❗ markers from the current open commissions, and re-pull
+    // when the CommissionModal reports an accept/abandon (no WS broadcast
+    // exists for those transitions — the modal is the only local mutator).
+    this._refreshCommissionMarkers()
+    this.externalCleanups.push(bridge.on('commissions:changed', () => this._refreshCommissionMarkers()))
 
     // Listen for camera pan requests from React UI (search, bulletin board).
     // bridge is a module singleton too — same teardown treatment as above.
@@ -436,6 +457,12 @@ class MainScene extends Phaser.Scene {
 
   update() {
     if (!this.mapReady || !this.player?.body) return
+
+    // B1: ❗ markers track their resident sprite (which resident_move may be
+    // tweening) — same follow pattern as the other-player labels below. Runs
+    // before the teleport/input-focus early returns so markers never desync.
+    this.commissionMarkers.forEach(({ text, sprite }) => text.setPosition(sprite.x, sprite.y - 52))
+
     if (this.isTeleporting) return
 
     // Pause movement when chat input is focused
@@ -731,6 +758,76 @@ class MainScene extends Phaser.Scene {
       wordWrap: { width: 170 },
     }).setOrigin(0.5).setDepth(11)
     this.time.delayedCall(6000, () => bubble.destroy())
+  }
+
+  // ── B1 commission markers & reward feedback ──────────────────────
+
+  /** Pull the open commissions once and sync the ❗ markers to their issuers. */
+  private _refreshCommissionMarkers(): void {
+    getCommissions('open')
+      .then(({ commissions }) => {
+        if (this.isShutdown) return
+        const issuerIds = new Set(commissions.map((c) => c.issuer_resident_id))
+        const slugs = new Set<string>()
+        for (const r of this.residents) {
+          if (issuerIds.has(r.id)) slugs.add(r.slug)
+        }
+        this._applyCommissionMarkers(slugs)
+      })
+      .catch(() => { /* markers are cosmetic — keep the previous set on failure */ })
+  }
+
+  /** Create/destroy marker texts so exactly `slugs` carry one; update() makes them follow. */
+  private _applyCommissionMarkers(slugs: Set<string>): void {
+    for (const [slug, entry] of this.commissionMarkers) {
+      if (slugs.has(slug)) continue
+      this.tweens.killTweensOf(entry.text)
+      entry.text.destroy()
+      this.commissionMarkers.delete(slug)
+    }
+    for (const slug of slugs) {
+      if (this.commissionMarkers.has(slug)) continue
+      const idx = this.residents.findIndex((r) => r.slug === slug)
+      const sprite = idx >= 0 ? this.npcSprites[idx] : undefined
+      if (!sprite) continue
+      const text = this.add.text(sprite.x, sprite.y - 52, '❗', { fontSize: '16px' })
+        .setOrigin(0.5).setDepth(4)
+      // Gentle pulse so the marker reads as actionable without being loud.
+      this.tweens.add({ targets: text, alpha: 0.45, duration: 700, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' })
+      this.commissionMarkers.set(slug, { text, sprite })
+    }
+  }
+
+  /** Completion notification → coin float + marker re-pull. */
+  private _handleCommissionNotification(msg: Record<string, unknown>): void {
+    const payload = (msg.payload ?? {}) as Record<string, unknown>
+    const reward = typeof payload.reward_sc === 'number' ? payload.reward_sc : 0
+    if (reward > 0) this._playCoinReward(reward)
+    this._refreshCommissionMarkers()
+  }
+
+  /** Float "+N 💰" up from the player and fade out — text + tween, no assets. */
+  private _playCoinReward(amount: number): void {
+    if (this.isShutdown) return
+    const cam = this.cameras.main
+    const x = this.player?.x ?? cam.worldView.centerX
+    const y = this.player ? this.player.y - 24 : cam.worldView.centerY
+    const text = this.add.text(x, y, `+${amount} 💰`, {
+      fontSize: '18px',
+      fontStyle: 'bold',
+      color: '#fbbf24',
+      stroke: '#78350f',
+      strokeThickness: 3,
+    }).setOrigin(0.5).setDepth(30)
+    this.tweens.add({
+      targets: text,
+      y: y - 70,
+      alpha: { from: 1, to: 0 },
+      scale: { from: 1, to: 1.2 },
+      duration: 1400,
+      ease: 'Cubic.easeOut',
+      onComplete: () => text.destroy(),
+    })
   }
 
   // ── B3 home decor ────────────────────────────────────────────────

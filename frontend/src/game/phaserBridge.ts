@@ -26,3 +26,4 @@ export const bridge = new PhaserBridge()
 // Phaser → React  teleport:complete  { tileX: number, tileY: number }
 // React → Phaser  photo:take         { residentSlug: string }            (E10 group photo)
 // Phaser → React  photo:result       { dataUrl: string, residentSlug: string }
+// React → Phaser  commissions:changed  (no payload — CommissionModal accepted/abandoned; GameScene re-pulls ❗ markers) (B1)
