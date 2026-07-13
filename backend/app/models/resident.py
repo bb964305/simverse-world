@@ -51,6 +51,11 @@ class Resident(Base):
     # {"valence": -1..1, "arousal": 0..1, "label": str, "updated_at": iso}
     mood_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
+    # --- Home decor (B3, migration 031) ---
+    # [{item_code, x, y, rot}] — x/y are tile offsets relative to the
+    # top-left corner of the home_location_id bbox (map_data bounds).
+    home_decor_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
     @property
     def mood_label(self) -> str:
         """Current mood word (E1 label set); residents without mood are calm."""

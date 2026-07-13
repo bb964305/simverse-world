@@ -10,6 +10,7 @@ import { AchievementsPanel } from '../components/profile/AchievementsPanel'
 import { FeedList } from '../components/profile/FeedList'
 import { WeeklyRecap } from '../components/profile/WeeklyRecap'
 import { ExplorationCodex } from '../components/profile/ExplorationCodex'
+import { CreatorDashboard } from '../components/profile/CreatorDashboard'
 import { useGameStore } from '../stores/gameStore'
 
 export function ProfilePage() {
@@ -40,6 +41,7 @@ export function ProfilePage() {
               onEditResident={setEditingSlug}
             />
           )}
+          {profileTab === 'creator' && <CreatorDashboard />}
           {profileTab === 'conversations' && <ConversationHistory />}
           {profileTab === 'transactions' && <TransactionHistory />}
           {profileTab === 'achievements' && <AchievementsPanel />}

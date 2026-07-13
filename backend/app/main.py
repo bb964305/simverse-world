@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
-from app.routers import auth, users, residents, forge, profile, search, bulletin, onboarding, sprites, avatar, settings as settings_router, media as media_router, events as events_router, notifications as notifications_router, achievements as achievements_router, shop as shop_router, digest as digest_router, daily as daily_router, commissions as commissions_router, graph as graph_router, exploration as exploration_router, capsules as capsules_router, feed as feed_router, photos as photos_router, tts as tts_router, seasons as seasons_router, goals as goals_router, debates as debates_router, polls as polls_router
+from app.routers import auth, users, residents, forge, profile, search, bulletin, onboarding, sprites, avatar, settings as settings_router, media as media_router, events as events_router, notifications as notifications_router, achievements as achievements_router, shop as shop_router, digest as digest_router, daily as daily_router, commissions as commissions_router, graph as graph_router, exploration as exploration_router, capsules as capsules_router, feed as feed_router, photos as photos_router, tts as tts_router, seasons as seasons_router, goals as goals_router, debates as debates_router, polls as polls_router, home_decor as home_decor_router
 # Import the modules whose @on(...) handlers must register on the event bus.
 import app.events.achievements  # noqa: F401
 import app.services.daily_quest_service  # noqa: F401
@@ -115,8 +115,10 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(residents.router)
+app.include_router(home_decor_router.router)
 app.include_router(forge.router)
 app.include_router(profile.router)
+app.include_router(profile.creator_router)  # D4: GET /creator/stats
 app.include_router(search.router)
 app.include_router(bulletin.router)
 app.include_router(onboarding.router)

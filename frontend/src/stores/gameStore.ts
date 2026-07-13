@@ -58,7 +58,7 @@ interface GameState {
   chatTarget: ChatTarget | null
   playerChatMessages: PlayerChatMessage[]
   inputFocused: boolean
-  profileTab: 'residents' | 'conversations' | 'transactions' | 'achievements' | 'feed' | 'recap' | 'codex' | 'settings'
+  profileTab: 'residents' | 'creator' | 'conversations' | 'transactions' | 'achievements' | 'feed' | 'recap' | 'codex' | 'settings'
   onlinePlayers: Map<string, OnlinePlayer>
   spawnX: number
   spawnY: number

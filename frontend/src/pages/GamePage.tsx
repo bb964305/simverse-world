@@ -4,6 +4,7 @@ import { ChatDrawer } from '../components/ChatDrawer'
 import { NpcTooltip } from '../components/NpcTooltip'
 import { CoinNotification } from '../components/CoinNotification'
 import { PhotoBooth } from '../components/PhotoBooth'
+import { DecorEditor } from '../components/DecorEditor'
 import { MinimapOverlay } from '../components/minimap/MinimapOverlay'
 import { useGameStore } from '../stores/gameStore'
 import { connectWS, disconnectWS } from '../services/ws'
@@ -69,6 +70,7 @@ export function GamePage() {
       <ChatDrawer />
       <CoinNotification />
       <PhotoBooth />
+      <DecorEditor />
     </>
   )
 }

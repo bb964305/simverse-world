@@ -52,4 +52,14 @@ class BasicPerceivePlugin:
         except Exception:
             pass
 
+        # B3: notice redecorated homes at the current location (own session,
+        # fail-open; process-local hash cache — first sight only primes it).
+        try:
+            from app.services.home_decor_service import notice_decor_changes
+            await notice_decor_changes(
+                ctx.resident.id, ctx.resident.tile_x, ctx.resident.tile_y,
+            )
+        except Exception:
+            pass
+
         return ctx

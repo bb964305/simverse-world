@@ -17,6 +17,7 @@ export interface ResidentListItem {
   sprite_key: string
   tile_x: number
   tile_y: number
+  home_location_id?: string | null
   star_rating: number
   token_cost_per_turn: number
   meta_json: Record<string, unknown> | null

@@ -3,7 +3,7 @@ import { bridge } from './phaserBridge'
 import { applyStatusVisuals, clearStatusVisuals, releaseAllStatusVisuals, STATUS_CONFIG } from './StatusVisuals'
 import { useGameStore } from '../stores/gameStore'
 import { sendPosition, sendWS, onWSMessage } from '../services/ws'
-import { updatePlayerPosition } from '../services/api'
+import { updatePlayerPosition, getHomeDecor, decorEmoji, HOUSING_BOUNDS, type DecorItem } from '../services/api'
 
 const TILE_SIZE = 32
 const PLAYER_SPEED = 160
@@ -37,6 +37,7 @@ export interface ResidentData {
   tile_x: number
   tile_y: number
   district: string
+  home_location_id?: string | null
   meta_json: { role?: string; sbti?: { type: string; type_name: string } }
   token_cost_per_turn: number
   star_rating: number
@@ -79,6 +80,11 @@ class MainScene extends Phaser.Scene {
   private mapReady = false
   private isTeleporting = false
   private otherPlayerSprites: Map<string, { sprite: Phaser.Physics.Arcade.Sprite; label: Phaser.GameObjects.Text }> = new Map()
+  // B3 home decor: emoji objects per resident slug, rendered below characters.
+  private decorLayer: Phaser.GameObjects.Layer | null = null
+  private decorTexts: Map<string, Phaser.GameObjects.Text[]> = new Map()
+  private decorLoaded: Set<string> = new Set()
+  private lastDecorScan = 0
   // Unsubscribers for listeners registered on module-level singletons
   // (ws.ts wsListeners, phaserBridge) — Phaser does NOT clean these up when
   // the scene dies, so without explicit teardown every StrictMode
@@ -105,6 +111,11 @@ class MainScene extends Phaser.Scene {
     this._chatBubbles.clear()
     this.npcSprites = []
     this.npcLabels = []
+    // Decor objects die with the scene; drop the references so a late
+    // getHomeDecor() resolution can't touch dead text objects.
+    this.decorTexts.clear()
+    this.decorLoaded.clear()
+    this.decorLayer = null
     // StatusVisuals keeps a module-level sprite→visuals registry; the objects
     // themselves die with the scene, but the Map entries must be released here.
     releaseAllStatusVisuals()
@@ -232,6 +243,9 @@ class MainScene extends Phaser.Scene {
     collisionLayer?.setCollisionByExclusion([-1])
     collisionLayer?.setVisible(false)
 
+    // B3 decor layer: above ground tiles (depth 0), below characters (depth 1).
+    this.decorLayer = this.add.layer().setDepth(0.5)
+
     // Player — use spawn position from store (set by backend spawn_position message)
     const { spawnX, spawnY } = useGameStore.getState()
     this.player = this.physics.add.sprite(spawnX, spawnY, 'player_atlas', 'down')
@@ -316,6 +330,9 @@ class MainScene extends Phaser.Scene {
       }
       if (msg.type === 'resident_greeting') {
         this._handleResidentGreeting(msg as { resident_slug: string; text: string })
+      }
+      if (msg.type === 'decor_updated') {
+        this._handleDecorUpdated(msg as unknown as { resident_slug: string; home_location_id?: string | null; decor: DecorItem[] })
       }
     }))
 
@@ -452,6 +469,12 @@ class MainScene extends Phaser.Scene {
     const store = useGameStore.getState()
     if (tileX !== store.playerTileX || tileY !== store.playerTileY) {
       store.setPlayerTile(tileX, tileY)
+    }
+
+    // B3: lazily load decor for homes entering the camera view (throttled).
+    if (this.time.now - this.lastDecorScan > 500) {
+      this.lastDecorScan = this.time.now
+      this._scanVisibleHomeDecor()
     }
 
     // Broadcast camera viewport for minimap
@@ -686,6 +709,64 @@ class MainScene extends Phaser.Scene {
       wordWrap: { width: 170 },
     }).setOrigin(0.5).setDepth(11)
     this.time.delayedCall(6000, () => bubble.destroy())
+  }
+
+  // ── B3 home decor ────────────────────────────────────────────────
+
+  /** Fetch decor once per resident whose home bbox intersects the camera view. */
+  private _scanVisibleHomeDecor(): void {
+    const view = this.cameras.main.worldView
+    const viewL = view.x / TILE_SIZE - 2
+    const viewT = view.y / TILE_SIZE - 2
+    const viewR = (view.x + view.width) / TILE_SIZE + 2
+    const viewB = (view.y + view.height) / TILE_SIZE + 2
+    for (const r of this.residents) {
+      if (!r.home_location_id || this.decorLoaded.has(r.slug)) continue
+      const b = HOUSING_BOUNDS[r.home_location_id]
+      if (!b) continue
+      if (b[2] < viewL || b[0] > viewR || b[3] < viewT || b[1] > viewB) continue
+      this.decorLoaded.add(r.slug)
+      getHomeDecor(r.slug)
+        .then((resp) => {
+          if (!this.isShutdown) this._renderDecor(r.slug, resp.items)
+        })
+        .catch(() => {
+          // Allow a retry on the next scan pass.
+          this.decorLoaded.delete(r.slug)
+        })
+    }
+  }
+
+  /** Replace a resident's decor objects. Emoji stand-ins — no decor atlas yet. */
+  private _renderDecor(slug: string, items: DecorItem[]): void {
+    const old = this.decorTexts.get(slug)
+    if (old) for (const t of old) t.destroy()
+    this.decorTexts.delete(slug)
+
+    const resident = this.residents.find((r) => r.slug === slug)
+    const bounds = resident?.home_location_id ? HOUSING_BOUNDS[resident.home_location_id] : undefined
+    if (!bounds || !this.decorLayer) return
+
+    const texts: Phaser.GameObjects.Text[] = []
+    for (const item of items) {
+      const px = (bounds[0] + item.x) * TILE_SIZE + TILE_SIZE / 2
+      const py = (bounds[1] + item.y) * TILE_SIZE + TILE_SIZE / 2
+      const t = this.add.text(px, py, decorEmoji(item.item_code), { fontSize: '22px' })
+        .setOrigin(0.5)
+        .setAngle(item.rot)
+      this.decorLayer.add(t)
+      texts.push(t)
+    }
+    if (texts.length > 0) this.decorTexts.set(slug, texts)
+  }
+
+  private _handleDecorUpdated(msg: { resident_slug: string; home_location_id?: string | null; decor: DecorItem[] }): void {
+    // The residents snapshot predates a lazy home claim — refresh it from the
+    // broadcast so the renderer can resolve the bbox.
+    const resident = this.residents.find((r) => r.slug === msg.resident_slug)
+    if (resident && msg.home_location_id) resident.home_location_id = msg.home_location_id
+    this.decorLoaded.add(msg.resident_slug)
+    this._renderDecor(msg.resident_slug, msg.decor ?? [])
   }
 
   private _handleResidentStatusUpdate(msg: {
