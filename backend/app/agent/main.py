@@ -53,22 +53,26 @@ async def main() -> None:
     stop_task = asyncio.create_task(stop_event.wait(), name="stop-signal")
 
     try:
-        done, _ = await asyncio.wait(
-            {stop_task, *tasks}, return_when=asyncio.FIRST_COMPLETED
-        )
-        for finished in done:
-            if finished is stop_task:
-                continue
-            exc = finished.exception()
-            if exc is not None:
-                logger.error(
-                    "agent-worker task %s crashed", finished.get_name(), exc_info=exc
-                )
-                raise exc
-            # The loops are infinite; a normal return is unexpected but not fatal.
-            logger.warning(
-                "agent-worker task %s exited unexpectedly", finished.get_name()
+        pending = {stop_task, *tasks}
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED
             )
+            if stop_task in done:
+                break
+            for finished in done:
+                exc = finished.exception()
+                if exc is not None:
+                    logger.error(
+                        "agent-worker task %s crashed", finished.get_name(), exc_info=exc
+                    )
+                    raise exc
+                # The loops are infinite; a normal return (e.g. embedding
+                # backfill short-circuits when EMBEDDING_ENABLED=false) is
+                # unexpected but not fatal — keep the remaining loops alive.
+                logger.warning(
+                    "agent-worker task %s exited unexpectedly", finished.get_name()
+                )
     finally:
         stop_task.cancel()
         for task in tasks:
