@@ -228,7 +228,14 @@
 - [x] **5.3 拆分结论**：下游失真改写 **过**（种子燃料 hops=3 直接触发：钟楼→教堂单细节失真、主干保留、origin_memory_id 串链、distorted=true）；**上游燃料生产断粮 = 真 bug**——全部 event 记忆管线（agent_action/chat_resident/chat_player/world_event…）均不写 related_resident_id（仅 relationship 类型写），maybe_gossip 候选查询（type=event + importance≥0.6 + related_resident_id 非空）恒空集，**gossip 特性生产环境结构性死亡**。修法方向：chat_wrapup/extract 提取三方提及时回填 related_resident_id。
 - [x] **行为面重大发现：自然互聊两天零次**——CHAT_RESIDENT 仅在半径 10-14 tile 有 idle 居民时进动作空间（perceive 插件 radius 参数），大地图 9 居民散布+今日 WORK 主导（99/180 动作，前日 backfill 目标驱动 A1 生效）→ 相遇率趋零。研究期基线"互聊 46% 成本占比"与 E-13"5% 互聊率"在本世界配置下不成立（实测 0%）。成本利好但社交真实感缺失；修法方向：社交倾向的 VISIT_DISTRICT 加权/共享地标吸引子/扩 radius。chat_wrapup 三次手动触发 3/3 parse_ok（管线本身稳）。
 - **阶段 2 中段数据（10:45 UTC，18.8h 进行时）**：昨日定格 $0.4738（含手动验收 ~$0.36）；今日至 10:45 = $0.11/占用 7.3%、parse_ok 100%（今日 60+ 行）、attempt>1 0%、worker 全程零重启（跨扩容重启）。
-- **待收尾（17:57 UTC 满 24h）**：5.10 模板问候降级验收（关系账号重上线）→ --days 2 定格报告 → 退出标准评估 → 阶段 3 建议。
+- [x] **5.10 降级验收过（手动触发 maybe_greet，挚友档 e2e玩家↔klaus imp0.90）**：模板问候主体闭环——关系记忆→idle 居民→WARM 模板池（klaus heat≥30 命中"嘿，e2e玩家！好久不见"）→离线走通知中心（notification kind=resident_greeting 落库）+ greeting 记忆写入。挚友送礼分支 gift=None——**根因 items 表完全为空（0 行）**，非逻辑 bug；LLM 个性化问候仍记跟进项（手册既定）。
+- [x] **新发现：vm212 items 表未 seed（0 行）**——挚友送礼、商店购买（D2）、礼物道具等所有依赖 Item 的功能在 vm212 静默失效；生产化前必须 `seed.shop_items`。数据问题非代码 bug，记跟进。
+- [x] **阶段 2 退出评估（07-14 满 24h 定格，退出标准 5/5 达标）**：
+  - **成本拆分（07-14 完整自然日，按驱动源）**：A 背景自主 loop(decide/plan/reflect) 57 调用 $0.0890 | B nightly/weekly(digest/dream/goal_eval) 12 调用 $0.0628 | C 互聊驱动(今日全手动，因自然互聊零次 bug) 30 调用 $0.0327 | D 玩家聊天(手动) 5 调用 $0.0055。全天 $0.1901。
+  - **稳态 $/居民·天（实际 9 tick 对象：5 原始+3 forge+1 avatar，非报告基准 5）**：纯自主 loop A = $0.0099/居民·天；A+nightly = $0.0169；全天含手动 = $0.0211。**任何口径均 ≤ 优化后预期下沿 $0.0264**——E-09 计划跳过 + 日行动 cap 20 双重压制。**重要口径提醒**：C 类互聊成本当前是人为的（自然互聊 bug），修复互聊后 C 会自然产生并抬高稳态；但因 cap 20 硬帽 + skip-decide，总成本大概率仍落优化后区间。真实定版待互聊修复 + 换按量 key 后重测。
+  - **退出标准核对**：$/居民·天 ≤ 基线上沿 $0.0667 ✓（远低于）| parse_ok ≥85% ✓（两日均 100%，179 行零解析失败）| §5 清单 5.1–5.9 全过（5.7 半）✓，5.10 降级过/5.11 过 | worker 零重启 ✓（跨扩容重启自愈）| Sentry 无新增 error ✓。
+  - **熔断三级从未触发**（预算充裕，占用峰值 31.6% < 80% throttle 线）——降级/恢复路径本轮无法验证，记跟进（阶段 3 后可用 BUDGET_GLOBAL_DAILY_USD=0.05 专门演练一次）。
+- **阶段 3 决策待 Jimmy 拍板**：burn-in 三问（成本/行为面/稳定性）阶段 1+2 已充分回答。阶段 3（48h 稳态定版）的增量价值主要是"长期参数冻结证明"，但①F-02 真实账单对账因 Coding Plan 订阅制做不了②当前配置带两个已知 bug（gossip 燃料/自然互聊零次）+ items 空，48h 空跑的是待修配置。**建议：暂停在阶段 2 结束点，等修复批次（cowork 进行中）合并部署 + 换按量 key 后再跑阶段 3**，那时数据才有定版意义；而非现在用带 bug 配置空耗 48h。
 
 ## 发现（施工中发现的新问题，不当场处理）
 - **成本优化研究完成（2026-07-07）**：28 条实验，产出在 `docs/research/`（REPORT=结论与 P1-1 建议、LOG=实验台账、DIRECTOR_ROADMAP/CALLMAP=Opus 统筹产物）。关键输入给 P1-1：计量字段清单、熔断阈值、杠杆排序（计划优先跳过 decide 省 29-37% 为最大项）；缓存/Batch 判定为不可用杠杆。**开放问题需 Jimmy**：部署机 .env 的 LLM_BASE_URL（验证端点是否 Anthropic 原生，F-02）。顺手修清单：互聊 max_tokens 100→150（截断污染 history 风险）、互聊 history 双注入（chat.py 一行）、玩家聊天 chat_messages 无截断。
