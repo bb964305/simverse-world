@@ -218,6 +218,18 @@
 - **burn-in 新发现（记账不修，续）**：④**居民就地入睡不回家（Jimmy 前端目视发现，2026-07-14 00:1x UTC）**——作息门实现为"到点停 tick"（`scheduler.py::should_tick` 在 sleep_hour 后概率恒 0，`loop.py:112` 按容器时钟=UTC 取小时），居民冻结在最后位置（9 人散落随机坐标，DB status 仍 idle，"睡着"是前端时间渲染）；动作空间有 GO_HOME、居民都有 home_location_id，但无"睡前回家"收尾链（规则或 prompt 均无）。修法候选（burn-in 后）：sleep_hour 前 1h 规则化强制 GO_HOME 零 LLM tick / plan 末槽位固定"回家休息" / 到点直接置 status=sleeping+传送回家。⑤**作息锚定 UTC**——游戏活跃时段 ≈ 北京 13:00-次日 05:00，中国玩家早 8-13 点看到全员睡觉，需产品决策时区锚点。⑥深夜时段（UTC 0-5 点）全员零 tick 属设计行为（作息门），burn-in 观测时段需避开误判。
 - **burn-in 新发现（记账不修）**：①**玩家 avatar 被 loop tick**——onboarding 建 `p-<slug>` resident（onboarding_service.py:151），loop 只排除 sleeping → 每个玩家离线自主行动烧全局预算（观测 p-新居民 NAP 决策多次）；E-13 并发悬崖与成本模型均未计入"每玩家+1 agent"，需产品决策（特性 or 排除）。②首轮真 LLM 时延偏高（extract 24.8s/update_rel 26.9s/wrapup 11s），未触发 tick 节奏阈值但比研究期数字慢，留意阶段 2。③docker exec 一次性进程发起的 LLM 调用不计入 api 进程 /metrics 计数（拓扑已知项的补充口径）。
 
+## Kickoff V5 — burn-in 阶段 2 全量 24h（2026-07-13 17:57 → 07-14 17:57 UTC，本机 CC）
+- [x] **环境事件：vm212 扩容重启（07-14 03:36:54 UTC，游戏深夜零影响窗口）**——内存 1.8G→7.8G、swap 移除；全链自愈验证：AgentLoop 03:37:26 自动重启、Redis RDB 持久化完好（昨日行动计数 key 存续）、.env 无损、8 容器 healthy 回归。观测矩阵内存风险项（阈值 #8）消除。
+- [x] **nightly cron 跨越验证（00:30 UTC）**：**5.5 过**——日报真 LLM 组稿《阵雨突袭小镇…》vs 前日冷启动兜底文案，两日对照证明"有素材才调 LLM"；事实核验无编造（雷阵雨 world_event 真实、当日 219 条记忆）。S1 排期"集市日"+天气链（烈日→多云→雷阵雨→烈日）正常。dream 当晚 0.5 概率未掷中（后手动补验过）。
+- [x] **5.7（对话半项）过**：雷阵雨活跃时中性提问，isabella 自然带出阵雨+集市日并织进人设叙事（雨后特调），非注入复读。decide 雨天室内倾斜待降雨落在清醒时段（作息门昼夜错位，雨段夜间到来错过）。
+- [x] **5.2 过（手动触发，手册命令）**：5 条梦全部第一人称+素材可溯源的荒诞混搭（klaus"消音器+头顶钟楼"=静默协议聊天+辩论；isabella"雨滴砸碎深烘豆"=当晨特调灵感；tamara"钟楼碾碎塞进克劳斯饭碗"=辩论论点），非记忆复读。
+- [x] **5.4 过（手动触发；目标为前日 backfill 规则化）**：6 评估全 parse_ok=t；progress 与行为强度合理相关（互动最多 klaus/adam +0.2，拒社交 tamara 与睡觉 avatar 0）；milestone 具体非模板（"确立'真理探寻者'身份"）。
+- [x] **5.1 过（drift 路径）**：personality_history 5 条 drift 横跨 5 居民（isabella 00:35 自然触发），changes_json 维度写回、评估 parse_ok 全真。shift 未自然触发——机制代码级验证（≥0.9 触发记忆 + 24h 冷却，memory/service.py:368）；高强度表白催化实验反证 guard 自洽：klaus 人设把表白定性"高熵值情绪噪声"，extract 只评 0.5-0.6 重要度，**人设反向抑制重要度评分，情感免疫居民极难 shift**（行为面观察，非 bug）。
+- [x] **5.3 拆分结论**：下游失真改写 **过**（种子燃料 hops=3 直接触发：钟楼→教堂单细节失真、主干保留、origin_memory_id 串链、distorted=true）；**上游燃料生产断粮 = 真 bug**——全部 event 记忆管线（agent_action/chat_resident/chat_player/world_event…）均不写 related_resident_id（仅 relationship 类型写），maybe_gossip 候选查询（type=event + importance≥0.6 + related_resident_id 非空）恒空集，**gossip 特性生产环境结构性死亡**。修法方向：chat_wrapup/extract 提取三方提及时回填 related_resident_id。
+- [x] **行为面重大发现：自然互聊两天零次**——CHAT_RESIDENT 仅在半径 10-14 tile 有 idle 居民时进动作空间（perceive 插件 radius 参数），大地图 9 居民散布+今日 WORK 主导（99/180 动作，前日 backfill 目标驱动 A1 生效）→ 相遇率趋零。研究期基线"互聊 46% 成本占比"与 E-13"5% 互聊率"在本世界配置下不成立（实测 0%）。成本利好但社交真实感缺失；修法方向：社交倾向的 VISIT_DISTRICT 加权/共享地标吸引子/扩 radius。chat_wrapup 三次手动触发 3/3 parse_ok（管线本身稳）。
+- **阶段 2 中段数据（10:45 UTC，18.8h 进行时）**：昨日定格 $0.4738（含手动验收 ~$0.36）；今日至 10:45 = $0.11/占用 7.3%、parse_ok 100%（今日 60+ 行）、attempt>1 0%、worker 全程零重启（跨扩容重启）。
+- **待收尾（17:57 UTC 满 24h）**：5.10 模板问候降级验收（关系账号重上线）→ --days 2 定格报告 → 退出标准评估 → 阶段 3 建议。
+
 ## 发现（施工中发现的新问题，不当场处理）
 - **成本优化研究完成（2026-07-07）**：28 条实验，产出在 `docs/research/`（REPORT=结论与 P1-1 建议、LOG=实验台账、DIRECTOR_ROADMAP/CALLMAP=Opus 统筹产物）。关键输入给 P1-1：计量字段清单、熔断阈值、杠杆排序（计划优先跳过 decide 省 29-37% 为最大项）；缓存/Batch 判定为不可用杠杆。**开放问题需 Jimmy**：部署机 .env 的 LLM_BASE_URL（验证端点是否 Anthropic 原生，F-02）。顺手修清单：互聊 max_tokens 100→150（截断污染 history 风险）、互聊 history 双注入（chat.py 一行）、玩家聊天 chat_messages 无截断。
 - 4 个预先存在的测试失败（HEAD 基线复现，与 P0-1 无关）：`test_forge.py::test_forge_answers_advance_to_generating`、`test_map_integration.py::test_decide_prompt_includes_remembered_residents`、`test_portrait.py::test_generate_portrait_success`（portrait_url 为 None）、`test_preset_import.py::test_seed_presets_creates_residents`（district 默认值断言 'free'，代码已改 'central_plaza'）——测试与代码漂移
