@@ -19,6 +19,7 @@ from app.memory.prompts import (
     sbti_coloring_block,
 )
 from app.personality.evolution import EvolutionService
+from app.services.resident_service import resolve_resident_mentions
 
 logger = logging.getLogger(__name__)
 
@@ -334,12 +335,21 @@ class MemoryService:
             logger.warning("Event extraction failed: %s", e)
             return []
 
+        items = data.get("memories", [])
+        mentioned = [i.get("mentioned_resident") for i in items
+                     if isinstance(i, dict) and i.get("mentioned_resident")]
+        mention_map = await resolve_resident_mentions(self.db, mentioned) if mentioned else {}
+
         memories = []
-        for item in data.get("memories", []):
+        for item in items:
             content = item.get("content", "")
             importance = float(item.get("importance", 0.5))
             if not content:
                 continue
+
+            related_id = mention_map.get((item.get("mentioned_resident") or "").strip())
+            if related_id == resident.id:
+                related_id = None  # 不指向自己
 
             emb = await generate_embedding(content)
             mem = await self.add_memory(
@@ -349,6 +359,7 @@ class MemoryService:
                 importance=importance,
                 source=source,
                 embedding=emb,
+                related_resident_id=related_id,
             )
             memories.append(mem)
 
@@ -424,8 +435,18 @@ class MemoryService:
         if data is None:
             return fallback
 
-        await self._persist_wrapup_side(initiator, target, data.get("initiator") or {})
-        await self._persist_wrapup_side(target, initiator, data.get("target") or {})
+        init_side = data.get("initiator") or {}
+        tgt_side = data.get("target") or {}
+        mentioned = [
+            i.get("mentioned_resident")
+            for side in (init_side, tgt_side)
+            for i in (side.get("memories") or [])
+            if isinstance(i, dict) and i.get("mentioned_resident")
+        ]
+        mention_map = await resolve_resident_mentions(self.db, mentioned) if mentioned else {}
+
+        await self._persist_wrapup_side(initiator, target, init_side, mention_map)
+        await self._persist_wrapup_side(target, initiator, tgt_side, mention_map)
 
         mood = data.get("mood")
         return {
@@ -433,7 +454,10 @@ class MemoryService:
             "mood": mood if mood in ("positive", "neutral", "negative") else "neutral",
         }
 
-    async def _persist_wrapup_side(self, resident: "Resident", other: "Resident", side: dict) -> None:
+    async def _persist_wrapup_side(
+        self, resident: "Resident", other: "Resident", side: dict,
+        mention_map: dict[str, str] | None = None,
+    ) -> None:
         """Persist one resident's extracted memories + relationship from the
         merged wrap-up result, then run evolution hooks."""
         memories: list[Memory] = []
@@ -442,10 +466,15 @@ class MemoryService:
             if not content:
                 continue
             importance = float(item.get("importance", 0.5))
+            raw_mention = (item.get("mentioned_resident") or "").strip()
+            related_id = (mention_map or {}).get(raw_mention)
+            if not related_id or related_id == resident.id:
+                related_id = other.id  # 默认：记忆关于对话对象
             emb = await generate_embedding(content)
             mem = await self.add_memory(
                 resident_id=resident.id, type="event", content=content,
                 importance=importance, source="chat_resident", embedding=emb,
+                related_resident_id=related_id,
             )
             memories.append(mem)
 

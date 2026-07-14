@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.resident import Resident
 
@@ -21,3 +21,20 @@ async def list_residents(
 async def get_resident_by_slug(db: AsyncSession, slug: str) -> Resident | None:
     result = await db.execute(select(Resident).where(Resident.slug == slug))
     return result.scalar_one_or_none()
+
+
+async def resolve_resident_mentions(db: AsyncSession, names: list[str]) -> dict[str, str]:
+    """Map mentioned names/slugs -> resident.id. Unknown names are dropped."""
+    cleaned = [n.strip() for n in names if n and n.strip()]
+    if not cleaned:
+        return {}
+    rows = (await db.execute(
+        select(Resident).where(
+            or_(Resident.name.in_(cleaned), Resident.slug.in_(cleaned))
+        )
+    )).scalars().all()
+    mapping: dict[str, str] = {}
+    for r in rows:
+        mapping[r.name] = r.id
+        mapping[r.slug] = r.id
+    return {n: mapping[n] for n in cleaned if n in mapping}
