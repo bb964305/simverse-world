@@ -25,8 +25,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.actions import ActionType, ActionResult
 from app.agent.chat import resident_chat
+from app.agent.night_homing import night_homing_step
 from app.agent.registry import registry
-from app.agent.scheduler import build_schedule, should_tick
+from app.agent.scheduler import build_schedule, get_activity_probability, should_tick
 from app.agent.tick import resident_tick
 from app.observability import observe_tick_round
 from app.config import settings
@@ -119,6 +120,27 @@ class AgentLoop:
             # Evaluate schedule before acquiring semaphore (no DB needed)
             sbti_data = (meta_json or {}).get("sbti")
             schedule = build_schedule(sbti_data, weather=weather)
+
+            if get_activity_probability(schedule, current_hour) <= 0.0:
+                # 作息门关闭：夜间归巢（零 LLM，一 tick 一步），不计日行动数
+                # （burn-in 发现：sleep_hour 后居民冻结在最后位置"就地入睡"）
+                async with semaphore:
+                    async with async_session() as db:
+                        resident = await db.get(Resident, resident_id)
+                        if resident is None or resident.status in (
+                                "sleeping", "chatting", "socializing"):
+                            return None
+                        new_tile = await night_homing_step(db, resident)
+                        if new_tile is not None:
+                            await manager.broadcast({
+                                "type": "resident_move",
+                                "resident_slug": resident.slug,
+                                "tile_x": resident.tile_x,
+                                "tile_y": resident.tile_y,
+                                "target_tile": None,
+                                "status": "walking",
+                            })
+                return None
 
             if not should_tick(schedule, current_hour):
                 return None
