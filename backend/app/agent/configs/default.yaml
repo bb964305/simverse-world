@@ -7,7 +7,7 @@ phases:
   perceive:
     plugin: app.agent.phases.perceive.basic.BasicPerceivePlugin
     params:
-      radius: 10
+      radius: 18
 
   plan:
     plugin: app.agent.phases.plan.basic.BasicPlanPlugin
@@ -16,6 +16,11 @@ phases:
       hourly_slots: 7
       max_social_slots: 2
       max_high_importance: 2
+      preferred_actions:
+        - CHAT_RESIDENT:2
+        - VISIT_DISTRICT:2
+        - WORK:2
+        - WANDER:1
 
   decide:
     plugin: app.agent.phases.decide.basic.BasicDecidePlugin
