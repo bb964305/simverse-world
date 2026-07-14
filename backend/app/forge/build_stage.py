@@ -5,10 +5,12 @@ from app.llm.metering import record_usage
 
 
 class BuildStage:
-    def __init__(self, llm_client, model: str, max_tokens: int = 2000):
+    def __init__(self, llm_client, model: str, max_tokens: int = 2000,
+                 session_id: str | None = None):
         self._client = llm_client
         self._model = model
         self._max_tokens = max_tokens
+        self._session_id = session_id
 
     async def run(
         self,
@@ -62,7 +64,8 @@ class BuildStage:
             system=system,
             messages=[{"role": "user", "content": user_msg}],
         )
-        await record_usage("forge_build", model=self._model, owner="user", response=response)
+        await record_usage("forge_build", model=self._model, owner="user", response=response,
+                           conversation_id=self._session_id)
         for block in response.content:
             if hasattr(block, "text"):
                 return block.text

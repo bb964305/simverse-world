@@ -5,9 +5,10 @@ from app.llm.metering import record_usage
 
 
 class ValidationStage:
-    def __init__(self, llm_client, model: str):
+    def __init__(self, llm_client, model: str, session_id: str | None = None):
         self._client = llm_client
         self._model = model
+        self._session_id = session_id
 
     async def run(
         self,
@@ -43,6 +44,7 @@ class ValidationStage:
         await record_usage(
             "forge_validate", model=self._model, owner="user", response=response,
             parse_ok=data is not None,
+            conversation_id=self._session_id,
         )
         if data is not None:
             return data

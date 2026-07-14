@@ -251,3 +251,74 @@ async def test_extraction_truncates_research_input():
 
     sent = mock_client.messages.create.call_args.kwargs["messages"][0]["content"]
     assert sent.count("z") == RESEARCH_INPUT_MAX_CHARS
+
+
+# ── 成本封顶（burn-in 修复批次 1, Task 4）──────────────────────────────
+
+@pytest.mark.anyio
+async def test_build_stage_tags_session_id():
+    """Stage 计量行要带 session 标签（复用 conversation_id 槽位）。"""
+    from app.forge.build_stage import BuildStage
+
+    mock_client = AsyncMock()
+    responses = [
+        AsyncMock(content=[AsyncMock(text="# Ability Layer\n...")]),
+        AsyncMock(content=[AsyncMock(text="# Persona Layer\n...")]),
+        AsyncMock(content=[AsyncMock(text="# Soul Layer\n...")]),
+    ]
+    mock_client.messages.create = AsyncMock(side_effect=responses)
+
+    with patch("app.forge.build_stage.record_usage", new_callable=AsyncMock) as ru:
+        stage = BuildStage(llm_client=mock_client, model="test-model", session_id="sess-1")
+        await stage.run(
+            character_name="萧炎",
+            research_text="调研数据...",
+            extraction_data={"core_models": [], "heuristics": []},
+        )
+
+    assert ru.await_args_list  # 至少记了一次
+    for call in ru.await_args_list:
+        assert call.kwargs.get("conversation_id") == "sess-1"
+
+
+@pytest.mark.anyio
+async def test_pipeline_aborts_when_over_request_budget(db_session, monkeypatch):
+    """stage 间预算闸：session 已烧费用超 budget_forge_request_usd 时中止。"""
+    from app.forge.pipeline import ForgePipeline
+    from app.models.llm_usage import LLMUsage
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "budget_forge_request_usd", 0.10)
+
+    user = User(name="test", email="budget@test.com")
+    db_session.add(user)
+    await db_session.commit()
+
+    mock_client = AsyncMock()
+    mock_client.messages.create = AsyncMock(return_value=AsyncMock(
+        content=[AsyncMock(text='{"route": "quick", "reason": "fictional"}')]
+    ))
+
+    pipeline = ForgePipeline(db=db_session, system_client=mock_client,
+                             user_client=mock_client, model="test")
+
+    from app.forge.build_stage import BuildStage
+    original_run = BuildStage.run
+
+    async def mock_build_run(self, **kwargs):
+        return {"ability_md": "# Ability", "persona_md": "# Persona", "soul_md": "# Soul"}
+    BuildStage.run = mock_build_run
+
+    try:
+        session = await pipeline.start(user_id=user.id, character_name="赛博黑客", raw_text="虚构角色")
+        # 预先塞一行超预算的用量（模拟前面 stage 已烧 $0.12）
+        db_session.add(LLMUsage(scenario="forge_build", model="test", owner="user",
+                                conversation_id=session.id, cost_usd=0.12))
+        await db_session.commit()
+
+        result = await pipeline.run_to_completion(session.id)
+        assert result.status == "error"
+        error_msg = (result.refinement_log or {}).get("error", "")
+        assert "budget" in error_msg.lower()
+    finally:
+        BuildStage.run = original_run

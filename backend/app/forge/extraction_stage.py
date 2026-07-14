@@ -9,9 +9,10 @@ RESEARCH_INPUT_MAX_CHARS = 8000
 
 
 class ExtractionStage:
-    def __init__(self, llm_client, model: str):
+    def __init__(self, llm_client, model: str, session_id: str | None = None):
         self._client = llm_client
         self._model = model
+        self._session_id = session_id
 
     async def run(self, research_text: str, character_name: str) -> dict[str, Any]:
         from app.forge.prompts import EXTRACTION_SYSTEM_PROMPT, EXTRACTION_USER_TEMPLATE
@@ -39,6 +40,7 @@ class ExtractionStage:
         await record_usage(
             "forge_extract", model=self._model, owner="user", response=response,
             parse_ok=extract_json_object(text) is not None,
+            conversation_id=self._session_id,
         )
         return self._parse(text)
 

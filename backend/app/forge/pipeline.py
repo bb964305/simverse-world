@@ -2,8 +2,9 @@ import random
 import re
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import func, select
 from app.models.forge_session import ForgeSession
+from app.models.llm_usage import LLMUsage
 from app.models.resident import Resident
 from app.forge.router_stage import InputRouter
 from app.forge.research_stage import ResearchStage
@@ -15,6 +16,10 @@ from app.forge.progress import (
     notify_forge_progress, notify_forge_done, notify_forge_error,
 )
 from app.config import settings
+
+
+class ForgeBudgetExceeded(RuntimeError):
+    """单次 forge 请求花费超过 budget_forge_request_usd（burn-in 发现：deep 实测 $0.30）。"""
 
 
 class ForgePipeline:
@@ -98,6 +103,20 @@ class ForgePipeline:
 
         return session
 
+    async def _check_request_budget(self, session_id: str) -> None:
+        """Stage 间预算闸：session 已烧费用超过单次上限即中止（零迁移，
+        复用 llm_usage.conversation_id 槽位做 session 标签）。"""
+        cap = settings.budget_forge_request_usd
+        if cap <= 0:
+            return
+        spent = (await self._db.execute(
+            select(func.coalesce(func.sum(LLMUsage.cost_usd), 0.0))
+            .where(LLMUsage.conversation_id == session_id)
+        )).scalar_one()
+        if spent > cap:
+            raise ForgeBudgetExceeded(
+                f"forge request budget exceeded: ${spent:.4f} > ${cap}")
+
     async def _create_resident(self, session: ForgeSession):
         """Create a Resident from a completed forge session."""
         from app.services.resident_placement import SPRITE_KEYS, allocate_resident_location
@@ -148,7 +167,9 @@ class ForgePipeline:
         user_material = session.research_data.get("user_material", "")
         input_text = user_material or raw_text or session.character_name
 
-        build = BuildStage(llm_client=self._user_client, model=self._model)
+        await self._check_request_budget(session.id)
+        build = BuildStage(llm_client=self._user_client, model=self._model,
+                           session_id=session.id)
         build_result = await build.run(
             character_name=session.character_name,
             research_text=input_text,
@@ -183,7 +204,9 @@ class ForgePipeline:
         await self._db.commit()
         await notify_forge_progress(session.user_id, session.id, "extraction", "extracting")
 
-        extraction = ExtractionStage(llm_client=self._user_client, model=self._model)
+        await self._check_request_budget(session.id)
+        extraction = ExtractionStage(llm_client=self._user_client, model=self._model,
+                                     session_id=session.id)
         extraction_result = await extraction.run(research_text, session.character_name)
         session.extraction_data = extraction_result
         await self._db.commit()
@@ -194,7 +217,9 @@ class ForgePipeline:
         await self._db.commit()
         await notify_forge_progress(session.user_id, session.id, "build", "building")
 
-        build = BuildStage(llm_client=self._user_client, model=self._model)
+        await self._check_request_budget(session.id)
+        build = BuildStage(llm_client=self._user_client, model=self._model,
+                           session_id=session.id)
         build_result = await build.run(
             character_name=session.character_name,
             research_text=research_text,
@@ -209,7 +234,9 @@ class ForgePipeline:
         await self._db.commit()
         await notify_forge_progress(session.user_id, session.id, "validation", "validating")
 
-        validation = ValidationStage(llm_client=self._user_client, model=self._model)
+        await self._check_request_budget(session.id)
+        validation = ValidationStage(llm_client=self._user_client, model=self._model,
+                                     session_id=session.id)
         validation_report = await validation.run(
             character_name=session.character_name,
             ability_md=build_result["ability_md"],
@@ -225,7 +252,9 @@ class ForgePipeline:
         await self._db.commit()
         await notify_forge_progress(session.user_id, session.id, "refinement", "refining")
 
-        refinement = RefinementStage(llm_client=self._user_client, model=self._model)
+        await self._check_request_budget(session.id)
+        refinement = RefinementStage(llm_client=self._user_client, model=self._model,
+                                     session_id=session.id)
         refined = await refinement.run(
             character_name=session.character_name,
             ability_md=build_result["ability_md"],
