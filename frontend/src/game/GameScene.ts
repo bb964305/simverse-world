@@ -1,5 +1,6 @@
 import Phaser from 'phaser'
 import { bridge } from './phaserBridge'
+import { observeContainerResize, waitForNonZeroSize } from './canvasSize'
 import { applyStatusVisuals, clearStatusVisuals, releaseAllStatusVisuals, STATUS_CONFIG } from './StatusVisuals'
 import { useGameStore } from '../stores/gameStore'
 import { sendPosition, sendWS, onWSMessage } from '../services/ws'
@@ -47,26 +48,44 @@ export interface ResidentData {
 }
 
 let gameInstance: Phaser.Game | null = null
+let stopResizeObserver: (() => void) | null = null
+let initGeneration = 0
 
 export function destroyGame(): void {
+  initGeneration += 1
+  if (stopResizeObserver) {
+    stopResizeObserver()
+    stopResizeObserver = null
+  }
   if (gameInstance) {
     gameInstance.destroy(true)
     gameInstance = null
   }
 }
 
-export function initGame(container: HTMLElement): void {
+export async function initGame(container: HTMLElement): Promise<void> {
   if (gameInstance) return
+  // burn-in 修复：首登画布只渲染左上角 150x90——Phaser 在布局稳定前读了一次
+  // 容器尺寸（scale mode NONE 不会自愈）。先等容器有真实尺寸再建 Game，
+  // 之后 ResizeObserver 跟随容器变化（顺带修 chatOpen 380px 推移不重排）。
+  const generation = ++initGeneration
+  const { width, height } = await waitForNonZeroSize(container)
+  if (generation !== initGeneration || gameInstance) return // unmount 竞态防护
   const zoom = Math.max(1, window.innerWidth / 4400)
   gameInstance = new Phaser.Game({
     type: Phaser.AUTO,
-    width: container.clientWidth / zoom,
-    height: container.clientHeight / zoom,
+    width: width / zoom,
+    height: height / zoom,
     parent: container,
     pixelArt: true,
     physics: { default: 'arcade', arcade: { gravity: { x: 0, y: 0 } } },
     scene: [MainScene],
     scale: { zoom },
+  })
+  stopResizeObserver = observeContainerResize(container, (w, h) => {
+    if (gameInstance && w > 0 && h > 0) {
+      gameInstance.scale.resize(w / zoom, h / zoom)
+    }
   })
 }
 
