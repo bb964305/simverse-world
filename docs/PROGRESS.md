@@ -215,6 +215,7 @@
 - [x] **5.8 chat_wrapup 首验过（手动触发，容器内 `resident_chat(klaus, adam)`，同 §5.6 姿势）**：8 轮 chat_turn + 合并 wrapup **parse_ok=t attempt=1**（E-05 qwen 嵌套 JSON 最大不确定点一把过，latency 11s）；summary 贴对话；双方记忆视角正确不串人、关系记忆双向落库方向合理；连带 evolution_drift×2 parse_ok=t（5.1 部分预验）。gossip 概率未掷中（阶段 2 自然验）。
 - [x] **前端行为可见性**：生产页（skills-world.stawky.workers.dev）目视——居民移动、状态 tooltip、天气 banner 随马尔可夫机翻转（烈日当空→多云）。已知小坑：首次进图 Phaser 画布偶发只渲染左上角，刷新即好（记跟进，非 burn-in 阻塞）。
 - [x] **进阶段 2（UTC 2026-07-13 17:57:30）**：BUDGET_GLOBAL_DAILY_USD 0.5→1.5 recreate，AgentLoop 重启确认。24h 窗口跨 00:30 UTC nightly（digest/dream/胶囊），待完成 §5 主体（5.1–5.7 全量 + 5.3 gossip 自然发生 + 5.4 手动周评估）。
+- **burn-in 新发现（记账不修，续）**：④**居民就地入睡不回家（Jimmy 前端目视发现，2026-07-14 00:1x UTC）**——作息门实现为"到点停 tick"（`scheduler.py::should_tick` 在 sleep_hour 后概率恒 0，`loop.py:112` 按容器时钟=UTC 取小时），居民冻结在最后位置（9 人散落随机坐标，DB status 仍 idle，"睡着"是前端时间渲染）；动作空间有 GO_HOME、居民都有 home_location_id，但无"睡前回家"收尾链（规则或 prompt 均无）。修法候选（burn-in 后）：sleep_hour 前 1h 规则化强制 GO_HOME 零 LLM tick / plan 末槽位固定"回家休息" / 到点直接置 status=sleeping+传送回家。⑤**作息锚定 UTC**——游戏活跃时段 ≈ 北京 13:00-次日 05:00，中国玩家早 8-13 点看到全员睡觉，需产品决策时区锚点。⑥深夜时段（UTC 0-5 点）全员零 tick 属设计行为（作息门），burn-in 观测时段需避开误判。
 - **burn-in 新发现（记账不修）**：①**玩家 avatar 被 loop tick**——onboarding 建 `p-<slug>` resident（onboarding_service.py:151），loop 只排除 sleeping → 每个玩家离线自主行动烧全局预算（观测 p-新居民 NAP 决策多次）；E-13 并发悬崖与成本模型均未计入"每玩家+1 agent"，需产品决策（特性 or 排除）。②首轮真 LLM 时延偏高（extract 24.8s/update_rel 26.9s/wrapup 11s），未触发 tick 节奏阈值但比研究期数字慢，留意阶段 2。③docker exec 一次性进程发起的 LLM 调用不计入 api 进程 /metrics 计数（拓扑已知项的补充口径）。
 
 ## 发现（施工中发现的新问题，不当场处理）
