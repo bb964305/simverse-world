@@ -105,6 +105,33 @@ async def test_disconnect_clears_presence_lock_and_queue(mgr):
     assert await mgr.dequeue("r2") is None
 
 
+# ── lock TTL（burn-in 工程观察②：孤锁自愈）────────────────────────────
+
+@pytest.mark.anyio
+async def test_chat_lock_has_ttl_and_reentry_refreshes(mgr):
+    """非优雅退出（OOM/kill -9）留下的孤锁靠 TTL 到期自清；重入续期=心跳。"""
+    from app.redis_client import get_redis
+
+    assert await mgr.lock_resident("r1", "userA") is True
+    r = get_redis()
+    ttl = await r.ttl("sv:chatting:r1")
+    assert ttl > 0
+
+    await r.expire("sv:chatting:r1", 5)  # 模拟快过期
+    assert await mgr.lock_resident("r1", "userA") is True  # 重入
+    assert await r.ttl("sv:chatting:r1") > 5  # 重入把 TTL 续满
+
+
+@pytest.mark.anyio
+async def test_socializing_lock_has_ttl(mgr):
+    from app.redis_client import get_redis
+
+    assert await mgr.lock_socializing("a", "b") is True
+    r = get_redis()
+    assert await r.ttl("sv:socializing:a") > 0
+    assert await r.ttl("sv:socializing:b") > 0
+
+
 # ── socializing (NPC<->NPC) lock ──────────────────────────────────────
 
 @pytest.mark.anyio
