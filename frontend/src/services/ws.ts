@@ -1,4 +1,5 @@
 import { useGameStore } from '../stores/gameStore'
+import { bridge } from '../game/phaserBridge'
 
 let socket: WebSocket | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -65,6 +66,11 @@ export function connectWS(): void {
       }
       if (data.type === 'daily_reward' && typeof data.new_balance === 'number') {
         useGameStore.getState().updateBalance(data.new_balance)
+      }
+      // Lab: walking into the experiment building opens the ExperimentPanel
+      // (self-mounted in TopNav, listens for the bridge event).
+      if (data.type === 'experiment_prompt') {
+        bridge.emit('experiment:open')
       }
       // Handle online players
       if (data.type === 'player_moved') {

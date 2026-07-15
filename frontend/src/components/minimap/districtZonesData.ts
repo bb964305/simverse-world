@@ -7,7 +7,7 @@ export const MAP_TILES_H = 100
 
 export type LocationKey =
   | 'academy' | 'tavern' | 'cafe' | 'workshop'
-  | 'library' | 'shop' | 'town_hall'
+  | 'library' | 'shop' | 'town_hall' | 'experiment_building'
   | 'north_path' | 'central_plaza' | 'south_lawn' | 'town_entrance'
 
 export interface LocationConfig {
@@ -56,6 +56,12 @@ export const LOCATIONS: LocationConfig[] = [
     key: 'town_hall', label: '市政厅', icon: '🏛',
     color: 'rgba(14,165,233,0.8)', bgColor: 'rgba(14,165,233,0.35)', bgColorDim: 'rgba(14,165,233,0.12)',
     tileRect: { x: 106, y: 45, w: 26, h: 17 },
+  },
+  {
+    // Lab / experiment building — bounds mirror map_data (108,72,124,86).
+    key: 'experiment_building', label: '实验楼', icon: '🧪',
+    color: 'rgba(20,184,166,0.8)', bgColor: 'rgba(20,184,166,0.35)', bgColorDim: 'rgba(20,184,166,0.12)',
+    tileRect: { x: 108, y: 72, w: 16, h: 14 },
   },
   // Outdoor areas — neutral
   {

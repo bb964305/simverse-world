@@ -69,6 +69,14 @@ class BasicExecutePlugin:
                         await maybe_create_journal_post(ctx.db, ctx.resident)
                     except Exception:
                         logger.warning("journal post attempt failed for %s", ctx.resident.slug, exc_info=True)
+            elif action == ActionType.RESEARCH:
+                # Lab narrative sync only: flag the researcher as researching so
+                # the world sees "XX 正在实验楼做研究". The real sandbox work is
+                # driven entirely by the Lab Runner (spec §5.4) — zero external
+                # I/O on the tick.
+                if ctx.resident.status not in ("chatting", "socializing"):
+                    ctx.resident.status = "researching"
+                    await ctx.db.commit()
         except Exception as e:
             logger.warning("Execute failed for %s: %s", ctx.resident.slug, e)
 

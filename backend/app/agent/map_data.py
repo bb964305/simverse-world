@@ -76,6 +76,21 @@ LOCATIONS: dict[str, dict[str, Any]] = {
         "description": "小镇的行政中心，处理公共事务和居民登记",
         "boosted_actions": ["WORK"],
     },
+    # === Experiment Building (Lab / 元游戏入口) ===
+    # Bounds chosen on empty land in the south-east; verified non-overlapping
+    # against every existing LOCATIONS entry (see docs/FEATURE_SPEC_LAB.md §13,
+    # LAB_HANDOFF risk note). The visual tilemap tile is deferred to art (P4);
+    # the location is logic-only for now (pathfinding/planning/codex).
+    "experiment_building": {
+        "name": "实验楼",
+        "type": "public",
+        "role": "research",
+        "bounds": (108, 72, 124, 86),
+        "center": (116, 79),
+        "entrance": (116, 72),
+        "description": "小镇的元游戏入口：研究员在此接入隔离沙箱，完成玩家委托、产出世界变更提案",
+        "boosted_actions": ["RESEARCH"],
+    },
     # === Private Houses ===
     "house_a": {
         "name": "住宅A", "type": "private",
@@ -171,6 +186,27 @@ def get_location_id_at(x: int, y: int) -> str | None:
 def get_location_by_id(loc_id: str) -> dict | None:
     """Lookup location by ID."""
     return LOCATIONS.get(loc_id)
+
+
+# ── Dynamic world overlay (Lab governance) ────────────────────────────
+# Slugs merged in from the ``dynamic_locations`` table so an approved
+# WorldChangeProposal can add a building without a redeploy. Tracked so a
+# reload can drop the previously-merged set before re-merging.
+_dynamic_slugs: set[str] = set()
+
+
+def load_dynamic_locations() -> int:
+    """Merge active ``dynamic_locations`` overlay rows into in-memory LOCATIONS.
+
+    Called at process startup and on the ``sv:world:reload`` signal so a newly
+    approved building appears in pathfinding / planning / codex without a
+    redeploy (spec §4.6, §7). P0 placeholder — the overlay tables and the real
+    merge land in P3; this hook stays a safe no-op until then so callers wired
+    up early do nothing. Returns the number of dynamic locations merged.
+    """
+    # P3 will replace this body with an actual DB read + merge; keep it a no-op
+    # (returns 0) so P0/P1/P2 callers are harmless.
+    return 0
 
 
 def get_public_locations() -> list[dict]:

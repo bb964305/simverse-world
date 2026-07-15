@@ -19,6 +19,15 @@ class Resident(Base):
     ability_md: Mapped[str] = mapped_column(Text, default="")
     persona_md: Mapped[str] = mapped_column(Text, default="")
     soul_md: Mapped[str] = mapped_column(Text, default="")
+    # meta_json holds loosely-typed sub-namespaces keyed by feature, e.g.
+    #   "sbti": {...}
+    #   "lab":  {"access": bool, "tier": str, "skills": [str, ...]}
+    #     — Lab/experiment building (spec §2). "access" is the admin-granted
+    #       researcher whitelist flag gating ActionType.RESEARCH + LabTask
+    #       assignment; "tier"/"skills" drive auto-dispatch of open recruitment.
+    #       The researcher's treasury balance is NOT stored here — it lives in
+    #       the resident_treasuries table (spec §4.7, atomic + auditable), a
+    #       v0.2 revision away from the earlier meta_json plan.
     meta_json: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=None)
     versions_json: Mapped[list] = mapped_column(JSON, default=list, nullable=True)
     sprite_key: Mapped[str] = mapped_column(String(100), default="伊莎贝拉")

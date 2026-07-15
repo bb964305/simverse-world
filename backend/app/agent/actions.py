@@ -24,6 +24,10 @@ class ActionType(str, Enum):
     # Rest
     IDLE           = "IDLE"
     NAP            = "NAP"
+    # Lab (元游戏入口): narrative-only tick action, gated to researchers inside
+    # the experiment building. It never runs the real sandbox (that is the Lab
+    # Runner's job); it only flips status→researching + writes a memory.
+    RESEARCH       = "RESEARCH"
 
 
 @dataclass
@@ -84,6 +88,16 @@ def get_available_actions(resident, nearby_residents: list) -> list[ActionType]:
         if home_x is not None and home_y is not None:
             if not (resident.tile_x == home_x and resident.tile_y == home_y):
                 available.append(ActionType.GO_HOME)
+
+    # RESEARCH (Lab): gated to authorized researchers standing inside the
+    # experiment building. meta_json["lab"]["access"] is the admin-granted
+    # whitelist flag (spec §14 "研究员资格：先手动授权"). This keeps the real
+    # sandbox entirely off the tick — RESEARCH is narrative-only.
+    lab_meta = (getattr(resident, "meta_json", None) or {}).get("lab") or {}
+    if lab_meta.get("access"):
+        from app.agent.map_data import get_location_id_at
+        if get_location_id_at(resident.tile_x, resident.tile_y) == "experiment_building":
+            available.append(ActionType.RESEARCH)
 
     # Deduplicate while preserving order
     seen: set[ActionType] = set()

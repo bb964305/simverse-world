@@ -44,6 +44,8 @@ def format_action_memory(action_result, resident) -> str:
         return f"在{loc_name}小憩了一会儿"
     elif action == ActionType.IDLE:
         return f"在{loc_name}发了会儿呆"
+    elif action == ActionType.RESEARCH:
+        return f"在{loc_name}接入沙箱，投入了一段真实世界的研究工作"
     else:
         return f"在{loc_name}执行了 {action.value}"
 

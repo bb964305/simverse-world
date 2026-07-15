@@ -169,6 +169,19 @@ async def process_one(user_id: str, location_id: str) -> None:
             await check_visit_commissions(db, user_id, location_id)
         except Exception:
             logger.warning("commission visit check failed for %s@%s", user_id, location_id, exc_info=True)
+        # Lab: entering the experiment building surfaces the Lab panel prompt
+        # (mirrors the encounter_prompt → EncounterCard link, upgraded to a
+        # panel). Fires on every entry, not just the first visit.
+        if location_id == "experiment_building":
+            try:
+                from app.ws.manager import manager
+                await manager.send(user_id, {
+                    "type": "experiment_prompt",
+                    "location_id": location_id,
+                    "name": LOCATIONS.get(location_id, {}).get("name", "实验楼"),
+                })
+            except Exception:
+                logger.warning("experiment prompt send failed for %s", user_id, exc_info=True)
 
 
 async def location_consumer_loop() -> None:

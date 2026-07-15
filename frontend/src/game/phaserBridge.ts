@@ -27,3 +27,5 @@ export const bridge = new PhaserBridge()
 // React → Phaser  photo:take         { residentSlug: string }            (E10 group photo)
 // Phaser → React  photo:result       { dataUrl: string, residentSlug: string }
 // React → Phaser  commissions:changed  (no payload — CommissionModal accepted/abandoned; GameScene re-pulls ❗ markers) (B1)
+// React → React  experiment:open   (no payload — open ExperimentPanel; emitted by TopNav button + ws.ts on experiment_prompt) (Lab)
+// React → React  experiment:close  (no payload — close ExperimentPanel) (Lab)

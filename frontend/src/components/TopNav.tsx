@@ -6,6 +6,7 @@ import { NotificationDrawer } from './NotificationDrawer'
 import { DigestModal } from './DigestModal'
 import { CommissionModal } from './CommissionModal'
 import { BulletinBoard } from './BulletinBoard'
+import { ExperimentPanel } from './ExperimentPanel'
 import { ShopModal } from './ShopModal'
 import { bridge } from '../game/phaserBridge'
 import { disconnectWS, onWSMessage } from '../services/ws'
@@ -221,6 +222,11 @@ export function TopNav() {
           padding: '5px 12px', borderRadius: 'var(--radius)', fontSize: 12,
           fontWeight: 600, cursor: 'pointer',
         }}>🗒️ 委托板</button>
+        <button onClick={() => bridge.emit('experiment:open')} style={{
+          background: 'none', color: '#14b8a6', border: '1px solid #14b8a644',
+          padding: '5px 12px', borderRadius: 'var(--radius)', fontSize: 12,
+          fontWeight: 600, cursor: 'pointer',
+        }}>🧪 实验楼</button>
         {user?.is_admin && (
           <button onClick={() => navigate('/admin')} style={{
             background: 'none', color: '#ef4444', border: '1px solid #ef444444',
@@ -432,6 +438,9 @@ export function TopNav() {
       {/* Mounted here (not GamePage) so the 公告板 button works on every
           authenticated page — the modal is self-contained (bridge + API). */}
       <BulletinBoard />
+      {/* Self-mounted like BulletinBoard: opens on the experiment:open bridge
+          event (TopNav button + ws.ts experiment_prompt). */}
+      <ExperimentPanel />
     </nav>
     {/* Active world-event banner (A2) — slim strip right below the nav.
         Overlays the map's top edge on purpose; the page does not reflow. */}
