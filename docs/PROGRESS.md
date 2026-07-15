@@ -238,6 +238,9 @@
 - **阶段 3 决策待 Jimmy 拍板**：burn-in 三问（成本/行为面/稳定性）阶段 1+2 已充分回答。阶段 3（48h 稳态定版）的增量价值主要是"长期参数冻结证明"，但①F-02 真实账单对账因 Coding Plan 订阅制做不了②当前配置带两个已知 bug（gossip 燃料/自然互聊零次）+ items 空，48h 空跑的是待修配置。**建议：暂停在阶段 2 结束点，等修复批次（cowork 进行中）合并部署 + 换按量 key 后再跑阶段 3**，那时数据才有定版意义；而非现在用带 bug 配置空耗 48h。
 
 ## 发现（施工中发现的新问题，不当场处理）
+- **burn-in 跑测试/验收脚本的工程观察（2026-07-14，副产物）**：
+  - **测试对 backend/.env 有隐式依赖（实锤）**：worktree 中 backend/ 无 .env 时，`test_rate_limit.py` 在 LLM client 构造期抛 `ValueError: server_hostname is only meaningful with ssl`（某配置项空值触发），从主仓库 `cp .env` 后 744 全绿。CI 因有 env 而绿，但本地 worktree/裸环境跑测试会挂——测试非完全隔离。建议 conftest 注 dummy env（LLM_BASE_URL 等），去掉对真实 .env 的依赖。
+  - **chat lock `sv:chatting` 无 TTL（理论缺口，未实测触发）**：优雅断连清理正常（`manager.disconnect` manager.py:63-66 清 user 持有的全部锁 + `_cleanup` 的 finally），burn-in 中查证 sv:chatting 实为空=清理工作。但锁本身无 expire 兜底、启动不清 stale，进程非优雅退出（OOM/kill -9/容器强杀，finally 不执行）时会留孤锁无自愈。建议给锁加 TTL（如 5min）或 lifespan 启动清 stale。
 - **成本优化研究完成（2026-07-07）**：28 条实验，产出在 `docs/research/`（REPORT=结论与 P1-1 建议、LOG=实验台账、DIRECTOR_ROADMAP/CALLMAP=Opus 统筹产物）。关键输入给 P1-1：计量字段清单、熔断阈值、杠杆排序（计划优先跳过 decide 省 29-37% 为最大项）；缓存/Batch 判定为不可用杠杆。**开放问题需 Jimmy**：部署机 .env 的 LLM_BASE_URL（验证端点是否 Anthropic 原生，F-02）。顺手修清单：互聊 max_tokens 100→150（截断污染 history 风险）、互聊 history 双注入（chat.py 一行）、玩家聊天 chat_messages 无截断。
 - 4 个预先存在的测试失败（HEAD 基线复现，与 P0-1 无关）：`test_forge.py::test_forge_answers_advance_to_generating`、`test_map_integration.py::test_decide_prompt_includes_remembered_residents`、`test_portrait.py::test_generate_portrait_success`（portrait_url 为 None）、`test_preset_import.py::test_seed_presets_creates_residents`（district 默认值断言 'free'，代码已改 'central_plaza'）——测试与代码漂移
 - ~~`Memory.embedding` ORM 类型为 JSON 但迁移 004 实际列是 `vector(1024)`~~ **已修**（`045cd5a`）：当时猜"PG 靠 asyncpg 文本转型可行"被 vm212 实测证伪（连 NULL 都插不进，整个记忆管线在 PG 上死透）；现用 EmbeddingVector 方言分派类型。sqlite 残留 JSON 'null' 文本行的提醒仍有效
