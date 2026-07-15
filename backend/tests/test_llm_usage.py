@@ -115,6 +115,28 @@ def test_cost_includes_cache_tokens():
     assert withcache > base
 
 
+def test_cost_deepseek_v4_flash_not_haiku_fallback():
+    # Regression guard (F-02): deepseek-v4-flash must NOT fall back to the haiku
+    # rate ($1/$5) — that over-bills ~7x and would falsely trip the budget breaker.
+    assert compute_cost("deepseek-v4-flash", 1000, 1000) != compute_cost("claude-haiku-4-5", 1000, 1000)
+    assert compute_cost("deepseek-v4-flash", 1000, 1000) < compute_cost("claude-haiku-4-5", 1000, 1000)
+
+
+def test_cost_deepseek_v4_flash_rates():
+    # ¥1 in / ¥2 out @7.2 → $0.14 / $0.28 per 1M (official Alibaba USD list price)
+    assert compute_cost("deepseek-v4-flash", 1_000_000, 1_000_000) == round(0.14 + 0.28, 8)
+    # cache-hit input is far cheaper than a cache-miss input token
+    miss = compute_cost("deepseek-v4-flash", 1_000_000, 0)
+    hit = compute_cost("deepseek-v4-flash", 0, 0, cache_read_tokens=1_000_000)
+    assert hit < miss
+
+
+def test_cost_qwen37_plus_priced_not_fallback():
+    # Historical burn-in reconciliation: qwen3.7-plus is priced, not haiku fallback.
+    assert compute_cost("qwen3.7-plus", 1000, 1000) != compute_cost("claude-haiku-4-5", 1000, 1000)
+    assert compute_cost("qwen3.7-plus", 1_000_000, 1_000_000) == round(0.11 + 0.28, 8)
+
+
 # ---------- estimate / usage extraction ----------
 
 def test_estimate_tokens_nonzero_and_cjk_denser():

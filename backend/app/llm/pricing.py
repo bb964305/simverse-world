@@ -1,13 +1,15 @@
 """LLM price table + cost computation (P1-1).
 
-All rates are **Anthropic list prices, USD per 1,000,000 tokens**, matched to
-the model family by prefix. The production endpoint is a DashScope-style relay
-whose real tariff is unverified (COST_RESEARCH_REPORT §五, "待 Jimmy"), so
-``cost_usd`` is an *estimate*: the budget circuit breaker relies on relative
-spend within a window, not on absolute-dollar accuracy.
+Rates are **USD per 1,000,000 tokens**, matched to the model family by longest
+prefix. ``claude-*`` families use Anthropic list prices. DashScope pay-as-you-go
+models (deepseek-v4-flash, qwen3.7-plus) are converted from the published CNY
+tariff at 7.2 CNY/USD (2026-07-15; the official pages also quote the same USD
+figures). Unlike the old Coding-Plan subscription, the按量 endpoint is genuinely
+metered, so a deepseek ``cost_usd`` is now reconcilable against the provider bill
+(F-02) rather than a pure estimate.
 
-Unknown / non-Anthropic models (e.g. the kimi-k2.5 video path) fall back to the
-Haiku rate so their spend is still counted rather than silently zeroed.
+Unknown / unpriced models (e.g. the kimi-k2.5 video path) fall back to the Haiku
+rate so their spend is still counted rather than silently zeroed.
 """
 from __future__ import annotations
 
@@ -17,6 +19,16 @@ _PER_MTOK: dict[str, tuple[float, float, float, float]] = {
     "claude-3-5-haiku": (1.00, 5.00, 0.10, 1.25),
     "claude-sonnet": (3.00, 15.00, 0.30, 3.75),
     "claude-opus": (15.00, 75.00, 1.50, 18.75),
+    # ---- DashScope 按量计费（Anthropic 兼容端点 /apps/anthropic）：非 Anthropic 模型 ----
+    # deepseek-v4-flash：输入 ¥1(cache-miss) / 输出 ¥2 / 输入缓存命中 ¥0.02
+    #   → @7.2 = $0.14 / $0.28 / $0.0028（官方 USD 同值）。deepseek 无独立 cache-write
+    #   加价，cache_creation 按输入价 ¥1 = $0.14 计。不补则回落 haiku $1/$5，虚高 ~7x
+    #   → 预算熔断误触发（Kickoff V6 任务 2.1）。
+    "deepseek-v4-flash": (0.14, 0.28, 0.0028, 0.14),
+    # qwen3.7-plus：百炼 Coding Plan（订阅制，实际成本已摊销固定）；此价仅供 burn-in
+    #   阶段 1/2 历史 llm_usage 行重算口径，用 qwen-plus 档按量价 输入 ¥0.8 / 输出 ¥2 /
+    #   缓存命中 ~¥0.16 → @7.2 = $0.11 / $0.28 / $0.022。
+    "qwen3.7-plus": (0.11, 0.28, 0.022, 0.11),
 }
 
 _DEFAULT = _PER_MTOK["claude-haiku"]
