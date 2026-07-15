@@ -72,6 +72,13 @@ export function connectWS(): void {
       if (data.type === 'experiment_prompt') {
         bridge.emit('experiment:open')
       }
+      // Lab run/task live frames. `lab_task_update` and `lab_run_step` are
+      // consumed by ExperimentPanel via the onWSMessage listener fan-out below
+      // (same pattern as forge_progress). A pending sensitive-action approval
+      // additionally surfaces the panel so the player can respond.
+      if (data.type === 'lab_run_approval') {
+        bridge.emit('experiment:open')
+      }
       // Handle online players
       if (data.type === 'player_moved') {
         useGameStore.getState().setOnlinePlayer({

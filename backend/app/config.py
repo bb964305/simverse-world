@@ -162,6 +162,23 @@ class Settings(BaseSettings):
     agent_enabled: bool = True             # master switch (set False to pause loop)
     agent_debug_always_active: bool = False  # bypass schedule, all residents always active
 
+    # --- Lab / experiment building (元游戏入口) ---
+    # Deploy-level master switch (loaded at startup). The *runtime* kill switch
+    # is the Redis flag ``sv:lab:enabled`` (admin toggles it live, no restart);
+    # this only gates whether the feature is wired at deploy time.
+    lab_enabled: bool = False
+    lab_adapter: str = "mock"               # default sandbox adapter (mock|openclaw|hermes|computer_use)
+    lab_creator_share: float = 0.2          # researcher's creator gets this share of reward_sc; rest → treasury
+    lab_platform_fee_rate: float = 0.1      # platform fee added on top of reward (fee = ceil(reward*rate)) → sink
+    lab_max_concurrent_runs: int = 3        # global cap on concurrently-running runs
+    lab_daily_tasks_per_user: int = 20      # per-player daily task-publish cap
+    lab_default_budget_usd: float = 0.5     # per-run LLM/compute budget ceiling
+    lab_sc_per_usd: int = 100               # SC↔USD conversion (price scopes / validate reward vs budget)
+    lab_approval_timeout_s: int = 1800      # sensitive-action human-review timeout (default: deny)
+    lab_run_heartbeat_ttl_s: int = 300      # orphan-run watchdog threshold (no heartbeat past this → reap+refund)
+    lab_auto_release_hours: int = 72        # review→auto-release window (anti-runaway)
+    lab_task_deadline_hours: int = 24       # default task deadline if the issuer doesn't set one
+
     # --- Rate Limiting (OPTIMIZATION_PLAN P1-1, limit sub-item) ---
     # WS chat_msg sliding window is in-process (single-worker model); REST uses
     # slowapi. Both migrate to Redis once P0-3b lands the cross-process bus.
