@@ -237,6 +237,25 @@
   - **熔断三级从未触发**（预算充裕，占用峰值 31.6% < 80% throttle 线）——降级/恢复路径本轮无法验证，记跟进（阶段 3 后可用 BUDGET_GLOBAL_DAILY_USD=0.05 专门演练一次）。
 - **阶段 3 决策待 Jimmy 拍板**：burn-in 三问（成本/行为面/稳定性）阶段 1+2 已充分回答。阶段 3（48h 稳态定版）的增量价值主要是"长期参数冻结证明"，但①F-02 真实账单对账因 Coding Plan 订阅制做不了②当前配置带两个已知 bug（gossip 燃料/自然互聊零次）+ items 空，48h 空跑的是待修配置。**建议：暂停在阶段 2 结束点，等修复批次（cowork 进行中）合并部署 + 换按量 key 后再跑阶段 3**，那时数据才有定版意义；而非现在用带 bug 配置空耗 48h。
 
+## Kickoff V6 — 修复批次合并部署 + 切按量 deepseek-v4-flash + 阶段 3 起跑（2026-07-15，本机 CC）
+- [x] **步骤 0 git index 漂移归位**：主仓大片假 staged（沙盒 commit-tree 后遗症）——`git diff HEAD --stat` 6 文件差异全为 index 内假删除，物理文件逐个 `git hash-object` 对拍 == HEAD（MM/D 类全 MATCH）→ `reset --mixed` 归位 + db checkout 丢弃，工作树净。
+- [x] **审查 7 提交（11 agent 并行 fan-out + 主线亲验代码）**：无 blocker。kickoff 点名 4 关切 a/b/c 成立（gossip 回填只走 `resolve_resident_mentions`→只落 Resident.id、user_id 无路径；半径改只动 3 yaml+prompt+新测无破坏既有距离断言；夜间归巢全链纯规则/DB 零 LLM）；**d 低危不完全一致**——forge stage 间预算闸抛 `ForgeBudgetExceeded` 被 `run_to_completion` 通用 except 拍平成 str（deep forge 异步后台任务架构上不可能回 402，只能 WS error；功能正确、仅前端/监控无干净 code 区分预算 vs 崩溃，记 follow-up）。
+- [x] **补 b494061 守卫**（`9f27423`，TDD）：`resolve_resident_mentions` 加 `isinstance(n,str)` 守卫——LLM 偶发把 mentioned_resident 返 list 时 `.strip()` 在 try/except 外抛 AttributeError 崩整条 wrapup（违 E-05），红测→绿测。
+- [x] **合并**（`2101454`，--no-ff）：fix/burnin-batch-1 零冲突入 feat（feat 领先仅 2 纯 PROGRESS 提交，与 7 code 提交零重叠）；**无新 Alembic 迁移**（仍 31 版本）。
+- [x] **pricing.py 补价目**（`f03c713`，TDD）：deepseek-v4-flash `(0.14,0.28,0.0028,0.14)`（¥1/¥2/缓存命中¥0.02 @7.2；官方 USD 同值；缓存命中官方是 ¥0.02 非 Jimmy 口误的 ¥0.2）+ qwen3.7-plus `(0.11,0.28,0.022,0.11)`（历史 llm_usage 重算口径）；防 haiku fallback 虚高 ~7x。+3 测试。
+- [x] **全量验证（CI 口径，合并后 HEAD）**：后端 `.venv/bin/pytest` **763 passed/0 failed**（零排除，含新测）；前端 tsc(strict) 0 / vitest 34 / eslint 0 / build 全绿（Node v25 build 这次直过，rolldown/mount 坑未复现）。
+- [x] **push 双 ref + CI**：`c20b1e8..f03c713`（10 提交）→ feat+master 同 HEAD；**双 ref CI 一把绿**（3 job：pytest sqlite+fakeredis / PG 全链迁移+注册冒烟 pgvector / 前端四连）。
+- [x] **部署 vm212（backend）**：`cp -r` 备份 `backend.bak.deploy-1784102102`（保留 deploy/.env）→ `git archive HEAD backend` 树覆盖（night_homing/pricing sha 对拍一致）→ build（nohup 远端日志）→ up -d。三查：/health ok、/metrics 200(带token)/401(无token)、AgentLoop started。**Coding Plan 红线守住**：切 key 前 AGENT_ENABLED=false 期间 agent 自主 LLM 调用 0 行（`ts` 列查证）。
+- [x] **seed items/achievements**：startup seed 被 `if settings.auto_create_tables:`（dev-only）门住，vm212 生产 `AUTO_CREATE_TABLES=false` 从不自动 seed → 手动 `docker compose exec api python -c "...seed_achievements/seed_items..."`（幂等）→ **achievements=12、items=10**（kickoff 说 8，实际 ITEM_DEFS=10）。
+- [x] **部署前端（Phaser 修复）**：`VITE_API_URL=https://simverse-api.proxypool.eu.org` 重建（我 T1.3 那次 build 没带 URL）→ wrangler deploy → 生产 skills-world.stawky.workers.dev 服务新构建 `index-B0aUKM76.js`（Version 252fb8f2）。
+- [x] **切按量 deepseek（任务 2，串行在任务 1 稳定后）**：E-06 探针本机+vm212 双侧裸 curl **200**（usage 在场/thinking disabled/JSON 可解析）；备份 `.env.bak-v6-deepseek-*` → 三键换按量（`dashscope.aliyuncs.com/apps/anthropic` + deepseek-v4-flash key；LLM_THINKING 缺省=disabled；VIDEO/BACKGROUND 缺省不动）；force-recreate。
+- [x] **计量自检**：resident_chat(klaus,adam) 8轮+wrapup → llm_usage 9 行全 `deepseek-v4-flash source=usage`，**wrapup parse_ok=t attempt=1**（E-05 deepseek 嵌套 JSON 最大未知点一把过），单链 $0.00045（e-4，非 haiku e-3；wrapup 693in/468out=$0.000228 == 693×0.14+468×0.28/1e6 印证新价目生效）。
+- [x] **开 agent loop（Jimmy 拍板"开"，备份 `.env.bak-v6-agenton-*`）**：AGENT_ENABLED=true recreate。**修复实证**（部署后 ~20min）：① 自然互聊恢复——chat_turn 40+ 次（此前两天零次）、wrapup parse_ok=t（f06fe66）；② gossip 燃料恢复——event 记忆 related_resident_id **11.8% 非空**（修复前恒 0%，b494061）；③ deepseek JSON 可靠性 decide/plan/wrapup/drift/reflect **全 100% parse_ok、0 重试**（40+ 评估行，远超 ≥95%）。
+- [x] **f06fe66 半径成本 finding 实测**：翻转初 20min 外推 ~$0.33/天=预算 21.7%（冷启动 residents 聚集期 decide 变多），随后近 3min decide=0（E-09 跳过生效、居民拿到新鲜计划）→ **半径成本 finding 属冷启动瞬态、非持续**，稳态显著更低；熔断从未触发。真实但安全。
+- [x] **阶段 3 起跑（Jimmy 明确"开"，`PHASE3_START_UTC=2026-07-15T10:57:45Z`）**：定版配置 = deepseek-v4-flash 按量 / thinking=disabled / AGENT_ENABLED=true / metering=true / budgets global=1.5·user=0.5·forge=0.15。起跑锚点 126 calls/$0.014/parse_ok 100%。监控 = `burnin-phase3-monitor.service`（systemd 瞬态，hourly `burnin_report --days 2` 落 `/root/burnin_v6_phase3.log`；vm212 无 crontab 故用 systemd-run）。
+- **阶段 3 退出评估口径（24h/48h 评）**：$/居民·天 ≤ 基线上沿 $0.0667 | parse_ok ≥85%（deepseek 现 100%）| §5 清单维持 | worker 零重启 | Sentry 无新 error | 熔断三级本轮可专门演练（BUDGET_GLOBAL_DAILY_USD=0.05 recreate，销遗留项，完后调回 1.5）。
+- **待办/时间门**：① **F-02 真实账单对账**——我方 burnin_report 出成本合计，需 Jimmy 抄阿里云[模型观测](https://bailian.console.aliyun.com/?tab=model#/model-telemetry)token 数 + 账单明细扣费算比值（目标 0.8–1.2；换按量后终于可做）；② GO_HOME 冒烟时间门 UTC ~21:00（北京 05:00 sleep_hour，5 单测+审查兜底）；③ gossip 实际掷中概率性待更多量；④ Phaser 首登画布已上线+单测过，待 Jimmy 目视。
+
 ## 发现（施工中发现的新问题，不当场处理）
 - **burn-in 跑测试/验收脚本的工程观察（2026-07-14，副产物）**：
   - **测试对 backend/.env 有隐式依赖（实锤）**：worktree 中 backend/ 无 .env 时，`test_rate_limit.py` 在 LLM client 构造期抛 `ValueError: server_hostname is only meaningful with ssl`（某配置项空值触发），从主仓库 `cp .env` 后 744 全绿。CI 因有 env 而绿，但本地 worktree/裸环境跑测试会挂——测试非完全隔离。建议 conftest 注 dummy env（LLM_BASE_URL 等），去掉对真实 .env 的依赖。
