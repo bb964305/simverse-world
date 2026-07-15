@@ -1,8 +1,23 @@
 import os
+import tempfile
+from pathlib import Path
 
 # Must be set before app.config is imported: tests run without a .env,
 # and non-debug mode refuses the default JWT secret (P0-4b)
 os.environ.setdefault("DEBUG", "true")
+
+# 测试不依赖 backend/.env（burn-in 工程观察①）：裸环境（新 worktree/新机器）缺
+# .env 时，config 默认值会把测试引向真实服务——DATABASE_URL 默认 postgres@localhost
+# （test_rate_limit 的 ws chat 路径直连全局 engine，连接期 ConnectionRefused/SSL 崩），
+# LLM key 为空串。这里在 app.config 导入前注入 dummy 配置补齐隔离；有 .env 的机器
+# 走不到这个分支，行为不变。显式导出的环境变量（CI 的 DATABASE_URL）优先级更高，
+# setdefault 不覆盖。
+if not (Path(__file__).resolve().parent.parent / ".env").exists():
+    os.environ.setdefault(
+        "DATABASE_URL",
+        f"sqlite+aiosqlite:///{tempfile.gettempdir()}/simverse_test_{os.getpid()}.db",
+    )
+    os.environ.setdefault("LLM_API_KEY", "test-dummy-key")
 
 import pytest
 from httpx import AsyncClient, ASGITransport
