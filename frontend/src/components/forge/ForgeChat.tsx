@@ -250,7 +250,7 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
       {/* Input */}
       <div style={{ padding: '14px 20px', borderTop: '1px solid var(--border)', display: 'flex', gap: 10, alignItems: 'center' }}>
         {isDone ? (
-          <button onClick={() => { window.location.href = '/' }} style={{
+          <button onClick={() => { window.location.href = '/play' }} style={{
             flex: 1, background: 'var(--accent-green)', color: '#000', border: 'none',
             padding: '12px 20px', borderRadius: 'var(--radius)', fontSize: 14,
             fontWeight: 700, cursor: 'pointer',

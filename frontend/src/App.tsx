@@ -1,7 +1,8 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { Suspense, lazy } from 'react'
 import { useGameStore } from './stores/gameStore'
 import { LoginPage } from './pages/LoginPage'
+import { LandingPage } from './pages/LandingPage'
 import { AuthCallbackPage } from './pages/AuthCallbackPage'
 import { AchievementToast } from './components/AchievementToast'
 import { ConnectionBanner } from './components/ConnectionBanner'
@@ -24,7 +25,11 @@ const CapsulesPage = lazy(() => import('./pages/CapsulesPage').then((m) => ({ de
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const token = useGameStore((s) => s.token)
-  if (!token) return <Navigate to="/login" replace />
+  const location = useLocation()
+  if (!token) {
+    const next = encodeURIComponent(`${location.pathname}${location.search}`)
+    return <Navigate to={`/login?next=${next}`} replace />
+  }
   return <>{children}</>
 }
 
@@ -54,10 +59,11 @@ export default function App() {
       <ErrorBoundary>
       <Suspense fallback={<PageFallback />}>
         <Routes>
+          <Route path="/" element={<LandingPage />} />
           <Route path="/login" element={<LoginPage />} />
           <Route path="/auth/callback" element={<AuthCallbackPage />} />
           <Route path="/onboarding" element={<ProtectedRoute><OnboardingPage /></ProtectedRoute>} />
-          <Route path="/" element={<ProtectedRoute><GamePage /></ProtectedRoute>} />
+          <Route path="/play" element={<ProtectedRoute><GamePage /></ProtectedRoute>} />
           <Route path="/forge" element={<ProtectedRoute><ForgePage /></ProtectedRoute>} />
           <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
           <Route path="/admin" element={<ProtectedRoute><AdminPage /></ProtectedRoute>} />
