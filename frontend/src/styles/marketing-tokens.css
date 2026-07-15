@@ -1,0 +1,20 @@
+:root {
+  --mkt-void: #07070d;
+  --mkt-surface: #0f0f17;
+  --mkt-elevated: #14141f;
+  --mkt-glass: rgba(20, 20, 32, 0.72);
+  --mkt-text: #f4f4f8;
+  --mkt-text-2: #a1a1b5;
+  --mkt-text-3: #6b6b80;
+  --mkt-border: rgba(255, 255, 255, 0.08);
+  --mkt-border-glow: rgba(14, 165, 233, 0.35);
+  --mkt-cyan: #22d3ee;
+  --mkt-cyan-deep: #0ea5e9;
+  --mkt-magenta: #e94560;
+  --mkt-violet: #8b5cf6;
+  --mkt-ok: #53d769;
+  --mkt-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --mkt-max: 1120px;
+  --mkt-font: 'Space Grotesk', Inter, system-ui, sans-serif;
+  --mkt-mono: 'JetBrains Mono', ui-monospace, monospace;
+}

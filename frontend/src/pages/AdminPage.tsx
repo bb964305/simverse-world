@@ -20,7 +20,7 @@ export function AdminPage() {
 
   // Route guard: non-admin users are redirected to home
   if (!user?.is_admin) {
-    return <Navigate to="/" replace />
+    return <Navigate to="/play" replace />
   }
 
   const renderContent = () => {

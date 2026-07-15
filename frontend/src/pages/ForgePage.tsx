@@ -29,7 +29,7 @@ export function ForgePage() {
   }, [])
 
   const handleComplete = useCallback(() => {
-    navigate('/')
+    navigate('/play')
   }, [navigate])
 
   return (
@@ -55,7 +55,7 @@ export function ForgePage() {
         flexShrink: 0,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ cursor: 'pointer', color: 'var(--accent-blue)' }} onClick={() => navigate('/')}>
+          <span style={{ cursor: 'pointer', color: 'var(--accent-blue)' }} onClick={() => navigate('/play')}>
             Simverse World
           </span>
           <span>/</span>
