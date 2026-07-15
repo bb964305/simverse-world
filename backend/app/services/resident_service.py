@@ -24,8 +24,10 @@ async def get_resident_by_slug(db: AsyncSession, slug: str) -> Resident | None:
 
 
 async def resolve_resident_mentions(db: AsyncSession, names: list[str]) -> dict[str, str]:
-    """Map mentioned names/slugs -> resident.id. Unknown names are dropped."""
-    cleaned = [n.strip() for n in names if n and n.strip()]
+    """Map mentioned names/slugs -> resident.id. Unknown / non-string entries are
+    dropped (an LLM may emit ``mentioned_resident`` as a list; this runs outside the
+    extract/wrapup try/except, so it must never raise — burn-in review finding)."""
+    cleaned = [n.strip() for n in names if isinstance(n, str) and n.strip()]
     if not cleaned:
         return {}
     rows = (await db.execute(

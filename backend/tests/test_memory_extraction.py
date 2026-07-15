@@ -141,6 +141,27 @@ async def test_resolve_resident_mentions(db_session):
 
 
 @pytest.mark.anyio
+async def test_resolve_resident_mentions_ignores_non_string(db_session):
+    """Robustness: an LLM may return mentioned_resident as a list / non-string
+    (prompt asks for a name, but models occasionally emit ["亚当","梅"]). resolve
+    runs OUTSIDE the extract/wrapup try/except, so a raw .strip() there would abort
+    the whole memory persistence (violates E-05 'never blank-screen'). Non-string
+    elements must be dropped, valid names still resolve."""
+    from app.models.resident import Resident
+    from app.services.resident_service import resolve_resident_mentions
+
+    r1 = Resident(slug="klaus", name="克劳斯", persona_md="x", creator_id="test-user")
+    db_session.add(r1)
+    await db_session.commit()
+
+    mapping = await resolve_resident_mentions(
+        db_session, ["克劳斯", ["亚当", "梅"], None, 123]
+    )
+    assert mapping["克劳斯"] == r1.id
+    assert len(mapping) == 1
+
+
+@pytest.mark.anyio
 async def test_extract_events_sets_related_resident(db_session, resident):
     from app.models.resident import Resident
     third = Resident(slug="adam", name="亚当", persona_md="x", creator_id="test-user")
