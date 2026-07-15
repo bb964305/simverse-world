@@ -6,9 +6,10 @@ from app.llm.metering import record_usage
 
 
 class RefinementStage:
-    def __init__(self, llm_client, model: str):
+    def __init__(self, llm_client, model: str, session_id: str | None = None):
         self._client = llm_client
         self._model = model
+        self._session_id = session_id
 
     async def run(
         self,
@@ -32,7 +33,8 @@ class RefinementStage:
             system=REFINE_OPTIMIZER_SYSTEM,
             messages=[{"role": "user", "content": f"人物：{character_name}\n验证报告：{validation_str}\n\n{combined}"}],
         )
-        await record_usage("forge_refine", model=self._model, owner="user", response=opt_resp)
+        await record_usage("forge_refine", model=self._model, owner="user", response=opt_resp,
+                           conversation_id=self._session_id)
         opt_log = self._extract_json(opt_resp)
 
         # Agent 2: Creator perspective
@@ -41,7 +43,8 @@ class RefinementStage:
             system=REFINE_CREATOR_SYSTEM,
             messages=[{"role": "user", "content": f"人物：{character_name}\n\n{combined}"}],
         )
-        await record_usage("forge_refine", model=self._model, owner="user", response=creator_resp)
+        await record_usage("forge_refine", model=self._model, owner="user", response=creator_resp,
+                           conversation_id=self._session_id)
         creator_log = self._extract_json(creator_resp)
 
         # Merge suggestions
@@ -87,7 +90,8 @@ class RefinementStage:
                 layer_md=layer_md,
             )}],
         )
-        await record_usage("forge_refine", model=self._model, owner="user", response=response)
+        await record_usage("forge_refine", model=self._model, owner="user", response=response,
+                           conversation_id=self._session_id)
         for block in response.content:
             if hasattr(block, "text"):
                 return block.text

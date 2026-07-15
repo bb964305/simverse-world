@@ -63,7 +63,8 @@ async def test_agent_loop_tick_round_runs(loop_session_factory, loop_residents):
 
     with patch("app.agent.loop.async_session", loop_session_factory):
         with patch("app.agent.loop.resident_tick", side_effect=mock_tick):
-            with patch("app.agent.loop.should_tick", return_value=True):
+            with patch("app.agent.loop.should_tick", return_value=True), \
+         patch("app.agent.loop.get_activity_probability", return_value=0.5):
                 with patch("app.agent.loop.build_schedule", return_value=MagicMock(
                     wake_hour=6, sleep_hour=23, peak_hours=[10], social_slots=[14], rest_ratio=0.3
                 )):
@@ -87,7 +88,8 @@ async def test_agent_loop_each_tick_gets_own_session(db_session, loop_session_fa
 
     with patch("app.agent.loop.async_session", loop_session_factory):
         with patch("app.agent.loop.resident_tick", side_effect=capture_tick):
-            with patch("app.agent.loop.should_tick", return_value=True):
+            with patch("app.agent.loop.should_tick", return_value=True), \
+         patch("app.agent.loop.get_activity_probability", return_value=0.5):
                 with patch("app.agent.loop.build_schedule", return_value=MagicMock(
                     wake_hour=6, sleep_hour=23, peak_hours=[10], social_slots=[14], rest_ratio=0.3
                 )):
@@ -117,7 +119,8 @@ async def test_agent_loop_respects_max_concurrent(loop_session_factory, loop_res
 
     with patch("app.agent.loop.async_session", loop_session_factory):
         with patch("app.agent.loop.resident_tick", side_effect=slow_tick):
-            with patch("app.agent.loop.should_tick", return_value=True):
+            with patch("app.agent.loop.should_tick", return_value=True), \
+         patch("app.agent.loop.get_activity_probability", return_value=0.5):
                 with patch("app.agent.loop.build_schedule", return_value=MagicMock(
                     wake_hour=6, sleep_hour=23, peak_hours=[10], social_slots=[14], rest_ratio=0.3
                 )):
@@ -146,7 +149,8 @@ async def test_agent_loop_broadcasts_movement(loop_session_factory, loop_residen
 
     with patch("app.agent.loop.async_session", loop_session_factory):
         with patch("app.agent.loop.resident_tick", return_value=wander_result):
-            with patch("app.agent.loop.should_tick", return_value=True):
+            with patch("app.agent.loop.should_tick", return_value=True), \
+         patch("app.agent.loop.get_activity_probability", return_value=0.5):
                 with patch("app.agent.loop.build_schedule", return_value=MagicMock(
                     wake_hour=6, sleep_hour=23, peak_hours=[10], social_slots=[14], rest_ratio=0.3
                 )):
@@ -173,7 +177,8 @@ async def test_agent_loop_one_failed_tick_doesnt_crash(loop_session_factory, loo
 
     with patch("app.agent.loop.async_session", loop_session_factory):
         with patch("app.agent.loop.resident_tick", side_effect=flaky_tick):
-            with patch("app.agent.loop.should_tick", return_value=True):
+            with patch("app.agent.loop.should_tick", return_value=True), \
+         patch("app.agent.loop.get_activity_probability", return_value=0.5):
                 with patch("app.agent.loop.build_schedule", return_value=MagicMock(
                     wake_hour=6, sleep_hour=23, peak_hours=[10], social_slots=[14], rest_ratio=0.3
                 )):
@@ -202,7 +207,8 @@ async def test_loop_player_only_skips_round(loop_session_factory, loop_residents
     with patch("app.agent.loop.async_session", loop_session_factory), \
          patch("app.agent.loop.background_tier", AsyncMock(return_value=BudgetTier.PLAYER_ONLY)), \
          patch("app.agent.loop.resident_tick", side_effect=spy_tick), \
-         patch("app.agent.loop.should_tick", return_value=True):
+         patch("app.agent.loop.should_tick", return_value=True), \
+         patch("app.agent.loop.get_activity_probability", return_value=0.5):
         tier = await loop._tick_round()
 
     assert tier == BudgetTier.PLAYER_ONLY
@@ -226,6 +232,7 @@ async def test_loop_rule_only_forces_plan_and_suppresses_chat(loop_session_facto
          patch("app.agent.loop.background_tier", AsyncMock(return_value=BudgetTier.RULE_ONLY)), \
          patch("app.agent.loop.resident_tick", side_effect=chat_tick), \
          patch("app.agent.loop.should_tick", return_value=True), \
+         patch("app.agent.loop.get_activity_probability", return_value=0.5), \
          patch("app.agent.loop.build_schedule", return_value=MagicMock(
              wake_hour=6, sleep_hour=23, peak_hours=[10], social_slots=[14], rest_ratio=0.3)), \
          patch.object(loop, "_initiate_chat", new=AsyncMock()) as mock_initiate, \
@@ -237,3 +244,27 @@ async def test_loop_rule_only_forces_plan_and_suppresses_chat(loop_session_facto
     assert seen_force and all(seen_force)          # every tick forced plan-only
     mock_initiate.assert_not_called()              # inter-resident chat suppressed
     assert not any(b.get("type") == "resident_chat" for b in broadcasts)
+
+
+# ── Night homing（burn-in 修复批次 1, Task 3）────────────────────────
+
+@pytest.mark.anyio
+async def test_tick_round_night_runs_homing_not_llm(loop_session_factory, loop_residents):
+    """活动概率 0（夜间）时：不调 resident_tick，改跑 night_homing_step。"""
+    homing = AsyncMock(return_value=(1, 1))
+    tick = AsyncMock()
+    with patch("app.agent.loop.async_session", loop_session_factory), \
+         patch("app.agent.loop.build_schedule", return_value=MagicMock(
+             wake_hour=8, sleep_hour=22, peak_hours=[10], social_slots=[], rest_ratio=0.3)), \
+         patch("app.agent.loop.get_activity_probability", return_value=0.0), \
+         patch("app.agent.loop.night_homing_step", homing), \
+         patch("app.agent.loop.resident_tick", tick), \
+         patch("app.agent.loop.manager") as mock_manager:
+        mock_manager.broadcast = AsyncMock()
+        await AgentLoop()._tick_round()
+
+    assert tick.await_count == 0            # 零 LLM tick
+    assert homing.await_count >= 1          # 归巢步跑了
+    assert mock_manager.broadcast.await_count >= 1   # resident_move 帧广播
+    frame = mock_manager.broadcast.await_args_list[0].args[0]
+    assert frame["type"] == "resident_move" and frame["status"] == "walking"

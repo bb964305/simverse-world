@@ -7,7 +7,7 @@ phases:
   perceive:
     plugin: app.agent.phases.perceive.social.SocialPerceivePlugin
     params:
-      radius: 14
+      radius: 24
       track_relationships: true
 
   plan:

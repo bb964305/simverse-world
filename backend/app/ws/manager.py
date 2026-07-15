@@ -9,10 +9,10 @@ Now the only process-local state is ``self.local`` — the actual WebSocket
 objects for clients connected to *this* worker (WebSockets cannot be shared
 across processes). Everything else is in Redis:
 
-- ``sv:positions``      hash  user_id -> {x, y, direction, name}  (also the online set)
-- ``sv:chatting``       hash  resident_id -> user_id              (player<->NPC chat lock)
-- ``sv:socializing``    hash  resident_id -> partner_resident_id  (NPC<->NPC social lock)
-- ``sv:queue:{rid}``    list  [user_id, ...]                      (waiting-to-chat queue)
+- ``sv:positions``        hash    user_id -> {x, y, direction, name}  (also the online set)
+- ``sv:chatting:{rid}``   string  -> user_id             (player<->NPC chat lock, TTL)
+- ``sv:socializing:{rid}``string  -> partner_resident_id (NPC<->NPC social lock, TTL)
+- ``sv:queue:{rid}``      list    [user_id, ...]         (waiting-to-chat queue)
 
 Realtime delivery goes over a Redis pub/sub channel (``sv:ws``): ``broadcast``
 and cross-worker ``send`` publish an envelope; every API worker runs one
@@ -21,8 +21,12 @@ and cross-worker ``send`` publish an envelope; every API worker runs one
 never touches Redis, keeping the common "reply to the caller" path fast.
 
 The lock/queue helpers avoid Lua so they work on both redis-py and fakeredis:
-re-entrant locking uses HSETNX + a follow-up HGET, which is safe because a held
-field only changes on explicit unlock.
+re-entrant locking uses SET NX + a follow-up GET, which is safe because a held
+key only changes on explicit unlock or TTL expiry.
+
+Lock TTL（burn-in 工程观察②）：锁从 hash field 改为独立 key 挂 TTL——进程非优雅
+退出（OOM/kill -9，finally 不跑）留下的孤锁到期自愈；优雅路径仍由 disconnect/
+chat_end 显式释放。玩家锁重入即续期（每条 chat 消息都会重入一次 = 心跳）。
 """
 import asyncio
 import json
@@ -35,10 +39,15 @@ from app.redis_client import get_redis
 logger = logging.getLogger(__name__)
 
 POSITIONS_KEY = "sv:positions"
-CHATTING_KEY = "sv:chatting"
-SOCIALIZING_KEY = "sv:socializing"
+CHATTING_PREFIX = "sv:chatting:"      # per-resident string key, value=user_id
+SOCIALIZING_PREFIX = "sv:socializing:"  # per-resident string key, value=partner_id
 QUEUE_PREFIX = "sv:queue:"
 WS_CHANNEL = "sv:ws"
+
+# 孤锁自愈上限。玩家锁每条消息重入续期，30 分钟只兜底"进程死了"的情况；
+# NPC 互聊单次就几秒-几分钟，10 分钟足够。
+CHAT_LOCK_TTL = 1800
+SOCIAL_LOCK_TTL = 600
 
 
 class ConnectionManager:
@@ -60,10 +69,9 @@ class ConnectionManager:
         self.local.pop(user_id, None)
         r = get_redis()
         await r.hdel(POSITIONS_KEY, user_id)
-        locks = await r.hgetall(CHATTING_KEY)
-        held = [rid for rid, uid in locks.items() if uid == user_id]
-        if held:
-            await r.hdel(CHATTING_KEY, *held)
+        async for key in r.scan_iter(match=CHATTING_PREFIX + "*"):
+            if await r.get(key) == user_id:
+                await r.delete(key)
         await self.cancel_all_queues(user_id)
 
     # ------------------------------------------------------------------ #
@@ -190,17 +198,23 @@ class ConnectionManager:
     async def lock_resident(self, resident_id: str, user_id: str) -> bool:
         """Lock resident for chatting. Returns False if held by another user.
 
-        Re-entrant: the same user re-locking their own resident returns True.
-        HSETNX is atomic; the follow-up HGET is safe because a held field only
-        changes on explicit unlock.
+        Re-entrant: the same user re-locking their own resident returns True
+        AND refreshes the TTL (every chat message re-locks, so an active chat
+        never expires; an orphaned lock self-heals after CHAT_LOCK_TTL).
+        SET NX is atomic; the follow-up GET is safe because a held key only
+        changes on explicit unlock or TTL expiry.
         """
         r = get_redis()
-        if await r.hsetnx(CHATTING_KEY, resident_id, user_id):
+        key = CHATTING_PREFIX + resident_id
+        if await r.set(key, user_id, nx=True, ex=CHAT_LOCK_TTL):
             return True
-        return (await r.hget(CHATTING_KEY, resident_id)) == user_id
+        if (await r.get(key)) == user_id:
+            await r.expire(key, CHAT_LOCK_TTL)  # 重入=心跳续期
+            return True
+        return False
 
     async def unlock_resident(self, resident_id: str) -> None:
-        await get_redis().hdel(CHATTING_KEY, resident_id)
+        await get_redis().delete(CHATTING_PREFIX + resident_id)
 
     # ------------------------------------------------------------------ #
     # Chat queue                                                         #
@@ -241,21 +255,26 @@ class ConnectionManager:
     async def lock_socializing(self, res_a_id: str, res_b_id: str) -> bool:
         """Mark two residents as socializing with each other.
 
-        Returns False if either is already locked.
+        Returns False if either is already locked. Both keys carry a TTL so a
+        non-graceful worker death cannot leave the pair locked forever.
         """
         r = get_redis()
-        if await r.hexists(SOCIALIZING_KEY, res_a_id) or await r.hexists(
-            SOCIALIZING_KEY, res_b_id
-        ):
+        key_a = SOCIALIZING_PREFIX + res_a_id
+        key_b = SOCIALIZING_PREFIX + res_b_id
+        if not await r.set(key_a, res_b_id, nx=True, ex=SOCIAL_LOCK_TTL):
             return False
-        await r.hset(SOCIALIZING_KEY, mapping={res_a_id: res_b_id, res_b_id: res_a_id})
+        if not await r.set(key_b, res_a_id, nx=True, ex=SOCIAL_LOCK_TTL):
+            await r.delete(key_a)  # roll back the half-taken pair
+            return False
         return True
 
     async def unlock_socializing(self, res_a_id: str, res_b_id: str) -> None:
-        await get_redis().hdel(SOCIALIZING_KEY, res_a_id, res_b_id)
+        await get_redis().delete(
+            SOCIALIZING_PREFIX + res_a_id, SOCIALIZING_PREFIX + res_b_id
+        )
 
     async def is_socializing(self, resident_id: str) -> bool:
-        return bool(await get_redis().hexists(SOCIALIZING_KEY, resident_id))
+        return bool(await get_redis().exists(SOCIALIZING_PREFIX + resident_id))
 
 
 manager = ConnectionManager()

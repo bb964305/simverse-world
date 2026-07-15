@@ -4,11 +4,12 @@ EXTRACT_EVENTS_SYSTEM = """\
 每条记忆应该是一句简洁的陈述，描述"发生了什么"。
 - 聚焦于有意义的信息交换、情感表达、承诺、观点，而非寒暄
 - 如果对话很短或没有实质内容，可以只返回 1 条或空列表
+- mentioned_resident 只填村民（NPC）的名字，玩家/用户不填；没有提及其他村民时填 null
 
 {sbti_coloring}
 
 输出严格 JSON 格式：
-{{"memories": [{{"content": "...", "importance": 0.0-1.0}}]}}
+{{"memories": [{{"content": "...", "importance": 0.0-1.0, "mentioned_resident": "记忆中提及的其他村民名字，没有则为 null"}}]}}
 
 importance 评分标准：
 - 0.1-0.3: 日常闲聊，无特殊信息
@@ -68,9 +69,10 @@ CHAT_WRAPUP_SYSTEM = """\
 
 importance 评分：0.1-0.3 日常闲聊 / 0.4-0.6 有实质话题 / 0.7-0.8 涉及感受或价值观 / 0.9-1.0 重大事件或冲突。
 affinity：-1（厌恶）到 1（亲密）；trust：0 到 1；tags：2-5 个印象标签。
+mentioned_resident 只填村民（NPC）的名字，玩家/用户不填；没有提及其他村民时填 null。
 
 输出严格 JSON（不要输出其它内容）：
-{{"initiator": {{"memories": [{{"content": "...", "importance": 0.0}}], "relationship": {{"content": "...", "importance": 0.0, "metadata": {{"affinity": 0.0, "trust": 0.0, "tags": []}}}}}}, "target": {{"memories": [{{"content": "...", "importance": 0.0}}], "relationship": {{"content": "...", "importance": 0.0, "metadata": {{"affinity": 0.0, "trust": 0.0, "tags": []}}}}}}, "summary": "...", "mood": "positive/neutral/negative"}}
+{{"initiator": {{"memories": [{{"content": "...", "importance": 0.0, "mentioned_resident": "记忆中提及的其他村民名字，没有则为 null"}}], "relationship": {{"content": "...", "importance": 0.0, "metadata": {{"affinity": 0.0, "trust": 0.0, "tags": []}}}}}}, "target": {{"memories": [{{"content": "...", "importance": 0.0, "mentioned_resident": "记忆中提及的其他村民名字，没有则为 null"}}], "relationship": {{"content": "...", "importance": 0.0, "metadata": {{"affinity": 0.0, "trust": 0.0, "tags": []}}}}}}, "summary": "...", "mood": "positive/neutral/negative"}}
 """
 
 CHAT_WRAPUP_USER = """\

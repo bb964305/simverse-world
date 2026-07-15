@@ -124,6 +124,13 @@ def build_decision_prompt(
             user += "\n（暴风雨，尽量待在室内，别选室外行动）"
         elif kind == "snow":
             user += "\n（下雪了，出门会踩一脚雪，不过看雪景也不错）"
+    # 社交软提示（burn-in 发现：自然互聊为零；有邻居时轻推一把，不强制）
+    if nearby_residents and ActionType.CHAT_RESIDENT in available_actions:
+        names = "、".join(r.name for r in nearby_residents[:3])
+        user += (
+            f"\n附近有可以交谈的居民：{names}。"
+            "如果当前没有更重要的事，主动搭话（CHAT_RESIDENT）能带来新鲜事和关系进展。"
+        )
     # E1: current mood + a soft behavior hint (prompt hint, not a hard filter).
     mood = resident.mood_json or {}
     label = mood.get("label")
