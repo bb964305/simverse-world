@@ -181,10 +181,16 @@ async def get_run_steps(run_id: str, request: Request, after: int = 0, db: Async
     return {"steps": [svc.serialize_step(s) for s in rows]}
 
 
+class ApprovalBody(BaseModel):
+    approval_id: str
+    decision: bool
+
+
 @router.post("/runs/{run_id}/approval")
-async def run_approval(run_id: str, request: Request, db: AsyncSession = Depends(get_db)):
-    """Respond to a sensitive-action breakpoint. The pause/resume machinery lands
-    in P2; the Mock adapter never pauses, so there is nothing to approve here."""
+async def run_approval(run_id: str, body: ApprovalBody, request: Request, db: AsyncSession = Depends(get_db)):
+    """Respond to a sensitive-action breakpoint (spec §5.3). Records the
+    approve/deny decision on the run; the runner's poll picks it up and resumes
+    (or the timeout default-denies)."""
     user = await _require_user(request, db)
     run = await db.get(LabRun, run_id)
     if run is None:
@@ -194,7 +200,17 @@ async def run_approval(run_id: str, request: Request, db: AsyncSession = Depends
         raise HTTPException(status_code=403, detail="not your run")
     if run.status != "needs_approval":
         raise HTTPException(status_code=409, detail="no pending approval")
-    raise HTTPException(status_code=501, detail="approval handling arrives in P2")
+    approvals = list(run.approvals_json or [])
+    found = False
+    for a in approvals:
+        if a.get("id") == body.approval_id and a.get("status") == "pending":
+            a["status"] = "approved" if body.decision else "denied"
+            found = True
+    if not found:
+        raise HTTPException(status_code=404, detail="pending approval not found")
+    run.approvals_json = approvals
+    await db.commit()
+    return {"ok": True, "approval_id": body.approval_id, "decision": body.decision}
 
 
 # ── artifacts ─────────────────────────────────────────────────────────

@@ -178,6 +178,17 @@ class Settings(BaseSettings):
     lab_run_heartbeat_ttl_s: int = 300      # orphan-run watchdog threshold (no heartbeat past this → reap+refund)
     lab_auto_release_hours: int = 72        # review→auto-release window (anti-runaway)
     lab_task_deadline_hours: int = 24       # default task deadline if the issuer doesn't set one
+    # P2 real sandbox: one-shot container image + default-deny egress allowlist.
+    lab_sandbox_image: str = ""             # container image for isolated runs ("" = not provisioned)
+    lab_egress_allowlist: list[str] = []    # allowed egress hosts (e.g. ["*.wikipedia.org"])
+    # Real adapter endpoints — empty string = unconfigured (portrait/tts grouping
+    # convention). The adapter still imports; start() raises LabAdapterUnconfigured.
+    lab_openclaw_base_url: str = ""
+    lab_openclaw_api_key: str = ""
+    lab_hermes_base_url: str = ""
+    lab_hermes_api_key: str = ""
+    lab_computer_use_base_url: str = ""
+    lab_computer_use_api_key: str = ""
 
     # --- Rate Limiting (OPTIMIZATION_PLAN P1-1, limit sub-item) ---
     # WS chat_msg sliding window is in-process (single-worker model); REST uses

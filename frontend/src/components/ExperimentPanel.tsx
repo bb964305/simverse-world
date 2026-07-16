@@ -5,9 +5,11 @@ import { onWSMessage } from '../services/ws'
 import { useGameStore } from '../stores/gameStore'
 import {
   listLabResearchers, createLabTask, getLabTasks, getLabTask,
-  cancelLabTask, acceptLabResult, rejectLabResult, getLabRunSteps, getMe,
+  cancelLabTask, acceptLabResult, rejectLabResult, getLabRunSteps, respondLabApproval, getMe,
   type LabResearcher, type LabTask, type LabRun, type LabRunStep, type LabArtifact,
 } from '../services/api'
+
+interface LabApproval { id: string; tool?: string | null; summary?: string; status?: string }
 
 // ExperimentPanel — Lab / 实验楼 entry panel (spec §9). Self-mounted in TopNav.
 // Panel-local state (spec sanctions this over a store slice); live run steps come
@@ -257,6 +259,19 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
             {run && <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
               运行 {run.status} · 适配器 {run.adapter}
             </div>}
+            {run && (run.approvals as LabApproval[] | undefined || [])
+              .filter((a) => a.status === 'pending').map((a) => (
+              <div key={a.id} style={{
+                border: '1px solid #f59e0b66', background: '#f59e0b12', borderRadius: 8,
+                padding: 10, marginBottom: 8,
+              }}>
+                <div style={{ fontSize: 12, marginBottom: 6 }}>⚠️ 敏感动作待批准：{a.summary || a.tool}</div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button onClick={async () => { await respondLabApproval(run.id, a.id, true); }} style={btn(ACCENT)}>批准</button>
+                  <button onClick={async () => { await respondLabApproval(run.id, a.id, false); }} style={btn('#ef4444')}>拒绝</button>
+                </div>
+              </div>
+            ))}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 300, overflowY: 'auto' }}>
               {steps.map((s) => (
                 <div key={`${s.run_id}-${s.seq}`} style={{ fontSize: 12, lineHeight: 1.5 }}>

@@ -119,3 +119,10 @@ export function getLabRunSteps(id: string, after = 0): Promise<{ steps: LabRunSt
 export function getLabArtifact(id: string): Promise<LabArtifact> {
   return apiFetch(`/lab/artifacts/${encodeURIComponent(id)}`)
 }
+
+export function respondLabApproval(runId: string, approvalId: string, decision: boolean): Promise<{ ok: boolean }> {
+  return apiFetch(`/lab/runs/${encodeURIComponent(runId)}/approval`, {
+    method: 'POST',
+    body: JSON.stringify({ approval_id: approvalId, decision }),
+  })
+}

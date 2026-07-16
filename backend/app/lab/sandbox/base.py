@@ -64,3 +64,113 @@ class SandboxAdapter(Protocol):
     async def approve(self, handle: Any, approval_id: str, decision: bool) -> None: ...
     async def collect_artifacts(self, handle: Any) -> list[ArtifactSpec]: ...
     async def stop(self, handle: Any) -> None: ...
+
+
+class LabAdapterUnconfigured(RuntimeError):
+    """Raised at start() when a real adapter has no ``base_url`` configured.
+    Never raised at import — the module always imports so the app boots without
+    the external runtime (spec §13 P2: 空串=未配置, 无外部依赖也必须能 import)."""
+
+
+class HttpAgentAdapter:
+    """Shared skeleton for HTTP-backed real adapters (OpenClaw / Hermes /
+    computer-use). Subclasses set ``name`` and read their own base_url/api_key
+    from settings. The wire protocol below is a deliberate placeholder to be
+    aligned with the concrete runtime during P2 rollout; it is import-safe and
+    reuses the process-wide httpx client (trust_env=False).
+    """
+    name = "http"
+
+    def __init__(self, base_url: str = "", api_key: str = "", timeout: float = 60.0) -> None:
+        self.base_url = (base_url or "").rstrip("/")
+        self.api_key = api_key or ""
+        self.timeout = timeout
+
+    def _require_configured(self) -> None:
+        if not self.base_url:
+            raise LabAdapterUnconfigured(f"{self.name} adapter has no base_url configured")
+
+    def _headers(self) -> dict[str, str]:
+        h = {"Content-Type": "application/json"}
+        if self.api_key:
+            h["Authorization"] = f"Bearer {self.api_key}"
+        return h
+
+    async def start(self, spec: RunSpec) -> "HttpHandle":
+        self._require_configured()
+        from app.http import get_client
+        resp = await get_client().post(
+            f"{self.base_url}/runs", headers=self._headers(), timeout=self.timeout,
+            json={"run_id": spec.run_id, "scopes": spec.scopes, "budget_usd": spec.budget_usd,
+                  "egress_allowlist": spec.egress_allowlist},
+        )
+        resp.raise_for_status()
+        session_id = (resp.json() or {}).get("session_id", spec.run_id)
+        return HttpHandle(self, session_id, spec)
+
+    async def submit_goal(self, handle: "HttpHandle", brief: str, scopes: list[str]) -> None:
+        from app.http import get_client
+        resp = await get_client().post(
+            f"{self.base_url}/runs/{handle.session_id}/goal", headers=self._headers(),
+            timeout=self.timeout, json={"brief": brief, "scopes": scopes},
+        )
+        resp.raise_for_status()
+
+    async def step_stream(self, handle: "HttpHandle") -> AsyncIterator[StepEvent]:
+        from app.http import get_client
+        after = 0
+        while True:
+            resp = await get_client().get(
+                f"{self.base_url}/runs/{handle.session_id}/steps", headers=self._headers(),
+                timeout=self.timeout, params={"after": after},
+            )
+            resp.raise_for_status()
+            data = resp.json() or {}
+            for raw in data.get("steps", []):
+                after = max(after, int(raw.get("seq", after)))
+                yield StepEvent(
+                    phase=raw.get("phase", "message"), summary=raw.get("summary", ""),
+                    tool=raw.get("tool"), payload=raw.get("payload") or {},
+                    cost_usd_cents=int(raw.get("cost_usd_cents", 0)),
+                    approval=raw.get("approval"),
+                )
+            if data.get("done"):
+                break
+
+    async def approve(self, handle: "HttpHandle", approval_id: str, decision: bool) -> None:
+        from app.http import get_client
+        resp = await get_client().post(
+            f"{self.base_url}/runs/{handle.session_id}/approve", headers=self._headers(),
+            timeout=self.timeout, json={"approval_id": approval_id, "decision": decision},
+        )
+        resp.raise_for_status()
+
+    async def collect_artifacts(self, handle: "HttpHandle") -> list[ArtifactSpec]:
+        from app.http import get_client
+        resp = await get_client().get(
+            f"{self.base_url}/runs/{handle.session_id}/artifacts", headers=self._headers(),
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return [
+            ArtifactSpec(kind=a.get("kind", "text"), title=a.get("title", ""), uri=a.get("uri"),
+                         text_md=a.get("text_md"), meta=a.get("meta") or {})
+            for a in (resp.json() or {}).get("artifacts", [])
+        ]
+
+    async def stop(self, handle: "HttpHandle") -> None:
+        from app.http import get_client
+        try:
+            await get_client().post(
+                f"{self.base_url}/runs/{handle.session_id}/stop", headers=self._headers(),
+                timeout=self.timeout,
+            )
+        except Exception:
+            pass  # best-effort teardown
+
+
+class HttpHandle(SandboxHandle):
+    def __init__(self, adapter: HttpAgentAdapter, session_id: str, spec: RunSpec) -> None:
+        self.adapter = adapter
+        self.session_id = session_id
+        self.spec = spec

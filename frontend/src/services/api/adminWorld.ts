@@ -137,3 +137,50 @@ export function deleteAdminEvent(token: string, id: string): Promise<{ ok: boole
     headers: { Authorization: `Bearer ${token}` },
   })
 }
+
+// ─── Admin Lab: run monitor + kill switch (P2) ───────────────────
+
+export interface AdminLabRun {
+  id: string
+  task_id: string
+  researcher_slug: string
+  adapter: string
+  status: string
+  scopes: string[]
+  budget_usd_cents: number
+  cost_usd_cents: number
+  approvals: unknown[]
+  error: string | null
+  started_at: string | null
+  ended_at: string | null
+}
+
+export interface AdminLabStatus {
+  deploy_enabled: boolean
+  runtime_enabled: boolean
+  adapter: string
+}
+
+export function getAdminLabStatus(token: string): Promise<AdminLabStatus> {
+  return apiFetch('/admin/lab/status', { headers: { Authorization: `Bearer ${token}` } })
+}
+
+export function setAdminLabKillSwitch(token: string, enabled: boolean): Promise<{ runtime_enabled: boolean }> {
+  return apiFetch('/admin/lab/kill-switch', {
+    method: 'POST',
+    body: JSON.stringify({ enabled }),
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export function getAdminLabRuns(token: string, status?: string): Promise<{ runs: AdminLabRun[] }> {
+  const query = status ? `?status=${encodeURIComponent(status)}` : ''
+  return apiFetch(`/admin/lab/runs${query}`, { headers: { Authorization: `Bearer ${token}` } })
+}
+
+export function cancelAdminLabRun(token: string, runId: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/admin/lab/runs/${encodeURIComponent(runId)}/cancel`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
