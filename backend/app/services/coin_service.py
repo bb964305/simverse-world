@@ -36,7 +36,12 @@ async def charge(db: AsyncSession, user_id: str, amount: int, reason: str) -> bo
         .execution_options(synchronize_session=False)
     )
     if result.rowcount == 0:
-        await db.rollback()
+        # Guard matched 0 rows → nothing was written, so there is nothing to undo.
+        # Do NOT rollback here: rollback expires EVERY ORM object in the caller's
+        # session (this is independent of expire_on_commit=False, which only
+        # governs commit), so a later lazy attribute access — e.g. resident.id in
+        # the ws chat wake path — raises MissingGreenlet under asyncio. Leave the
+        # (empty) transaction for the caller to manage.
         return False
     db.add(Transaction(user_id=user_id, amount=-amount, reason=reason))
     await db.commit()
@@ -55,7 +60,9 @@ async def transfer(db: AsyncSession, from_user: str, to_user: str, amount: int, 
         .execution_options(synchronize_session=False)
     )
     if debited.rowcount == 0:
-        await db.rollback()
+        # Nothing written (guard matched 0 rows) → no rollback: rollback would
+        # expire the caller's ORM objects (see charge()). Only the credit-failed
+        # branch below rolls back, because there the debit really did write.
         return False
     credited = await db.execute(
         update(User)
@@ -85,7 +92,8 @@ async def hold(db: AsyncSession, user_id: str, amount: int, reason: str) -> str 
         .execution_options(synchronize_session=False)
     )
     if debited.rowcount == 0:
-        await db.rollback()
+        # Nothing written → no rollback (would expire the caller's ORM objects,
+        # e.g. the freshly-created LabTask in lab_task_service). See charge().
         return None
     h = CoinHold(user_id=user_id, amount=amount, reason=reason, status="held")
     db.add(h)
