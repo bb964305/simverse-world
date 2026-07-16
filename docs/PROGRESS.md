@@ -258,6 +258,9 @@
 - [x] **GO_HOME 冒烟实证过（2026-07-16 UTC 22 sleep 窗口现场）**：sleep 门关 8/9，两次快照隔一 tick——6 个居民 status=walking 逐格朝各自 home 精确挪 1 格（klaus/adam/tamara/夏洛克/林晚秋/陈默 全 A* 寻路收敛），mei 已抵家转 idle。**ad8891f 生效**：不再"就地冻结假睡"，零 LLM（归巢分支 resident_tick 前返回，无 llm_usage）。数据缺口：`p-新居民`（玩家 avatar）home_location_id=None → 无家可归就地待（onboarding 未设 home，与"玩家 avatar 被 tick"同源，记跟进，非 NPC 归巢 bug）。
 - **待办/时间门**：① **F-02 真实账单对账**——我方 burnin_report 出成本合计，需 Jimmy 抄阿里云[模型观测](https://bailian.console.aliyun.com/?tab=model#/model-telemetry)token 数 + 账单明细扣费算比值（目标 0.8–1.2；换按量后终于可做）；② gossip 实际掷中概率性待更多量；③ Phaser 首登画布已上线+单测过，待 Jimmy 目视。
 
+- [x] **阶段 3「24h」分析 + agent_loop"假 stall"根因（2026-07-16，systematic-debugging）**：观察到世界 07-16 08:39 后 ~6.6h 零 LLM/零移动、居民冻在家、restart 无效，**初判 agent_loop 挂死——证伪了**：① `pg_stat_activity` 证 loop 每 60s 在转（round 连接 ROLLBACK）；② `tick.py:53` `_over_daily_limit` 早退；③ Redis 证 9 居民今日计数**全 =20=`agent_max_daily_actions`**；④ **force-test 铁证**（清 klaus 计数 → 他立刻 REFLECT、计数重涨）。**根因=日行动 cap=20**：居民活跃窗（北京 15-17=UTC 7-9）烧满 20 动作即整天 no-op，计数在 Redis+日期戳（**跨重启存活→restart 无效**，UTC 午夜重置）。**属设计非 bug**（阶段 1"成本拐点 AGENT_MAX_DAILY_ACTIONS=20 烧完"同源）。**py-spy 确认 Sentry 在跑**（退出准则可查）。**24h 评估重画**：世界每 UTC 天只真活 ~2-3h，低成本主要是"大部分时间休眠 + deepseek 比 Haiku 基线便宜 6.6x"，**非纯 E-09 效率**；稳态数据薄。**教训**：低活跃≠挂死，cap 触顶别误判 stall；py-spy "idle in select" 无法区分卡死与 round 间 sleep，要用 pg_stat_activity 证 loop 在转。
+- **阶段 3 定版前置（config 决策待 Jimmy）**：cap=20 对"活的世界"太低 → 世界每天休眠 ~21h。选项：① 抬 `AGENT_MAX_DAILY_ACTIONS`（60-100，成本外推 ~$0.08-0.13/天 仍 <10% 预算）；② 改"硬日 cap"为"每小时速率限制"（动作摊全天而非 burst-then-dead）；③ 修 UTC 作息锚（发现⑤）。当前配置下"48h 定版"跑出来是"burst + 21h 休眠 ×2"，无定版意义。
+
 ## 发现（施工中发现的新问题，不当场处理）
 - **burn-in 跑测试/验收脚本的工程观察（2026-07-14，副产物）**：
   - **测试对 backend/.env 有隐式依赖（实锤）**：worktree 中 backend/ 无 .env 时，`test_rate_limit.py` 在 LLM client 构造期抛 `ValueError: server_hostname is only meaningful with ssl`（某配置项空值触发），从主仓库 `cp .env` 后 744 全绿。CI 因有 env 而绿，但本地 worktree/裸环境跑测试会挂——测试非完全隔离。建议 conftest 注 dummy env（LLM_BASE_URL 等），去掉对真实 .env 的依赖。
