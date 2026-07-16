@@ -16,7 +16,13 @@ def test_default_secret_allowed_in_debug():
 
 
 def test_real_secret_allowed_when_not_debug():
-    s = Settings(debug=False, jwt_secret="a-long-random-production-secret", _env_file=None)
+    # >=32 chars: the P0-4b hardening (test_config_jwt_guard.py) also floors
+    # secret length, so the "real secret" fixture must clear that bar.
+    s = Settings(
+        debug=False,
+        jwt_secret="a-long-random-production-secret-value",
+        _env_file=None,
+    )
     assert s.debug is False
 
 

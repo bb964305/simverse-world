@@ -2,6 +2,15 @@ from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 _DEFAULT_JWT_SECRET = "dev-secret-change-in-production"
+# Known placeholders that must never reach production, even though they are
+# not the app's own default constant (e.g. the deploy template ships a
+# different placeholder string than the code's dev default — P0-4b hardening
+# after security audit: an exact-constant-only check let that one through).
+_PLACEHOLDER_JWT_SECRETS = {
+    _DEFAULT_JWT_SECRET,
+    "generate-a-64-char-random-string-here",  # deploy/backend/.env.example
+}
+_MIN_JWT_SECRET_LENGTH = 32
 
 
 class Settings(BaseSettings):
@@ -21,10 +30,14 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _reject_default_jwt_secret(self) -> "Settings":
-        if not self.debug and self.jwt_secret == _DEFAULT_JWT_SECRET:
+        if not self.debug and (
+            self.jwt_secret in _PLACEHOLDER_JWT_SECRETS
+            or len(self.jwt_secret) < _MIN_JWT_SECRET_LENGTH
+        ):
             raise ValueError(
-                "JWT_SECRET is still the insecure default — refusing to start. "
-                "Set JWT_SECRET to a long random string, or set DEBUG=true for "
+                "JWT_SECRET is missing, a known placeholder, or too short "
+                f"(<{_MIN_JWT_SECRET_LENGTH} chars) — refusing to start. Set "
+                "JWT_SECRET to a long random string, or set DEBUG=true for "
                 "local development."
             )
         return self
