@@ -25,6 +25,7 @@ function submitLogin() {
 
 afterEach(() => {
   cleanup()
+  document.body.classList.remove('auth-page-open')
   vi.unstubAllGlobals()
 })
 

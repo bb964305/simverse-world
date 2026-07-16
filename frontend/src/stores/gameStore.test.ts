@@ -21,6 +21,9 @@ function resetStore() {
     chatTarget: null,
     playerChatMessages: [],
     onlinePlayers: new Map(),
+    wsStatus: 'connected',
+    achievementToast: null,
+    pendingEncounter: null,
   })
 }
 
@@ -35,11 +38,21 @@ describe('auth slice', () => {
     expect(JSON.parse(localStorage.getItem('user')!)).toMatchObject({ id: 'u1' })
   })
 
-  it('logout clears both state and localStorage', () => {
+  it('logout clears auth and ephemeral gameplay UI', () => {
     useGameStore.getState().setAuth(testUser, 'tok-123')
+    useGameStore.setState({
+      wsStatus: 'reconnecting',
+      achievementToast: { code: 'first', title: 'First Visit', reward_sc: 5 },
+      pendingEncounter: { resident_slug: 'mei', resident_name: '梅', location_id: 'square', opener: '你好' },
+    })
     useGameStore.getState().logout()
-    expect(useGameStore.getState().token).toBeNull()
-    expect(useGameStore.getState().user).toBeNull()
+    expect(useGameStore.getState()).toMatchObject({
+      user: null,
+      token: null,
+      wsStatus: 'connected',
+      achievementToast: null,
+      pendingEncounter: null,
+    })
     expect(localStorage.getItem('token')).toBeNull()
     expect(localStorage.getItem('user')).toBeNull()
   })
