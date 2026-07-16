@@ -13,12 +13,13 @@ from app.agent.map_data import (
 
 
 def test_locations_has_all_entries():
-    assert len(LOCATIONS) == 20
+    assert len(LOCATIONS) == 21  # +experiment_building (P0 Lab)
     assert "academy" in LOCATIONS
     assert "tavern" in LOCATIONS
     assert "house_a" in LOCATIONS
     assert "apt_star" in LOCATIONS
     assert "central_plaza" in LOCATIONS
+    assert "experiment_building" in LOCATIONS
 
 
 def test_get_location_at_inside_library():
@@ -46,7 +47,7 @@ def test_get_location_by_id():
 
 def test_get_public_locations():
     pubs = get_public_locations()
-    assert len(pubs) == 7
+    assert len(pubs) == 8  # +experiment_building (P0 Lab, type=public)
     names = [p["name"] for p in pubs]
     assert "学院" in names
     assert "市政厅" in names
