@@ -28,6 +28,16 @@ from app.models.season import Season, SeasonScript, Poll, Vote, SeasonScore
 from app.models.goal_investment import GoalInvestment
 from app.models.debate import Debate, DebateStake
 # C3 剧本季 reuses the seasons family (027) — no new migration.
+# Lab (experiment building) core — P1 (migration 032)
+from app.models.coin_hold import CoinHold
+from app.models.resident_treasury import ResidentTreasury
+from app.models.lab_task import LabTask
+from app.models.lab_run import LabRun, LabRunStep
+from app.models.lab_artifact import LabArtifact
+# World governance overlay — P3 (migration 033)
+from app.models.world_change_proposal import WorldChangeProposal
+from app.models.dynamic_location import DynamicLocation
+from app.models.dynamic_mechanic import DynamicMechanic
 
 config = context.config
 if config.config_file_name is not None:

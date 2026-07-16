@@ -1,4 +1,4 @@
-type AdminTab = 'dashboard' | 'users' | 'residents' | 'forge' | 'economy' | 'llm' | 'events' | 'gossip' | 'system'
+type AdminTab = 'dashboard' | 'users' | 'residents' | 'forge' | 'economy' | 'llm' | 'events' | 'gossip' | 'lab_runs' | 'proposals' | 'system'
 
 interface NavItem {
   key: AdminTab
@@ -15,6 +15,8 @@ const NAV_ITEMS: NavItem[] = [
   { key: 'llm', icon: '💸', label: 'LLM 成本' },
   { key: 'events', icon: '📣', label: '世界事件' },
   { key: 'gossip', icon: '🗣️', label: '谣言链' },
+  { key: 'lab_runs', icon: '🧪', label: '实验楼' },
+  { key: 'proposals', icon: '🌍', label: '世界提案' },
   { key: 'system', icon: '⚙️', label: '系统' },
 ]
 

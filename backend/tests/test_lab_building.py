@@ -64,9 +64,14 @@ def test_experiment_building_lookup():
     assert map_data.get_location_at(116, 79)["name"] == "实验楼"
 
 
-def test_load_dynamic_locations_is_noop_in_p0():
-    # P3 replaces the body; the P0 stub must be a harmless 0-return.
-    assert map_data.load_dynamic_locations() == 0
+@pytest.mark.anyio
+async def test_load_dynamic_locations_empty_is_zero():
+    # P3 makes this async + DB-backed; with no overlay rows it merges nothing
+    # (fail-open also returns 0). Full overlay behavior lives in
+    # test_world_governance.
+    import inspect
+    assert inspect.iscoroutinefunction(map_data.load_dynamic_locations)
+    assert await map_data.load_dynamic_locations() == 0
 
 
 # ── RESEARCH action + gating ──────────────────────────────────────────

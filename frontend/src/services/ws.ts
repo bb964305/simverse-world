@@ -72,6 +72,19 @@ export function connectWS(): void {
       if (data.type === 'experiment_prompt') {
         bridge.emit('experiment:open')
       }
+      // Lab run/task live frames. `lab_task_update` and `lab_run_step` are
+      // consumed by ExperimentPanel via the onWSMessage listener fan-out below
+      // (same pattern as forge_progress). A pending sensitive-action approval
+      // additionally surfaces the panel so the player can respond.
+      if (data.type === 'lab_run_approval') {
+        bridge.emit('experiment:open')
+      }
+      // World governance: an applied/reverted proposal changed the map. Minimap
+      // /codex re-pull GET /world/locations on this signal (they listen for the
+      // bridge event); the dynamic layer is runtime data, not a compile-time key.
+      if (data.type === 'world_changed') {
+        bridge.emit('world:changed')
+      }
       // Handle online players
       if (data.type === 'player_moved') {
         useGameStore.getState().setOnlinePlayer({

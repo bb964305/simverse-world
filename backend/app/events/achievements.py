@@ -42,9 +42,17 @@ ACHIEVEMENT_DEFS: list[dict] = [
 _DEF_BY_CODE: dict[str, dict] = {d["code"]: d for d in ACHIEVEMENT_DEFS}
 
 # Target for "visit all locations" — every distinct named, bounded map location.
+# experiment_building is excluded: it's entered only via the player-driven Lab
+# panel and its tile sits in a walled-off pathfinding component (LAB_HANDOFF §5.3),
+# so an organically-exploring player/NPC can never reach it — requiring it would
+# make explorer_all unwinnable. Re-include once the tilemap is carved (P4).
+_UNREACHABLE_FOR_EXPLORER = {"experiment_building"}
 try:
     from app.agent.map_data import LOCATIONS as _LOCATIONS
-    ALL_LOCATIONS_TARGET = len([lid for lid, l in _LOCATIONS.items() if l.get("bounds")])
+    ALL_LOCATIONS_TARGET = len([
+        lid for lid, l in _LOCATIONS.items()
+        if l.get("bounds") and lid not in _UNREACHABLE_FOR_EXPLORER
+    ])
 except Exception:  # pragma: no cover
     ALL_LOCATIONS_TARGET = 20
 

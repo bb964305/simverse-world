@@ -137,3 +137,99 @@ export function deleteAdminEvent(token: string, id: string): Promise<{ ok: boole
     headers: { Authorization: `Bearer ${token}` },
   })
 }
+
+// ─── Admin Lab: run monitor + kill switch (P2) ───────────────────
+
+export interface AdminLabRun {
+  id: string
+  task_id: string
+  researcher_slug: string
+  adapter: string
+  status: string
+  scopes: string[]
+  budget_usd_cents: number
+  cost_usd_cents: number
+  approvals: unknown[]
+  error: string | null
+  started_at: string | null
+  ended_at: string | null
+}
+
+export interface AdminLabStatus {
+  deploy_enabled: boolean
+  runtime_enabled: boolean
+  adapter: string
+}
+
+export function getAdminLabStatus(token: string): Promise<AdminLabStatus> {
+  return apiFetch('/admin/lab/status', { headers: { Authorization: `Bearer ${token}` } })
+}
+
+export function setAdminLabKillSwitch(token: string, enabled: boolean): Promise<{ runtime_enabled: boolean }> {
+  return apiFetch('/admin/lab/kill-switch', {
+    method: 'POST',
+    body: JSON.stringify({ enabled }),
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export function getAdminLabRuns(token: string, status?: string): Promise<{ runs: AdminLabRun[] }> {
+  const query = status ? `?status=${encodeURIComponent(status)}` : ''
+  return apiFetch(`/admin/lab/runs${query}`, { headers: { Authorization: `Bearer ${token}` } })
+}
+
+export function cancelAdminLabRun(token: string, runId: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/admin/lab/runs/${encodeURIComponent(runId)}/cancel`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+// ─── Admin World governance: proposal review (P3) ────────────────
+
+export interface WorldProposal {
+  id: string
+  origin: string
+  origin_ref: string | null
+  author_slug: string | null
+  kind: string
+  title: string
+  rationale_md: string
+  patch: Record<string, unknown>
+  cost_sc: number
+  status: string
+  risk_level: string
+  reviewer_id: string | null
+  review_note: string | null
+  applied_at: string | null
+  reverted_at: string | null
+  created_at: string | null
+  preview?: { kind: string; conflicts?: string[]; adds_location?: string }
+}
+
+export function getAdminProposals(token: string, status?: string): Promise<{ proposals: WorldProposal[] }> {
+  const query = status ? `?status=${encodeURIComponent(status)}` : ''
+  return apiFetch(`/admin/world/proposals${query}`, { headers: { Authorization: `Bearer ${token}` } })
+}
+
+export function getAdminProposal(token: string, id: string): Promise<WorldProposal> {
+  return apiFetch(`/admin/world/proposals/${encodeURIComponent(id)}`, { headers: { Authorization: `Bearer ${token}` } })
+}
+
+export function approveAdminProposal(token: string, id: string, note = ''): Promise<WorldProposal> {
+  return apiFetch(`/admin/world/proposals/${encodeURIComponent(id)}/approve`, {
+    method: 'POST', body: JSON.stringify({ note }), headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export function rejectAdminProposal(token: string, id: string, note = ''): Promise<WorldProposal> {
+  return apiFetch(`/admin/world/proposals/${encodeURIComponent(id)}/reject`, {
+    method: 'POST', body: JSON.stringify({ note }), headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export function revertAdminProposal(token: string, id: string): Promise<WorldProposal> {
+  return apiFetch(`/admin/world/proposals/${encodeURIComponent(id)}/revert`, {
+    method: 'POST', headers: { Authorization: `Bearer ${token}` },
+  })
+}

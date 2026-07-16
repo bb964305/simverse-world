@@ -5,11 +5,15 @@ from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.routers import auth, users, residents, forge, profile, search, bulletin, onboarding, sprites, avatar, settings as settings_router, media as media_router, events as events_router, notifications as notifications_router, achievements as achievements_router, shop as shop_router, digest as digest_router, daily as daily_router, commissions as commissions_router, graph as graph_router, exploration as exploration_router, capsules as capsules_router, feed as feed_router, photos as photos_router, tts as tts_router, seasons as seasons_router, goals as goals_router, debates as debates_router, polls as polls_router, home_decor as home_decor_router
+from app.routers import lab as lab_router
+from app.routers import world as world_router
 # Import the modules whose @on(...) handlers must register on the event bus.
 import app.events.achievements  # noqa: F401
 import app.services.daily_quest_service  # noqa: F401
 import app.services.commission_service  # noqa: F401
 import app.services.season_scorer  # noqa: F401
+import app.services.lab_task_service  # noqa: F401  (lab_task_completed handler)
+import app.services.proposal_service  # noqa: F401  (world_proposal_applied handler)
 from app.routers.admin import router as admin_router
 from app.ws.handlers import websocket_handler
 from app.tasks.heat_cron import heat_cron_loop
@@ -64,6 +68,16 @@ async def lifespan(app):
     from app.services.location_tracker import location_consumer_loop
     location_task = asyncio.create_task(location_consumer_loop())
 
+    # P3: world-overlay — merge active dynamic locations at startup, then
+    # subscribe to sv:world:reload so an applied/reverted proposal takes effect
+    # across processes without a redeploy. Runs on every API worker.
+    from app.lab.apply import reload_world, world_reload_subscriber
+    try:
+        await reload_world()
+    except Exception:
+        logger.warning("initial world overlay load skipped", exc_info=True)
+    world_reload_task = asyncio.create_task(world_reload_subscriber())
+
     # Background loops run in-process only in single-process mode (P0-3):
     # with RUN_BACKGROUND_TASKS=false they are owned by the standalone
     # agent-worker process (python -m app.agent.main).
@@ -85,6 +99,7 @@ async def lifespan(app):
     yield
     subscriber_task.cancel()
     location_task.cancel()
+    world_reload_task.cancel()
     for task in background_tasks:
         task.cancel()
     await close_client()
@@ -143,6 +158,8 @@ app.include_router(seasons_router.router)
 app.include_router(goals_router.router)
 app.include_router(debates_router.router)
 app.include_router(polls_router.router)
+app.include_router(lab_router.router)
+app.include_router(world_router.router)
 app.include_router(admin_router)
 
 # --- Observability (Phase 3): GET /metrics + runtime gauges ---

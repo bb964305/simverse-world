@@ -73,6 +73,28 @@ async def run_nightly_jobs() -> None:
     except Exception:
         logger.error("Event scheduling failed", exc_info=True)
 
+    # Lab: expire overdue tasks + auto-release reviewed ones (72h), and dispatch
+    # any funded open-recruitment tasks that now have an idle researcher.
+    try:
+        from app.services.lab_task_service import expire_lab_tasks, dispatch_open_tasks
+        async with async_session() as db:
+            n = await expire_lab_tasks(db)
+        async with async_session() as db:
+            d = await dispatch_open_tasks(db)
+        if n or d:
+            logger.info("Lab: expired/released %d tasks, dispatched %d", n, d)
+    except Exception:
+        logger.error("Lab task expiry/dispatch failed", exc_info=True)
+
+    # Lab: reap orphaned runs (crashed runner → stale heartbeat) and refund the
+    # escrow so no run stays stuck 'running' with money frozen (spec §5.1).
+    try:
+        n = await sweep_orphan_lab_runs()
+        if n:
+            logger.info("Lab: reaped %d orphan runs", n)
+    except Exception:
+        logger.error("Lab orphan-run sweep failed", exc_info=True)
+
     # A1: weekly life-goal evaluation (Sundays only).
     if datetime.now(UTC).weekday() == 6:
         try:
@@ -80,6 +102,40 @@ async def run_nightly_jobs() -> None:
         except Exception:
             logger.error("Weekly goal eval failed", exc_info=True)
     # Future: E2 dreams, E7 capsule delivery — each own try/except.
+
+
+async def sweep_orphan_lab_runs() -> int:
+    """Reap runs whose heartbeat went stale (runner crashed): mark the run
+    failed and refund the task's escrow. Returns the number reaped."""
+    from sqlalchemy import select
+    from app.models.lab_run import LabRun
+    from app.models.lab_task import LabTask
+    from app.config import settings
+    from app.services.lab_task_service import fail_task
+
+    cutoff = datetime.now(UTC) - timedelta(seconds=settings.lab_run_heartbeat_ttl_s)
+    n = 0
+    async with async_session() as db:
+        stale = (await db.execute(
+            select(LabRun).where(
+                LabRun.status.in_(["queued", "running", "needs_approval"]),
+                LabRun.heartbeat_at.isnot(None),
+                LabRun.heartbeat_at <= cutoff,
+            )
+        )).scalars().all()
+        for run in stale:
+            run.status = "failed"
+            run.ended_at = datetime.now(UTC)
+            run.error = "orphaned: heartbeat stale"
+            await db.commit()
+            task = await db.get(LabTask, run.task_id)
+            if task is not None and task.status not in ("completed", "cancelled", "expired", "failed"):
+                try:
+                    await fail_task(db, task, reason=f"orphan_run:{run.id}")
+                except Exception:
+                    logger.warning("orphan refund failed for task %s", run.task_id, exc_info=True)
+            n += 1
+    return n
 
 
 async def run_weekly_goal_eval() -> None:

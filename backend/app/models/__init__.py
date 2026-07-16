@@ -30,3 +30,13 @@ import app.models.feed  # noqa: F401
 import app.models.season  # noqa: F401
 import app.models.goal_investment  # noqa: F401
 import app.models.debate  # noqa: F401
+# Lab (experiment building) core — P1
+import app.models.coin_hold  # noqa: F401
+import app.models.resident_treasury  # noqa: F401
+import app.models.lab_task  # noqa: F401
+import app.models.lab_run  # noqa: F401
+import app.models.lab_artifact  # noqa: F401
+# World governance overlay — P3
+import app.models.world_change_proposal  # noqa: F401
+import app.models.dynamic_location  # noqa: F401
+import app.models.dynamic_mechanic  # noqa: F401

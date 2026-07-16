@@ -42,6 +42,14 @@ def _build_lookup() -> None:
 
 _build_lookup()
 
+
+def rebuild_lookup() -> None:
+    """Rebuild the tile→location index after the dynamic overlay changes (P3).
+    Called by the world-reload path once LOCATIONS has been re-merged so a newly
+    applied building's tiles resolve to it."""
+    _build_lookup()
+
+
 # Per-user last known location (in-memory, this worker only).
 _last_location: dict[str, str | None] = {}
 _secret_seen: set[tuple[str, str]] = set()  # (user_id, location_id) hidden spots already triggered

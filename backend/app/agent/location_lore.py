@@ -31,6 +31,37 @@ SECRET_TILE_TO_LOCATION: dict[tuple[int, int], str] = {t: loc for loc, t in HIDD
 
 SECRET_REWARD_SC = 5
 
+# Dynamic lore merged from approved add_lore proposals (P3 overlay). Refreshed
+# by the world-reload path; overrides/extends the handwritten LORE above.
+_dynamic_lore: dict[str, str] = {}
+
+
+async def load_dynamic_lore() -> int:
+    """Load active ``lore`` dynamic_mechanics into the in-memory overlay. Called
+    at startup / on the sv:world:reload signal. Fail-open (returns 0)."""
+    from sqlalchemy import select
+    from app.database import async_session
+    from app.models.dynamic_mechanic import DynamicMechanic
+
+    global _dynamic_lore
+    try:
+        async with async_session() as db:
+            rows = (await db.execute(
+                select(DynamicMechanic).where(
+                    DynamicMechanic.kind == "lore", DynamicMechanic.active.is_(True)
+                )
+            )).scalars().all()
+    except Exception:
+        return 0
+    merged: dict[str, str] = {}
+    for r in rows:
+        spec = r.spec_json or {}
+        loc, text = spec.get("location_id"), spec.get("text")
+        if loc and text:
+            merged[loc] = text
+    _dynamic_lore = merged
+    return len(merged)
+
 
 def lore_for(location_id: str) -> str | None:
-    return LORE.get(location_id)
+    return _dynamic_lore.get(location_id) or LORE.get(location_id)
