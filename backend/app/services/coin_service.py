@@ -192,14 +192,25 @@ async def treasury_debit(db: AsyncSession, slug: str, amount: int, reason: str =
 
 
 async def reward(db: AsyncSession, user_id: str, amount: int, reason: str) -> int:
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-    if not user:
+    """Credit ``amount`` to a user. Atomic ``UPDATE ... balance = balance + amount``
+    (mirrors charge()). The old SELECT-then-``user.soul_coin_balance += amount`` read
+    the identity-mapped User, which — after an atomic charge on the same user earlier
+    in the same session (stake→settle, invest→settle) — is STALE (charge uses
+    synchronize_session=False). Committing that object silently overwrote the real
+    balance, minting/burning coins. Returns the fresh balance, 0 if the user is gone.
+    """
+    result = await db.execute(
+        update(User)
+        .where(User.id == user_id)
+        .values(soul_coin_balance=User.soul_coin_balance + amount)
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount == 0:
         return 0
-    user.soul_coin_balance += amount
     db.add(Transaction(user_id=user_id, amount=amount, reason=reason))
     await db.commit()
-    return user.soul_coin_balance
+    row = await db.execute(select(User.soul_coin_balance).where(User.id == user_id))
+    return row.scalar_one_or_none() or 0
 
 
 async def reward_creator_passive(db: AsyncSession, creator_id: str, resident_slug: str) -> dict | None:
