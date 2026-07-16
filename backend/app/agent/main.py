@@ -43,12 +43,21 @@ async def main() -> None:
         except NotImplementedError:  # pragma: no cover — non-Unix platforms
             pass
 
+    # P3: merge the world overlay at startup + subscribe to reloads so the
+    # tick's pathfinding/planning sees an approved building without a redeploy.
+    from app.lab.apply import reload_world, world_reload_subscriber
+    try:
+        await reload_world()
+    except Exception:
+        logger.warning("initial world overlay load skipped", exc_info=True)
+
     tasks = [
         asyncio.create_task(agent_loop.run(), name="agent-loop"),
         asyncio.create_task(heat_cron_loop(), name="heat-cron"),
         asyncio.create_task(event_cron_loop(), name="event-cron"),
         asyncio.create_task(nightly_cron_loop(), name="nightly-cron"),
         asyncio.create_task(embedding_backfill_loop(), name="embedding-backfill"),
+        asyncio.create_task(world_reload_subscriber(), name="world-reload"),
     ]
     stop_task = asyncio.create_task(stop_event.wait(), name="stop-signal")
 

@@ -11,6 +11,7 @@ import { EventsPanel } from '../components/admin/EventsPanel'
 import { LlmUsagePanel } from '../components/admin/LlmUsagePanel'
 import { RumorChainPanel } from '../components/admin/RumorChainPanel'
 import { LabRunsPanel } from '../components/admin/LabRunsPanel'
+import { ProposalsPanel } from '../components/admin/ProposalsPanel'
 import { SystemConfigPanel } from '../components/admin/SystemConfigPanel'
 import { useGameStore } from '../stores/gameStore'
 
@@ -44,6 +45,8 @@ export function AdminPage() {
         return token ? <RumorChainPanel token={token} /> : null
       case 'lab_runs':
         return token ? <LabRunsPanel token={token} /> : null
+      case 'proposals':
+        return token ? <ProposalsPanel token={token} /> : null
       case 'system':
         return token ? <SystemConfigPanel token={token as string} /> : null
       default:

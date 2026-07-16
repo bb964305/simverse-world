@@ -36,3 +36,7 @@ import app.models.resident_treasury  # noqa: F401
 import app.models.lab_task  # noqa: F401
 import app.models.lab_run  # noqa: F401
 import app.models.lab_artifact  # noqa: F401
+# World governance overlay — P3
+import app.models.world_change_proposal  # noqa: F401
+import app.models.dynamic_location  # noqa: F401
+import app.models.dynamic_mechanic  # noqa: F401

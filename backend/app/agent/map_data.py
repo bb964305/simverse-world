@@ -195,18 +195,45 @@ def get_location_by_id(loc_id: str) -> dict | None:
 _dynamic_slugs: set[str] = set()
 
 
-def load_dynamic_locations() -> int:
+async def load_dynamic_locations() -> int:
     """Merge active ``dynamic_locations`` overlay rows into in-memory LOCATIONS.
 
     Called at process startup and on the ``sv:world:reload`` signal so a newly
     approved building appears in pathfinding / planning / codex without a
-    redeploy (spec §4.6, §7). P0 placeholder — the overlay tables and the real
-    merge land in P3; this hook stays a safe no-op until then so callers wired
-    up early do nothing. Returns the number of dynamic locations merged.
+    redeploy (spec §4.6, §7). Previously-merged dynamic slugs are dropped first
+    so a revert/rename doesn't linger. Fail-open: any DB hiccup returns 0 and
+    leaves the static LOCATIONS intact. Returns the number merged.
     """
-    # P3 will replace this body with an actual DB read + merge; keep it a no-op
-    # (returns 0) so P0/P1/P2 callers are harmless.
-    return 0
+    from sqlalchemy import select
+    from app.database import async_session
+    from app.models.dynamic_location import DynamicLocation
+
+    global _dynamic_slugs
+    for slug in _dynamic_slugs:
+        LOCATIONS.pop(slug, None)
+    _dynamic_slugs = set()
+
+    try:
+        async with async_session() as db:
+            rows = (await db.execute(
+                select(DynamicLocation).where(DynamicLocation.active.is_(True))
+            )).scalars().all()
+    except Exception:
+        return 0
+
+    n = 0
+    for row in rows:
+        data = dict(row.data_json or {})
+        # JSON stores lists; LOCATIONS consumers expect tuples for bounds/coords.
+        for key in ("bounds", "center", "entrance"):
+            if isinstance(data.get(key), list):
+                data[key] = tuple(data[key])
+        if "bounds" not in data:
+            continue  # malformed overlay row — skip rather than crash lookups
+        LOCATIONS[row.slug] = data
+        _dynamic_slugs.add(row.slug)
+        n += 1
+    return n
 
 
 def get_public_locations() -> list[dict]:

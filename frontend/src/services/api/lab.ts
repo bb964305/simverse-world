@@ -126,3 +126,21 @@ export function respondLabApproval(runId: string, approvalId: string, decision: 
     body: JSON.stringify({ approval_id: approvalId, decision }),
   })
 }
+
+// World locations — static + dynamic-overlay merged snapshot (P3, spec §7/§9).
+export interface WorldLocation {
+  slug: string
+  name: string | null
+  type: string | null
+  role: string | null
+  bounds: number[] | null
+  center: number[] | null
+  entrance: number[] | null
+  description: string | null
+  boosted_actions: string[]
+  dynamic: boolean
+}
+
+export function getWorldLocations(): Promise<{ locations: WorldLocation[] }> {
+  return apiFetch('/world/locations')
+}

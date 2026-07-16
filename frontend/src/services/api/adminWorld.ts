@@ -184,3 +184,52 @@ export function cancelAdminLabRun(token: string, runId: string): Promise<{ ok: b
     headers: { Authorization: `Bearer ${token}` },
   })
 }
+
+// ─── Admin World governance: proposal review (P3) ────────────────
+
+export interface WorldProposal {
+  id: string
+  origin: string
+  origin_ref: string | null
+  author_slug: string | null
+  kind: string
+  title: string
+  rationale_md: string
+  patch: Record<string, unknown>
+  cost_sc: number
+  status: string
+  risk_level: string
+  reviewer_id: string | null
+  review_note: string | null
+  applied_at: string | null
+  reverted_at: string | null
+  created_at: string | null
+  preview?: { kind: string; conflicts?: string[]; adds_location?: string }
+}
+
+export function getAdminProposals(token: string, status?: string): Promise<{ proposals: WorldProposal[] }> {
+  const query = status ? `?status=${encodeURIComponent(status)}` : ''
+  return apiFetch(`/admin/world/proposals${query}`, { headers: { Authorization: `Bearer ${token}` } })
+}
+
+export function getAdminProposal(token: string, id: string): Promise<WorldProposal> {
+  return apiFetch(`/admin/world/proposals/${encodeURIComponent(id)}`, { headers: { Authorization: `Bearer ${token}` } })
+}
+
+export function approveAdminProposal(token: string, id: string, note = ''): Promise<WorldProposal> {
+  return apiFetch(`/admin/world/proposals/${encodeURIComponent(id)}/approve`, {
+    method: 'POST', body: JSON.stringify({ note }), headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export function rejectAdminProposal(token: string, id: string, note = ''): Promise<WorldProposal> {
+  return apiFetch(`/admin/world/proposals/${encodeURIComponent(id)}/reject`, {
+    method: 'POST', body: JSON.stringify({ note }), headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export function revertAdminProposal(token: string, id: string): Promise<WorldProposal> {
+  return apiFetch(`/admin/world/proposals/${encodeURIComponent(id)}/revert`, {
+    method: 'POST', headers: { Authorization: `Bearer ${token}` },
+  })
+}

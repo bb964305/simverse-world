@@ -79,6 +79,12 @@ export function connectWS(): void {
       if (data.type === 'lab_run_approval') {
         bridge.emit('experiment:open')
       }
+      // World governance: an applied/reverted proposal changed the map. Minimap
+      // /codex re-pull GET /world/locations on this signal (they listen for the
+      // bridge event); the dynamic layer is runtime data, not a compile-time key.
+      if (data.type === 'world_changed') {
+        bridge.emit('world:changed')
+      }
       // Handle online players
       if (data.type === 'player_moved') {
         useGameStore.getState().setOnlinePlayer({

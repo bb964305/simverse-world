@@ -36,7 +36,16 @@ async def main() -> None:
         except NotImplementedError:  # pragma: no cover — non-Unix platforms
             pass
 
+    # P3: the runner may emit proposals + apply them via the shared engine; keep
+    # its LOCATIONS in sync by subscribing to reload signals too.
+    from app.lab.apply import reload_world, world_reload_subscriber
+    try:
+        await reload_world()
+    except Exception:
+        logger.warning("initial world overlay load skipped", exc_info=True)
+
     runner_task = asyncio.create_task(runner_loop(), name="lab-runner-loop")
+    world_reload_task = asyncio.create_task(world_reload_subscriber(), name="world-reload")
     stop_task = asyncio.create_task(stop_event.wait(), name="stop-signal")
 
     try:
@@ -52,7 +61,8 @@ async def main() -> None:
     finally:
         stop_task.cancel()
         runner_task.cancel()
-        await asyncio.gather(stop_task, runner_task, return_exceptions=True)
+        world_reload_task.cancel()
+        await asyncio.gather(stop_task, runner_task, world_reload_task, return_exceptions=True)
         for sig in registered:
             loop.remove_signal_handler(sig)
         await close_redis()

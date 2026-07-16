@@ -5,8 +5,9 @@ import { onWSMessage } from '../services/ws'
 import { useGameStore } from '../stores/gameStore'
 import {
   listLabResearchers, createLabTask, getLabTasks, getLabTask,
-  cancelLabTask, acceptLabResult, rejectLabResult, getLabRunSteps, respondLabApproval, getMe,
-  type LabResearcher, type LabTask, type LabRun, type LabRunStep, type LabArtifact,
+  cancelLabTask, acceptLabResult, rejectLabResult, getLabRunSteps, respondLabApproval,
+  getWorldLocations, getMe,
+  type LabResearcher, type LabTask, type LabRun, type LabRunStep, type LabArtifact, type WorldLocation,
 } from '../services/api'
 
 interface LabApproval { id: string; tool?: string | null; summary?: string; status?: string }
@@ -321,6 +322,7 @@ function btn(color: string): CSSProperties {
 function ArtifactsTab() {
   const [tasks, setTasks] = useState<LabTask[]>([])
   const [artifacts, setArtifacts] = useState<Record<string, LabArtifact[]>>({})
+  const [worldChanges, setWorldChanges] = useState<WorldLocation[]>([])
 
   useEffect(() => {
     getLabTasks('mine').then((r) => {
@@ -330,16 +332,35 @@ function ArtifactsTab() {
         getLabTask(t.id).then((d) => setArtifacts((prev) => ({ ...prev, [t.id]: d.artifacts }))).catch(() => {})
       })
     }).catch(() => {})
+    // Proposal wall: buildings the researchers actually added to the town.
+    getWorldLocations().then((r) => setWorldChanges(r.locations.filter((l) => l.dynamic))).catch(() => {})
   }, [])
 
-  if (tasks.length === 0) {
-    return <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.7 }}>
-      完成并放款的委托产物会陈列在这里；研究员产出并通过审核的世界变更也将在此叙事化展示（P3）。
+  const wall = worldChanges.length > 0 && (
+    <div style={{ border: '1px solid #14b8a644', borderRadius: 10, padding: 12, background: '#14b8a608' }}>
+      <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8, color: ACCENT }}>🌍 小镇因研究员而改变</div>
+      {worldChanges.map((l) => (
+        <div key={l.slug} style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>
+          · 新增了 <b>{l.name ?? l.slug}</b>{l.description ? ` —— ${l.description}` : ''}
+        </div>
+      ))}
     </div>
+  )
+
+  if (tasks.length === 0) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        {wall}
+        <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+          完成并放款的委托产物会陈列在这里；研究员产出并通过审核的世界变更在上方叙事化展示。
+        </div>
+      </div>
+    )
   }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {wall}
       {tasks.map((t) => (
         <div key={t.id}>
           <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>{t.title}</div>
