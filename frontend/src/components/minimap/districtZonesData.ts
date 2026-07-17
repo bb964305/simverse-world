@@ -2,13 +2,13 @@
 // component so that file only exports components
 // (react-refresh/only-export-components).
 
-export const MAP_TILES_W = 140
-export const MAP_TILES_H = 100
+export { MAP_TILES_H, MAP_TILES_W } from '../../game/worldGeometry'
 
 export type LocationKey =
   | 'academy' | 'tavern' | 'cafe' | 'workshop'
   | 'library' | 'shop' | 'town_hall' | 'experiment_building'
   | 'north_path' | 'central_plaza' | 'south_lawn' | 'town_entrance'
+  | 'east_gardens' | 'south_quarter'
 
 export interface LocationConfig {
   key: LocationKey
@@ -83,6 +83,16 @@ export const LOCATIONS: LocationConfig[] = [
     key: 'town_entrance', label: '小镇入口', icon: '🚪',
     color: 'rgba(100,116,139,0.6)', bgColor: 'rgba(100,116,139,0.2)', bgColorDim: 'rgba(100,116,139,0.08)',
     tileRect: { x: 50, y: 85, w: 40, h: 14 },
+  },
+  {
+    key: 'east_gardens', label: '东岸花园', icon: '🌳',
+    color: 'rgba(100,116,139,0.6)', bgColor: 'rgba(100,116,139,0.2)', bgColorDim: 'rgba(100,116,139,0.08)',
+    tileRect: { x: 140, y: 35, w: 39, h: 23 },
+  },
+  {
+    key: 'south_quarter', label: '南苑新区', icon: '🌿',
+    color: 'rgba(100,116,139,0.6)', bgColor: 'rgba(100,116,139,0.2)', bgColorDim: 'rgba(100,116,139,0.08)',
+    tileRect: { x: 42, y: 100, w: 93, h: 9 },
   },
 ]
 

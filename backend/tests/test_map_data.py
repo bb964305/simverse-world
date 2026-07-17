@@ -13,13 +13,15 @@ from app.agent.map_data import (
 
 
 def test_locations_has_all_entries():
-    assert len(LOCATIONS) == 21  # +experiment_building (P0 Lab)
+    assert len(LOCATIONS) == 33
     assert "academy" in LOCATIONS
     assert "tavern" in LOCATIONS
     assert "house_a" in LOCATIONS
     assert "apt_star" in LOCATIONS
     assert "central_plaza" in LOCATIONS
     assert "experiment_building" in LOCATIONS
+    assert "east_gardens" in LOCATIONS
+    assert "south_quarter" in LOCATIONS
 
 
 def test_get_location_at_inside_library():
@@ -55,9 +57,9 @@ def test_get_public_locations():
 
 def test_get_housing_locations():
     houses = get_housing_locations()
-    assert len(houses) == 9  # 6 private + 3 apartment
+    assert len(houses) == 19  # 9 private + 10 apartment
     total_cap = sum(h["capacity"] for h in houses)
-    assert total_cap == 21  # 6*1 + 3*5
+    assert total_cap == 59
 
 
 def test_find_nearest_location_public():
@@ -126,8 +128,10 @@ def test_assign_home_partial_fill_skips_correctly():
 
 def test_assign_home_all_full():
     """When everything is full, returns None."""
-    occupied = {"house_a": 1, "house_b": 1, "house_c": 1,
-                "house_d": 1, "house_e": 1, "house_f": 1,
-                "apt_star": 5, "apt_moon": 5, "apt_dawn": 5}
+    occupied = {
+        location_id: location["capacity"]
+        for location_id, location in LOCATIONS.items()
+        if location["type"] in ("private", "apartment")
+    }
     loc_id = assign_home(occupied=occupied)
     assert loc_id is None

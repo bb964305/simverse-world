@@ -107,7 +107,52 @@ def test_walkable_count_with_collisions():
     if not blocked:
         pytest.skip("Tilemap not available in test environment")
     walkable = get_walkable_tiles()
-    full_rect = 120 * 88  # (134-14) * (100-12)
+    from app.world_geometry import WALKABLE_X_RANGE, WALKABLE_Y_RANGE
+    full_rect = len(WALKABLE_X_RANGE) * len(WALKABLE_Y_RANGE)
     assert len(walkable) < full_rect, f"Walkable {len(walkable)} should be less than {full_rect}"
     assert len(walkable) > full_rect * 0.5, f"Walkable {len(walkable)} too small, expected > {full_rect * 0.5}"
+    reset_walkable_cache()
+
+
+def test_expanded_districts_are_in_walkable_world():
+    """The east and south additions must participate in NPC pathfinding."""
+    from app.agent.pathfinder import get_walkable_tiles, reset_walkable_cache
+    reset_walkable_cache()
+    walkable = get_walkable_tiles()
+    assert (150, 56) in walkable
+    assert (74, 104) in walkable
+    reset_walkable_cache()
+
+
+def test_reachable_tiles_exclude_disconnected_islands():
+    """get_reachable_tiles() must drop walkable-but-unreachable island pockets.
+
+    get_walkable_tiles() force-includes entrances/centers and leaves ~800 tiles
+    on disconnected islands. Placing a resident on one strands them (A* to any
+    building returns None). get_reachable_tiles() is the hub-connected subset.
+    """
+    from app.agent.pathfinder import (
+        get_walkable_tiles, get_reachable_tiles, find_path, reset_walkable_cache,
+    )
+    from app.agent.map_data import LOCATIONS
+    reset_walkable_cache()
+    walkable = get_walkable_tiles()
+    if (55, 54) not in walkable:
+        pytest.skip("Tilemap not available in test environment")
+
+    reachable = get_reachable_tiles()
+    hub = tuple(LOCATIONS["central_plaza"]["center"])
+
+    # Reachable is a strict subset of walkable (islands removed).
+    assert reachable <= walkable
+    assert len(reachable) < len(walkable)
+
+    # (55, 54) is central_plaza's first placement slot: walkable but islanded.
+    assert (55, 54) in walkable
+    assert find_path(hub, (55, 54), walkable) is None  # genuinely unreachable
+    assert (55, 54) not in reachable
+
+    # Every reachable tile is truly pathable from the hub (sample to bound cost).
+    for tile in list(reachable)[:200]:
+        assert find_path(hub, tile, walkable) is not None
     reset_walkable_cache()

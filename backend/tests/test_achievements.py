@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
 from app.models.user import User
 from app.models.achievement import UserAchievement
+from app.events.achievements import ALL_LOCATIONS_TARGET
 
 
 @pytest.fixture
@@ -130,7 +131,7 @@ D1_CASES = [
     ("soul_shaper", [("personality_shifted", {})]),
     ("week_streak", [("login_streak", {"streak": 7})]),
     ("explorer_5", [("location_first_visit", {})] * 5),
-    ("explorer_all", [("location_first_visit", {})] * 20),
+    ("explorer_all", [("location_first_visit", {})] * ALL_LOCATIONS_TARGET),
     ("errand_runner", [("commission_completed", {})]),
     ("patron", [("purchase_tip", {})]),
     ("socialite", [("chat_completed", {"resident_id": f"r{i}", "turns": 1}) for i in range(10)]),

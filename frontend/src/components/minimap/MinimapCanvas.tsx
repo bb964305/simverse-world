@@ -1,15 +1,16 @@
 import { useEffect, useRef } from 'react'
 import { useGameStore } from '../../stores/gameStore'
+import { MAP_TILES_H, MAP_TILES_W, mapHeightForWidth } from '../../game/worldGeometry'
 
-const MAP_TILES_W = 140
-const MAP_TILES_H = 100
+const DEFAULT_WIDTH = 180
+const DEFAULT_HEIGHT = mapHeightForWidth(DEFAULT_WIDTH)
 
 interface Props {
   width?: number
   height?: number
 }
 
-export function MinimapCanvas({ width = 180, height = 130 }: Props) {
+export function MinimapCanvas({ width = DEFAULT_WIDTH, height = DEFAULT_HEIGHT }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const imgRef = useRef<HTMLImageElement | null>(null)
   const textureUrl = useGameStore((s) => s.minimapTextureUrl)

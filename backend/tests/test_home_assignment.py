@@ -1,7 +1,7 @@
 """Tests for home_location_id assignment in creation paths."""
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from app.agent.map_data import allocate_home, assign_home
+from app.agent.map_data import LOCATIONS, allocate_home, assign_home
 
 
 def test_assign_home_empty_town():
@@ -10,9 +10,9 @@ def test_assign_home_empty_town():
 
 def test_assign_home_all_full():
     occupied = {
-        "house_a": 1, "house_b": 1, "house_c": 1,
-        "house_d": 1, "house_e": 1, "house_f": 1,
-        "apt_star": 5, "apt_moon": 5, "apt_dawn": 5,
+        location_id: location["capacity"]
+        for location_id, location in LOCATIONS.items()
+        if location["type"] in ("private", "apartment")
     }
     assert assign_home(occupied) is None
 
@@ -31,7 +31,7 @@ async def test_allocate_home_returns_location_id():
 async def test_allocate_resident_location_returns_home():
     from app.services.resident_placement import allocate_resident_location
     mock_db = AsyncMock()
-    with patch("app.services.resident_placement._find_available_tile", return_value=(75, 56)):
+    with patch("app.services.resident_placement._find_available_tile", return_value=("central_plaza", 75, 56)):
         with patch("app.services.resident_placement.allocate_home", return_value="house_a"):
             result = await allocate_resident_location(mock_db, requested_location_id="central_plaza")
     assert len(result) == 4
@@ -44,7 +44,7 @@ async def test_allocate_resident_location_returns_home():
 async def test_allocate_resident_location_no_housing_when_disabled():
     from app.services.resident_placement import allocate_resident_location
     mock_db = AsyncMock()
-    with patch("app.services.resident_placement._find_available_tile", return_value=(75, 56)):
+    with patch("app.services.resident_placement._find_available_tile", return_value=("central_plaza", 75, 56)):
         result = await allocate_resident_location(mock_db, requested_location_id="central_plaza", assign_housing=False)
     assert len(result) == 4
     assert result[3] is None

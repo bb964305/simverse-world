@@ -109,10 +109,10 @@ def test_go_home_not_available_when_at_home():
 
 
 def test_full_housing_assignment_flow():
-    """Simulate assigning 21 residents to fill all housing."""
+    """Simulate assigning every resident until the expanded town is full."""
     occupied = {}
     assignments = []
-    for i in range(21):
+    for i in range(59):
         loc_id = assign_home(occupied=occupied)
         assert loc_id is not None, f"Resident {i+1} got no home"
         occupied[loc_id] = occupied.get(loc_id, 0) + 1
@@ -120,9 +120,10 @@ def test_full_housing_assignment_flow():
 
     # First 6 get private houses
     assert assignments[:6] == ["house_a", "house_b", "house_c", "house_d", "house_e", "house_f"]
-    # Next 15 fill apartments
-    assert all(a.startswith("apt_") for a in assignments[6:])
-    # 22nd should be None
+    assert assignments[6:21] == ["apt_star"] * 5 + ["apt_moon"] * 5 + ["apt_dawn"] * 5
+    assert assignments[21:24] == ["house_g", "house_h", "house_i"]
+    assert all(a.startswith("apt_") for a in assignments[24:])
+    # The next resident should be the first one without a home.
     assert assign_home(occupied=occupied) is None
 
 
@@ -144,8 +145,79 @@ async def test_find_available_tile_uses_canonical_occupancy_bucket(db_session):
     )
     await db_session.commit()
 
-    next_x, next_y = await _find_available_tile(db_session, "engineering")
+    location_id, next_x, next_y = await _find_available_tile(db_session, "engineering")
+    assert location_id == "workshop"
     assert (next_x, next_y) != (occupied_x, occupied_y)
+
+
+@pytest.mark.anyio
+async def test_find_available_tile_skips_blocked_slots_and_uses_expansion(db_session, monkeypatch):
+    """A full or blocked district falls back to a legal tile in a new district."""
+    from app.services import resident_placement
+
+    monkeypatch.setattr(resident_placement, "LOCATION_TILE_SLOTS", {
+        "central_plaza": [(75, 56), (77, 56)],
+        "east_gardens": [(150, 56)],
+    })
+    monkeypatch.setattr(resident_placement, "LOCATION_ALLOCATION_ORDER", (
+        "central_plaza", "east_gardens",
+    ))
+    monkeypatch.setattr(resident_placement, "get_reachable_tiles", lambda: {(150, 56)})
+
+    location_id, tile_x, tile_y = await resident_placement._find_available_tile(
+        db_session,
+        "central_plaza",
+    )
+
+    assert (location_id, tile_x, tile_y) == ("east_gardens", 150, 56)
+
+
+@pytest.mark.anyio
+async def test_find_available_tile_returns_reachable_tile(db_session):
+    """Placement must never strand a resident on a walkable-but-unreachable island.
+
+    central_plaza's first candidate slot (55, 54) is walkable but on a disconnected
+    island; the old membership-only check handed it out and A* could never move that
+    resident. The allocated tile must be pathable from the town hub.
+    """
+    from app.services.resident_placement import _find_available_tile
+    from app.agent.pathfinder import get_walkable_tiles, find_path, reset_walkable_cache
+    reset_walkable_cache()
+    walkable = get_walkable_tiles()
+    if (55, 54) not in walkable:
+        pytest.skip("Tilemap not available in test environment")
+    hub = tuple(LOCATIONS["central_plaza"]["center"])
+
+    location_id, x, y = await _find_available_tile(db_session, "central_plaza")
+
+    assert find_path(hub, (x, y), walkable) is not None, (
+        f"Allocated tile ({x}, {y}) in {location_id} is unreachable from hub {hub}"
+    )
+    reset_walkable_cache()
+
+
+@pytest.mark.anyio
+async def test_find_available_tile_saturation_degrades_gracefully(db_session, monkeypatch):
+    """When every district slot is occupied, fall back to a free reachable tile, not a crash.
+
+    The saturation path used to raise RuntimeError, turning onboarding/forge into 500s.
+    """
+    from app.services import resident_placement
+
+    monkeypatch.setattr(resident_placement, "LOCATION_TILE_SLOTS", {"central_plaza": [(75, 56)]})
+    monkeypatch.setattr(resident_placement, "LOCATION_ALLOCATION_ORDER", ("central_plaza",))
+    monkeypatch.setattr(resident_placement, "get_reachable_tiles", lambda: {(75, 56), (76, 56)})
+
+    db_session.add(Resident(
+        slug="occupier", name="Occupier", district="central_plaza",
+        creator_id="creator-1", tile_x=75, tile_y=56,
+    ))
+    await db_session.commit()
+
+    location_id, x, y = await resident_placement._find_available_tile(db_session, "central_plaza")
+
+    # Only free reachable tile is (76, 56); must degrade to it instead of raising.
+    assert (x, y) == (76, 56)
 
 
 @pytest.mark.anyio

@@ -5,8 +5,8 @@ import { applyStatusVisuals, clearStatusVisuals, releaseAllStatusVisuals, STATUS
 import { useGameStore } from '../stores/gameStore'
 import { sendPosition, sendWS, onWSMessage } from '../services/ws'
 import { updatePlayerPosition, getHomeDecor, decorEmoji, getActiveEvents, getCommissions, HOUSING_BOUNDS, type DecorItem } from '../services/api'
+import { TILE_SIZE } from './worldGeometry'
 
-const TILE_SIZE = 32
 const PLAYER_SPEED = 160
 const NPC_INTERACT_DISTANCE = 60
 const PLAYER_INTERACT_DISTANCE = 80
@@ -250,6 +250,7 @@ class MainScene extends Phaser.Scene {
     // external listeners below) on a scene that was destroyed mid-await.
     if (this.isShutdown) return
     const map = this.make.tilemap({ key: 'map' })
+    this.physics.world.setBounds(0, 0, map.widthInPixels, map.heightInPixels)
 
     const tilesetMap: Record<string, Phaser.Tilemaps.Tileset | null> = {}
     for (const key of Object.keys(TILESET_IMAGE_MAP)) {
@@ -285,7 +286,7 @@ class MainScene extends Phaser.Scene {
     // Player — use spawn position from store (set by backend spawn_position message)
     const { spawnX, spawnY } = useGameStore.getState()
     this.player = this.physics.add.sprite(spawnX, spawnY, 'player_atlas', 'down')
-      .setSize(24, 24).setOffset(4, 8).setDepth(1)
+      .setSize(24, 24).setOffset(4, 8).setDepth(1).setCollideWorldBounds(true)
     this.player.displayWidth = 40
     this.player.scaleY = this.player.scaleX
 

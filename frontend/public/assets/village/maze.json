@@ -2,8 +2,8 @@
     "world": "the Ville",
     "tile_size": 32,
     "size": [
-        100,
-        140
+        128,
+        180
     ],
     "map": {
         "asset": "map",

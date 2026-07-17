@@ -4,13 +4,11 @@ import { DistrictZones } from './DistrictZones'
 import type { DistrictKey } from './districtZonesData'
 import { ResidentPanel } from './ResidentPanel'
 import { bridge } from '../../game/phaserBridge'
+import { MAP_TILES_H, MAP_TILES_W, mapHeightForWidth } from '../../game/worldGeometry'
 
-const MAP_TILES_W = 140
-const MAP_TILES_H = 100
 const SMALL_W = 180
-const SMALL_H = 130
+const SMALL_H = mapHeightForWidth(SMALL_W)
 const LARGE_W = 560
-const LARGE_H = 400
 const EXPANDED_VIEWPORT_GUTTER = 32
 
 function getExpandedMapWidth(): number {
@@ -24,7 +22,7 @@ export function MinimapOverlay() {
   const [expandedMapWidth, setExpandedMapWidth] = useState(getExpandedMapWidth)
   const smallMapRef = useRef<HTMLDivElement>(null)
   const largeMapRef = useRef<HTMLDivElement>(null)
-  const expandedMapHeight = Math.round((expandedMapWidth / LARGE_W) * LARGE_H)
+  const expandedMapHeight = mapHeightForWidth(expandedMapWidth)
 
   const handleSelectDistrict = useCallback((key: DistrictKey) => {
     setSelectedDistrict((prev) => (prev === key ? null : key))
@@ -162,8 +160,13 @@ export function MinimapOverlay() {
         }}
         onDoubleClick={handleDoubleClick}
       >
-        <MinimapCanvas />
-        <DistrictZones selected={selectedDistrict} onSelect={handleSelectDistrict} />
+        <MinimapCanvas width={SMALL_W} height={SMALL_H} />
+        <DistrictZones
+          selected={selectedDistrict}
+          onSelect={handleSelectDistrict}
+          mapWidth={SMALL_W}
+          mapHeight={SMALL_H}
+        />
       </div>
 
       {/* Resident panel */}

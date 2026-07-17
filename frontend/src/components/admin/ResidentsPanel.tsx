@@ -18,6 +18,8 @@ const DISTRICT_OPTIONS = [
   { value: 'central_plaza', label: '中央广场' },
   { value: 'south_lawn', label: '南草坪' },
   { value: 'town_entrance', label: '小镇入口' },
+  { value: 'east_gardens', label: '东岸花园' },
+  { value: 'south_quarter', label: '南苑新区' },
   { value: 'outdoor', label: '户外' },
 ]
 

@@ -1,11 +1,11 @@
 """Resident placement utilities — location normalization, tile allocation, slugs, sprites.
 
 Pipeline-neutral helpers shared by the forge pipelines (legacy + canonical),
-resident import, onboarding and seed scripts. Extracted from the deprecated
-app/services/forge_service.py (P1-6 file split); behavior is unchanged.
+resident import, onboarding and seed scripts. Placement is constrained to
+unoccupied, walkable map tiles and can spill into another district when the
+requested district is full.
 """
 
-import random
 import re
 import uuid
 
@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.map_data import LOCATIONS as _MAP_LOCATIONS, get_location_id_at, allocate_home
+from app.agent.pathfinder import get_reachable_tiles
 from app.models.resident import Resident
 
 _LOCATION_BOUNDS = {
@@ -29,6 +30,15 @@ def _gen_slots(x1: int, y1: int, x2: int, y2: int, step: int = 2) -> list[tuple[
 LOCATION_TILE_SLOTS: dict[str, list[tuple[int, int]]] = {
     loc: _gen_slots(*bounds) for loc, bounds in _LOCATION_BOUNDS.items()
 }
+
+LOCATION_ALLOCATION_ORDER = (
+    "central_plaza",
+    "east_gardens",
+    "south_quarter",
+    *(location_id for location_id in LOCATION_TILE_SLOTS if location_id not in {
+        "central_plaza", "east_gardens", "south_quarter",
+    }),
+)
 
 # Backwards alias: old code uses DISTRICT_TILE_SLOTS
 DISTRICT_TILE_SLOTS = LOCATION_TILE_SLOTS
@@ -133,29 +143,42 @@ async def allocate_resident_location(
 
     if preferred_tile is not None:
         preferred_location_id = get_location_id_at(*preferred_tile)
-        if preferred_location_id:
+        if preferred_location_id and preferred_tile in get_reachable_tiles():
             canonical_location_id = normalize_location_id(preferred_location_id, default=canonical_location_id, allocatable_only=True)
             if not await _is_tile_occupied(db, *preferred_tile):
                 home_id = await allocate_home(db) if assign_housing else None
                 return canonical_location_id, preferred_tile[0], preferred_tile[1], home_id
 
-    tile_x, tile_y = await _find_available_tile(db, canonical_location_id)
+    canonical_location_id, tile_x, tile_y = await _find_available_tile(db, canonical_location_id)
     home_id = await allocate_home(db) if assign_housing else None
     return canonical_location_id, tile_x, tile_y, home_id
 
 
-async def _find_available_tile(db: AsyncSession, district: str) -> tuple[int, int]:
+async def _find_available_tile(db: AsyncSession, district: str) -> tuple[str, int, int]:
     district = normalize_location_id(district, allocatable_only=True)
-    slots = LOCATION_TILE_SLOTS.get(district, LOCATION_TILE_SLOTS.get(DEFAULT_LOCATION_ID, []))
-    result = await db.execute(
-        select(Resident.tile_x, Resident.tile_y).where(Resident.district == district)
-    )
+    result = await db.execute(select(Resident.tile_x, Resident.tile_y))
     occupied = {(row.tile_x, row.tile_y) for row in result.all()}
-    for x, y in slots:
-        if (x, y) not in occupied:
-            return x, y
-    base_x, base_y = slots[-1]
-    return base_x + random.randint(1, 5) * 2, base_y + random.randint(1, 5) * 2
+    # Only tiles reachable from the town hub — a resident dropped on a walkable
+    # island can never path to any building (see get_reachable_tiles).
+    reachable = get_reachable_tiles()
+    candidate_locations = (district, *(
+        location_id for location_id in LOCATION_ALLOCATION_ORDER
+        if location_id != district
+    ))
+
+    for location_id in candidate_locations:
+        for x, y in LOCATION_TILE_SLOTS.get(location_id, []):
+            if (x, y) in reachable and (x, y) not in occupied:
+                return location_id, x, y
+
+    # All district slots are taken: degrade gracefully to any free reachable tile
+    # (deterministic pick) rather than raising — onboarding/forge must not 500.
+    free = reachable - occupied
+    if free:
+        x, y = min(free)
+        return district, x, y
+
+    raise RuntimeError("No unoccupied reachable resident tile is available")
 
 
 def _generate_slug(name: str) -> str:

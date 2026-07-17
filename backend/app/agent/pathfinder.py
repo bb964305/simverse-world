@@ -2,17 +2,16 @@
 import heapq
 import json
 import logging
+from collections import deque
 from pathlib import Path
 
 from app.agent.map_data import LOCATIONS
+from app.world_geometry import WALKABLE_X_RANGE, WALKABLE_Y_RANGE
 
 logger = logging.getLogger(__name__)
 
 _walkable_tiles_cache: set[tuple[int, int]] | None = None
-
-# Rectangular bounds for the overall walkable area
-_WALKABLE_X_RANGE = range(14, 134)  # x=14..133
-_WALKABLE_Y_RANGE = range(12, 100)  # y=12..99
+_reachable_tiles_cache: set[tuple[int, int]] | None = None
 
 _TILEMAP_PATH = Path(__file__).resolve().parents[3] / "frontend" / "public" / "assets" / "village" / "tilemap" / "tilemap.json"
 
@@ -32,8 +31,8 @@ def _load_collision_tiles() -> set[tuple[int, int]]:
         if layer["name"] == "Collisions":
             coll_data = layer["data"]
             blocked: set[tuple[int, int]] = set()
-            for y in _WALKABLE_Y_RANGE:
-                for x in _WALKABLE_X_RANGE:
+            for y in WALKABLE_Y_RANGE:
+                for x in WALKABLE_X_RANGE:
                     idx = y * map_width + x
                     if idx < len(coll_data) and coll_data[idx] != 0:
                         blocked.add((x, y))
@@ -67,8 +66,8 @@ def get_walkable_tiles() -> set[tuple[int, int]]:
 
     # Start with full rectangular area
     tiles: set[tuple[int, int]] = set()
-    for x in _WALKABLE_X_RANGE:
-        for y in _WALKABLE_Y_RANGE:
+    for x in WALKABLE_X_RANGE:
+        for y in WALKABLE_Y_RANGE:
             tiles.add((x, y))
 
     # Subtract collision-layer blocked tiles
@@ -85,10 +84,52 @@ def get_walkable_tiles() -> set[tuple[int, int]]:
     return tiles
 
 
+def _town_hub() -> tuple[int, int]:
+    """The tile residents navigate from and to — the central plaza center."""
+    center = LOCATIONS.get("central_plaza", {}).get("center")
+    if center:
+        return tuple(center)
+    # central_plaza is always defined; fall back defensively to any walkable tile.
+    return next(iter(get_walkable_tiles()))
+
+
+def get_reachable_tiles() -> set[tuple[int, int]]:
+    """Walkable tiles connected to the town hub via 4-neighbour movement.
+
+    ``get_walkable_tiles()`` force-includes every location entrance/center and so
+    can leave disconnected pockets ("islands") that A* can never reach from the
+    town. Resident placement must draw only from this hub-connected component, or
+    a resident dropped on an island is stranded (``find_path`` to any building
+    returns ``None`` forever).
+    """
+    global _reachable_tiles_cache
+    if _reachable_tiles_cache is not None:
+        return _reachable_tiles_cache
+
+    walkable = get_walkable_tiles()
+    hub = _town_hub()
+    reachable: set[tuple[int, int]] = set()
+    if hub in walkable:
+        dq = deque([hub])
+        reachable.add(hub)
+        while dq:
+            x, y = dq.popleft()
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                n = (x + dx, y + dy)
+                if n in walkable and n not in reachable:
+                    reachable.add(n)
+                    dq.append(n)
+        logger.info("Reachable-from-hub tiles: %d / %d walkable", len(reachable), len(walkable))
+
+    _reachable_tiles_cache = reachable
+    return reachable
+
+
 def reset_walkable_cache() -> None:
-    """Reset cache (for testing)."""
-    global _walkable_tiles_cache
+    """Reset caches (for testing)."""
+    global _walkable_tiles_cache, _reachable_tiles_cache
     _walkable_tiles_cache = None
+    _reachable_tiles_cache = None
 
 
 def find_path(

@@ -138,6 +138,58 @@ LOCATIONS: dict[str, dict[str, Any]] = {
         "bounds": (87, 65, 99, 75), "center": (93, 70), "entrance": (90, 74),
         "capacity": 5,
     },
+    # === Expansion Housing: South Quarter ===
+    "house_g": {
+        "name": "南苑住宅G", "type": "private",
+        "bounds": (20, 104, 24, 115), "center": (22, 109), "entrance": (20, 110),
+        "capacity": 1,
+    },
+    "house_h": {
+        "name": "南苑住宅H", "type": "private",
+        "bounds": (27, 104, 33, 115), "center": (30, 109), "entrance": (28, 110),
+        "capacity": 1,
+    },
+    "house_i": {
+        "name": "南苑住宅I", "type": "private",
+        "bounds": (36, 104, 40, 115), "center": (38, 109), "entrance": (36, 110),
+        "capacity": 1,
+    },
+    "apt_pine": {
+        "name": "松风公寓", "type": "apartment",
+        "bounds": (51, 110, 62, 120), "center": (56, 115), "entrance": (54, 119),
+        "capacity": 5,
+    },
+    "apt_lake": {
+        "name": "湖畔公寓", "type": "apartment",
+        "bounds": (69, 110, 80, 120), "center": (74, 115), "entrance": (72, 119),
+        "capacity": 5,
+    },
+    "apt_sunrise": {
+        "name": "朝阳公寓", "type": "apartment",
+        "bounds": (87, 110, 99, 120), "center": (93, 115), "entrance": (90, 119),
+        "capacity": 5,
+    },
+    # === Expansion Housing: East Gardens ===
+    "apt_river": {
+        "name": "河湾公寓", "type": "apartment",
+        "bounds": (141, 65, 152, 75), "center": (146, 70), "entrance": (144, 74),
+        "capacity": 5,
+    },
+    "apt_garden": {
+        "name": "花园公寓", "type": "apartment",
+        "bounds": (159, 65, 170, 75), "center": (164, 70), "entrance": (162, 74),
+        "capacity": 5,
+    },
+    "apt_orchard": {
+        "name": "果园公寓", "type": "apartment",
+        "bounds": (143, 110, 155, 120), "center": (149, 115), "entrance": (152, 119),
+        "capacity": 5,
+    },
+    "apt_harbor": {
+        "name": "港湾公寓", "type": "apartment",
+        "bounds": (162, 110, 173, 120), "center": (168, 115), "entrance": (170, 119),
+        "capacity": 5,
+    },
     # === Outdoor Areas ===
     "north_path": {
         "name": "北林荫道", "type": "outdoor",
@@ -158,6 +210,16 @@ LOCATIONS: dict[str, dict[str, Any]] = {
         "name": "小镇入口", "type": "outdoor",
         "bounds": (50, 85, 90, 99), "center": (70, 92),
         "description": "小镇南端的入口区域",
+    },
+    "east_gardens": {
+        "name": "东岸花园", "type": "outdoor",
+        "bounds": (140, 35, 179, 58), "center": (160, 56),
+        "description": "向东延伸的新街区，林荫道连接住宅与公共活动空间",
+    },
+    "south_quarter": {
+        "name": "南苑新区", "type": "outdoor",
+        "bounds": (42, 100, 135, 109), "center": (88, 104),
+        "description": "小镇南部的新居住区，宽阔步道通往成排住宅",
     },
 }
 
@@ -291,6 +353,9 @@ def get_valid_target_tile(loc_id: str) -> tuple[int, int] | None:
 _HOUSING_ORDER = [
     "house_a", "house_b", "house_c", "house_d", "house_e", "house_f",
     "apt_star", "apt_moon", "apt_dawn",
+    "house_g", "house_h", "house_i",
+    "apt_river", "apt_garden", "apt_pine", "apt_lake", "apt_sunrise",
+    "apt_orchard", "apt_harbor",
 ]
 
 

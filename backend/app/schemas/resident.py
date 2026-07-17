@@ -1,5 +1,7 @@
 from pydantic import BaseModel, Field
 
+from app.world_geometry import MAP_HEIGHT_TILES, MAP_WIDTH_TILES
+
 
 class ResidentListItem(BaseModel):
     id: str
@@ -57,5 +59,5 @@ class ResidentImportResponse(BaseModel):
 
 class PlayerPositionUpdate(BaseModel):
     """Request to update the current user's player position."""
-    tile_x: int = Field(ge=0, le=139)
-    tile_y: int = Field(ge=0, le=99)
+    tile_x: int = Field(ge=0, lt=MAP_WIDTH_TILES)
+    tile_y: int = Field(ge=0, lt=MAP_HEIGHT_TILES)

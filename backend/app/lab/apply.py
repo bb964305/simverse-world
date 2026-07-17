@@ -20,11 +20,11 @@ from app.models.dynamic_location import DynamicLocation
 from app.models.dynamic_mechanic import DynamicMechanic
 from app.models.world_change_proposal import WorldChangeProposal
 from app.agent.map_data import LOCATIONS
+from app.world_geometry import MAP_HEIGHT_TILES, MAP_WIDTH_TILES
 
 logger = logging.getLogger(__name__)
 
 WORLD_RELOAD_CHANNEL = "sv:world:reload"
-MAP_W, MAP_H = 140, 100
 
 
 class ApplyError(Exception):
@@ -64,7 +64,10 @@ def validate_add_location(patch: dict) -> list[str]:
         errors.append("bounds must be [x1,y1,x2,y2] integers")
     else:
         x1, y1, x2, y2 = bounds
-        if not (0 <= x1 <= x2 < MAP_W and 0 <= y1 <= y2 < MAP_H):
+        if not (
+            0 <= x1 <= x2 < MAP_WIDTH_TILES
+            and 0 <= y1 <= y2 < MAP_HEIGHT_TILES
+        ):
             errors.append(f"bounds out of map range or inverted: {bounds}")
         else:
             for other_slug, loc in LOCATIONS.items():
