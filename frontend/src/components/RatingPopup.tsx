@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 interface RatingPopupProps {
   residentName: string
@@ -10,23 +10,32 @@ interface RatingPopupProps {
 export function RatingPopup({ residentName, onRate, onSkip }: RatingPopupProps) {
   const [hovered, setHovered] = useState(0)
   const [selected, setSelected] = useState(0)
+  const skipButtonRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    skipButtonRef.current?.focus()
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onSkip()
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [onSkip])
 
   const submit = () => {
     if (selected > 0) onRate(selected)
   }
 
   return (
-    <div style={{
-      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50,
-    }}>
-      <div style={{
-        background: 'var(--bg-card)', border: '1px solid var(--border)',
-        borderRadius: 16, padding: 32, width: 320, textAlign: 'center',
-        boxShadow: '0 20px 60px rgba(0,0,0,0.4)',
-      }}>
+    <div className="game-modal-backdrop">
+      <div
+        className="game-modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="rating-dialog-title"
+        style={{ padding: 28, width: 'min(320px, calc(100vw - 24px))', textAlign: 'center' }}
+      >
         <div style={{ fontSize: 32, marginBottom: 8 }}>💬</div>
-        <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 4 }}>对话结束了</div>
+        <div id="rating-dialog-title" style={{ fontWeight: 700, fontSize: 16, marginBottom: 4 }}>对话结束了</div>
         <div style={{ color: 'var(--text-muted)', fontSize: 13, marginBottom: 20 }}>
           和 {residentName} 的对话怎么样？
         </div>
@@ -59,7 +68,7 @@ export function RatingPopup({ residentName, onRate, onSkip }: RatingPopupProps) 
         )}
 
         <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={onSkip} style={{
+          <button ref={skipButtonRef} onClick={onSkip} style={{
             flex: 1, background: 'var(--bg-input)', color: 'var(--text-muted)',
             border: '1px solid var(--border)', padding: '10px 16px',
             borderRadius: 'var(--radius)', fontSize: 13, cursor: 'pointer',

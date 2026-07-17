@@ -252,16 +252,21 @@ export function ChatDrawer() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, streamingText, playerChatMessages])
 
-  // Escape key to close. `close` is recreated every render (it captures local
-  // state), so listing it as a dep would re-subscribe the listener on every
-  // render; useEffectEvent keeps the subscription keyed on chatOpen only while
-  // the handler always sees the latest close logic.
-  const closeOnEscape = useEffectEvent(close)
+  // Escape resolves the topmost chat-owned layer before closing the drawer.
+  const closeOnEscape = useEffectEvent(() => {
+    if (wakePrompt) {
+      setWakePrompt(null)
+      return
+    }
+    // RatingPopup owns Escape so it can run the normal skip/cleanup path.
+    if (pendingRating) return
+    if (chatOpen) close()
+  })
   useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape' && chatOpen) closeOnEscape() }
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') closeOnEscape() }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
-  }, [chatOpen])
+  }, [])
 
   // Header display info
   const headerName = isPlayerChat
@@ -273,13 +278,11 @@ export function ChatDrawer() {
   const headerIcon = isPlayerChat ? '🧑‍🤝‍🧑' : '🧑‍💻'
 
   return (<>
-    <div style={{
-      position: 'fixed', top: 48, right: 0, bottom: 0, width: 380,
-      background: 'var(--bg-card)', borderLeft: '1px solid var(--border)',
-      display: 'flex', flexDirection: 'column', zIndex: 20,
-      transform: chatOpen ? 'translateX(0)' : 'translateX(100%)',
-      transition: 'transform 0.3s ease',
-    }}>
+    <div
+      className={`game-shell__chat-drawer${chatOpen ? ' game-shell__chat-drawer--open' : ''}`}
+      aria-hidden={!chatOpen}
+      inert={!chatOpen}
+    >
       {/* Header */}
       <div style={{ padding: '14px 16px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10 }}>
         <div style={{ width: 40, height: 40, background: 'var(--bg-input)', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22 }}>{headerIcon}</div>
@@ -422,31 +425,32 @@ export function ChatDrawer() {
             }}>发送</button>
             <span style={{ color: 'var(--text-muted)', fontSize: 11, whiteSpace: 'nowrap' }}>1🪙</span>
           </div>
-          {pendingRating && (
-            <RatingPopup
-              residentName={pendingRating.residentName}
-              conversationId={pendingRating.conversationId}
-              onRate={handleRate}
-              onSkip={handleSkipRating}
-            />
-          )}
         </>
       )}
 
     </div>
 
+    {pendingRating && (
+      <RatingPopup
+        residentName={pendingRating.residentName}
+        conversationId={pendingRating.conversationId}
+        onRate={handleRate}
+        onSkip={handleSkipRating}
+      />
+    )}
+
     {/* Wake confirmation popup — rendered outside sliding drawer */}
     {wakePrompt && (
-      <div style={{
-        position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50,
-      }}>
-        <div style={{
-          background: 'var(--bg-card)', border: '1px solid var(--border)',
-          borderRadius: 12, padding: 24, maxWidth: 280, textAlign: 'center',
-        }}>
+      <div className="game-modal-backdrop">
+        <div
+          className="game-modal-panel"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="wake-dialog-title"
+          style={{ width: 'min(320px, calc(100vw - 24px))', padding: 24, textAlign: 'center' }}
+        >
           <div style={{ fontSize: 32, marginBottom: 12 }}>💤</div>
-          <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 8 }}>{wakePrompt.name} 正在沉睡</div>
+          <div id="wake-dialog-title" style={{ fontWeight: 700, fontSize: 15, marginBottom: 8 }}>{wakePrompt.name} 正在沉睡</div>
           <div style={{ color: 'var(--text-muted)', fontSize: 13, marginBottom: 16 }}>
             花费 <span style={{ color: '#fbbf24', fontWeight: 700 }}>{wakePrompt.cost} 🪙</span> 唤醒并开始对话？
           </div>
@@ -462,6 +466,7 @@ export function ChatDrawer() {
               }}
             >唤醒</button>
             <button
+              autoFocus
               onClick={() => { setWakePrompt(null) }}
               style={{
                 background: 'var(--bg-input)', color: 'var(--text-muted)', border: '1px solid var(--border)',
@@ -475,11 +480,11 @@ export function ChatDrawer() {
 
     {/* Queue status toast — rendered outside sliding drawer */}
     {queueInfo && (
-      <div style={{
-        position: 'fixed', bottom: 20, right: 20, zIndex: 50,
+      <div className={`game-shell__queue-toast${chatOpen ? ' is-chat-open' : ''}`} style={{
+        position: 'fixed',
         background: 'var(--bg-card)', border: '1px solid var(--border)',
-        borderRadius: 12, padding: '14px 20px', boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
-        display: 'flex', alignItems: 'center', gap: 12, minWidth: 240,
+        borderRadius: 8, padding: '14px 20px', boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
+        display: 'flex', alignItems: 'center', gap: 12,
       }}>
         <div style={{ fontSize: 24 }}>⏳</div>
         <div>

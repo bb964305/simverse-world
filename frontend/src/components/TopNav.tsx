@@ -12,13 +12,25 @@ import { bridge } from '../game/phaserBridge'
 import { disconnectWS, onWSMessage } from '../services/ws'
 import { getNotifications, getDailyQuest, getActiveEvents, getMe } from '../services/api'
 import type { DailyQuestResponse, ActiveEventData } from '../services/api'
+import '../styles/game-ui.css'
 
 // Streak reward ladder (D3): SC amounts for each day of the 7-day cycle.
 const STREAK_LADDER = [10, 15, 20, 25, 30, 40, 50]
 
-// World-event banner (A2): dismissals are session-only, module scope survives
-// TopNav remounts within the tab but resets on reload.
-const dismissedEvents = new Set<string>()
+// Keep dismissals across TopNav remounts without leaking them between accounts.
+const dismissedEventsByUser = new Map<string, Set<string>>()
+
+function getDismissedEvents(userId: string | undefined): Set<string> {
+  const key = userId ?? 'anonymous'
+  const existing = dismissedEventsByUser.get(key)
+  if (existing) return existing
+  const created = new Set<string>()
+  dismissedEventsByUser.set(key, created)
+  return created
+}
+
+type NavPopover = 'streak' | 'notifications' | 'account' | 'menu' | null
+type NavModal = 'digest' | 'commission' | 'shop' | null
 
 function useClock() {
   const [time, setTime] = useState(() => new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }))
@@ -36,21 +48,18 @@ export function TopNav() {
   const logout = useGameStore((s) => s.logout)
   const balance = user?.soul_coin_balance ?? 0
   const navigate = useNavigate()
-  const [dropdownOpen, setDropdownOpen] = useState(false)
+  const [activePopover, setActivePopover] = useState<NavPopover>(null)
+  const [activeModal, setActiveModal] = useState<NavModal>(null)
   const avatarRef = useRef<HTMLDivElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
   const clock = useClock()
   const unreadCount = useGameStore((s) => s.unreadCount)
   const setNotifications = useGameStore((s) => s.setNotifications)
-  const [notifOpen, setNotifOpen] = useState(false)
   const notifRef = useRef<HTMLDivElement>(null)
   const digestUnread = useGameStore((s) => s.digestUnread)
   const setDigestUnread = useGameStore((s) => s.setDigestUnread)
-  const [digestOpen, setDigestOpen] = useState(false)
-  const [commissionOpen, setCommissionOpen] = useState(false)
-  const [shopOpen, setShopOpen] = useState(false)
 
   // Login streak + daily quest popup (D3)
-  const [streakOpen, setStreakOpen] = useState(false)
   const [dailyData, setDailyData] = useState<DailyQuestResponse | null>(null)
   const streakRef = useRef<HTMLDivElement>(null)
   const streakBtnRef = useRef<HTMLButtonElement>(null)
@@ -60,6 +69,11 @@ export function TopNav() {
   const [events, setEvents] = useState<ActiveEventData[]>([])
   const [eventIdx, setEventIdx] = useState(0)
   const [bannerVisible, setBannerVisible] = useState(true)
+  const dismissedEvents = getDismissedEvents(user?.id)
+  const streakOpen = activePopover === 'streak'
+  const notifOpen = activePopover === 'notifications'
+  const dropdownOpen = activePopover === 'account'
+  const menuOpen = activePopover === 'menu'
 
   const refreshDailyQuest = useCallback(() => {
     getDailyQuest().then(setDailyData).catch(() => {})
@@ -88,7 +102,7 @@ export function TopNav() {
     getActiveEvents()
       .then((r) => setEvents(r.events.filter((e) => e.type !== 'season' && !dismissedEvents.has(e.id))))
       .catch(() => {})
-  }, [refreshDailyQuest])
+  }, [dismissedEvents, refreshDailyQuest])
 
   // Refetch when the popup opens — streak/quest status may have changed.
   useEffect(() => {
@@ -110,7 +124,7 @@ export function TopNav() {
         }
       }
     })
-  }, [refreshDailyQuest])
+  }, [dismissedEvents, refreshDailyQuest])
 
   // A2: cycle through multiple events every 8s with a short fade. The render
   // indexes with `eventIdx % events.length`, so no sync reset is needed when
@@ -128,22 +142,34 @@ export function TopNav() {
     return () => clearInterval(id)
   }, [events.length])
 
-  // Close the streak popup on outside click (popup is a DOM child of streakRef).
+  // Only one nav popover can own focus at a time. Outside click and Escape use
+  // the active popover's trigger/container as the boundary.
   useEffect(() => {
-    if (!streakOpen) return
+    if (!activePopover) return
+    const activeRef = activePopover === 'streak' ? streakRef
+      : activePopover === 'notifications' ? notifRef
+        : activePopover === 'account' ? avatarRef
+          : menuRef
     const handler = (e: MouseEvent) => {
-      if (streakRef.current && !streakRef.current.contains(e.target as Node)) setStreakOpen(false)
+      if (activeRef.current && !activeRef.current.contains(e.target as Node)) setActivePopover(null)
+    }
+    const keyHandler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setActivePopover(null)
     }
     document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [streakOpen])
+    document.addEventListener('keydown', keyHandler)
+    return () => {
+      document.removeEventListener('mousedown', handler)
+      document.removeEventListener('keydown', keyHandler)
+    }
+  }, [activePopover])
 
   const toggleStreak = () => {
     const rect = streakBtnRef.current?.getBoundingClientRect()
     if (rect) {
       setStreakPopupPos({ top: rect.bottom + 6, right: Math.max(8, window.innerWidth - rect.right) })
     }
-    setStreakOpen((v) => !v)
+    setActivePopover((current) => current === 'streak' ? null : 'streak')
   }
 
   const dismissEvent = (id: string) => {
@@ -157,24 +183,52 @@ export function TopNav() {
   const currentEvent = events.length > 0 ? events[eventIdx % events.length] : null
 
   useEffect(() => {
-    if (!notifOpen) return
-    const handler = (e: MouseEvent) => {
-      if (notifRef.current && !notifRef.current.contains(e.target as Node)) setNotifOpen(false)
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [notifOpen])
+    document.documentElement.style.setProperty('--game-event-height', currentEvent ? '30px' : '0px')
+    return () => document.documentElement.style.setProperty('--game-event-height', '0px')
+  }, [currentEvent])
 
   useEffect(() => {
-    if (!dropdownOpen) return
-    const handleClickOutside = (e: MouseEvent) => {
-      if (avatarRef.current && !avatarRef.current.contains(e.target as Node)) {
-        setDropdownOpen(false)
-      }
+    if (!activeModal) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setActiveModal(null)
     }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [dropdownOpen])
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [activeModal])
+
+  // Bridge-opened panels and nav-owned dialogs share one exclusive overlay lane.
+  useEffect(() => {
+    const closeLocalLayers = () => {
+      setActiveModal(null)
+      setActivePopover(null)
+    }
+    const unsubBulletin = bridge.on('bulletin:open', closeLocalLayers)
+    const unsubExperiment = bridge.on('experiment:open', closeLocalLayers)
+    return () => { unsubBulletin(); unsubExperiment() }
+  }, [])
+
+  const closeBridgePanels = () => {
+    bridge.emit('bulletin:close')
+    bridge.emit('experiment:close')
+  }
+
+  const openModal = (modal: Exclude<NavModal, null>) => {
+    closeBridgePanels()
+    setActivePopover(null)
+    setActiveModal(modal)
+  }
+
+  const openBridgePanel = (panel: 'bulletin' | 'experiment') => {
+    setActiveModal(null)
+    setActivePopover(null)
+    bridge.emit(panel === 'bulletin' ? 'experiment:close' : 'bulletin:close')
+    bridge.emit(`${panel}:open`)
+  }
+
+  const navigateTo = (path: string) => {
+    setActivePopover(null)
+    navigate(path)
+  }
 
   const handleLogout = () => {
     disconnectWS()
@@ -183,91 +237,74 @@ export function TopNav() {
   }
 
   return (<>
-    <nav style={{
-      position: 'fixed', top: 0, left: 0, right: 0, height: 'var(--nav-height)',
-      background: 'var(--bg-card)', borderBottom: '1px solid var(--border)',
-      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-      padding: '0 16px', zIndex: 20,
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-        <span style={{ fontWeight: 700, fontSize: 15, cursor: 'pointer' }}
-              onClick={() => navigate('/')}>🏙️ Simverse World</span>
-        <button onClick={() => navigate('/forge')} style={{
-          background: 'var(--accent-red)', color: 'white', border: 'none',
-          padding: '5px 12px', borderRadius: 'var(--radius)', fontSize: 12,
-          fontWeight: 600, cursor: 'pointer',
-        }}>+ 炼化新居民</button>
-        <button onClick={() => bridge.emit('bulletin:open')} style={{
-          background: 'none', color: '#f59e0b', border: '1px solid #f59e0b44',
-          padding: '5px 12px', borderRadius: 'var(--radius)', fontSize: 12,
-          fontWeight: 600, cursor: 'pointer',
-        }}>📋 公告板</button>
-        <button onClick={() => navigate('/seasons')} style={{
-          background: 'none', color: '#eab308', border: '1px solid #eab30844',
-          padding: '5px 12px', borderRadius: 'var(--radius)', fontSize: 12,
-          fontWeight: 600, cursor: 'pointer',
-        }}>🏆 赛季</button>
-        <button onClick={() => navigate('/debates')} style={{
-          background: 'none', color: '#a78bfa', border: '1px solid #a78bfa44',
-          padding: '5px 12px', borderRadius: 'var(--radius)', fontSize: 12,
-          fontWeight: 600, cursor: 'pointer',
-        }}>⚔️ 辩论</button>
-        <button onClick={() => setShopOpen(true)} style={{
-          background: 'none', color: '#f472b6', border: '1px solid #f472b644',
-          padding: '5px 12px', borderRadius: 'var(--radius)', fontSize: 12,
-          fontWeight: 600, cursor: 'pointer',
-        }}>🛒 商店</button>
-        <button onClick={() => setCommissionOpen(true)} style={{
-          background: 'none', color: '#10b981', border: '1px solid #10b98144',
-          padding: '5px 12px', borderRadius: 'var(--radius)', fontSize: 12,
-          fontWeight: 600, cursor: 'pointer',
-        }}>🗒️ 委托板</button>
-        <button onClick={() => bridge.emit('experiment:open')} style={{
-          background: 'none', color: '#14b8a6', border: '1px solid #14b8a644',
-          padding: '5px 12px', borderRadius: 'var(--radius)', fontSize: 12,
-          fontWeight: 600, cursor: 'pointer',
-        }}>🧪 实验楼</button>
-        {user?.is_admin && (
-          <button onClick={() => navigate('/admin')} style={{
-            background: 'none', color: '#ef4444', border: '1px solid #ef444444',
-            padding: '5px 12px', borderRadius: 'var(--radius)', fontSize: 12,
-            fontWeight: 600, cursor: 'pointer',
-          }}>🔐 管理</button>
-        )}
+    <nav className="game-topnav" aria-label="游戏主导航">
+      <div className="game-topnav__left">
+        <button className="game-topnav__brand" onClick={() => navigateTo('/')} aria-label="返回 Simverse World">
+          <span className="game-topnav__brand-mark" aria-hidden="true">🏙️</span>
+          <span className="game-topnav__brand-word">Simverse World</span>
+        </button>
+        <div className="game-topnav__links">
+          <button onClick={() => navigateTo('/forge')} className="game-nav-link game-nav-link--primary">＋ 炼化居民</button>
+          <button onClick={() => openBridgePanel('bulletin')} className="game-nav-link game-nav-link--gold">📋 公告板</button>
+          <button onClick={() => navigateTo('/seasons')} className="game-nav-link game-nav-link--gold">🏆 赛季</button>
+          <button onClick={() => navigateTo('/debates')} className="game-nav-link game-nav-link--violet">⚔️ 辩论</button>
+          <button onClick={() => openModal('shop')} className="game-nav-link game-nav-link--pink">🛒 商店</button>
+          <button onClick={() => openModal('commission')} className="game-nav-link game-nav-link--green">🗒️ 委托</button>
+          <button onClick={() => openBridgePanel('experiment')} className="game-nav-link game-nav-link--teal">🧪 实验楼</button>
+          {user?.is_admin && (
+            <button onClick={() => navigateTo('/admin')} className="game-nav-link game-nav-link--danger">🔐 管理</button>
+          )}
+        </div>
+        <div ref={menuRef} className="game-topnav__control">
+          <button
+            className="game-topnav__menu-button"
+            onClick={() => setActivePopover((current) => current === 'menu' ? null : 'menu')}
+            aria-label={menuOpen ? '关闭世界菜单' : '打开世界菜单'}
+            aria-expanded={menuOpen}
+            aria-controls="game-world-menu"
+          >
+            <span aria-hidden="true">☰</span><span>世界</span>
+          </button>
+          {menuOpen && (
+            <div id="game-world-menu" className="game-nav-menu" role="menu">
+              <div className="game-nav-menu__search"><SearchDropdown /></div>
+              <button onClick={() => navigateTo('/forge')} className="game-nav-link game-nav-link--primary" role="menuitem">＋ 炼化居民</button>
+              <button onClick={() => openBridgePanel('bulletin')} className="game-nav-link game-nav-link--gold" role="menuitem">📋 公告板</button>
+              <button onClick={() => navigateTo('/seasons')} className="game-nav-link game-nav-link--gold" role="menuitem">🏆 赛季</button>
+              <button onClick={() => navigateTo('/debates')} className="game-nav-link game-nav-link--violet" role="menuitem">⚔️ 辩论</button>
+              <button onClick={() => openModal('shop')} className="game-nav-link game-nav-link--pink" role="menuitem">🛒 商店</button>
+              <button onClick={() => openModal('commission')} className="game-nav-link game-nav-link--green" role="menuitem">🗒️ 委托</button>
+              <button onClick={() => openBridgePanel('experiment')} className="game-nav-link game-nav-link--teal" role="menuitem">🧪 实验楼</button>
+              <button onClick={() => { setDigestUnread(false); openModal('digest') }} className="game-nav-link" role="menuitem">📰 村落日报</button>
+              {user?.is_admin && (
+                <button onClick={() => navigateTo('/admin')} className="game-nav-link game-nav-link--danger" role="menuitem">🔐 管理</button>
+              )}
+            </div>
+          )}
+        </div>
       </div>
-      <SearchDropdown />
-      <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-        <span style={{
-          color: 'var(--text-muted)', fontSize: 12,
-          background: 'var(--bg-input)', padding: '4px 10px', borderRadius: 16,
-          fontVariantNumeric: 'tabular-nums',
-        }}>🕐 {clock}</span>
-        <span style={{
-          color: 'var(--accent-green)', fontSize: 13,
-          background: '#53d76915', padding: '4px 12px', borderRadius: 16,
-        }}>🪙 {balance}</span>
+      <div className="game-topnav__search"><SearchDropdown /></div>
+      <div className="game-topnav__actions">
+        <span className="game-topnav__status game-topnav__clock" style={{ fontVariantNumeric: 'tabular-nums' }}>🕐 {clock}</span>
+        <span className="game-topnav__status game-topnav__status--coin">🪙 {balance}</span>
         {/* Login streak + daily quest (D3) */}
-        <div ref={streakRef} style={{ position: 'relative' }}>
+        <div ref={streakRef} className="game-topnav__control game-topnav__streak">
           <button
             ref={streakBtnRef}
             onClick={toggleStreak}
             title="连续登录"
-            style={{
-              background: 'var(--bg-input)', border: 'none', height: 30,
-              padding: '0 10px', borderRadius: 15, cursor: 'pointer',
-              fontSize: 12, fontWeight: 700, color: 'var(--text-primary)',
-              display: 'flex', alignItems: 'center', gap: 2,
-            }}
+            className="game-topnav__status"
+            aria-expanded={streakOpen}
           >
             🔥{loginStreak}
           </button>
           {streakOpen && (
-            <div style={{
-              position: 'fixed', top: streakPopupPos.top, right: streakPopupPos.right,
-              zIndex: 30, width: 264,
-              background: 'var(--bg-card)', border: '1px solid var(--border)',
-              borderRadius: 10, padding: 14, boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
-            }}>
+            <div
+              className="game-nav-popover game-nav-popover--streak"
+              style={{ top: streakPopupPos.top, right: streakPopupPos.right }}
+              role="dialog"
+              aria-label="连续登录与今日话题"
+            >
               <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-primary)' }}>
                 连续登录 {loginStreak} 天 🔥
               </div>
@@ -325,64 +362,40 @@ export function TopNav() {
           )}
         </div>
         <button
-          onClick={() => { setDigestOpen(true); setDigestUnread(false) }}
+          onClick={() => { setDigestUnread(false); openModal('digest') }}
           title="村落日报"
-          style={{
-            position: 'relative', background: 'var(--bg-input)', border: 'none',
-            width: 30, height: 30, borderRadius: '50%', cursor: 'pointer',
-            fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }}
+          className="game-topnav__icon-button game-topnav__digest"
         >
           📰
           {digestUnread && (
-            <span style={{
-              position: 'absolute', top: -2, right: -2, width: 9, height: 9,
-              borderRadius: '50%', background: 'var(--accent-red)',
-            }} />
+            <span className="game-topnav__badge game-topnav__badge--dot" />
           )}
         </button>
-        <div ref={notifRef} style={{ position: 'relative' }}>
+        <div ref={notifRef} className="game-topnav__control">
           <button
-            onClick={() => setNotifOpen((v) => !v)}
+            onClick={() => setActivePopover((current) => current === 'notifications' ? null : 'notifications')}
             title="通知"
-            style={{
-              position: 'relative', background: 'var(--bg-input)', border: 'none',
-              width: 30, height: 30, borderRadius: '50%', cursor: 'pointer',
-              fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center',
-            }}
+            className="game-topnav__icon-button"
+            aria-expanded={notifOpen}
           >
             🔔
             {unreadCount > 0 && (
-              <span style={{
-                position: 'absolute', top: -4, right: -4, minWidth: 16, height: 16,
-                padding: '0 4px', borderRadius: 8, background: 'var(--accent-red)',
-                color: 'white', fontSize: 10, fontWeight: 700,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-              }}>{unreadCount > 99 ? '99+' : unreadCount}</span>
+              <span className="game-topnav__badge">{unreadCount > 99 ? '99+' : unreadCount}</span>
             )}
           </button>
-          {notifOpen && <NotificationDrawer onClose={() => setNotifOpen(false)} />}
+          {notifOpen && <NotificationDrawer onClose={() => setActivePopover(null)} />}
         </div>
-        <div ref={avatarRef} style={{ position: 'relative' }}>
-          <div
-            onClick={() => setDropdownOpen((v) => !v)}
-            style={{
-              width: 30, height: 30, background: 'var(--bg-input)', borderRadius: '50%',
-              display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14,
-              fontWeight: 700, color: 'var(--text-primary)', cursor: 'pointer',
-              border: dropdownOpen ? '1px solid var(--accent)' : '1px solid transparent',
-            }}
-            title="账号菜单"
+        <div ref={avatarRef} className="game-topnav__control">
+          <button
+            onClick={() => setActivePopover((current) => current === 'account' ? null : 'account')}
+            className="game-topnav__avatar"
+            aria-label="账号菜单"
+            aria-expanded={dropdownOpen}
           >
             {user?.name?.[0]?.toUpperCase() || '?'}
-          </div>
+          </button>
           {dropdownOpen && (
-            <div style={{
-              position: 'absolute', top: 38, right: 0,
-              background: 'var(--bg-card)', border: '1px solid var(--border)',
-              borderRadius: 8, minWidth: 160, boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
-              zIndex: 100, overflow: 'hidden',
-            }}>
+            <div className="game-nav-popover game-nav-popover--account" role="menu">
               <div style={{
                 padding: '10px 14px', fontSize: 13, fontWeight: 600,
                 color: 'var(--text-primary)', borderBottom: '1px solid var(--border)',
@@ -390,7 +403,7 @@ export function TopNav() {
                 {user?.name ?? '用户'}
               </div>
               <button
-                onClick={() => { setDropdownOpen(false); navigate('/profile') }}
+                onClick={() => navigateTo('/profile')}
                 style={{
                   display: 'block', width: '100%', textAlign: 'left',
                   padding: '9px 14px', fontSize: 13,
@@ -403,7 +416,7 @@ export function TopNav() {
                 👤 个人主页
               </button>
               <button
-                onClick={() => { setDropdownOpen(false); navigate('/capsules') }}
+                onClick={() => navigateTo('/capsules')}
                 style={{
                   display: 'block', width: '100%', textAlign: 'left',
                   padding: '9px 14px', fontSize: 13,
@@ -432,30 +445,21 @@ export function TopNav() {
           )}
         </div>
       </div>
-      {digestOpen && <DigestModal onClose={() => setDigestOpen(false)} />}
-      {commissionOpen && <CommissionModal onClose={() => setCommissionOpen(false)} />}
-      {shopOpen && <ShopModal onClose={() => setShopOpen(false)} />}
-      {/* Mounted here (not GamePage) so the 公告板 button works on every
-          authenticated page — the modal is self-contained (bridge + API). */}
-      <BulletinBoard />
-      {/* Self-mounted like BulletinBoard: opens on the experiment:open bridge
-          event (TopNav button + ws.ts experiment_prompt). */}
-      <ExperimentPanel />
     </nav>
-    {/* Active world-event banner (A2) — slim strip right below the nav.
-        Overlays the map's top edge on purpose; the page does not reflow. */}
+    {activeModal === 'digest' && <DigestModal onClose={() => setActiveModal(null)} />}
+    {activeModal === 'commission' && <CommissionModal onClose={() => setActiveModal(null)} />}
+    {activeModal === 'shop' && <ShopModal onClose={() => setActiveModal(null)} />}
+    {/* Viewport overlays stay outside nav so backdrop-filter cannot establish
+        a 48px fixed-position containing block around them. */}
+    <BulletinBoard />
+    <ExperimentPanel />
+    {/* The shared event-height variable moves every game HUD surface below it. */}
     {currentEvent && (
-      <div style={{
-        position: 'fixed', top: 'var(--nav-height)', left: 0, right: 0, zIndex: 19,
-        background: 'rgba(233,69,96,0.12)', borderBottom: '1px solid rgba(233,69,96,0.35)',
-        display: 'flex', alignItems: 'center', gap: 8, padding: '4px 16px',
-        fontSize: 12, color: 'var(--text-primary)',
-        opacity: bannerVisible ? 1 : 0, transition: 'opacity 0.3s ease',
-      }}>
+      <div className="game-world-event" style={{ opacity: bannerVisible ? 1 : 0, transition: 'opacity 0.3s ease' }} role="status">
         <span>📣</span>
-        <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <span className="game-world-event__copy">
           <span style={{ fontWeight: 600 }}>{currentEvent.title}</span>
-          <span style={{ color: 'var(--text-secondary)' }}> — {currentEvent.description.slice(0, 80)}</span>
+          <span className="game-world-event__description" style={{ color: '#d2c5c4' }}> · {currentEvent.description.slice(0, 80)}</span>
         </span>
         {events.length > 1 && (
           <span style={{ fontSize: 10, color: 'var(--text-muted)', fontVariantNumeric: 'tabular-nums' }}>
@@ -464,13 +468,8 @@ export function TopNav() {
         )}
         <button
           onClick={() => dismissEvent(currentEvent.id)}
-          title="关闭"
-          style={{
-            background: 'none', border: 'none', color: 'var(--text-muted)',
-            fontSize: 12, cursor: 'pointer', padding: '2px 4px', lineHeight: 1,
-          }}
-          onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--accent-red)' }}
-          onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = 'var(--text-muted)' }}
+          aria-label="关闭世界事件"
+          className="game-dialog-close"
         >✕</button>
       </div>
     )}

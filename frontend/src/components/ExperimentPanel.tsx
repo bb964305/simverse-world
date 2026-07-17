@@ -43,36 +43,53 @@ export function ExperimentPanel() {
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<LabTab>('publish')
   const updateBalance = useGameStore((s) => s.updateBalance)
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
-    const unsubOpen = bridge.on('experiment:open', () => setOpen(true))
+    const unsubOpen = bridge.on('experiment:open', () => {
+      bridge.emit('bulletin:close')
+      setOpen(true)
+    })
     const unsubClose = bridge.on('experiment:close', () => setOpen(false))
     return () => { unsubOpen(); unsubClose() }
   }, [])
 
+  useEffect(() => {
+    if (!open) return
+    closeButtonRef.current?.focus()
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [open])
+
   if (!open) return null
 
   return (
-    <div style={{
-      position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
-      width: 620, maxHeight: '82vh', overflowY: 'auto', zIndex: 25,
-      background: '#18181bf5', border: `2px solid ${ACCENT}44`, borderRadius: 16,
-      backdropFilter: 'blur(12px)', boxShadow: '0 0 60px rgba(20,184,166,0.1)',
-    }}>
-      <div style={{
+    <div
+      className="game-modal-backdrop"
+      onClick={(e) => { if (e.target === e.currentTarget) setOpen(false) }}
+    >
+      <section
+        className="game-modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="experiment-dialog-title"
+        style={{ borderColor: `${ACCENT}55` }}
+      >
+      <div className="game-dialog-header" style={{
         padding: '16px 20px', borderBottom: '1px solid var(--border)',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        background: '#14b8a608', position: 'sticky', top: 0, zIndex: 1,
+        background: '#14b8a608',
       }}>
         <div>
-          <div style={{ fontWeight: 800, fontSize: 15, color: ACCENT }}>🧪 实验楼</div>
+          <div id="experiment-dialog-title" style={{ fontWeight: 800, fontSize: 15, color: ACCENT }}>🧪 实验楼</div>
           <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 2 }}>
             发布真实委托 · 观看研究员运行 · 领取产物与世界提案
           </div>
         </div>
-        <button onClick={() => setOpen(false)} style={{
-          background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 18, cursor: 'pointer',
-        }}>✕</button>
+        <button ref={closeButtonRef} onClick={() => setOpen(false)} className="game-dialog-close" aria-label="关闭实验楼">✕</button>
       </div>
 
       <div style={{ display: 'flex', gap: 4, padding: '8px 20px 0', borderBottom: '1px solid var(--border)' }}>
@@ -90,6 +107,7 @@ export function ExperimentPanel() {
         {tab === 'live' && <LiveTab onBalanceChange={() => { getMe().then((m) => updateBalance(m.soul_coin_balance)).catch(() => {}) }} />}
         {tab === 'artifacts' && <ArtifactsTab />}
       </div>
+      </section>
     </div>
   )
 }
@@ -184,6 +202,7 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
   const [run, setRun] = useState<LabRun | null>(null)
   const [steps, setSteps] = useState<LabRunStep[]>([])
   const lastSeq = useRef(0)
+  const runRef = useRef<LabRun | null>(null)
 
   const loadTasks = useCallback(() => {
     getLabTasks('mine').then((r) => setTasks(r.tasks)).catch(() => {})
@@ -194,24 +213,35 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
   useEffect(() => {
     if (!selected) return
     let cancelled = false
-    lastSeq.current = 0
-    setSteps([])
     const pull = async () => {
       try {
         const { run: r } = await getLabTask(selected)
         if (cancelled) return
+        runRef.current = r
         setRun(r)
         if (r) {
           const { steps: s } = await getLabRunSteps(r.id, lastSeq.current)
           if (cancelled) return
-          if (s.length) { lastSeq.current = s[s.length - 1].seq; setSteps((prev) => [...prev, ...s]) }
+          if (s.length) {
+            // WS may advance lastSeq while this request is in flight. Only
+            // merge genuinely newer steps and never move the cursor backward.
+            const fresh = s.filter((step) => step.seq > lastSeq.current)
+            lastSeq.current = Math.max(lastSeq.current, ...s.map((step) => step.seq))
+            if (fresh.length) {
+              setSteps((prev) => {
+                const seen = new Set(prev.map((step) => `${step.run_id}:${step.seq}`))
+                return [...prev, ...fresh.filter((step) => !seen.has(`${step.run_id}:${step.seq}`))]
+              })
+            }
+          }
         }
       } catch { /* ignore */ }
     }
     void pull()
     const timer = setInterval(pull, 2000)
     const unsub = onWSMessage((data) => {
-      if (data.type === 'lab_run_step' && run && data.run_id === run.id) {
+      const activeRun = runRef.current
+      if (data.type === 'lab_run_step' && activeRun && data.run_id === activeRun.id) {
         const seq = Number(data.seq)
         if (seq > lastSeq.current) {
           lastSeq.current = seq
@@ -225,7 +255,15 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
       if (data.type === 'lab_task_update' && data.task_id === selected) loadTasks()
     })
     return () => { cancelled = true; clearInterval(timer); unsub() }
-  }, [selected, run, loadTasks])
+  }, [selected, loadTasks])
+
+  const selectTask = (id: string) => {
+    lastSeq.current = 0
+    runRef.current = null
+    setRun(null)
+    setSteps([])
+    setSelected(id)
+  }
 
   const settle = async (id: string, accept: boolean) => {
     try {
@@ -238,12 +276,12 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
   }
 
   return (
-    <div style={{ display: 'flex', gap: 12 }}>
+    <div className="game-lab-split" style={{ display: 'flex', gap: 12 }}>
       <div style={{ width: 200, borderRight: '1px solid var(--border)', paddingRight: 12 }}>
         <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>我的委托</div>
         {tasks.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>还没有委托</div>}
         {tasks.map((t) => (
-          <button key={t.id} onClick={() => setSelected(t.id)} style={{
+          <button key={t.id} onClick={() => selectTask(t.id)} style={{
             display: 'block', width: '100%', textAlign: 'left', background: selected === t.id ? '#14b8a614' : 'none',
             border: 'none', borderRadius: 6, padding: '6px 8px', cursor: 'pointer', marginBottom: 4,
             color: 'var(--text)', fontSize: 12,

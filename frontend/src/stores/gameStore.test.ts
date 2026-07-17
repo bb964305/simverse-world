@@ -9,6 +9,25 @@ const testUser = {
   soul_coin_balance: 100,
 }
 
+const otherUser = {
+  ...testUser,
+  id: 'u2',
+  name: 'Ada',
+  email: 'ada@example.com',
+}
+
+const notification = {
+  id: 'notification-1',
+  kind: 'message',
+  title: 'New message',
+  body: 'Hello',
+  payload: {},
+  read: false,
+  created_at: null,
+}
+
+const onlinePlayer = { player_id: 'p1', name: 'A', x: 0, y: 0, direction: 'down' }
+
 function resetStore() {
   localStorage.clear()
   useGameStore.setState({
@@ -21,6 +40,9 @@ function resetStore() {
     chatTarget: null,
     playerChatMessages: [],
     onlinePlayers: new Map(),
+    wsStatus: 'connected',
+    achievementToast: null,
+    pendingEncounter: null,
   })
 }
 
@@ -35,13 +57,95 @@ describe('auth slice', () => {
     expect(JSON.parse(localStorage.getItem('user')!)).toMatchObject({ id: 'u1' })
   })
 
-  it('logout clears both state and localStorage', () => {
+  it('logout clears auth and ephemeral gameplay UI', () => {
     useGameStore.getState().setAuth(testUser, 'tok-123')
+    useGameStore.setState({
+      wsStatus: 'reconnecting',
+      notifications: [notification],
+      unreadCount: 1,
+      digestUnread: true,
+      achievementToast: { code: 'first', title: 'First Visit', reward_sc: 5 },
+      pendingEncounter: { resident_slug: 'mei', resident_name: '梅', location_id: 'square', opener: '你好' },
+      playerSpriteKey: '梅',
+      chatOpen: true,
+      chatResident: { slug: 'mei', name: '梅', role: 'merchant' },
+      chatTarget: { type: 'player', userId: 'u2', name: 'Ada' },
+      playerChatMessages: [{ from: 'u2', text: 'old', isAuto: false, timestamp: 1 }],
+      inputFocused: true,
+      profileTab: 'settings',
+      onlinePlayers: new Map([[onlinePlayer.player_id, onlinePlayer]]),
+      spawnX: 123,
+      spawnY: 456,
+      minimapTextureUrl: 'blob:map',
+      playerTileX: 10,
+      playerTileY: 20,
+      cameraViewport: { x: 1, y: 2, w: 3, h: 4 },
+    })
     useGameStore.getState().logout()
-    expect(useGameStore.getState().token).toBeNull()
-    expect(useGameStore.getState().user).toBeNull()
+    expect(useGameStore.getState()).toMatchObject({
+      user: null,
+      token: null,
+      wsStatus: 'connected',
+      notifications: [],
+      unreadCount: 0,
+      digestUnread: false,
+      achievementToast: null,
+      pendingEncounter: null,
+      playerSpriteKey: '埃迪',
+      chatOpen: false,
+      chatResident: null,
+      chatTarget: null,
+      playerChatMessages: [],
+      inputFocused: false,
+      profileTab: 'residents',
+      spawnX: 76 * 32,
+      spawnY: 50 * 32,
+      minimapTextureUrl: null,
+      playerTileX: 76,
+      playerTileY: 50,
+      cameraViewport: null,
+    })
+    expect(useGameStore.getState().onlinePlayers.size).toBe(0)
     expect(localStorage.getItem('token')).toBeNull()
     expect(localStorage.getItem('user')).toBeNull()
+  })
+
+  it('setAuth starts a clean session when the account changes', () => {
+    useGameStore.getState().setAuth(testUser, 'tok-123')
+    useGameStore.setState({
+      notifications: [notification],
+      unreadCount: 1,
+      chatOpen: true,
+      chatTarget: { type: 'player', userId: 'u3', name: 'Previous player' },
+      playerChatMessages: [{ from: 'u3', text: 'old', isAuto: false, timestamp: 1 }],
+      onlinePlayers: new Map([[onlinePlayer.player_id, onlinePlayer]]),
+      pendingEncounter: { resident_slug: 'mei', resident_name: '梅', location_id: 'square', opener: '你好' },
+    })
+
+    useGameStore.getState().setAuth(otherUser, 'tok-456')
+
+    expect(useGameStore.getState()).toMatchObject({
+      user: otherUser,
+      token: 'tok-456',
+      notifications: [],
+      unreadCount: 0,
+      chatOpen: false,
+      chatTarget: null,
+      playerChatMessages: [],
+      pendingEncounter: null,
+    })
+    expect(useGameStore.getState().onlinePlayers.size).toBe(0)
+  })
+
+  it('setAuth preserves the active session for same-account profile updates', () => {
+    useGameStore.getState().setAuth(testUser, 'tok-123')
+    useGameStore.setState({ chatOpen: true, onlinePlayers: new Map([[onlinePlayer.player_id, onlinePlayer]]) })
+
+    useGameStore.getState().setAuth({ ...testUser, name: 'Updated name' }, 'tok-123')
+
+    expect(useGameStore.getState().user?.name).toBe('Updated name')
+    expect(useGameStore.getState().chatOpen).toBe(true)
+    expect(useGameStore.getState().onlinePlayers.size).toBe(1)
   })
 
   it('updateBalance only touches balance and is a no-op when logged out', () => {
@@ -60,9 +164,15 @@ describe('chat slice', () => {
   beforeEach(resetStore)
 
   it('openChat/closeChat toggle drawer and resident', () => {
+    useGameStore.setState({
+      chatTarget: { type: 'player', userId: 'u2', name: 'Ada' },
+      playerChatMessages: [{ from: 'u2', text: 'old', isAuto: false, timestamp: 1 }],
+    })
     useGameStore.getState().openChat({ slug: 'klaus', name: '克劳斯', role: 'blacksmith' })
     expect(useGameStore.getState().chatOpen).toBe(true)
     expect(useGameStore.getState().chatResident?.slug).toBe('klaus')
+    expect(useGameStore.getState().chatTarget).toBeNull()
+    expect(useGameStore.getState().playerChatMessages).toHaveLength(0)
 
     useGameStore.getState().closeChat()
     expect(useGameStore.getState().chatOpen).toBe(false)

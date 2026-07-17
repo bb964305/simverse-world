@@ -22,16 +22,16 @@ export function DigestModal({ onClose }: Props) {
   return (
     <div
       onClick={onClose}
-      style={{
-        position: 'fixed', inset: 0, zIndex: 200, background: 'rgba(0,0,0,0.6)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
-      }}
+      className="game-modal-backdrop"
     >
       <div
         onClick={(e) => e.stopPropagation()}
+        className="game-modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="digest-dialog-title"
         style={{
-          background: 'var(--bg-card)', border: '1px solid var(--border)',
-          borderRadius: 12, width: 'min(640px, 92vw)', maxHeight: '82vh',
+          width: 'min(640px, calc(100vw - 32px))',
           display: 'flex', flexDirection: 'column', overflow: 'hidden',
         }}
       >
@@ -39,11 +39,8 @@ export function DigestModal({ onClose }: Props) {
           padding: '14px 20px', borderBottom: '1px solid var(--border)',
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         }}>
-          <span style={{ fontWeight: 700, fontSize: 15 }}>📰 村落日报</span>
-          <button onClick={onClose} style={{
-            background: 'none', border: 'none', color: 'var(--text-muted)',
-            fontSize: 18, cursor: 'pointer',
-          }}>✕</button>
+          <span id="digest-dialog-title" style={{ fontWeight: 700, fontSize: 15 }}>📰 村落日报</span>
+          <button autoFocus onClick={onClose} className="game-dialog-close" aria-label="关闭村落日报">✕</button>
         </div>
         <div style={{ padding: '20px 24px', overflowY: 'auto', lineHeight: 1.75, fontSize: 14 }}>
           {loading ? (

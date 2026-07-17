@@ -9,10 +9,10 @@ const API = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 interface Props {
   district: DistrictKey
   onClose: () => void
-  panelLeft?: number
+  variant: 'collapsed' | 'expanded'
 }
 
-export function ResidentPanel({ district, onClose, panelLeft = 188 }: Props) {
+export function ResidentPanel({ district, onClose, variant }: Props) {
   const [residents, setResidents] = useState<ResidentData[]>([])
   const config = DISTRICTS.find((d) => d.key === district)!
 
@@ -36,20 +36,10 @@ export function ResidentPanel({ district, onClose, panelLeft = 188 }: Props) {
   }
 
   return (
-    <div style={{
-      position: 'absolute',
-      top: 0,
-      left: panelLeft,
-      width: 220,
-      background: 'rgba(15,23,42,0.95)',
-      border: `1px solid ${config.color.replace('0.8', '0.4')}`,
-      borderRadius: 8,
-      overflow: 'hidden',
-      fontSize: 12,
-      color: '#e2e8f0',
-      zIndex: 20,
-      boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
-    }}>
+    <div
+      className={`game-minimap__resident-panel game-minimap__resident-panel--${variant}`}
+      style={{ borderColor: config.color.replace('0.8', '0.4') }}
+    >
       {/* Header */}
       <div style={{
         padding: '10px 12px',
@@ -69,7 +59,7 @@ export function ResidentPanel({ district, onClose, panelLeft = 188 }: Props) {
       </div>
 
       {/* Resident list */}
-      <div style={{ maxHeight: 200, overflowY: 'auto' }}>
+      <div className="game-minimap__resident-list">
         {residents.length === 0 && (
           <div style={{ padding: 16, textAlign: 'center', color: '#475569', fontSize: 11 }}>
             该街区暂无居民

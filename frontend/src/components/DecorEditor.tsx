@@ -47,6 +47,18 @@ export function DecorEditor() {
     return () => { cancelled = true }
   }, [token])
 
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setOpen(false)
+        setError(null)
+      }
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [open])
+
   const homeBounds = mine?.home ? HOUSING_BOUNDS[mine.home] : undefined
   const insideHome = !!homeBounds
     && tileX >= homeBounds[0] && tileX <= homeBounds[2]
@@ -154,26 +166,24 @@ export function DecorEditor() {
         </div>
       )}
       {open && bounds && (
-        <div style={{
-          position: 'fixed', inset: 0, zIndex: 320,
-          background: 'rgba(0,0,0,0.55)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>
-          <div style={{
-            background: 'var(--bg-card)', border: '1px solid #f59e0b55',
-            borderRadius: 14, padding: 18, maxHeight: '90vh', overflow: 'auto',
-            boxShadow: '0 12px 48px rgba(0,0,0,0.5)',
-          }}>
+        <div className="game-modal-backdrop">
+          <div
+            className="game-modal-panel game-decor-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="decor-dialog-title"
+            style={{ width: 'fit-content', maxWidth: 'calc(100vw - 16px)', padding: 18, borderColor: '#f59e0b55' }}
+          >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-              <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)' }}>
+              <div id="decor-dialog-title" style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)' }}>
                 🛋️ 装修{mine.home ? ` · ${HOUSING_NAMES[mine.home] ?? mine.home}` : ''}
               </div>
               <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                 {items.length}/{DECOR_MAX_ITEMS} 件
               </div>
             </div>
-            <div style={{ display: 'flex', gap: 14 }}>
-              <div>
+            <div className="game-decor-layout" style={{ display: 'flex', gap: 14 }}>
+              <div className="game-decor-grid">
                 <div style={{
                   display: 'grid',
                   gridTemplateColumns: `repeat(${bounds[2] - bounds[0] + 1}, 26px)`,
@@ -205,7 +215,7 @@ export function DecorEditor() {
                   点击空格摆放所选家具，点击已摆放的家具移除
                 </div>
               </div>
-              <div style={{ width: 170, display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div className="game-decor-inventory" style={{ width: 170, display: 'flex', flexDirection: 'column', gap: 6 }}>
                 <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>我的家具</div>
                 {inventory.length === 0 && (
                   <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>

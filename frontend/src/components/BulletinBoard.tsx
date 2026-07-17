@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { bridge } from '../game/phaserBridge'
 import { getBulletinPosts, type BulletinPostData } from '../services/api'
 import { parseUTC } from '../utils/time'
@@ -82,9 +82,11 @@ export function BulletinBoard() {
   const [postsLoading, setPostsLoading] = useState(false)
   const [postsLoadingMore, setPostsLoadingMore] = useState(false)
   const [postsError, setPostsError] = useState<string | null>(null)
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     const unsub1 = bridge.on('bulletin:open', () => {
+      bridge.emit('experiment:close')
       setOpen(true)
       void fetchBulletin()
     })
@@ -94,6 +96,16 @@ export function BulletinBoard() {
       unsub2()
     }
   }, [])
+
+  useEffect(() => {
+    if (!open) return
+    closeButtonRef.current?.focus()
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [open])
 
   // First page of posts: fetched when the tab is shown or the kind filter
   // changes (filter switch resets the cursor by refetching from the top).
@@ -149,28 +161,30 @@ export function BulletinBoard() {
   if (!open) return null
 
   return (
-    <div style={{
-      position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
-      width: 520, maxHeight: '80vh', overflowY: 'auto', zIndex: 25,
-      background: '#18181bf5', border: '2px solid #f59e0b44', borderRadius: 16,
-      backdropFilter: 'blur(12px)', boxShadow: '0 0 60px rgba(245,158,11,0.1)',
-    }}>
+    <div
+      className="game-modal-backdrop"
+      onClick={(e) => { if (e.target === e.currentTarget) setOpen(false) }}
+    >
+      <section
+        className="game-modal-panel game-modal-panel--bulletin"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="bulletin-dialog-title"
+        style={{ borderColor: '#f59e0b55' }}
+      >
       {/* Header */}
-      <div style={{
+      <div className="game-dialog-header" style={{
         padding: '16px 20px', borderBottom: '1px solid var(--border)',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         background: '#f59e0b08',
-        position: 'sticky', top: 0, zIndex: 1,
       }}>
         <div>
-          <div style={{ fontWeight: 800, fontSize: 15, color: '#f59e0b' }}>📋 中央广场公告板</div>
+          <div id="bulletin-dialog-title" style={{ fontWeight: 800, fontSize: 15, color: '#f59e0b' }}>📋 中央广场公告板</div>
           <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 2 }}>
             {data ? `最近 24 小时：${data.recent_conversations_24h} 次对话` : '加载中...'}
           </div>
         </div>
-        <button onClick={() => setOpen(false)} style={{
-          background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 18, cursor: 'pointer',
-        }}>✕</button>
+        <button ref={closeButtonRef} onClick={() => setOpen(false)} className="game-dialog-close" aria-label="关闭公告板">✕</button>
       </div>
 
       {/* Tabs: 广场 (legacy plaza view) | 帖子 (A4 posts) */}
@@ -346,6 +360,7 @@ export function BulletinBoard() {
           </div>
         </div>
       )}
+      </section>
     </div>
   )
 }

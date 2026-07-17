@@ -10,6 +10,7 @@ import { useGameStore } from '../stores/gameStore'
 import { connectWS, disconnectWS } from '../services/ws'
 import { getSettings } from '../services/api'
 import { bridge } from '../game/phaserBridge'
+import '../styles/game-shell.css'
 
 export function GamePage() {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -48,6 +49,7 @@ export function GamePage() {
     return () => {
       destroyed = true
       unsubPlayerInteract()
+      useGameStore.getState().closeChat()
       disconnectWS()
       import('../game/GameScene').then(({ destroyGame }) => destroyGame())
     }
@@ -60,11 +62,7 @@ export function GamePage() {
       <div
         ref={containerRef}
         id="game-container"
-        style={{
-          position: 'fixed', top: 48, left: 0, bottom: 0,
-          right: chatOpen ? 380 : 0,
-          transition: 'right 0.3s ease',
-        }}
+        className={`game-shell__canvas${chatOpen ? ' game-shell__canvas--chat-open' : ''}`}
       />
       <NpcTooltip />
       <ChatDrawer />

@@ -40,8 +40,8 @@ export function NotificationDrawer({ onClose }: Props) {
   }, [notifications, setNotifications])
 
   return (
-    <div style={{
-      position: 'absolute', top: 38, right: 0, width: 320, maxHeight: 420,
+    <div role="region" aria-label="通知" style={{
+      position: 'absolute', top: 38, right: 0, width: 'min(320px, calc(100vw - 16px))', maxHeight: 'min(420px, calc(100dvh - 64px))',
       background: 'var(--bg-card)', border: '1px solid var(--border)',
       borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.3)', zIndex: 100,
       display: 'flex', flexDirection: 'column', overflow: 'hidden',

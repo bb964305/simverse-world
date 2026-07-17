@@ -7,6 +7,7 @@ export function EncounterCard() {
   const encounter = useGameStore((s) => s.pendingEncounter)
   const clear = useGameStore((s) => s.clearPendingEncounter)
   const openChat = useGameStore((s) => s.openChat)
+  const chatOpen = useGameStore((s) => s.chatOpen)
 
   useEffect(() => {
     if (!encounter) return
@@ -24,10 +25,9 @@ export function EncounterCard() {
   }
 
   return (
-    <div style={{
-      position: 'fixed', right: 20, bottom: 20, zIndex: 300, width: 300,
+    <div className={`game-encounter-card${chatOpen ? ' is-chat-open' : ''}`} style={{
       background: 'var(--bg-card)', border: '1px solid #0ea5e955',
-      borderRadius: 12, padding: '14px 16px', boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+      borderRadius: 8, padding: '14px 16px', boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
       animation: 'encSlideIn 0.35s ease',
     }}>
       <div style={{ fontSize: 12, color: '#0ea5e9', fontWeight: 700, marginBottom: 6 }}>✨ 偶遇</div>

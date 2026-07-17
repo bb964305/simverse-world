@@ -131,10 +131,9 @@ export function NpcTooltip() {
   const latestDoneMilestone = goal?.milestones?.filter((m) => m.done).pop() ?? null
 
   return (
-    <div style={{
-      position: 'fixed', top: 60, right: 12, zIndex: 15, minWidth: 180,
+    <div className="game-shell__npc-tooltip" style={{
       background: '#18181bf5', color: '#d4d4d8', fontSize: 13,
-      padding: '10px 14px', borderRadius: 10, border: '1px solid var(--border)',
+      padding: '10px 14px', borderRadius: 8, border: '1px solid var(--border)',
       backdropFilter: 'blur(8px)',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>

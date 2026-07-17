@@ -11,12 +11,20 @@ const SMALL_W = 180
 const SMALL_H = 130
 const LARGE_W = 560
 const LARGE_H = 400
+const EXPANDED_VIEWPORT_GUTTER = 32
+
+function getExpandedMapWidth(): number {
+  if (typeof window === 'undefined') return LARGE_W
+  return Math.max(1, Math.min(LARGE_W, window.innerWidth - EXPANDED_VIEWPORT_GUTTER))
+}
 
 export function MinimapOverlay() {
   const [selectedDistrict, setSelectedDistrict] = useState<DistrictKey | null>(null)
   const [expanded, setExpanded] = useState(false)
+  const [expandedMapWidth, setExpandedMapWidth] = useState(getExpandedMapWidth)
   const smallMapRef = useRef<HTMLDivElement>(null)
   const largeMapRef = useRef<HTMLDivElement>(null)
+  const expandedMapHeight = Math.round((expandedMapWidth / LARGE_W) * LARGE_H)
 
   const handleSelectDistrict = useCallback((key: DistrictKey) => {
     setSelectedDistrict((prev) => (prev === key ? null : key))
@@ -66,19 +74,17 @@ export function MinimapOverlay() {
     return () => document.removeEventListener('keydown', handler)
   }, [expanded])
 
+  useEffect(() => {
+    const handleResize = () => setExpandedMapWidth(getExpandedMapWidth())
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
+
   // Expanded: centered overlay with large map
   if (expanded) {
     return (
       <div
-        style={{
-          position: 'fixed',
-          inset: 0,
-          zIndex: 50,
-          background: 'rgba(0,0,0,0.6)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-        }}
+        className="game-minimap__backdrop"
         onClick={(e) => {
           // Click backdrop to close panel (not collapse — use double-click to collapse)
           if (e.target === e.currentTarget) {
@@ -86,20 +92,14 @@ export function MinimapOverlay() {
           }
         }}
       >
-        <div style={{ position: 'relative' }}>
+        <div className="game-minimap__expanded-layout">
           {/* Large map container */}
           <div
             ref={largeMapRef}
+            className="game-minimap__map game-minimap__map--expanded"
             style={{
-              width: LARGE_W,
-              height: LARGE_H,
-              background: 'rgba(0,0,0,0.85)',
-              border: '1.5px solid rgba(255,255,255,0.25)',
-              borderRadius: 12,
-              overflow: 'hidden',
-              boxShadow: '0 8px 40px rgba(0,0,0,0.7)',
-              position: 'relative',
-              cursor: 'pointer',
+              width: expandedMapWidth,
+              height: expandedMapHeight,
             }}
             onClick={(e) => {
               // Click on empty map area → teleport
@@ -112,13 +112,20 @@ export function MinimapOverlay() {
             }}
             onDoubleClick={handleDoubleClick}
           >
-            <MinimapCanvas width={LARGE_W} height={LARGE_H} />
+            <MinimapCanvas width={expandedMapWidth} height={expandedMapHeight} />
             <DistrictZones
               selected={selectedDistrict}
               onSelect={handleSelectDistrict}
-              mapWidth={LARGE_W}
-              mapHeight={LARGE_H}
+              mapWidth={expandedMapWidth}
+              mapHeight={expandedMapHeight}
             />
+            <button
+              className="game-minimap__close"
+              onClick={() => { setExpanded(false); setSelectedDistrict(null) }}
+              aria-label="关闭大地图"
+            >
+              ✕
+            </button>
           </div>
 
           {/* Resident panel to the right of the large map */}
@@ -126,7 +133,7 @@ export function MinimapOverlay() {
             <ResidentPanel
               district={selectedDistrict}
               onClose={handleClosePanel}
-              panelLeft={LARGE_W + 8}
+              variant="expanded"
             />
           )}
         </div>
@@ -137,27 +144,13 @@ export function MinimapOverlay() {
   // Collapsed: small minimap in top-left
   return (
     <div
-      style={{
-        position: 'fixed',
-        top: 52,
-        left: 12,
-        zIndex: 15,
-      }}
+      className="game-minimap__collapsed"
     >
       {/* Small map container */}
       <div
         ref={smallMapRef}
-        style={{
-          width: SMALL_W,
-          height: SMALL_H,
-          background: 'rgba(0,0,0,0.7)',
-          border: '1.5px solid rgba(255,255,255,0.2)',
-          borderRadius: 8,
-          overflow: 'hidden',
-          boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
-          position: 'relative',
-          cursor: 'pointer',
-        }}
+        className="game-minimap__map game-minimap__map--collapsed"
+        style={{ width: SMALL_W, height: SMALL_H }}
         onClick={(e) => {
           // Click on empty map area → teleport
           if (e.target === e.currentTarget) {
@@ -175,7 +168,7 @@ export function MinimapOverlay() {
 
       {/* Resident panel */}
       {selectedDistrict && (
-        <ResidentPanel district={selectedDistrict} onClose={handleClosePanel} />
+        <ResidentPanel district={selectedDistrict} onClose={handleClosePanel} variant="collapsed" />
       )}
     </div>
   )

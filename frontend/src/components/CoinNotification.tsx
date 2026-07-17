@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { onWSMessage } from '../services/ws'
+import { useGameStore } from '../stores/gameStore'
 
 interface CoinNotif {
   id: number
@@ -21,6 +22,7 @@ const REASON_LABELS: Record<string, string> = {
 export function CoinNotification() {
   const [notifications, setNotifications] = useState<CoinNotif[]>([])
   const timersRef = useRef(new Map<number, ReturnType<typeof setTimeout>>())
+  const chatOpen = useGameStore((s) => s.chatOpen)
 
   const add = useCallback((amount: number, reason: string) => {
     const id = ++notifCounter
@@ -52,20 +54,19 @@ export function CoinNotification() {
   if (notifications.length === 0) return null
 
   return (
-    <div style={{
-      position: 'fixed', top: 56, left: '50%', transform: 'translateX(-50%)',
-      zIndex: 30, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
+    <div className={`game-toast-coins${chatOpen ? ' is-chat-open' : ''}`} style={{
+      display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6,
       pointerEvents: 'none',
     }}>
       {notifications.map((n) => (
         <div key={n.id} style={{
           padding: '8px 18px', borderRadius: 20, fontSize: 14, fontWeight: 700,
           animation: 'coinFloatUp 3s ease-out forwards',
-          background: n.amount > 0 ? '#53d76920' : '#e9456020',
+          background: n.amount > 0 ? 'rgba(16, 32, 26, 0.94)' : 'rgba(42, 19, 23, 0.94)',
           color: n.amount > 0 ? '#53d769' : '#e94560',
           border: `1px solid ${n.amount > 0 ? '#53d76940' : '#e9456040'}`,
           backdropFilter: 'blur(8px)',
-          whiteSpace: 'nowrap',
+          whiteSpace: 'nowrap', maxWidth: 'calc(100vw - 16px)', overflow: 'hidden', textOverflow: 'ellipsis',
         }}>
           🪙 {n.amount > 0 ? '+' : ''}{n.amount}
           <span style={{ color: 'var(--text-muted)', fontSize: 11, marginLeft: 8 }}>

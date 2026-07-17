@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { Suspense, lazy } from 'react'
 import { useGameStore } from './stores/gameStore'
 import { LoginPage } from './pages/LoginPage'
@@ -13,6 +13,7 @@ import { ErrorBoundary } from './components/ErrorBoundary'
 // (via ResidentEditor), AdminPage pulls in the whole admin panel tree. These
 // pages use named exports, so adapt them to the default export React.lazy wants.
 const GamePage = lazy(() => import('./pages/GamePage').then((m) => ({ default: m.GamePage })))
+const LandingPage = lazy(() => import('./pages/LandingPage').then((m) => ({ default: m.LandingPage })))
 const ForgePage = lazy(() => import('./pages/ForgePage').then((m) => ({ default: m.ForgePage })))
 const ProfilePage = lazy(() => import('./pages/ProfilePage').then((m) => ({ default: m.ProfilePage })))
 const OnboardingPage = lazy(() => import('./pages/OnboardingPage').then((m) => ({ default: m.OnboardingPage })))
@@ -26,6 +27,16 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const token = useGameStore((s) => s.token)
   if (!token) return <Navigate to="/login" replace />
   return <>{children}</>
+}
+
+function HomeRoute() {
+  const token = useGameStore((s) => s.token)
+  return token ? <GamePage /> : <LandingPage />
+}
+
+function LoginRoute() {
+  const token = useGameStore((s) => s.token)
+  return token ? <Navigate to="/" replace /> : <LoginPage />
 }
 
 function PageFallback() {
@@ -45,29 +56,49 @@ function PageFallback() {
   )
 }
 
+function AuthenticatedOverlays() {
+  const token = useGameStore((state) => state.token)
+  const { pathname } = useLocation()
+  if (!token || pathname === '/login' || pathname === '/auth/callback') return null
+
+  return (
+    <>
+      <ConnectionBanner />
+      <AchievementToast />
+      {pathname === '/' && <EncounterCard />}
+    </>
+  )
+}
+
+export function AppRoutes() {
+  return (
+    <>
+      <AuthenticatedOverlays />
+      <ErrorBoundary>
+        <Suspense fallback={<PageFallback />}>
+          <Routes>
+            <Route path="/login" element={<LoginRoute />} />
+            <Route path="/auth/callback" element={<AuthCallbackPage />} />
+            <Route path="/onboarding" element={<ProtectedRoute><OnboardingPage /></ProtectedRoute>} />
+            <Route path="/" element={<HomeRoute />} />
+            <Route path="/forge" element={<ProtectedRoute><ForgePage /></ProtectedRoute>} />
+            <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
+            <Route path="/admin" element={<ProtectedRoute><AdminPage /></ProtectedRoute>} />
+            <Route path="/graph" element={<ProtectedRoute><GraphPage /></ProtectedRoute>} />
+            <Route path="/seasons" element={<ProtectedRoute><SeasonsPage /></ProtectedRoute>} />
+            <Route path="/debates" element={<ProtectedRoute><DebatesPage /></ProtectedRoute>} />
+            <Route path="/capsules" element={<ProtectedRoute><CapsulesPage /></ProtectedRoute>} />
+          </Routes>
+        </Suspense>
+      </ErrorBoundary>
+    </>
+  )
+}
+
 export default function App() {
   return (
     <BrowserRouter>
-      <ConnectionBanner />
-      <AchievementToast />
-      <EncounterCard />
-      <ErrorBoundary>
-      <Suspense fallback={<PageFallback />}>
-        <Routes>
-          <Route path="/login" element={<LoginPage />} />
-          <Route path="/auth/callback" element={<AuthCallbackPage />} />
-          <Route path="/onboarding" element={<ProtectedRoute><OnboardingPage /></ProtectedRoute>} />
-          <Route path="/" element={<ProtectedRoute><GamePage /></ProtectedRoute>} />
-          <Route path="/forge" element={<ProtectedRoute><ForgePage /></ProtectedRoute>} />
-          <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
-          <Route path="/admin" element={<ProtectedRoute><AdminPage /></ProtectedRoute>} />
-          <Route path="/graph" element={<ProtectedRoute><GraphPage /></ProtectedRoute>} />
-          <Route path="/seasons" element={<ProtectedRoute><SeasonsPage /></ProtectedRoute>} />
-          <Route path="/debates" element={<ProtectedRoute><DebatesPage /></ProtectedRoute>} />
-          <Route path="/capsules" element={<ProtectedRoute><CapsulesPage /></ProtectedRoute>} />
-        </Routes>
-      </Suspense>
-      </ErrorBoundary>
+      <AppRoutes />
     </BrowserRouter>
   )
 }

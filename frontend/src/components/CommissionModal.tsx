@@ -44,16 +44,17 @@ export function CommissionModal({ onClose }: Props) {
   }
 
   return (
-    <div onClick={onClose} style={{
-      position: 'fixed', inset: 0, zIndex: 200, background: 'rgba(0,0,0,0.6)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
-    }}>
-      <div onClick={(e) => e.stopPropagation()} style={{
-        background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12,
-        width: 'min(560px, 92vw)', maxHeight: '80vh', display: 'flex', flexDirection: 'column', overflow: 'hidden',
-      }}>
+    <div onClick={onClose} className="game-modal-backdrop">
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="game-modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="commission-dialog-title"
+        style={{ width: 'min(560px, calc(100vw - 32px))', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+      >
         <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)', display: 'flex', gap: 12, alignItems: 'center' }}>
-          <span style={{ fontWeight: 700, fontSize: 15 }}>🗒️ 委托板</span>
+          <span id="commission-dialog-title" style={{ fontWeight: 700, fontSize: 15 }}>🗒️ 委托板</span>
           <div style={{ display: 'flex', gap: 4, marginLeft: 8 }}>
             {(['open', 'mine'] as const).map((t) => (
               <button key={t} onClick={() => setTab(t)} style={{
@@ -63,7 +64,7 @@ export function CommissionModal({ onClose }: Props) {
               }}>{t === 'open' ? '可接取' : '我接的'}</button>
             ))}
           </div>
-          <button onClick={onClose} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 18, cursor: 'pointer' }}>✕</button>
+          <button autoFocus onClick={onClose} className="game-dialog-close" style={{ marginLeft: 'auto' }} aria-label="关闭委托板">✕</button>
         </div>
         {error && <div style={{ padding: '8px 20px', color: 'var(--accent-red)', fontSize: 12 }}>{error}</div>}
         <div style={{ overflowY: 'auto', flex: 1, padding: '8px 0' }}>

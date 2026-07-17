@@ -10,7 +10,7 @@ export function LabRunsPanel({ token }: { token: string }) {
   const [runs, setRuns] = useState<AdminLabRun[]>([])
   const [status, setStatus] = useState<AdminLabStatus | null>(null)
   const [filter, setFilter] = useState('')
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [notice, setNotice] = useState<string | null>(null)
 
   const load = useCallback(() => {
@@ -21,7 +21,18 @@ export function LabRunsPanel({ token }: { token: string }) {
       .finally(() => setLoading(false))
   }, [token, filter])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    let cancelled = false
+    Promise.all([getAdminLabRuns(token, filter || undefined), getAdminLabStatus(token)])
+      .then(([r, s]) => {
+        if (cancelled) return
+        setRuns(r.runs)
+        setStatus(s)
+      })
+      .catch(() => { if (!cancelled) setNotice('加载失败') })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [token, filter])
 
   const toggleKill = async () => {
     if (!status) return
@@ -60,7 +71,7 @@ export function LabRunsPanel({ token }: { token: string }) {
       )}
 
       <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
-        <select value={filter} onChange={(e) => setFilter(e.target.value)} style={{
+        <select value={filter} onChange={(e) => { setLoading(true); setFilter(e.target.value) }} style={{
           background: 'var(--bg-input)', color: 'var(--text)', border: '1px solid var(--border)',
           borderRadius: 8, padding: '6px 10px', fontSize: 13,
         }}>

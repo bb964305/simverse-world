@@ -98,30 +98,41 @@ interface GameState {
   clearPendingEncounter: () => void
 }
 
+const DEFAULT_SPAWN_X = 76 * 32
+const DEFAULT_SPAWN_Y = 50 * 32
+const DEFAULT_PLAYER_TILE_X = 76
+const DEFAULT_PLAYER_TILE_Y = 50
+
+function createSessionState() {
+  return {
+    wsStatus: 'connected' as const,
+    notifications: [] as NotificationItem[],
+    unreadCount: 0,
+    achievementToast: null,
+    digestUnread: false,
+    pendingEncounter: null,
+    playerSpriteKey: '埃迪',
+    chatOpen: false,
+    chatResident: null,
+    chatTarget: null,
+    playerChatMessages: [] as PlayerChatMessage[],
+    inputFocused: false,
+    profileTab: 'residents' as const,
+    onlinePlayers: new Map<string, OnlinePlayer>(),
+    spawnX: DEFAULT_SPAWN_X,
+    spawnY: DEFAULT_SPAWN_Y,
+    minimapTextureUrl: null,
+    playerTileX: DEFAULT_PLAYER_TILE_X,
+    playerTileY: DEFAULT_PLAYER_TILE_Y,
+    cameraViewport: null,
+  }
+}
+
 export const useGameStore = create<GameState>((set) => ({
   user: (() => { try { return JSON.parse(localStorage.getItem('user') || 'null') } catch { return null } })(),
   token: localStorage.getItem('token'),
-  wsStatus: 'connected',
+  ...createSessionState(),
   setWsStatus: (status) => set({ wsStatus: status }),
-  notifications: [],
-  unreadCount: 0,
-  achievementToast: null,
-  digestUnread: false,
-  pendingEncounter: null,
-  playerSpriteKey: '埃迪',
-  chatOpen: false,
-  chatResident: null,
-  chatTarget: null,
-  playerChatMessages: [],
-  inputFocused: false,
-  profileTab: 'residents',
-  onlinePlayers: new Map(),
-  spawnX: 76 * 32,
-  spawnY: 50 * 32,
-  minimapTextureUrl: null,
-  playerTileX: 76,
-  playerTileY: 50,
-  cameraViewport: null,
   setMinimapTexture: (url) => set({ minimapTextureUrl: url }),
   setPlayerTile: (x, y) => set({ playerTileX: x, playerTileY: y }),
   setCameraViewport: (vp) => set({ cameraViewport: vp }),
@@ -129,15 +140,27 @@ export const useGameStore = create<GameState>((set) => ({
   setAuth: (user, token) => {
     localStorage.setItem('token', token)
     localStorage.setItem('user', JSON.stringify(user))
-    set({ user, token })
+    set((state) => state.user?.id === user.id && state.token === token
+      ? { user, token }
+      : { ...createSessionState(), user, token })
   },
   logout: () => {
     localStorage.removeItem('token')
     localStorage.removeItem('user')
-    set({ user: null, token: null })
+    set({
+      ...createSessionState(),
+      user: null,
+      token: null,
+    })
   },
   setPlayerSpriteKey: (key) => set({ playerSpriteKey: key }),
-  openChat: (resident) => set({ chatOpen: true, chatResident: resident }),
+  openChat: (resident) => set({
+    chatOpen: true,
+    chatResident: resident,
+    chatTarget: null,
+    playerChatMessages: [],
+    inputFocused: false,
+  }),
   closeChat: () => set({ chatOpen: false, chatResident: null, chatTarget: null, inputFocused: false }),
   setChatTarget: (target) => set({
     chatTarget: target,

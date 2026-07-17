@@ -114,16 +114,17 @@ export function ShopModal({ onClose }: Props) {
   }
 
   return (
-    <div onClick={onClose} style={{
-      position: 'fixed', inset: 0, zIndex: 200, background: 'rgba(0,0,0,0.6)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20,
-    }}>
-      <div onClick={(e) => e.stopPropagation()} style={{
-        background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12,
-        width: 'min(640px, 94vw)', maxHeight: '82vh', display: 'flex', flexDirection: 'column', overflow: 'hidden',
-      }}>
+    <div onClick={onClose} className="game-modal-backdrop">
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="game-modal-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="shop-dialog-title"
+        style={{ width: 'min(640px, calc(100vw - 32px))', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+      >
         <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)', display: 'flex', gap: 12, alignItems: 'center' }}>
-          <span style={{ fontWeight: 700, fontSize: 15 }}>🛒 杂货铺</span>
+          <span id="shop-dialog-title" style={{ fontWeight: 700, fontSize: 15 }}>🛒 杂货铺</span>
           <div style={{ display: 'flex', gap: 4, marginLeft: 8 }}>
             {(['catalog', 'inventory'] as const).map((t) => (
               <button key={t} onClick={() => setTab(t)} style={{
@@ -136,9 +137,7 @@ export function ShopModal({ onClose }: Props) {
           <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--text-secondary)' }}>
             🪙 {user?.soul_coin_balance ?? 0}
           </span>
-          <button onClick={onClose} style={{
-            background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 18, cursor: 'pointer',
-          }}>×</button>
+          <button autoFocus onClick={onClose} className="game-dialog-close" aria-label="关闭杂货铺">×</button>
         </div>
 
         {notice && (

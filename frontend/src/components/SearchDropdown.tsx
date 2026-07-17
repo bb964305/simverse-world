@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useId } from 'react'
 import { bridge } from '../game/phaserBridge'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
@@ -13,10 +13,12 @@ const DISTRICT_NAMES: Record<string, string> = {
 }
 
 export function SearchDropdown() {
+  const listboxId = useId()
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<SearchResult[]>([])
   const [loading, setLoading] = useState(false)
+  const [activeIndex, setActiveIndex] = useState(-1)
   const inputRef = useRef<HTMLInputElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -44,6 +46,7 @@ export function SearchDropdown() {
   const handleInput = (value: string) => {
     setQuery(value)
     setOpen(true)
+    setActiveIndex(-1)
     if (debounceRef.current) clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(() => void search(value), 300)
   }
@@ -54,6 +57,29 @@ export function SearchDropdown() {
     setOpen(false)
     setQuery('')
     setResults([])
+    setActiveIndex(-1)
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    e.stopPropagation()
+    if (e.key === 'Escape') {
+      setOpen(false)
+      return
+    }
+    if (e.key === 'ArrowDown' && results.length > 0) {
+      e.preventDefault()
+      setActiveIndex((current) => Math.min(results.length - 1, current + 1))
+      return
+    }
+    if (e.key === 'ArrowUp' && results.length > 0) {
+      e.preventDefault()
+      setActiveIndex((current) => Math.max(0, current - 1))
+      return
+    }
+    if (e.key === 'Enter' && activeIndex >= 0 && results[activeIndex]) {
+      e.preventDefault()
+      handleSelect(results[activeIndex])
+    }
   }
 
   return (
@@ -65,14 +91,19 @@ export function SearchDropdown() {
           value={query}
           onChange={(e) => handleInput(e.target.value)}
           onFocus={() => { setOpen(true); if (query) void search(query) }}
-          onKeyDown={(e) => e.stopPropagation()}
+          onKeyDown={handleKeyDown}
           placeholder="搜索居民..."
+          role="combobox"
+          aria-label="搜索居民"
+          aria-expanded={open}
+          aria-controls={listboxId}
+          aria-activedescendant={activeIndex >= 0 ? `${listboxId}-${results[activeIndex]?.id}` : undefined}
           style={{ background: 'none', border: 'none', color: 'var(--text-primary)', fontSize: 13, outline: 'none', width: 140 }}
         />
       </div>
 
       {open && (query.trim() || results.length > 0) && (
-        <div style={{
+        <div id={listboxId} role="listbox" style={{
           position: 'absolute', top: '100%', left: 0, right: 0, marginTop: 4,
           background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8,
           boxShadow: '0 8px 24px rgba(0,0,0,0.3)', zIndex: 100, overflow: 'hidden', minWidth: 240,
@@ -81,10 +112,12 @@ export function SearchDropdown() {
           {!loading && results.length === 0 && query.trim() && (
             <div style={{ padding: '10px 14px', color: 'var(--text-muted)', fontSize: 12 }}>没有找到居民</div>
           )}
-          {results.map((r) => (
-            <div key={r.id} onClick={() => handleSelect(r)} style={{
-              padding: '10px 14px', cursor: 'pointer', display: 'flex', gap: 10, alignItems: 'center',
-              borderBottom: '1px solid var(--border)',
+          {results.map((r, index) => (
+            <button key={r.id} id={`${listboxId}-${r.id}`} role="option" aria-selected={activeIndex === index}
+              onClick={() => handleSelect(r)} style={{
+              width: '100%', padding: '10px 14px', cursor: 'pointer', display: 'flex', gap: 10, alignItems: 'center',
+              border: 'none', borderBottom: '1px solid var(--border)', textAlign: 'left', color: 'var(--text-primary)',
+              background: activeIndex === index ? 'var(--bg-input)' : 'transparent',
             }}
             onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-input)')}
             onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}>
@@ -96,7 +129,7 @@ export function SearchDropdown() {
                 </div>
               </div>
               <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>🔥{r.heat}</span>
-            </div>
+            </button>
           ))}
         </div>
       )}

@@ -1,6 +1,7 @@
-import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useState, type FormEvent } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
 import { useGameStore } from '../stores/gameStore'
+import '../styles/login-page.css'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -9,116 +10,162 @@ export function LoginPage() {
   const [password, setPassword] = useState('')
   const [name, setName] = useState('')
   const [isRegister, setIsRegister] = useState(false)
+  const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState('')
-  const setAuth = useGameStore((s) => s.setAuth)
+  const setAuth = useGameStore((state) => state.setAuth)
   const navigate = useNavigate()
 
+  useEffect(() => {
+    document.body.classList.add('auth-page-open')
+    return () => document.body.classList.remove('auth-page-open')
+  }, [])
+
   const submit = async () => {
+    if (isSubmitting) return
     setError('')
+    setIsSubmitting(true)
     const endpoint = isRegister ? '/auth/register' : '/auth/login'
     const body = isRegister ? { name, email, password } : { email, password }
+
     try {
-      const resp = await fetch(`${API}${endpoint}`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+      const response = await fetch(`${API}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({}))
-        // FastAPI 422 puts a list of {loc,msg,...} objects in detail — never
-        // hand non-strings to JSX or the whole page crashes into ErrorBoundary.
-        const detail = err?.detail
-        const msg = typeof detail === 'string'
+      if (!response.ok) {
+        const responseBody = await response.json().catch(() => ({}))
+        const detail = responseBody?.detail
+        const message = typeof detail === 'string'
           ? detail
           : Array.isArray(detail)
-            ? detail.map((d) => d?.msg).filter(Boolean).join('；')
+            ? detail.map((item) => item?.msg).filter(Boolean).join('；')
             : ''
-        setError(msg || '操作失败')
+        setError(message || '操作失败')
         return
       }
-      const data = await resp.json()
+
+      const data = await response.json()
       setAuth(data.user, data.access_token)
       navigate('/onboarding')
     } catch {
       setError('网络错误，请重试')
+    } finally {
+      setIsSubmitting(false)
     }
   }
 
-  const inputStyle: React.CSSProperties = {
-    width: '100%', background: 'var(--bg-input)', border: '1px solid var(--border)',
-    color: 'var(--text-primary)', padding: '10px 14px', borderRadius: 'var(--radius)',
-    fontSize: 14, outline: 'none', marginBottom: 8,
-  }
-
-  const oauthBtnStyle: React.CSSProperties = {
-    width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-    padding: 10, borderRadius: 'var(--radius)', fontSize: 13, fontWeight: 600,
-    cursor: 'pointer', border: '1px solid var(--border)', background: 'var(--bg-input)',
-    color: 'var(--text-primary)', transition: 'background 0.15s',
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    void submit()
   }
 
   return (
-    <div style={{
-      minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
-      background: 'linear-gradient(135deg, #1a1a2e 0%, #0f3460 100%)',
-    }}>
-      <div style={{
-        background: '#18181bf0', border: '1px solid var(--border)', borderRadius: 16,
-        padding: 32, width: 340, backdropFilter: 'blur(12px)',
-      }}>
-        <div style={{ textAlign: 'center', marginBottom: 20 }}>
-          <div style={{ fontSize: 28 }}>🏙️</div>
-          <div style={{ fontWeight: 800, fontSize: 18, marginTop: 4 }}>Simverse World</div>
-          <div style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 4 }}>
-            一座永不关闭的赛博城市
-          </div>
+    <main className="auth-page">
+      <img className="auth-page__backdrop" src="/marketing/world-hero.jpg" alt="" />
+      <div className="auth-page__shade" />
+
+      <header className="auth-header">
+        <Link className="auth-brand" to="/" aria-label="返回 Simverse World 官网">
+          <span className="auth-brand__mark" aria-hidden="true">S/</span>
+          <span>SIMVERSE</span>
+        </Link>
+        <Link className="auth-header__back" to="/">返回官网</Link>
+      </header>
+
+      <section className="auth-story" aria-labelledby="auth-page-title">
+        <p>YOUR CITY ACCESS / NODE 07</p>
+        <h1 id="auth-page-title">回到一座<br />持续生活的城市。</h1>
+        <span>居民、关系与记忆都在继续。登录后从上次离开的地方重新进入。</span>
+      </section>
+
+      <section className="auth-panel" aria-labelledby="auth-form-title">
+        <div className="auth-mode" role="group" aria-label="认证模式">
+          <button
+            type="button"
+            aria-pressed={!isRegister}
+            onClick={() => { setIsRegister(false); setError('') }}
+          >
+            登录
+          </button>
+          <button
+            type="button"
+            aria-pressed={isRegister}
+            onClick={() => { setIsRegister(true); setError('') }}
+          >
+            注册
+          </button>
         </div>
 
-        {/* OAuth Buttons */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
-          <a href={`${API}/auth/github/login`} style={{ textDecoration: 'none' }}>
-            <div style={oauthBtnStyle}
-              onMouseEnter={(e) => { e.currentTarget.style.background = '#27272a' }}
-              onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--bg-input)' }}>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
-              </svg>
-              GitHub 登录
-            </div>
+        <div className="auth-panel__heading">
+          <p>CITY ACCESS</p>
+          <h2 id="auth-form-title">{isRegister ? '创建通行身份' : '进入 Simverse'}</h2>
+          <span>{isRegister ? '完成注册后开始创建你的第一位居民。' : '选择一种方式继续进入城市。'}</span>
+        </div>
+
+        <div className="auth-oauth">
+          <a href={`${API}/auth/github/login`}>
+            <svg aria-hidden="true"><use href="/icons.svg#github-icon" /></svg>
+            GitHub 登录
           </a>
-          <a href={`${API}/auth/linuxdo/login`} style={{ textDecoration: 'none' }}>
-            <div style={oauthBtnStyle}
-              onMouseEnter={(e) => { e.currentTarget.style.background = '#27272a' }}
-              onMouseLeave={(e) => { e.currentTarget.style.background = 'var(--bg-input)' }}>
-              <span style={{ fontSize: 16 }}>🐧</span>
-              LinuxDo 登录
-            </div>
+          <a href={`${API}/auth/linuxdo/login`}>
+            <span className="auth-oauth__linuxdo" aria-hidden="true">L</span>
+            LinuxDo 登录
           </a>
         </div>
 
-        {/* Divider */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
-          <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
-          <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>或使用邮箱</span>
-          <div style={{ flex: 1, height: 1, background: 'var(--border)' }} />
-        </div>
+        <div className="auth-divider"><span>或使用邮箱</span></div>
 
-        {isRegister && (
-          <input style={inputStyle} placeholder="名字" value={name} onChange={(e) => setName(e.target.value)} />
-        )}
-        <input style={inputStyle} placeholder="邮箱" value={email} onChange={(e) => setEmail(e.target.value)} />
-        <input style={{ ...inputStyle, marginBottom: error ? 4 : 8 }} placeholder="密码" type="password"
-          value={password} onChange={(e) => setPassword(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && submit()} />
-        {error && <div style={{ color: 'var(--accent-red)', fontSize: 12, marginBottom: 8 }}>{error}</div>}
-        <button onClick={submit} style={{
-          width: '100%', background: 'var(--accent-red)', color: 'white', border: 'none',
-          padding: 10, borderRadius: 'var(--radius)', fontSize: 14, fontWeight: 700, cursor: 'pointer',
-        }}>{isRegister ? '注册并进入城市' : '进入城市'}</button>
-        <div style={{ textAlign: 'center', marginTop: 10, color: 'var(--text-muted)', fontSize: 12, cursor: 'pointer' }}
-          onClick={() => setIsRegister(!isRegister)}>
-          {isRegister ? '已有账号？登录' : '没有账号？注册'}
-        </div>
-      </div>
-    </div>
+        <form className="auth-form" onSubmit={handleSubmit}>
+          {isRegister && (
+            <label>
+              <span>名字</span>
+              <input
+                name="name"
+                autoComplete="name"
+                placeholder="名字"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                required
+              />
+            </label>
+          )}
+
+          <label>
+            <span>邮箱</span>
+            <input
+              name="email"
+              type="email"
+              autoComplete="email"
+              placeholder="邮箱"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              required
+            />
+          </label>
+
+          <label>
+            <span>密码</span>
+            <input
+              name="password"
+              type="password"
+              autoComplete={isRegister ? 'new-password' : 'current-password'}
+              placeholder="密码"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              required
+            />
+          </label>
+
+          {error && <div className="auth-error" role="alert">{error}</div>}
+
+          <button className="auth-submit" type="submit" disabled={isSubmitting}>
+            {isSubmitting ? '正在连接…' : isRegister ? '注册并进入城市' : '进入城市'}
+          </button>
+        </form>
+
+        <p className="auth-panel__note">首次进入后将继续完成居民创建与世界引导。</p>
+      </section>
+    </main>
   )
 }

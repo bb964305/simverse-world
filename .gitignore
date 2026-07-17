@@ -47,6 +47,8 @@ seed_local.py
 
 # Screenshots
 *.png
+!docs/renders/*.png
+!output/imagegen/simverse-concepts/*.png
 .omx/
 
 # Agent/session workspaces + runtime artifacts

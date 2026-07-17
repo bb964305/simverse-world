@@ -1,0 +1,207 @@
+.game-shell__canvas {
+  position: fixed;
+  inset: calc(var(--nav-height, 48px) + var(--game-event-height, 0px)) 0 0;
+  transition: right 0.3s ease;
+}
+
+.game-shell__canvas--chat-open {
+  right: 380px;
+}
+
+.game-shell__chat-drawer {
+  position: fixed;
+  top: calc(var(--nav-height, 48px) + var(--game-event-height, 0px));
+  right: 0;
+  bottom: 0;
+  z-index: var(--game-z-hud, 100);
+  display: flex;
+  width: min(380px, 100vw);
+  flex-direction: column;
+  border-left: 1px solid var(--game-hud-border, var(--border));
+  background: var(--game-hud-surface-strong, var(--bg-card));
+  box-shadow: -12px 0 32px rgb(0 0 0 / 24%);
+  transform: translateX(100%);
+  transition: transform 0.3s ease;
+}
+
+.game-shell__chat-drawer--open {
+  transform: translateX(0);
+}
+
+.game-shell__npc-tooltip {
+  position: fixed;
+  top: calc(60px + var(--game-event-height, 0px));
+  right: 12px;
+  z-index: var(--game-z-hud, 100);
+  min-width: 180px;
+  max-width: min(360px, calc(100vw - 24px));
+}
+
+.game-shell__queue-toast {
+  right: 20px;
+  bottom: 20px;
+  z-index: var(--game-z-toast, 700);
+  min-width: 240px;
+}
+
+.game-shell__queue-toast.is-chat-open { right: 400px; }
+
+.game-minimap__collapsed {
+  position: fixed;
+  top: calc(var(--nav-height, 48px) + 4px + var(--game-event-height, 0px));
+  left: 12px;
+  z-index: var(--game-z-hud, 100);
+  max-width: calc(100vw - 24px);
+}
+
+.game-minimap__map {
+  position: relative;
+  flex: 0 0 auto;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.game-minimap__map > canvas {
+  width: 100%;
+  height: 100%;
+}
+
+.game-minimap__map--collapsed {
+  border: 1.5px solid rgb(255 255 255 / 20%);
+  border-radius: 8px;
+  background: rgb(0 0 0 / 70%);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 50%);
+}
+
+.game-minimap__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--game-z-overlay, 500) - 20);
+  display: flex;
+  overflow: auto;
+  padding: 16px;
+  background: rgb(0 0 0 / 60%);
+}
+
+.game-minimap__expanded-layout {
+  display: flex;
+  max-width: 100%;
+  align-items: flex-start;
+  gap: 8px;
+  margin: auto;
+}
+
+.game-minimap__map--expanded {
+  border: 1.5px solid rgb(255 255 255 / 25%);
+  border-radius: 8px;
+  background: rgb(0 0 0 / 85%);
+  box-shadow: 0 8px 40px rgb(0 0 0 / 70%);
+}
+
+.game-minimap__resident-panel {
+  z-index: 20;
+  width: 220px;
+  overflow: hidden;
+  border: 1px solid;
+  border-radius: 8px;
+  background: var(--game-hud-surface-strong, rgb(22 24 26 / 95%));
+  box-shadow: 0 4px 16px rgb(0 0 0 / 50%);
+  color: #e2e8f0;
+  font-size: 12px;
+}
+
+.game-minimap__close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 30;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgb(255 255 255 / 28%);
+  border-radius: 6px;
+  background: rgb(18 20 22 / 88%);
+  color: white;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.game-minimap__resident-panel--collapsed {
+  position: absolute;
+  top: 0;
+  left: 188px;
+}
+
+.game-minimap__resident-panel--expanded {
+  position: relative;
+  flex: 0 0 220px;
+}
+
+.game-minimap__resident-list {
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+@media (max-width: 860px) {
+  .game-minimap__expanded-layout {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .game-minimap__resident-panel--expanded {
+    width: 100%;
+    flex-basis: auto;
+  }
+
+  .game-minimap__resident-panel--expanded .game-minimap__resident-list {
+    max-height: min(200px, 28dvh);
+  }
+
+  .game-minimap__resident-panel--collapsed {
+    top: 138px;
+    left: 0;
+    width: min(220px, calc(100vw - 24px));
+  }
+
+  .game-minimap__resident-panel--collapsed .game-minimap__resident-list {
+    max-height: min(200px, 30dvh);
+  }
+}
+
+@media (max-width: 720px) {
+  .game-shell__canvas--chat-open {
+    right: 0;
+  }
+
+  .game-shell__chat-drawer {
+    width: 100vw;
+  }
+
+  .game-shell__queue-toast {
+    right: 12px;
+    bottom: 80px;
+    left: 12px;
+    min-width: 0;
+  }
+
+
+  .game-shell__queue-toast.is-chat-open { right: 12px; }
+}
+
+@media (max-width: 480px) {
+  .game-minimap__map--collapsed {
+    width: 156px !important;
+    height: 112px !important;
+  }
+
+  .game-minimap__resident-panel--collapsed {
+    top: 120px;
+    left: 0;
+    width: min(220px, calc(100vw - 24px));
+  }
+
+  .game-minimap__resident-panel--collapsed .game-minimap__resident-list {
+    max-height: min(200px, 35dvh);
+  }
+}
