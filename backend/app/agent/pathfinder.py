@@ -2,6 +2,7 @@
 import heapq
 import json
 import logging
+import os
 from collections import deque
 from pathlib import Path
 
@@ -13,13 +14,27 @@ logger = logging.getLogger(__name__)
 _walkable_tiles_cache: set[tuple[int, int]] | None = None
 _reachable_tiles_cache: set[tuple[int, int]] | None = None
 
-_TILEMAP_PATH = Path(__file__).resolve().parents[3] / "frontend" / "public" / "assets" / "village" / "tilemap" / "tilemap.json"
+# The tilemap is bundled inside the backend package so it is present in the
+# container image (built from backend/ only). Falls back to the monorepo frontend
+# asset for local dev, and to SIMVERSE_TILEMAP_PATH when set.
+_BUNDLED_TILEMAP = Path(__file__).resolve().parents[1] / "assets" / "village" / "tilemap" / "tilemap.json"
+_MONOREPO_TILEMAP = Path(__file__).resolve().parents[3] / "frontend" / "public" / "assets" / "village" / "tilemap" / "tilemap.json"
+
+
+def _resolve_tilemap_path() -> Path:
+    """Resolve the tilemap path, preferring the backend-bundled copy."""
+    override = os.environ.get("SIMVERSE_TILEMAP_PATH")
+    if override:
+        return Path(override)
+    if _BUNDLED_TILEMAP.exists():
+        return _BUNDLED_TILEMAP
+    return _MONOREPO_TILEMAP
 
 
 def _load_collision_tiles() -> set[tuple[int, int]]:
     """Read the Collisions layer from tilemap.json and return blocked tile coordinates."""
     try:
-        with open(_TILEMAP_PATH) as f:
+        with open(_resolve_tilemap_path()) as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError) as e:
         logger.warning("Could not load tilemap for collision data: %s", e)

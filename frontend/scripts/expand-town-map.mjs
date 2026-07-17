@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -11,6 +11,12 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const villageDirectory = path.resolve(scriptDirectory, "../public/assets/village");
 const tilemapPath = path.join(villageDirectory, "tilemap/tilemap.json");
 const mazePath = path.join(villageDirectory, "maze.json");
+// Backend bundles its own tilemap copy so pathfinding works in the container
+// image (built from backend/ only). Kept byte-identical to the frontend source.
+const backendTilemapPath = path.resolve(
+  scriptDirectory,
+  "../../backend/app/assets/village/tilemap/tilemap.json",
+);
 
 function assert(condition, message) {
   if (!condition) {
@@ -243,8 +249,12 @@ tilemap.width = EXPANDED_WIDTH;
 tilemap.height = EXPANDED_HEIGHT;
 maze.size = [EXPANDED_HEIGHT, EXPANDED_WIDTH];
 
-await writeFile(tilemapPath, `${JSON.stringify(tilemap, null, 3)}\n`);
+const tilemapJson = `${JSON.stringify(tilemap, null, 3)}\n`;
+await writeFile(tilemapPath, tilemapJson);
 await writeFile(mazePath, `${JSON.stringify(maze, null, 4)}\n`);
+// Keep the backend-bundled copy byte-identical (same serialization).
+await mkdir(path.dirname(backendTilemapPath), { recursive: true });
+await writeFile(backendTilemapPath, tilemapJson);
 
 console.log(
   `${shouldRebuild ? "Expanded" : "Validated"} town map at ${EXPANDED_WIDTH}x${EXPANDED_HEIGHT}: ${tileLayers.length} layers, ${EXPANDED_WIDTH * EXPANDED_HEIGHT} tiles per layer.`,

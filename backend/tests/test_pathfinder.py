@@ -124,6 +124,42 @@ def test_expanded_districts_are_in_walkable_world():
     reset_walkable_cache()
 
 
+def test_tilemap_bundled_under_backend_tree():
+    """The tilemap must ship inside the backend package.
+
+    The container image is built from the backend/ tree only (Dockerfile COPY . .);
+    if the tilemap resolves to the frontend monorepo path it is absent at runtime
+    and collisions silently become empty (residents walk through walls).
+    """
+    from pathlib import Path
+    from app.agent.pathfinder import _resolve_tilemap_path
+    backend_root = Path(__file__).resolve().parents[1]  # backend/
+    resolved = _resolve_tilemap_path()
+    assert resolved.exists(), f"resolved tilemap {resolved} does not exist"
+    assert backend_root in resolved.parents, (
+        f"tilemap {resolved} is not under backend/ — it won't be in the image"
+    )
+
+
+def test_bundled_tilemap_matches_frontend_source():
+    """Backend-bundled tilemap must stay byte-identical to the frontend source."""
+    from pathlib import Path
+    backend_tm = (
+        Path(__file__).resolve().parents[1]
+        / "app" / "assets" / "village" / "tilemap" / "tilemap.json"
+    )
+    frontend_tm = (
+        Path(__file__).resolve().parents[2]
+        / "frontend" / "public" / "assets" / "village" / "tilemap" / "tilemap.json"
+    )
+    if not frontend_tm.exists():
+        pytest.skip("frontend source not present (backend-only deploy tree)")
+    assert backend_tm.exists(), "backend tilemap copy missing — run `npm run map:expand`"
+    assert backend_tm.read_bytes() == frontend_tm.read_bytes(), (
+        "backend/frontend tilemap drifted — run `npm run map:expand` to resync"
+    )
+
+
 def test_reachable_tiles_exclude_disconnected_islands():
     """get_reachable_tiles() must drop walkable-but-unreachable island pockets.
 
