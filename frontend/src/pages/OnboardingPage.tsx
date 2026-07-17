@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useGameStore } from '../stores/gameStore'
 import {
   checkOnboarding,
@@ -41,8 +41,15 @@ function districtColor(district: string): string {
   return map[district] ?? '#71717a'
 }
 
+function safeNext(raw: string | null): string {
+  if (!raw || !raw.startsWith('/') || raw.startsWith('//')) return '/play'
+  return raw
+}
+
 export function OnboardingPage() {
   const navigate = useNavigate()
+  const [params] = useSearchParams()
+  const next = safeNext(params.get('next'))
   const token = useGameStore((s) => s.token)
 
   const [presets, setPresets] = useState<PresetCard[]>([])
@@ -53,7 +60,7 @@ export function OnboardingPage() {
 
   useEffect(() => {
     if (!token) {
-      navigate('/login', { replace: true })
+      navigate(`/login?next=${encodeURIComponent(next)}`, { replace: true })
       return
     }
 
@@ -65,7 +72,7 @@ export function OnboardingPage() {
         // Check if onboarding is needed
         const check = await checkOnboarding(token!)
         if (!check.needs_onboarding) {
-          navigate('/', { replace: true })
+          navigate(next, { replace: true })
           return
         }
 
@@ -112,7 +119,7 @@ export function OnboardingPage() {
 
     init()
     return () => { cancelled = true }
-  }, [token, navigate])
+  }, [token, navigate, next])
 
   async function handleSelectPreset(slug: string) {
     if (!token || actionLoading) return
@@ -121,7 +128,7 @@ export function OnboardingPage() {
     setError('')
     try {
       await loadPreset(token, slug)
-      navigate('/', { replace: true })
+      navigate(next, { replace: true })
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : '选择失败，请重试')
       setSelected(null)
@@ -135,7 +142,7 @@ export function OnboardingPage() {
     setError('')
     try {
       await skipOnboarding(token)
-      navigate('/', { replace: true })
+      navigate(next, { replace: true })
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : '操作失败，请重试')
       setActionLoading(false)
