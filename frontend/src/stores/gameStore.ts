@@ -134,7 +134,13 @@ export const useGameStore = create<GameState>((set) => ({
   logout: () => {
     localStorage.removeItem('token')
     localStorage.removeItem('user')
-    set({ user: null, token: null })
+    set({
+      user: null,
+      token: null,
+      wsStatus: 'connected',
+      achievementToast: null,
+      pendingEncounter: null,
+    })
   },
   setPlayerSpriteKey: (key) => set({ playerSpriteKey: key }),
   openChat: (resident) => set({ chatOpen: true, chatResident: resident }),
