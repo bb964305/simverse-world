@@ -233,7 +233,9 @@ async def request_action(db, *, claims, token, tool_name, args, idempotency_key=
             raise grants.GrantError("grant/claims jti mismatch")
         await grants.check_grant_active(db, claims, expected_epoch=expected_epoch)
     except grants.GrantError as exc:
-        await _deny("R4", f"grant_inactive: {exc}", hard=True)
+        # "NA": a lifecycle/grant-expiry denial, not a tool-risk one — tagging it
+        # R4 would misattribute it to attack-surface stats keyed on risk_class.
+        await _deny("NA", f"grant_inactive: {exc}", hard=True)
 
     # 3. Policy: deny > ask > allow. Hard denies and governance routes never
     # create an approval row.

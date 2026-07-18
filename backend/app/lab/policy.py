@@ -5,6 +5,11 @@ Pure decision logic only: no I/O, no grant verification (that lives in
 ``app.lab.grants``). The Tool Broker (T3) composes ``grants.check_grant_active``
 and ``decide`` on a verified ``GrantClaims``. Only registered tools exist;
 anything else is denied by default.
+
+Note: the denial reason ``"egress_not_granted"`` is never produced by
+``decide`` — it's raised by the Broker's own egress screening
+(``app.lab.broker._validate_egress``) after ``decide`` has already returned
+``allow``/``ask``.
 """
 from __future__ import annotations
 

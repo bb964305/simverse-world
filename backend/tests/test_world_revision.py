@@ -284,7 +284,7 @@ async def test_compiler_rejects_out_of_scope_kind(rev_env):
         with pytest.raises(compiler.CompileError):
             await compiler.compile_draft(
                 db, draft={"kind": "add_location", "patch": {}, "title": "x", "rationale": "y"},
-                origin_ref="run1", author_slug="sage", tenant_id="sage",
+                origin_ref="run1", author_slug="sage",
             )
 
 
@@ -300,7 +300,7 @@ async def test_compiler_rejects_out_of_whitelist_field(rev_env):
                     "patch": {"location_id": "observatory", "fields": {"bounds": [0, 0, 1, 1]}},
                     "title": "x", "rationale": "y",
                 },
-                origin_ref="run1", author_slug="sage", tenant_id="sage",
+                origin_ref="run1", author_slug="sage",
             )
 
 
@@ -312,13 +312,13 @@ async def test_compiler_rejects_bad_text_length(rev_env):
             await compiler.compile_draft(
                 db, draft={"kind": "add_lore", "patch": {"location_id": "academy", "text": ""},
                           "title": "x", "rationale": "y"},
-                origin_ref="run1", author_slug="sage", tenant_id="sage",
+                origin_ref="run1", author_slug="sage",
             )
         with pytest.raises(compiler.CompileError):
             await compiler.compile_draft(
                 db, draft={"kind": "add_lore", "patch": {"location_id": "academy", "text": "x" * 2001},
                           "title": "x", "rationale": "y"},
-                origin_ref="run1", author_slug="sage", tenant_id="sage",
+                origin_ref="run1", author_slug="sage",
             )
 
 
@@ -329,7 +329,7 @@ async def test_compiler_accepts_valid_draft(rev_env):
         p = await compiler.compile_draft(
             db, draft={"kind": "add_lore", "patch": {"location_id": "academy", "text": "新传说"},
                       "title": "探索发现", "rationale": "研究员的发现"},
-            origin_ref="run1", author_slug="sage", tenant_id="sage",
+            origin_ref="run1", author_slug="sage",
         )
         assert p.status == "pending"
         assert p.risk_level == "low"

@@ -64,7 +64,7 @@ def _validate_edit_location(patch: dict) -> tuple[str, dict]:
 
 
 async def compile_draft(
-    db, *, draft: dict, origin_ref: str, author_slug: str, tenant_id: str,
+    db, *, draft: dict, origin_ref: str, author_slug: str,
 ) -> psvc.WorldChangeProposal:
     kind = draft.get("kind")
     if kind not in ALLOWED_KINDS:

@@ -23,6 +23,7 @@ except where a flush is needed to read back an autoincrement/default id.
 """
 from __future__ import annotations
 
+import copy
 import uuid
 from datetime import datetime, UTC
 
@@ -58,7 +59,11 @@ def location_slug_for(kind: str, patch: dict) -> str | None:
 async def current_revision_id(db, location_slug: str | None = None) -> str | None:
     """The most recent WorldRevision id (any status), globally or scoped to a
     location — the optimistic-concurrency "base" a new proposal can pin to."""
-    stmt = select(WorldRevision.id).order_by(WorldRevision.created_at.desc()).limit(1)
+    stmt = (
+        select(WorldRevision.id)
+        .order_by(WorldRevision.created_at.desc(), WorldRevision.id.desc())
+        .limit(1)
+    )
     if location_slug is not None:
         stmt = stmt.where(WorldRevision.location_slug == location_slug)
     return (await db.execute(stmt)).scalar_one_or_none()
@@ -70,7 +75,7 @@ async def _lore_spec(db, location_slug: str) -> dict | None:
     )).scalar_one_or_none()
     if row is None or not row.active:
         return None
-    return dict(row.spec_json or {})
+    return copy.deepcopy(row.spec_json or {})
 
 
 async def _location_data(db, location_slug: str) -> dict:
@@ -79,7 +84,7 @@ async def _location_data(db, location_slug: str) -> dict:
     )).scalar_one_or_none()
     if row is None:
         raise RevisionError(f"edit_location target '{location_slug}' is not a dynamic location")
-    return dict(row.data_json or {})
+    return copy.deepcopy(row.data_json or {})
 
 
 async def capture_before_state(db, *, kind: str, patch: dict) -> dict | None:
@@ -105,6 +110,9 @@ async def record_apply(
     caller commits it together with the proposal's status flip so the two are
     atomic (self-review checkpoint: revision+status="applied" together)."""
     location_slug = location_slug_for(proposal.kind, proposal.patch_json or {})
+    # World-governance tenant_id is author attribution (author_slug), not the
+    # lab-run tenant_id (issuer_user_id) used elsewhere in app/lab/* — the two
+    # are intentionally different scopes.
     revision = WorldRevision(
         tenant_id=proposal.author_slug or "system",
         proposal_id=proposal.id,
@@ -127,7 +135,7 @@ async def latest_applied_revision(db, *, proposal_id: str) -> WorldRevision | No
     stmt = (
         select(WorldRevision)
         .where(WorldRevision.proposal_id == proposal_id, WorldRevision.status == "applied")
-        .order_by(WorldRevision.created_at.desc())
+        .order_by(WorldRevision.created_at.desc(), WorldRevision.id.desc())
         .limit(1)
     )
     return (await db.execute(stmt)).scalar_one_or_none()

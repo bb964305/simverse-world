@@ -374,7 +374,7 @@ class _Orchestrator:
                         "title": f"探索产出：{self.task.title}"[:200],
                         "rationale": summary,
                     },
-                    origin_ref=self.run_id, author_slug=self.actor, tenant_id=self.tenant_id,
+                    origin_ref=self.run_id, author_slug=self.actor,
                 )
                 await self._emit(type="proposal.drafted",
                                  payload={"proposal_id": proposal.id, "kind": proposal.kind})
