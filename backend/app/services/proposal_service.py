@@ -18,6 +18,7 @@ from app.lab import apply as apply_engine
 from app.models.world_change_proposal import WorldChangeProposal
 from app.models.resident import Resident
 from app.services import coin_service
+from app.services import world_revision_service
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,18 @@ async def create_proposal(
     return p
 
 
+async def _fail_apply(db, p: WorldChangeProposal, note: str, reason: str) -> None:
+    """Shared "apply didn't happen" bookkeeping for both a structural
+    ApplyError and a revision-capture/stale-base failure: proposal -> failed,
+    fuel refunded. No commit has touched the overlay tables at this point for
+    either failure kind, so this is the single rollback-equivalent path."""
+    p.status = "failed"
+    p.review_note = f"{note or ''} | apply failed: {reason}".strip(" |")
+    await db.commit()
+    if p.cost_sc > 0 and p.author_slug:
+        await coin_service.treasury_credit(db, p.author_slug, p.cost_sc, f"proposal_refund:{p.id}")
+
+
 async def approve_proposal(db, proposal_id: str, reviewer_id: str, note: str = "") -> WorldChangeProposal:
     p = await db.get(WorldChangeProposal, proposal_id)
     if p is None:
@@ -90,18 +103,53 @@ async def approve_proposal(db, proposal_id: str, reviewer_id: str, note: str = "
     p.reviewer_id = reviewer_id
     p.review_note = note or p.review_note
     await db.commit()
+
+    # v1 world-revision tracking is scoped to add_lore/edit_location
+    # (global-constraints.md #4); add_location/add_mechanic keep the
+    # pre-T6 apply/broadcast path byte-for-byte (test_world_governance.py).
+    revisioned = p.kind in world_revision_service.REVISIONED_KINDS
+    before_state = base_revision_id = None
+    if revisioned:
+        location_slug = world_revision_service.location_slug_for(p.kind, p.patch_json or {})
+        base_revision_id = await world_revision_service.current_revision_id(db, location_slug)
+        requested_base = (p.patch_json or {}).get("base_world_revision")
+        if requested_base is not None and requested_base != base_revision_id:
+            await _fail_apply(db, p, note, "stale base revision")
+            raise ProposalError("stale base revision")
+        try:
+            before_state = await world_revision_service.capture_before_state(
+                db, kind=p.kind, patch=p.patch_json or {},
+            )
+        except world_revision_service.RevisionError as e:
+            await _fail_apply(db, p, note, str(e))
+            raise ProposalError(f"apply failed: {e}")
+
     try:
-        await apply_engine.apply_proposal(db, p)
+        await apply_engine.apply_proposal(db, p, broadcast=not revisioned)
     except apply_engine.ApplyError as e:
-        p.status = "failed"
-        p.review_note = f"{note or ''} | apply failed: {e}".strip(" |")
-        await db.commit()
-        if p.cost_sc > 0 and p.author_slug:
-            await coin_service.treasury_credit(db, p.author_slug, p.cost_sc, f"proposal_refund:{p.id}")
+        await _fail_apply(db, p, note, str(e))
         raise ProposalError(f"apply failed: {e}")
+
+    envelope = None
+    if revisioned:
+        # Same read as before_state, taken again now that the write landed —
+        # "the target's current state" is the after-image this time.
+        after_state = await world_revision_service.capture_before_state(
+            db, kind=p.kind, patch=p.patch_json or {},
+        )
+        revision = await world_revision_service.record_apply(
+            db, proposal=p, before_state=before_state, after_state=after_state,
+            base_revision_id=base_revision_id, applied_by=reviewer_id,
+        )
+        envelope = await world_revision_service.build_world_changed_envelope(
+            db, revision=revision, action="applied", tenant_id=revision.tenant_id,
+        )
+
     p.status = "applied"
     p.applied_at = datetime.now(UTC)
-    await db.commit()
+    await db.commit()  # revision + outbox row + status="applied" together
+    if envelope is not None:
+        await apply_engine.broadcast_world_changed(payload=envelope)
     await emit(db, "world_proposal_applied", proposal_id=p.id, author_slug=p.author_slug, kind=p.kind)
     await db.refresh(p)
     return p
@@ -129,11 +177,36 @@ async def revert_proposal(db, proposal_id: str, reviewer_id: str) -> WorldChange
         raise ProposalError("proposal not found")
     if p.status != "applied":
         raise ProposalError("only applied proposals can be reverted")
-    await apply_engine.revert_proposal(db, p)
-    p.status = "reverted"
-    p.reverted_at = datetime.now(UTC)
-    p.reviewer_id = reviewer_id
-    await db.commit()
+
+    revision = None
+    if p.kind in world_revision_service.REVISIONED_KINDS:
+        revision = await world_revision_service.latest_applied_revision(db, proposal_id=p.id)
+
+    if revision is not None:
+        # Before-state restore path (T6): exact-slug data_json/lore rollback,
+        # not the pre-T6 soft-delete. Commit the restore BEFORE reload_world()
+        # — it opens its own session, so an uncommitted row mutation on this
+        # session would be invisible to it (stale in-memory overlay).
+        await world_revision_service.revert_revision(db, revision=revision, reverted_by=reviewer_id)
+        envelope = await world_revision_service.build_world_changed_envelope(
+            db, revision=revision, action="reverted", tenant_id=revision.tenant_id,
+        )
+        p.status = "reverted"
+        p.reverted_at = datetime.now(UTC)
+        p.reviewer_id = reviewer_id
+        await db.commit()  # overlay restore + revision + outbox + status="reverted" together
+        await apply_engine.reload_world()
+        await apply_engine.publish_world_reload()
+        await apply_engine.broadcast_world_changed(payload=envelope)
+    else:
+        # No revision on record (add_location/add_mechanic, or a legacy
+        # proposal predating T6) — unchanged soft-delete compatibility path.
+        await apply_engine.revert_proposal(db, p)
+        p.status = "reverted"
+        p.reverted_at = datetime.now(UTC)
+        p.reviewer_id = reviewer_id
+        await db.commit()
+
     await db.refresh(p)
     return p
 

@@ -94,10 +94,15 @@ async def _existing_dynamic_slug(db, slug: str) -> bool:
 
 # ── dispatch ──────────────────────────────────────────────────────────
 
-async def apply_proposal(db, proposal: WorldChangeProposal) -> None:
+async def apply_proposal(db, proposal: WorldChangeProposal, *, broadcast: bool = True) -> None:
     """Validate + write the overlay for an approved proposal, then reload the
     world (in-process) and signal the other processes. Raises ApplyError on a
-    structural/conflict failure (the caller keeps the proposal un-applied)."""
+    structural/conflict failure (the caller keeps the proposal un-applied).
+
+    ``broadcast=False`` lets a caller that will send its own (richer)
+    world_changed payload afterward — e.g. proposal_service for a revisioned
+    kind, once it has built the canonical envelope — skip this function's
+    bare broadcast instead of the client seeing two pushes for one apply."""
     kind = proposal.kind
     patch = proposal.patch_json or {}
     if kind == "add_location":
@@ -113,7 +118,8 @@ async def apply_proposal(db, proposal: WorldChangeProposal) -> None:
 
     await reload_world()
     await publish_world_reload()
-    await broadcast_world_changed()
+    if broadcast:
+        await broadcast_world_changed()
 
 
 async def _apply_add_location(db, proposal, patch: dict) -> None:
@@ -214,10 +220,13 @@ async def publish_world_reload() -> None:
         logger.warning("world reload publish failed", exc_info=True)
 
 
-async def broadcast_world_changed() -> None:
+async def broadcast_world_changed(payload: dict | None = None) -> None:
+    """``payload`` given → broadcast the full canonical world_changed envelope
+    (world_revision_service.world_changed_event); None → the pre-T6 bare ping
+    (backward compatible for kinds that don't record a revision)."""
     try:
         from app.ws.manager import manager
-        await manager.broadcast({"type": "world_changed"})
+        await manager.broadcast(payload if payload is not None else {"type": "world_changed"})
     except Exception:
         logger.warning("world_changed broadcast failed", exc_info=True)
 
