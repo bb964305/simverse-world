@@ -97,20 +97,13 @@ async def _mock_executor(tool_name: str, args: dict) -> dict:
 # Code/shell tools (R1) that route through the rootless OCI sandbox when it is
 # enabled + configured. Network tools never run here — egress stays governed by
 # the Broker/isolation layer, not the container.
-_OCI_TOOLS = frozenset({"code.run", "shell.exec", "fs.write"})
-
-
-def _select_executor(tool_name: str):
-    """The executor the Broker runs for this tool intent. Default — and every
-    non-code tool — is the Mock echo, so the flag-off path is byte-for-byte
-    unchanged. Only when ``lab_oci_enabled`` AND an image is configured do
-    code/shell tools route through ``OciExecutor``. Imported lazily so neither
-    the executor module nor docker is touched on the default path (P2-E:
-    default path zero change; Executor exposed only via the Broker slot)."""
-    if settings.lab_oci_enabled and settings.lab_oci_image and tool_name in _OCI_TOOLS:
-        from app.lab.sandbox.oci_executor import OciExecutor, SandboxLimits
-        return OciExecutor(image=settings.lab_oci_image, limits=SandboxLimits()).as_broker_executor()
-    return _mock_executor
+#
+# fs.write is deliberately EXCLUDED: its args are ``{path, content}``, not a
+# command, so ``_command_from_args`` finds nothing to run and the OCI path
+# would always report ``ok=False`` (a regression vs. the flag-off Mock, which
+# always succeeds). OCI executor v1 only routes tools that carry an executable
+# command; fs.write joins once scratch-file materialisation lands.
+_OCI_TOOLS = frozenset({"code.run", "shell.exec"})
 
 
 async def run_one_v1(run_id: str) -> None:
@@ -160,6 +153,11 @@ class _Orchestrator:
         self.adapter = None
         self.handle = None
         self.cost_cents = 0
+        # Lazily-created, reused for every action of THIS run (never re-created
+        # per action): a teardown failure marks the instance's own ``_broken``
+        # quarantine, and that must persist across the run's later actions, not
+        # reset on the next tool call (see ``_select_executor``).
+        self._oci_executor = None
         # active_workers is a gauge: this owner reserves exactly one slot once it
         # starts stepping and releases it on EVERY terminal path (see ``execute``
         # finally). The flag guards the release so a run that never reserved (a
@@ -340,6 +338,29 @@ class _Orchestrator:
         if is_egress:
             await budgets.release(self.db, run_id=self.run_id, dimension="egress_requests")
 
+    # ── executor selection ───────────────────────────────────────────
+
+    def _select_executor(self, tool_name: str):
+        """The executor the Broker runs for this tool intent. Default — and
+        every non-code tool — is the Mock echo, so the flag-off path is
+        byte-for-byte unchanged. Only when ``lab_oci_enabled`` AND an image is
+        configured do code/shell tools route through ``OciExecutor``. The
+        ``OciExecutor`` instance is created ONCE per run and cached on
+        ``self._oci_executor`` (not a fresh instance per action): a teardown
+        failure marks that instance broken, and reusing it is what makes the
+        quarantine actually block the run's later actions. Imported lazily so
+        neither the executor module nor docker is touched on the default path
+        (P2-E: default path zero change; Executor exposed only via the Broker
+        slot)."""
+        if settings.lab_oci_enabled and settings.lab_oci_image and tool_name in _OCI_TOOLS:
+            if self._oci_executor is None:
+                from app.lab.sandbox.oci_executor import OciExecutor, SandboxLimits
+                self._oci_executor = OciExecutor(
+                    image=settings.lab_oci_image, limits=SandboxLimits(),
+                )
+            return self._oci_executor.as_broker_executor()
+        return _mock_executor
+
     # ── tool intents through the Broker ───────────────────────────────
 
     async def _handle_tool(self, ev) -> None:
@@ -388,7 +409,7 @@ class _Orchestrator:
         db.expire(action)
         try:
             result = await broker.execute_action(
-                db, action_id=action_id, claims=self.claims, executor=_select_executor(tool),
+                db, action_id=action_id, claims=self.claims, executor=self._select_executor(tool),
                 args=args, expected_epoch=self.epoch,
             )
         except broker.ActionDenied as exc:

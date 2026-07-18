@@ -78,13 +78,21 @@ def _patch_run(monkeypatch, proc: _FakeProc):
     monkeypatch.setattr(oci, "_exec_run", _fake_exec_run)
 
 
-def _patch_cmd(monkeypatch, *, inspect_rc: int, sink: list | None = None):
+def _patch_cmd(monkeypatch, *, inspect_rc: int, inspect_stderr: str | None = None,
+               sink: list | None = None):
     async def _fake_exec_cmd(argv, env):
         if sink is not None:
             sink.append(list(argv))
         # ``docker inspect`` decides teardown; everything else is best-effort.
         if len(argv) >= 2 and argv[1] == "inspect":
-            return inspect_rc, "", "" if inspect_rc else "[]"
+            if inspect_rc == 0:
+                return 0, "[]", ""  # container still present
+            # non-zero: default stderr mimics the real "container is gone" message
+            # unless the caller wants to simulate a genuine inspect failure.
+            stderr = inspect_stderr if inspect_stderr is not None else (
+                f"Error: No such object: {argv[-1]}"
+            )
+            return inspect_rc, "", stderr
         return 0, "", ""
     monkeypatch.setattr(oci, "_exec_cmd", _fake_exec_cmd)
 
@@ -198,6 +206,41 @@ async def test_teardown_that_cannot_confirm_removal_marks_executor_broken(monkey
     with pytest.raises(SandboxTeardownError):
         await ex.run(argv=["true"])
     # once teardown can't be confirmed, the executor refuses further use.
+    with pytest.raises(ExecutorError):
+        await ex.run(argv=["true"])
+
+
+@pytest.mark.anyio
+async def test_teardown_inspect_confirms_absence_via_stderr_text(monkeypatch):
+    """A non-zero inspect whose stderr says the object is gone ("No such
+    object"/"no such container") is a normal teardown — removed=True, executor
+    stays usable."""
+    ex = _executor()
+    _patch_run(monkeypatch, _FakeProc(out=b"", err=b"", rc=0))
+    _patch_cmd(monkeypatch, inspect_rc=1,
+               inspect_stderr="Error: No such container: lab-oci-abc123")
+    res = await ex.run(argv=["true"])
+    assert res.teardown_proof["removed"] is True
+    # executor is still usable for a subsequent run.
+    _patch_cmd(monkeypatch, inspect_rc=1, inspect_stderr="Error: No such object: n")
+    res2 = await ex.run(argv=["true"])
+    assert res2.teardown_proof["removed"] is True
+
+
+@pytest.mark.anyio
+async def test_teardown_inspect_error_other_than_absent_does_not_assume_removed(monkeypatch):
+    """A non-zero inspect that is NOT a "no such object/container" message (a
+    transient daemon error, a timeout, an unrelated CLI failure) must NOT be
+    read as "the container is gone" — regression for the old fail-open ANY
+    non-zero => removed=True. The executor is quarantined exactly like the
+    "still present" case, not silently trusted."""
+    ex = _executor()
+    _patch_run(monkeypatch, _FakeProc(out=b"", err=b"", rc=0))
+    _patch_cmd(monkeypatch, inspect_rc=1,
+               inspect_stderr="Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?")
+    with pytest.raises(SandboxTeardownError):
+        await ex.run(argv=["true"])
+    # quarantined exactly like an unconfirmed teardown: no further runs.
     with pytest.raises(ExecutorError):
         await ex.run(argv=["true"])
 

@@ -263,8 +263,13 @@ class OciExecutor:
         return await _exec_cmd([self.runner] + subargv, self._host_env())
 
     async def _verify_teardown(self, name: str) -> dict:
-        rc, _out, _err = await self._docker(["inspect", name])
-        removed = rc != 0  # inspect fails ⇒ no such container ⇒ removed
+        rc, _out, err = await self._docker(["inspect", name])
+        # inspect succeeding (rc==0) always means the container is still there.
+        # A non-zero rc is only "removed" when stderr confirms the object is
+        # actually gone — any OTHER non-zero (daemon unresponsive, inspect
+        # itself erroring) must NOT be read as "removed": that would fail-open
+        # a still-live sandbox as torn down. Fall through to quarantine instead.
+        removed = rc != 0 and _stderr_confirms_absent(err)
         proof = {"removed": removed, "name": name, "checked_at": datetime.now(UTC).isoformat()}
         if not removed:
             self._broken = True
@@ -278,6 +283,17 @@ class OciExecutor:
     @staticmethod
     def _decode(data: bytes) -> str:
         return (data or b"").decode("utf-8", "replace")
+
+
+_ABSENT_MARKERS = ("no such object", "no such container")
+
+
+def _stderr_confirms_absent(stderr: str) -> bool:
+    """True only when ``docker inspect``'s stderr explicitly says the
+    container doesn't exist. Any other non-zero (daemon down, inspect itself
+    failing) is NOT confirmation of removal — see ``_verify_teardown``."""
+    lowered = (stderr or "").lower()
+    return any(marker in lowered for marker in _ABSENT_MARKERS)
 
 
 def _command_from_args(args: dict) -> str | None:
