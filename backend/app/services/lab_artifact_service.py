@@ -53,12 +53,24 @@ class DigestMismatch(ArtifactError):
     """Stored content no longer matches its recorded digest — retrieval blocked."""
 
 
+def _digest_content(a: LabArtifact) -> str:
+    """The string an artifact's integrity digest/size are computed over,
+    picked by ``kind`` rather than "whichever field is non-None": a
+    ``kind="text"`` artifact always hashes ``text_md`` (empty counts as
+    content); every other kind (link/file/image/dataset) hashes its ``uri``
+    first, falling back to ``text_md`` only when ``uri`` is unset. Without the
+    kind branch, a link artifact with ``text_md=""`` (a legitimate shape —
+    e.g. the http adapter's collected artifacts) would hash an empty string
+    and the digest would never reflect the actual ``uri`` content (P2-B
+    review finding). Both empty → the digest of the empty string."""
+    if a.kind == "text":
+        return a.text_md or ""
+    return a.uri or a.text_md or ""
+
+
 def compute_sha256(a: LabArtifact) -> str:
-    """utf-8 sha256 of ``text_md`` (preferred) or ``uri``; both empty → the
-    digest of the empty string (no special-cased sentinel — just hash
-    whatever content there is, including none)."""
-    content = a.text_md if a.text_md is not None else (a.uri or "")
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+    """utf-8 sha256 of ``_digest_content(a)``."""
+    return hashlib.sha256(_digest_content(a).encode("utf-8")).hexdigest()
 
 
 async def finalize_artifact(
@@ -68,9 +80,8 @@ async def finalize_artifact(
     commit — the caller (orchestrator._succeed) commits the whole batch."""
     artifact.tenant_id = tenant_id
     artifact.producer_action_id = producer_action_id
-    content = artifact.text_md if artifact.text_md is not None else (artifact.uri or "")
-    artifact.sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    artifact.byte_size = len(content.encode("utf-8"))
+    artifact.sha256 = compute_sha256(artifact)
+    artifact.byte_size = len(_digest_content(artifact).encode("utf-8"))
     artifact.expires_at = datetime.now(UTC) + timedelta(days=settings.lab_artifact_retention_days)
     return artifact
 
@@ -141,14 +152,22 @@ def _tombstone_row(a: LabArtifact, *, now: datetime) -> str:
     """Clear one artifact's content, leaving the row + a tombstone marker in
     its meta_json. Returns the digest recorded in the tombstone. Raising here
     is the injection point ``cleanup_expired`` quarantines around — it must
-    never take down the rest of the sweep."""
+    never take down the rest of the sweep.
+
+    Order matters: the tombstone marker is written BEFORE the content is
+    cleared. A raise between the two steps then leaves the row with its
+    content still intact and a (slightly premature) tombstone marker —
+    recoverable. The reverse order (clear first, mark second) would leave a
+    row with its content already gone and no tombstone recorded if
+    interrupted mid-function — silently lost evidence with no trace
+    (P2-B review finding)."""
     digest = a.sha256 or compute_sha256(a)
-    a.text_md = None
-    a.uri = None
     meta = dict(a.meta_json or {})
     meta["tombstone"] = digest
     meta["cleaned_at"] = now.isoformat()
     a.meta_json = meta
+    a.text_md = None
+    a.uri = None
     return digest
 
 
@@ -158,7 +177,19 @@ async def cleanup_expired(db, *, now: datetime | None = None) -> dict:
     cleared, row + audit trail kept) and the batch writes one outbox
     ``cleanup.completed`` event with its stats. A per-row failure is
     quarantined (``meta_json.cleanup_failed = true``, counted, skipped) rather
-    than aborting the batch."""
+    than aborting the batch.
+
+    Gated by ``settings.lab_agent_v1_enabled`` — unlike ``apply_retention_holds``
+    (purely protective), this operation is destructive (clears content).
+    Product decision (P2-B review): while the flag is off — e.g. during a
+    rollback window — nothing gets destroyed even if the nightly sweep (or
+    any other caller) still invokes this. Flag off is a hard no-op: no query,
+    no mutation, no outbox event, all-zero stats returned."""
+    if not settings.lab_agent_v1_enabled:
+        return {
+            "deleted_count": 0, "held_count": 0, "quarantined_count": 0,
+            "byte_count": 0, "tombstone_digest": None,
+        }
     now = now if now is not None else datetime.now(UTC)
     deleted_count = 0
     held_count = 0

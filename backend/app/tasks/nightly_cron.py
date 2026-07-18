@@ -96,8 +96,11 @@ async def run_nightly_jobs() -> None:
         logger.error("Lab orphan-run sweep failed", exc_info=True)
 
     # V12: pin still-referenced artifact evidence, then tombstone what's past
-    # its retention window. Safe to run unconditionally — flag-off/legacy
-    # artifacts never get an expires_at, so this sweep is a no-op for them.
+    # its retention window. apply_retention_holds is protective and always
+    # runs; cleanup_expired is destructive and internally no-ops while
+    # lab_agent_v1_enabled is off (P2-B review decision: don't destroy
+    # evidence during a flag-off rollback window) — the gate lives in the
+    # service, not here, so it holds for every caller.
     try:
         from app.services import lab_artifact_service
         async with async_session() as db:

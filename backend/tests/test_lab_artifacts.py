@@ -64,6 +64,42 @@ async def test_finalize_sets_fields_and_verify_detects_tamper(db_session, monkey
         )
 
 
+# ── 1b. non-text kind digests uri, not an empty text_md (P2-B review) ──
+
+@pytest.mark.anyio
+async def test_finalize_and_verify_use_uri_digest_for_non_text_kind(db_session):
+    """A link/file/image/dataset artifact commonly ships with text_md="" (the
+    http adapter's collected artifacts do this) — the digest must reflect the
+    uri, not silently hash the empty string and go stale the moment the uri
+    changes."""
+    task = LabTask(issuer_user_id="owner-a", title="t", reward_sc=10, status="completed")
+    db_session.add(task)
+    await db_session.flush()
+
+    artifact = LabArtifact(
+        run_id="run1", task_id=task.id, kind="link", title="x",
+        text_md="", uri="https://example.org/report",
+    )
+    await lab_artifact_service.finalize_artifact(db_session, artifact=artifact, tenant_id="owner-a")
+    db_session.add(artifact)
+    await db_session.commit()
+
+    expected_digest = hashlib.sha256("https://example.org/report".encode("utf-8")).hexdigest()
+    assert artifact.sha256 == expected_digest  # not the empty-string digest of text_md=""
+
+    fetched = await lab_artifact_service.verify_and_get(
+        db_session, artifact_id=artifact.id, user_id="owner-a", is_admin=False,
+    )
+    assert fetched.id == artifact.id
+
+    artifact.uri = "https://example.org/tampered"
+    await db_session.commit()
+    with pytest.raises(lab_artifact_service.DigestMismatch):
+        await lab_artifact_service.verify_and_get(
+            db_session, artifact_id=artifact.id, user_id="owner-a", is_admin=False,
+        )
+
+
 # ── 2. cross-tenant denied / admin allowed; REST 404 vs 409 vs flag-off 200 ──
 
 @pytest.mark.anyio

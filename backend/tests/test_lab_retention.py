@@ -12,11 +12,21 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
+from app.config import settings
 from app.models.lab_artifact import LabArtifact
 from app.models.lab_event import OutboxEvent
 from app.models.lab_task import LabTask
 from app.models.world_change_proposal import WorldChangeProposal
 from app.services import lab_artifact_service
+
+
+@pytest.fixture(autouse=True)
+def _v1_enabled(monkeypatch):
+    """cleanup_expired is gated behind the flag (destructive; paused during a
+    flag-off rollback window — P2-B review). Default it on for this module so
+    each scenario below tests the sweep itself; the no-op scenario flips it
+    back off explicitly."""
+    monkeypatch.setattr(settings, "lab_agent_v1_enabled", True, raising=False)
 
 
 def _digest(text: str) -> str:
@@ -187,3 +197,23 @@ async def test_cleanup_leaves_unexpired_rows_untouched(db_session):
     assert stats["held_count"] == 0
     refreshed = await db_session.get(LabArtifact, artifact.id)
     assert refreshed.text_md == "hello"
+
+
+# ── 7. flag off → cleanup_expired is a hard no-op (rollback-window safety) ──
+
+@pytest.mark.anyio
+async def test_cleanup_expired_is_noop_when_flag_off(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "lab_agent_v1_enabled", False, raising=False)
+    task, artifact = await _expired_task_and_artifact(db_session, text="hello")
+
+    stats = await lab_artifact_service.cleanup_expired(db_session)
+
+    assert stats["deleted_count"] == 0
+    assert stats["held_count"] == 0
+    assert stats["quarantined_count"] == 0
+    refreshed = await db_session.get(LabArtifact, artifact.id)
+    assert refreshed.text_md == "hello"  # untouched — expired, but flag is off
+    rows = (await db_session.execute(
+        select(OutboxEvent).where(OutboxEvent.topic == "cleanup.completed")
+    )).scalars().all()
+    assert rows == []  # no event written for a paused sweep
