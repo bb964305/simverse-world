@@ -80,6 +80,65 @@ async def test_reserve_confirm_and_reserve_release(db_session):
     assert row.reserved_tool_calls == 0
 
 
+# ─── 3b. confirm/release are atomic — no lost update across sessions ──
+
+
+@pytest.mark.anyio
+async def test_confirm_atomic_no_lost_update_across_sessions(db_engine):
+    """Two callers each hold their own independently-loaded (and, after the
+    other commits, stale) copy of the row and each confirm their own unit.
+    A Python-side read-modify-write would have the second caller compute its
+    new ``used`` off its own stale pre-commit read and clobber the first
+    caller's delta (final ``used`` == 1, wrong). The atomic UPDATE computes
+    the delta in SQL off the row's current committed value, so both land."""
+    factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as s0:
+        await budgets.init_run_budget(s0, run_id="run-confirm-race", tenant_id="owner-1")
+        await budgets.reserve(s0, run_id="run-confirm-race", dimension="tool_calls", amount=2)
+
+    s1, s2 = factory(), factory()
+    try:
+        row1 = await s1.get(LabRunBudget, "run-confirm-race")
+        row2 = await s2.get(LabRunBudget, "run-confirm-race")
+        assert row1.reserved_tool_calls == 2 and row2.reserved_tool_calls == 2  # both stale-equal
+
+        await budgets.confirm(s1, run_id="run-confirm-race", dimension="tool_calls", reserved=1, actual=1)
+        await budgets.confirm(s2, run_id="run-confirm-race", dimension="tool_calls", reserved=1, actual=1)
+    finally:
+        await s1.close()
+        await s2.close()
+
+    async with factory() as s3:
+        row = await s3.get(LabRunBudget, "run-confirm-race")
+        assert row.used_tool_calls == 2      # both confirms landed, not just the last writer
+        assert row.reserved_tool_calls == 0
+
+
+@pytest.mark.anyio
+async def test_release_atomic_no_lost_update_across_sessions(db_engine):
+    """Same lost-update shape as the confirm test above, for release."""
+    factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as s0:
+        await budgets.init_run_budget(s0, run_id="run-release-race", tenant_id="owner-1")
+        await budgets.reserve(s0, run_id="run-release-race", dimension="tool_calls", amount=3)
+
+    s1, s2 = factory(), factory()
+    try:
+        row1 = await s1.get(LabRunBudget, "run-release-race")
+        row2 = await s2.get(LabRunBudget, "run-release-race")
+        assert row1.reserved_tool_calls == 3 and row2.reserved_tool_calls == 3  # both stale-equal
+
+        await budgets.release(s1, run_id="run-release-race", dimension="tool_calls", amount=1)
+        await budgets.release(s2, run_id="run-release-race", dimension="tool_calls", amount=1)
+    finally:
+        await s1.close()
+        await s2.close()
+
+    async with factory() as s3:
+        row = await s3.get(LabRunBudget, "run-release-race")
+        assert row.reserved_tool_calls == 1  # 3 - 1 - 1, not clobbered back to 2
+
+
 # ─── 4. spend debits directly, no prior reservation required ──────────
 
 
