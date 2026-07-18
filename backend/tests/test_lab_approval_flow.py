@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, UTC
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 
 from app.lab import broker, grants
 from app.models.lab_action import LabToolAction, LabApproval
@@ -304,6 +304,45 @@ async def test_allow_passthrough_executes_and_redacts_result(db_session):
     assert res.status == "succeeded"
     assert executor.await_count == 1
     assert res.result_json["token"] == "[REDACTED]"
+
+
+# ─── 8b. allow-path atomic claim closes the double-execution race ─────
+
+
+@pytest.mark.anyio
+async def test_allow_path_atomic_claim_blocks_double_execution(db_session):
+    """An allow-passthrough action has no approval row to serialise on, so the
+    approved->executing transition must itself be atomic. Simulate a concurrent
+    caller having already claimed the action (DB row moved to 'executing') while
+    this session still holds the stale 'approved' it read: the conditional claim
+    must match zero rows and refuse rather than re-run the executor."""
+    token, claims = await _grant(db_session, ["web_search"])
+    action = await broker.request_action(
+        db_session, claims=claims, token=token, tool_name="web.search",
+        args={"query": "x"},
+    )
+    assert action.status == "approved"
+
+    # Move the DB row to 'executing' out-of-band (mirrors another caller winning
+    # the claim). synchronize_session=False leaves this session's ORM object at
+    # the stale 'approved' it already read.
+    await db_session.execute(
+        update(LabToolAction).where(LabToolAction.id == action.id)
+        .values(status="executing").execution_options(synchronize_session=False)
+    )
+    await db_session.commit()
+    assert action.status == "approved"  # confirm the stale read is set up
+
+    executor = AsyncMock()
+    with pytest.raises(broker.BrokerError) as ei:
+        await broker.execute_action(
+            db_session, action_id=action.id, claims=claims, executor=executor,
+            args={"query": "x"},
+        )
+    assert isinstance(ei.value, broker.ApprovalInvalid)
+    assert ei.value.reason == "already_executing"
+    executor.assert_not_called()
+    assert (await db_session.get(LabToolAction, action.id)).status == "executing"
 
 
 # ─── 9. idempotency key returns the same action, no duplicate row ─────

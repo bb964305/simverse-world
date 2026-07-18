@@ -37,9 +37,12 @@ from app.lab import grants, guard, policy, protocol
 from app.lab.sandbox import isolation
 from app.models.lab_action import LabToolAction, LabApproval
 
-# Terminal / in-flight states: re-invoking execute_action on one of these must
-# never run the executor again (idempotent, at-least-once delivery safety).
-_NO_REEXEC = ("succeeded", "failed", "executing", "reconciliation_required")
+# Terminal / parked states: re-invoking execute_action on one of these must
+# never run the executor again — return the existing outcome (idempotent,
+# at-least-once delivery safety). ``executing`` is deliberately NOT here: an
+# in-flight action is guarded by the atomic approved->executing claim below, so
+# a lost race raises rather than silently returning a half-finished action.
+_NO_REEXEC = ("succeeded", "failed", "reconciliation_required")
 
 
 class BrokerError(Exception):
@@ -184,6 +187,13 @@ async def request_action(db, *, claims, token, tool_name, args, idempotency_key=
     Returns the action in ``approved`` (allow passthrough) or
     ``waiting_approval`` (ask) state; raises ``ActionDenied`` on any refusal,
     always leaving a ``denied`` audit row and never an approval row.
+
+    Idempotency asymmetry (intentional): the *first* call for a given
+    ``idempotency_key`` raises ``ActionDenied`` on a refusal, but a *replay* of
+    that key takes the short-circuit below and **returns** the stored action —
+    which may itself be ``status == "denied"`` — rather than re-raising. Callers
+    that replay a key must therefore inspect ``action.status`` instead of relying
+    on an exception to signal a denial.
     """
     now = _now()
     digest = protocol.args_digest(args)
@@ -304,8 +314,10 @@ async def execute_action(db, *, action_id, claims, executor, args, expected_epoc
 
     Gates, in order: idempotent short-circuit on terminal states; digest binding;
     re-evaluated policy + active grant + egress (a forged approval dies here);
-    atomic one-shot approval consumption; then the executor with the
-    ``executing`` intent committed first so a crash is reconcilable.
+    atomic one-shot approval consumption; an atomic approved->executing claim
+    (rowcount check) that serialises execution even on the allow passthrough
+    where there is no approval row; then the executor, with the ``executing``
+    intent committed first so a crash is reconcilable.
     """
     now = _now()
     action = await db.get(LabToolAction, action_id)
@@ -378,17 +390,41 @@ async def execute_action(db, *, action_id, claims, executor, args, expected_epoc
             await db.rollback()
             raise ApprovalInvalid("not_consumable")
 
-    # Status gate: only an approved action executes.
-    if action.status != "approved":
-        if action.status == "waiting_approval":
-            raise ApprovalRequired(action_id=action.id, approval_id=action.approval_id)
-        raise ApprovalInvalid(f"not_executable:{action.status}")
+    # 7. Atomically claim the action for execution: approved -> executing via a
+    # conditional UPDATE + rowcount check (mirrors the approval consume). This is
+    # the sole status gate — exactly one caller can win, which closes the
+    # allow-passthrough double-execution race where there is no approval row to
+    # serialize on. Committed (together with the consume, same txn) before the
+    # side effect so a mid-flight crash leaves a durable reconciliation trail.
+    claim = (
+        update(LabToolAction)
+        .where(LabToolAction.id == action.id, LabToolAction.status == "approved")
+        .values(status="executing", attempts=LabToolAction.attempts + 1)
+        .execution_options(synchronize_session=False)
+    )
+    claimed = await db.execute(claim)
+    if claimed.rowcount != 1:
+        # Lost the race, or the action was never in an executable state. Roll
+        # back (also discards any just-made consume) and re-read the committed
+        # state to return the right outcome without ever reaching the executor.
+        # Use the ``action_id`` argument, not ``action.id`` — rollback expires
+        # the ORM object and touching it would trigger a sync lazy load.
+        await db.rollback()
+        fresh = await db.get(LabToolAction, action_id)
+        if fresh is None:
+            raise BrokerError(f"unknown action {action_id}")
+        if fresh.status in _NO_REEXEC:
+            return fresh
+        if fresh.status == "executing":
+            raise ApprovalInvalid("already_executing")
+        if fresh.status == "denied":
+            raise ActionDenied(_reason_of(fresh), action=fresh)
+        if fresh.status == "waiting_approval":
+            raise ApprovalRequired(action_id=fresh.id, approval_id=fresh.approval_id)
+        raise ApprovalInvalid(f"not_executable:{fresh.status}")
 
-    # 7. Commit the executing intent (and the consume, same txn) before the side
-    # effect, so a mid-flight crash leaves a durable reconciliation trail.
-    action.status = "executing"
-    action.attempts = (action.attempts or 0) + 1
     await db.commit()
+    await db.refresh(action)  # sync the ORM object to the claimed DB state
     await _emit(on_event, action)
 
     try:
