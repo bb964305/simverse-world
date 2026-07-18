@@ -121,6 +121,11 @@ async def _handle_approval(db, task: LabTask, run: LabRun, adapter, handle, ev) 
 async def run_one(run_id: str) -> None:
     """Execute a single queued run end-to-end. Idempotent guard: only picks up
     runs still in ``queued``."""
+    if settings.lab_agent_v1_enabled:
+        # v1 control-plane path (grant/policy/broker/ledger/budgets). The legacy
+        # body below is preserved byte-for-byte as the rollback path (flag off).
+        from app.lab import orchestrator
+        return await orchestrator.run_one_v1(run_id)
     async with async_session() as db:
         run = await db.get(LabRun, run_id)
         if run is None:

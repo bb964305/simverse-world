@@ -13,7 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
-from app.lab import acl
+from app.lab import acl, broker
+from app.models.lab_action import LabApproval
 from app.models.lab_artifact import LabArtifact
 from app.models.lab_run import LabRun, LabRunStep
 from app.models.lab_task import LabTask
@@ -163,7 +164,20 @@ async def get_run(run_id: str, request: Request, db: AsyncSession = Depends(get_
     task = await db.get(LabTask, run.task_id)
     if task is None or not acl.can_read_run(run, task, user_id=user.id, is_admin=user.is_admin):
         raise HTTPException(status_code=404, detail="run not found")
-    return svc.serialize_run(run)
+    data = svc.serialize_run(run)
+    if settings.lab_agent_v1_enabled:
+        # v1: the approval controls are gated by the server-authoritative
+        # projection (allowed_actions/can_decide/decision_scope/status), not the
+        # legacy approvals_json blob. Flag off leaves the shape untouched.
+        apprs = (await db.execute(
+            select(LabApproval).where(LabApproval.run_id == run_id).order_by(LabApproval.created_at)
+        )).scalars().all()
+        data["approvals"] = [
+            {**acl.approval_projection(a, task, user_id=user.id, is_admin=user.is_admin),
+             "approval_id": a.id, "action_id": a.action_id, "preview": a.preview_json}
+            for a in apprs
+        ]
+    return data
 
 
 @router.get("/runs/{run_id}/steps")
@@ -199,6 +213,28 @@ async def run_approval(run_id: str, body: ApprovalBody, request: Request, db: As
     task = await db.get(LabTask, run.task_id)
     if task is None or not acl.can_read_run(run, task, user_id=user.id, is_admin=user.is_admin):
         raise HTTPException(status_code=404, detail="run not found")
+
+    if settings.lab_agent_v1_enabled:
+        # v1: resolve a canonical lab_approvals row through the Broker (which
+        # binds the decider to the task owner/admin and flips the action). The
+        # response shape is unchanged. Flag off falls through to the legacy path.
+        appr = (await db.execute(
+            select(LabApproval).where(
+                LabApproval.id == body.approval_id,
+                LabApproval.run_id == run_id,
+                LabApproval.decision == "pending",
+            )
+        )).scalar_one_or_none()
+        if appr is not None:
+            try:
+                await broker.decide_approval(
+                    db, approval_id=appr.id, decider_user_id=user.id, approve=body.decision,
+                    task_owner_id=task.issuer_user_id, is_admin=user.is_admin,
+                )
+            except broker.ApprovalInvalid as e:
+                raise HTTPException(status_code=409, detail=str(e))
+            return {"ok": True, "approval_id": body.approval_id, "decision": body.decision}
+
     if run.status != "needs_approval":
         raise HTTPException(status_code=409, detail="no pending approval")
     approvals = list(run.approvals_json or [])
