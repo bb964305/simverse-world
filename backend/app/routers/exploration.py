@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.map_data import LOCATIONS
-from app.agent.location_lore import LORE, HIDDEN_SPOTS
+from app.agent.location_lore import HIDDEN_SPOTS, lore_for
 from app.database import get_db
 from app.models.location_visit import LocationVisit
 from app.services.auth_service import get_current_user
@@ -39,7 +39,7 @@ async def my_codex(request: Request, db: AsyncSession = Depends(get_db)):
             "visit_count": v.visit_count if v else 0,
             "secret_found": f"{loc_id}:secret" in by_loc,
             "has_secret": loc_id in HIDDEN_SPOTS,
-            "lore": LORE.get(loc_id) if v is not None else None,
+            "lore": lore_for(loc_id) if v is not None else None,
             # Tile-space rect so the codex can draw the minimap silhouette.
             "bounds": list(loc["bounds"]),
         })
