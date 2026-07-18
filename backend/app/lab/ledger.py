@@ -112,6 +112,12 @@ async def append_event(
 
     Raises ``leases.StaleEpoch`` (fenced writer — nothing written) or
     ``SequenceConflict`` (seq collision — transaction rolled back).
+
+    Reading attributes off the returned ORM object after commit is only safe
+    because the session's ``sessionmaker`` uses ``expire_on_commit=False`` (true
+    for both the app engine and the test factory). A caller wiring append_event
+    to a default sessionmaker must re-read the row, as commit would expire it and
+    attribute access would trigger a sync lazy-load.
     """
     run_id = envelope.run_id
 
@@ -137,10 +143,12 @@ async def append_event(
         if existing is not None:
             return None
 
-    # 3. Sequence assignment (envelope carries a seq; a 0/None placeholder means
-    #    "assign one"). All reads happen before any write is queued so the step
-    #    projection's MAX query cannot autoflush a half-built event.
-    seq = envelope.seq or await next_seq(db, run_id)
+    # 3. The envelope carries its own seq — the caller sources it from next_seq
+    #    (RunEventEnvelope.seq is Field(ge=1), so append_event never auto-assigns;
+    #    the unique (run_id, seq) constraint is the gap/duplicate backstop). All
+    #    reads happen before any write is queued so the step projection's MAX
+    #    query cannot autoflush a half-built event.
+    seq = envelope.seq
     run = await db.get(LabRun, run_id)
     payload = guard.redact_payload(envelope.payload)
 
