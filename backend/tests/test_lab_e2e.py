@@ -21,6 +21,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
+from app.lab import grants, leases
 from app.lab.runner import run_one
 from app.lab.sandbox.base import ArtifactSpec, SandboxHandle, StepEvent
 from app.models.lab_action import LabApproval, LabToolAction
@@ -380,6 +381,12 @@ async def test_flag_off_legacy_regression(lab_env, monkeypatch):
         assert (await s.execute(
             select(func.count()).select_from(LabCapabilityGrant).where(LabCapabilityGrant.run_id == run_id)
         )).scalar_one() == 0
+        assert (await s.execute(
+            select(func.count()).select_from(LabToolAction).where(LabToolAction.run_id == run_id)
+        )).scalar_one() == 0
+        assert (await s.execute(
+            select(func.count()).select_from(OutboxEvent).where(OutboxEvent.run_id == run_id)
+        )).scalar_one() == 0
         assert await s.get(LabRunBudget, run_id) is None
         assert await s.get(LabRunLease, run_id) is None
 
@@ -415,3 +422,45 @@ async def test_budget_termination_v1(lab_env, monkeypatch):
         budget = await s.get(LabRunBudget, run_id)
         assert budget.exhausted_dimension == "tool_calls"
         assert budget.used_tool_calls == 1  # only the first step settled
+
+
+# ── 8. held lease is fenced, not a refundable failure ─────────────────
+
+@pytest.mark.anyio
+async def test_held_lease_is_fenced_not_failed(lab_env):
+    """A concurrent owner already holds a live lease (queue redelivery). The
+    v1 orchestrator must abandon the run untouched — it must NOT flip the run to
+    running, refund the task, or revoke the holder's grant. Regression guard for
+    the review finding that ``LeaseError('held')`` fell into the generic failure
+    path and inverted fencing."""
+    factory = lab_env
+    await _seed(factory)
+    task_id, run_id = await _make_task(factory, scopes=["web_search"], reward_sc=100, title="争用")
+
+    # Another owner grabs the lease + mints a grant first (the true holder).
+    async with factory() as s:
+        await leases.acquire_lease(s, run_id=run_id, owner_id="holder-owner")
+        _, holder_claims = await grants.issue_run_grant(
+            s, tenant_id="issuer", task_id=task_id, run_id=run_id,
+            agent_id="holder", capabilities=["web_search"],
+        )
+        holder_jti = holder_claims.jti
+
+    await run_one(run_id)  # flag on → orchestrator → acquire_lease raises held
+
+    async with factory() as s:
+        run = await s.get(LabRun, run_id)
+        assert run.status == "queued"  # never flipped to running
+        task = await s.get(LabTask, task_id)
+        assert task.status == "assigned"  # unchanged (create_task left it assigned)
+        assert await coin_service.get_balance(s, "issuer") == 890  # NOT refunded (still escrowed)
+
+        holder_grant = await s.get(LabCapabilityGrant, holder_jti)
+        assert holder_grant.revoked_at is None  # the holder's grant survives
+
+        # No terminal state / events were written by the fenced loser.
+        assert (await s.execute(
+            select(func.count()).select_from(LabRunEvent).where(LabRunEvent.run_id == run_id)
+        )).scalar_one() == 0
+        lease = await s.get(LabRunLease, run_id)
+        assert lease.owner_id == "holder-owner" and lease.fencing_epoch == 0

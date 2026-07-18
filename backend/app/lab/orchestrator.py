@@ -133,21 +133,27 @@ class _Orchestrator:
 
     async def execute(self) -> None:
         db = self.db
-        # Same opening transition as legacy: run+task → running, then WS.
-        self.run.status = "running"
-        self.run.started_at = datetime.now(UTC)
-        self.run.heartbeat_at = datetime.now(UTC)
-        self.task.status = "running"
-        self.task.updated_at = datetime.now(UTC)
-        await db.commit()
-        await _ws_task_update(self.task)
-
         fenced = False
         try:
-            # Take the run lease (epoch), open the budget ledger, mint the
-            # signed grant, and log run.started — before any tool intent.
+            # Take the run lease FIRST — before touching run/task state. If another
+            # owner already holds a live lease (queue redelivery / concurrent
+            # double-take), acquire raises LeaseError("held") and we abandon the
+            # run untouched below, rather than flipping it to running and then
+            # (wrongly) refunding + revoking the holder's grant.
             lease = await leases.acquire_lease(db, run_id=self.run_id, owner_id=self.owner_id)
             self.epoch = lease.fencing_epoch
+
+            # We own the run → the same opening transition as legacy, then WS.
+            self.run.status = "running"
+            self.run.started_at = datetime.now(UTC)
+            self.run.heartbeat_at = datetime.now(UTC)
+            self.task.status = "running"
+            self.task.updated_at = datetime.now(UTC)
+            await db.commit()
+            await _ws_task_update(self.task)
+
+            # Open the budget ledger, mint the signed grant, log run.started —
+            # before any tool intent.
             await budgets.init_run_budget(db, run_id=self.run_id, tenant_id=self.tenant_id)
             self.token, self.claims = await grants.issue_run_grant(
                 db, tenant_id=self.tenant_id, task_id=self.task_id, run_id=self.run_id,
@@ -162,10 +168,15 @@ class _Orchestrator:
 
             await self._event_loop()
             await self._succeed()
-        except leases.StaleEpoch:
+        except leases.LeaseError as exc:
+            # We do not (or no longer) own this run's lease: a concurrent owner
+            # holds it ("held") or a takeover fenced us (StaleEpoch, a LeaseError
+            # subclass — this single handler covers both). Abandon quietly: write
+            # no terminal state, do NOT refund, and let ``finally`` skip revoke so
+            # the holder's grant survives. Fencing must never be invertible.
             fenced = True
-            logger.warning("lab run %s fenced at epoch %s; abandoning to new owner",
-                           self.run_id, self.epoch)
+            logger.warning("lab run %s not owned (%s); abandoning to lease holder",
+                           self.run_id, exc)
             return
         except _RunFailed as exc:
             await self._fail(exc.reason)
@@ -242,11 +253,18 @@ class _Orchestrator:
                 await budgets.release(db, run_id=self.run_id, dimension="tool_calls")
                 return
 
-        await self._emit(type="tool.started", action_id=action.id,
+        action_id = action.id  # capture before expiring (avoids a sync lazy-load)
+        await self._emit(type="tool.started", action_id=action_id,
                          payload={"tool": tool, "summary": summary})
+        # Lock the cross-session freshness invariant instead of leaning on
+        # identity-map weak-ref GC: expire our cached action so execute_action
+        # re-reads the REST-decided status/approval from the DB, not the stale
+        # pre-approval snapshot. (The approval row is deliberately never held
+        # strongly across the poll, so execute_action's own db.get re-reads it.)
+        db.expire(action)
         try:
             result = await broker.execute_action(
-                db, action_id=action.id, claims=self.claims, executor=_mock_executor,
+                db, action_id=action_id, claims=self.claims, executor=_mock_executor,
                 args=args, expected_epoch=self.epoch,
             )
         except broker.ActionDenied as exc:
