@@ -71,6 +71,15 @@ class SandboxAdapter(Protocol):
     async def collect_artifacts(self, handle: Any) -> list[ArtifactSpec]: ...
     async def stop(self, handle: Any) -> None: ...
 
+    # Optional cancel-escalation surface used by ``app.lab.supervision`` (P2-D).
+    # An adapter that omits these is treated as already-stopped / healthy — the
+    # supervisor probes them via ``getattr`` so legacy adapters keep working
+    # unchanged; the Mock and HttpAgentAdapter below give minimal implementations.
+    async def cancel(self, handle: Any) -> None: ...        # cooperative cancel
+    async def terminate(self, handle: Any) -> None: ...     # TERM escalation
+    async def kill(self, handle: Any) -> None: ...          # KILL escalation
+    async def health(self, handle: Any) -> dict: ...        # {"alive": bool, "cancelled": bool}
+
 
 class LabAdapterUnconfigured(RuntimeError):
     """Raised at start() when a real adapter has no ``base_url`` configured.
@@ -174,6 +183,44 @@ class HttpAgentAdapter:
             )
         except Exception:
             pass  # best-effort teardown
+
+    async def _post_control(self, handle: "HttpHandle", action: str) -> None:
+        """Best-effort control POST (cancel/terminate/kill). Placeholder wire
+        protocol aligned with the P2 rollout — import-safe, never raises so a
+        supervisor escalation always proceeds to the next tier / to fencing."""
+        from app.http import get_client
+        try:
+            await get_client().post(
+                f"{self.base_url}/runs/{handle.session_id}/{action}", headers=self._headers(),
+                timeout=self.timeout,
+            )
+        except Exception:
+            pass
+
+    async def cancel(self, handle: "HttpHandle") -> None:
+        await self._post_control(handle, "cancel")
+
+    async def terminate(self, handle: "HttpHandle") -> None:
+        await self._post_control(handle, "terminate")
+
+    async def kill(self, handle: "HttpHandle") -> None:
+        await self._post_control(handle, "kill")
+
+    async def health(self, handle: "HttpHandle") -> dict:
+        """Runtime liveness for the supervisor's cancel poll. Unreachable →
+        report stopped (fail-closed: the supervisor stops waiting and fences)."""
+        from app.http import get_client
+        try:
+            resp = await get_client().get(
+                f"{self.base_url}/runs/{handle.session_id}/health", headers=self._headers(),
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json() or {}
+            return {"alive": bool(data.get("alive", False)),
+                    "cancelled": bool(data.get("cancelled", False))}
+        except Exception:
+            return {"alive": False, "cancelled": True}
 
 
 class HttpHandle(SandboxHandle):

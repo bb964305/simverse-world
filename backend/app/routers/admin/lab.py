@@ -33,11 +33,18 @@ async def lab_status(admin: User = Depends(require_admin)):
 
 
 @router.post("/kill-switch")
-async def set_kill_switch(body: KillSwitchBody, admin: User = Depends(require_admin)):
-    """Flip the runtime kill switch live (Redis sv:lab:enabled) — no restart."""
-    from app.lab import set_lab_runtime_enabled
+async def set_kill_switch(body: KillSwitchBody, admin: User = Depends(require_admin),
+                          db: AsyncSession = Depends(get_db)):
+    """Flip the runtime kill switch live (Redis sv:lab:enabled) — no restart. On
+    kill (enabled=False) also runs the supervision drill: every active run is
+    cancelled, its grants revoked, its lease fenced and its task refunded (P2 exit
+    'kill switch terminates all runs and revokes grants')."""
+    from app.lab import set_lab_runtime_enabled, supervision
     await set_lab_runtime_enabled(body.enabled)
-    return {"runtime_enabled": body.enabled}
+    resp = {"runtime_enabled": body.enabled}
+    if not body.enabled:
+        resp["killed"] = await supervision.kill_switch_all(db)
+    return resp
 
 
 @router.get("/runs")
@@ -53,12 +60,29 @@ async def list_runs(status: str | None = None, admin: User = Depends(require_adm
 @router.post("/runs/{run_id}/cancel")
 async def cancel_run(run_id: str, admin: User = Depends(require_admin),
                      db: AsyncSession = Depends(get_db)):
-    """Circuit-breaker: cancel a run and refund the task's escrow."""
+    """Circuit-breaker: cancel a run and refund the task's escrow. With the v1
+    control plane on, route through ``supervision.cancel_run`` (cooperative →
+    TERM → KILL escalation + grant revocation + lease fencing); the legacy
+    flip-and-refund below is the flag-off fallback."""
     run = await db.get(LabRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
     if run.status in ("succeeded", "failed", "cancelled"):
         raise HTTPException(status_code=409, detail="run already terminal")
+
+    from app.config import settings
+    if settings.lab_agent_v1_enabled:
+        from app.lab import supervision
+        from app.lab.sandbox import get_adapter
+        tier = await supervision.cancel_run(
+            db, run_id=run_id, adapter=get_adapter(run.adapter), handle=None,
+            reason="admin_cancel",
+        )
+        task = await db.get(LabTask, run.task_id)
+        if task is not None and task.status not in ("completed", "cancelled", "expired", "failed"):
+            await svc.fail_task(db, task, reason=f"admin_cancel_run:{run_id}")
+        return {"ok": True, "run_id": run_id, "escalation": tier}
+
     run.status = "cancelled"
     run.ended_at = datetime.now(UTC)
     await db.commit()

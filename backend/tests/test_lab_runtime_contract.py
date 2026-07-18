@@ -1,0 +1,406 @@
+"""P2-D — Gateway runtime supervision layer contract (PRD §Simverse Lab Runtime
+Protocol v1: handshake / provider-cursor ACK / backpressure / cancel escalation,
+plus the kill-switch drill). V04 / V05 / V06 + kill switch.
+
+The supervision layer is the seam any REAL runtime adapter (P2-F) must pass
+through: it enforces the handshake before a run can start, dedups + backpressures
+the provider event stream (the provider ``cursor`` is a runtime-side counter,
+distinct from the ledger's durable ``seq``), acknowledges only up to the highest
+CONTIGUOUS committed cursor (a gap must not let an ACK jump past it), and
+escalates a cooperative cancel to TERM then KILL while ALWAYS revoking the run's
+grants and bumping the lease fencing epoch. The Mock path never flows through
+here (Mock has no provider stream), so these tests drive supervision directly
+with a deterministic in-test fake runtime + an injected clock — no real waits.
+
+Cross-session note (mirrors test_lab_task_flow / test_lab_e2e): each step opens
+its own ``async_session`` on the shared in-memory engine; supervision commits at
+every mutation so a fresh session always sees the prior one's writes.
+"""
+import uuid
+from datetime import datetime, UTC
+
+import pytest
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+
+from app.lab import grants, leases, ledger, protocol, supervision
+from app.lab.protocol import HandshakeManifest, RunEventEnvelope
+from app.models.lab_action import LabToolAction
+from app.models.lab_event import LabRunEvent
+from app.models.lab_grant import LabCapabilityGrant
+from app.models.lab_lease import LabRunLease
+from app.models.lab_run import LabRun
+from app.models.lab_task import LabTask
+from app.models.user import User
+from app.services.auth_service import create_token
+
+
+# ── fixtures / helpers ────────────────────────────────────────────────
+
+@pytest.fixture
+def sup_env(db_engine, monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "lab_grant_secret", "test-secret", raising=False)
+    monkeypatch.setattr(settings, "lab_agent_v1_enabled", True, raising=False)
+    return async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+
+
+def _good_manifest(**over) -> HandshakeManifest:
+    base = dict(protocol_version=1, runtime="fake", runtime_version="1",
+                capabilities=["broker_mediation"])
+    base.update(over)
+    return HandshakeManifest(**base)
+
+
+def _builder(cursor: int, *, run_id="run1", tenant_id="t1", task_id="task1", body="x"):
+    """A provider-event envelope factory the supervisor stamps a durable seq onto."""
+    def build(seq: int) -> RunEventEnvelope:
+        return RunEventEnvelope(
+            event_id=str(uuid.uuid4()), tenant_id=tenant_id, run_id=run_id, task_id=task_id,
+            seq=seq, type="plan.updated", actor="runtime", fencing_epoch=0,
+            policy_version="lab-policy-v1", occurred_at=datetime.now(UTC),
+            payload={"cursor": cursor, "summary": f"event {cursor} {body}"},
+        )
+    return build
+
+
+async def _ingest(db, session, cursor):
+    return await supervision.ingest_provider_event(
+        db, session, provider_cursor=cursor, envelope_builder=_builder(cursor))
+
+
+async def _event_count(db, run_id="run1", type_="plan.updated"):
+    return (await db.execute(
+        select(func.count()).select_from(LabRunEvent)
+        .where(LabRunEvent.run_id == run_id, LabRunEvent.type == type_)
+    )).scalar_one()
+
+
+class FakeClock:
+    """Injected time source: ``sleep`` advances the clock, so escalation windows
+    elapse instantly and deterministically (no real waits)."""
+    def __init__(self):
+        self.t = 0.0
+
+    def now(self):
+        return self.t
+
+    async def sleep(self, seconds):
+        self.t += seconds
+
+
+class FakeRuntimeAdapter:
+    """A programmable runtime: ``stops_at`` selects which escalation tier it
+    finally acknowledges cancel at ('cancel' | 'terminate' | 'kill')."""
+    name = "fake"
+
+    def __init__(self, *, stops_at):
+        self.stops_at = stops_at
+        self._stopped = False
+        self.calls: list[str] = []
+
+    async def cancel(self, handle):
+        self.calls.append("cancel")
+        if self.stops_at == "cancel":
+            self._stopped = True
+
+    async def terminate(self, handle):
+        self.calls.append("terminate")
+        if self.stops_at == "terminate":
+            self._stopped = True
+
+    async def kill(self, handle):
+        self.calls.append("kill")
+        self._stopped = True  # KILL always stops
+
+    async def health(self, handle):
+        return {"alive": not self._stopped, "cancelled": self._stopped}
+
+
+async def _seed_run(factory, *, run_id="run1", task_id="task1", status="running",
+                    issuer="issuer", hold_id=None, epoch0_owner="owner-A", with_grant=True):
+    async with factory() as s:
+        s.add(LabTask(id=task_id, issuer_user_id=issuer, title="t", hold_id=hold_id,
+                      status="running"))
+        s.add(LabRun(id=run_id, task_id=task_id, researcher_slug="sage",
+                     status=status, adapter="mock"))
+        await s.commit()
+        if epoch0_owner:
+            await leases.acquire_lease(s, run_id=run_id, owner_id=epoch0_owner)
+        jti = None
+        if with_grant:
+            _, claims = await grants.issue_run_grant(
+                s, tenant_id=issuer, task_id=task_id, run_id=run_id,
+                agent_id="a", capabilities=["web_search"], fencing_epoch=0,
+            )
+            jti = claims.jti
+        return jti
+
+
+# ── V04: handshake enforcement (before any run.started) ────────────────
+
+@pytest.mark.anyio
+async def test_v04_bad_protocol_version_rejected_before_run_started(sup_env):
+    factory = sup_env
+    async with factory() as db:
+        with pytest.raises(supervision.HandshakeRejected):
+            await supervision.open_session(db, run_id="run1", manifest=_good_manifest(protocol_version=2))
+        # Handshake failed => no run.started (indeed no event at all) was written.
+        assert await _event_count(db, type_="run.started") == 0
+        assert (await db.execute(
+            select(func.count()).select_from(LabRunEvent).where(LabRunEvent.run_id == "run1")
+        )).scalar_one() == 0
+
+
+@pytest.mark.anyio
+async def test_v04_missing_broker_mediation_rejected(sup_env):
+    factory = sup_env
+    async with factory() as db:
+        with pytest.raises(supervision.HandshakeRejected):
+            await supervision.open_session(db, run_id="run1", manifest=_good_manifest(capabilities=["fs"]))
+
+
+@pytest.mark.anyio
+async def test_v04_valid_manifest_opens_session(sup_env):
+    factory = sup_env
+    async with factory() as db:
+        session = await supervision.open_session(db, run_id="run1", manifest=_good_manifest())
+        assert session.run_id == "run1"
+        assert session.provider_cursor_acked == 0
+        assert session.paused is False and session.cancelled is False
+
+
+# ── V05: cursor dedup / gap-safe ACK / replay / backpressure ───────────
+
+@pytest.mark.anyio
+async def test_v05_duplicate_cursor_writes_one_canonical_row(sup_env):
+    factory = sup_env
+    async with factory() as db:
+        session = await supervision.open_session(db, run_id="run1", manifest=_good_manifest())
+        first = await _ingest(db, session, 5)
+        dup = await _ingest(db, session, 5)
+        assert first is not None
+        assert dup is None                         # deduped, not written
+        assert await _event_count(db) == 1         # exactly one canonical row
+        assert session.unacked_events == 1         # dup did not double-count
+
+
+@pytest.mark.anyio
+async def test_v05_ack_stops_at_highest_contiguous_cursor(sup_env):
+    factory = sup_env
+    async with factory() as db:
+        session = await supervision.open_session(db, run_id="run1", manifest=_good_manifest())
+        await _ingest(db, session, 1)
+        await _ingest(db, session, 3)              # gap at 2 (out-of-order arrival)
+        assert await _event_count(db) == 2         # both land in the ledger
+
+        await supervision.ack_through(db, session, provider_cursor=3)
+        assert session.provider_cursor_acked == 1  # ACK cannot jump past the gap
+
+        await _ingest(db, session, 2)              # gap filled
+        await supervision.ack_through(db, session, provider_cursor=3)
+        assert session.provider_cursor_acked == 3  # now contiguous → advances fully
+
+
+@pytest.mark.anyio
+async def test_v05_replay_window_is_acked_plus_one(sup_env):
+    factory = sup_env
+    async with factory() as db:
+        session = await supervision.open_session(db, run_id="run1", manifest=_good_manifest())
+        for c in (1, 2, 3):
+            await _ingest(db, session, c)
+        await supervision.ack_through(db, session, provider_cursor=3)
+        assert session.provider_cursor_acked == 3
+        assert supervision.replay_window(session) == 4   # reconnect resumes at N+1
+
+
+@pytest.mark.anyio
+async def test_v05_backpressure_pauses_without_dropping(sup_env, monkeypatch):
+    monkeypatch.setattr(protocol, "MAX_UNACKED_EVENTS", 2)
+    factory = sup_env
+    async with factory() as db:
+        session = await supervision.open_session(db, run_id="run1", manifest=_good_manifest())
+        await _ingest(db, session, 1)
+        await _ingest(db, session, 2)              # window full (2/2)
+        with pytest.raises(supervision.Backpressure):
+            await _ingest(db, session, 3)          # over the window → pause
+        assert session.paused is True
+        assert await _event_count(db) == 2         # event 3 NOT dropped-to-ledger
+
+        # ACK drains the window → resume; the paused event now ingests.
+        await supervision.ack_through(db, session, provider_cursor=2)
+        assert session.paused is False and session.unacked_events == 0
+        assert await _ingest(db, session, 3) is not None
+        assert await _event_count(db) == 3
+
+
+# ── V06: cooperative-cancel → TERM → KILL escalation + fencing ─────────
+
+@pytest.mark.anyio
+async def test_v06_cooperative_cancel_revokes_and_fences(sup_env):
+    factory = sup_env
+    jti = await _seed_run(factory)
+    adapter = FakeRuntimeAdapter(stops_at="cancel")
+    clock = FakeClock()
+
+    async with factory() as db:
+        tier = await supervision.cancel_run(
+            db, run_id="run1", adapter=adapter, handle=None, reason="admin",
+            grace_s=0.2, kill_s=0.4, now=clock.now, sleep=clock.sleep,
+        )
+    assert tier == "cooperative"
+    assert adapter.calls == ["cancel"]             # never escalated
+
+    async with factory() as db:
+        assert (await db.get(LabCapabilityGrant, jti)).revoked_at is not None
+        assert (await db.get(LabRunLease, "run1")).fencing_epoch == 1
+        run = await db.get(LabRun, "run1")
+        assert run.status == "cancelled" and run.ended_at is not None
+        evs = (await db.execute(
+            select(LabRunEvent).where(LabRunEvent.run_id == "run1", LabRunEvent.type == "run.failed")
+        )).scalars().all()
+        assert len(evs) == 1
+        assert evs[0].payload_json["reason"].startswith("cancelled:")
+        assert evs[0].payload_json["escalation"] == "cooperative"
+
+
+@pytest.mark.anyio
+async def test_v06_refused_cancel_escalates_to_kill_still_fences(sup_env):
+    factory = sup_env
+    jti = await _seed_run(factory)
+    adapter = FakeRuntimeAdapter(stops_at="kill")   # ignores cancel + terminate
+    clock = FakeClock()
+
+    async with factory() as db:
+        tier = await supervision.cancel_run(
+            db, run_id="run1", adapter=adapter, handle=None, reason="runaway",
+            grace_s=0.2, kill_s=0.4, now=clock.now, sleep=clock.sleep,
+        )
+    assert tier == "kill"
+    assert adapter.calls == ["cancel", "terminate", "kill"]  # full escalation
+
+    async with factory() as db:
+        # Revocation + fencing happen regardless of which tier fired.
+        assert (await db.get(LabCapabilityGrant, jti)).revoked_at is not None
+        assert (await db.get(LabRunLease, "run1")).fencing_epoch == 1
+
+
+@pytest.mark.anyio
+async def test_v06_term_tier_when_terminate_acks(sup_env):
+    factory = sup_env
+    await _seed_run(factory)
+    adapter = FakeRuntimeAdapter(stops_at="terminate")
+    clock = FakeClock()
+    async with factory() as db:
+        tier = await supervision.cancel_run(
+            db, run_id="run1", adapter=adapter, handle=None, reason="x",
+            grace_s=0.2, kill_s=0.4, now=clock.now, sleep=clock.sleep,
+        )
+    assert tier == "term"
+    assert adapter.calls == ["cancel", "terminate"]  # stopped before KILL
+
+
+@pytest.mark.anyio
+async def test_v06_cancel_does_not_replay_completed_actions(sup_env):
+    factory = sup_env
+    await _seed_run(factory)
+    adapter = FakeRuntimeAdapter(stops_at="cancel")
+    clock = FakeClock()
+    async with factory() as db:
+        before = (await db.execute(
+            select(func.count()).select_from(LabToolAction).where(LabToolAction.run_id == "run1")
+        )).scalar_one()
+        await supervision.cancel_run(
+            db, run_id="run1", adapter=adapter, handle=None, reason="x",
+            grace_s=0.2, kill_s=0.4, now=clock.now, sleep=clock.sleep,
+        )
+    async with factory() as db:
+        after = (await db.execute(
+            select(func.count()).select_from(LabToolAction).where(LabToolAction.run_id == "run1")
+        )).scalar_one()
+    assert before == 0 and after == 0              # cancel executes/replays no actions
+
+
+# ── kill switch drill ─────────────────────────────────────────────────
+
+@pytest.mark.anyio
+async def test_kill_switch_all_cancels_refunds_revokes_idempotently(sup_env):
+    factory = sup_env
+    # Two active runs under two tasks, each with a live grant + lease + escrow hold.
+    async with factory() as s:
+        s.add(User(id="issuer", name="I", email="i@t.com", soul_coin_balance=100))
+        await s.commit()
+    jtis = []
+    for i in (1, 2):
+        async with factory() as s:
+            task = LabTask(id=f"task{i}", issuer_user_id="issuer", title="t", reward_sc=10,
+                           platform_fee_sc=0, status="running")
+            s.add(task)
+            await s.flush()
+            from app.services import coin_service
+            hold = await coin_service.hold(s, "issuer", 10, f"lab_task:task{i}")
+            task.hold_id = hold
+            s.add(LabRun(id=f"run{i}", task_id=f"task{i}", researcher_slug="sage",
+                         status="running" if i == 1 else "needs_approval", adapter="mock"))
+            await s.commit()
+            await leases.acquire_lease(s, run_id=f"run{i}", owner_id=f"owner-{i}")
+            _, claims = await grants.issue_run_grant(
+                s, tenant_id="issuer", task_id=f"task{i}", run_id=f"run{i}",
+                agent_id="a", capabilities=["web_search"], fencing_epoch=0,
+            )
+            jtis.append(claims.jti)
+
+    async with factory() as db:
+        stats = await supervision.kill_switch_all(db)
+    assert stats["runs_cancelled"] == 2
+
+    async with factory() as db:
+        for i in (1, 2):
+            assert (await db.get(LabRun, f"run{i}")).status == "cancelled"
+            assert (await db.get(LabTask, f"task{i}")).status == "failed"
+            assert (await db.get(LabRunLease, f"run{i}")).fencing_epoch == 1
+            evs = (await db.execute(
+                select(LabRunEvent).where(LabRunEvent.run_id == f"run{i}", LabRunEvent.type == "run.failed")
+            )).scalars().all()
+            assert len(evs) == 1 and evs[0].payload_json["reason"] == "kill_switch"
+        for jti in jtis:
+            assert (await db.get(LabCapabilityGrant, jti)).revoked_at is not None
+        from app.services import coin_service
+        assert await coin_service.get_balance(db, "issuer") == 100  # both holds refunded
+
+    # Idempotent: a second drill touches nothing.
+    async with factory() as db:
+        stats2 = await supervision.kill_switch_all(db)
+    assert stats2["runs_cancelled"] == 0 and stats2["tasks_failed"] == 0
+    async with factory() as db:
+        for i in (1, 2):
+            # Still exactly one terminal event per run (no second run.failed).
+            assert (await db.execute(
+                select(func.count()).select_from(LabRunEvent)
+                .where(LabRunEvent.run_id == f"run{i}", LabRunEvent.type == "run.failed")
+            )).scalar_one() == 1
+
+
+# ── admin REST kill-switch terminates active runs ─────────────────────
+
+@pytest.mark.anyio
+async def test_admin_rest_kill_switch_terminates_active_runs(client, db_session):
+    db_session.add(User(id="admin-k", name="Admin", email="admin-k@t.com", is_admin=True))
+    db_session.add(LabTask(id="taskK", issuer_user_id="admin-k", title="t", status="running"))
+    db_session.add(LabRun(id="runK", task_id="taskK", researcher_slug="sage",
+                          status="running", adapter="mock"))
+    await db_session.commit()
+    await leases.acquire_lease(db_session, run_id="runK", owner_id="owner-K")
+    await db_session.commit()
+
+    # The kill-switch drill runs unconditionally (safety mechanism), independent
+    # of the v1 flag — so this test sets no global flag to leak into later tests.
+    headers = {"Authorization": f"Bearer {create_token('admin-k')}"}
+    resp = await client.post("/admin/lab/kill-switch", json={"enabled": False}, headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["runtime_enabled"] is False
+    assert resp.json()["killed"]["runs_cancelled"] >= 1
+
+    fresh = await db_session.get(LabRun, "runK")
+    await db_session.refresh(fresh)
+    assert fresh.status == "cancelled"

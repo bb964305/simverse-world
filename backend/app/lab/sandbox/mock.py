@@ -79,3 +79,18 @@ class MockAdapter:
 
     async def stop(self, handle: _MockHandle) -> None:
         return None
+
+    # Cancel-escalation surface (P2-D supervision). The Mock has no live process,
+    # so a cancel is instantaneous: ``health`` reports already-stopped, which the
+    # supervisor reads as a cooperative ACK.
+    async def cancel(self, handle: _MockHandle) -> None:
+        return None
+
+    async def terminate(self, handle: _MockHandle) -> None:
+        return None
+
+    async def kill(self, handle: _MockHandle) -> None:
+        return None
+
+    async def health(self, handle: _MockHandle) -> dict:
+        return {"alive": False, "cancelled": True}
