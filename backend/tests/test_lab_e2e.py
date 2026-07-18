@@ -9,18 +9,21 @@ artifact → mark_review → Compiler. These seven scenarios pin that the "Thin 
 enforcement is real on Mock while the flag-off path stays byte-for-byte legacy.
 
 Cross-session note (mirrors test_lab_task_flow): the orchestrator + services
-open their own ``async_session`` — patched here onto the shared in-memory
-engine. The two approval scenarios drive the run as a background task and
-resolve the approval from a separate session; the shared StaticPool connection
-interleaves safely because every step releases the connection on commit.
+open their own ``async_session`` — patched here onto a dedicated engine (see
+the local ``db_engine`` override below). The two approval scenarios drive the
+run as a background task and resolve the approval from a separate, concurrent
+session.
 """
 import asyncio
+import os
+import tempfile
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession, create_async_engine
 
+from app.database import Base
 from app.lab import grants, leases
 from app.lab.runner import run_one
 from app.lab.sandbox.base import ArtifactSpec, SandboxHandle, StepEvent
@@ -41,6 +44,38 @@ from app.services.auth_service import create_token
 
 
 # ── fixtures ──────────────────────────────────────────────────────────
+
+@pytest.fixture
+async def db_engine():
+    """Override conftest's shared ``:memory:`` engine with a tempfile-backed one.
+
+    ``sqlite+aiosqlite:///:memory:`` forces SQLAlchemy onto a single-connection
+    StaticPool (there is no way to open a second connection to the same
+    in-memory database), so every ``AsyncSession`` obtained from the engine —
+    including the background ``run_one`` task and the foreground test/HTTP
+    session driving it concurrently below — shares one literal DBAPI
+    connection. Two Sessions with genuinely overlapping (not just
+    interleaved-at-await-points) transactions on that one connection can
+    desync each other's transaction/identity-map state under real scheduling
+    delay: a session mid-commit can leave the connection in a state where a
+    concurrent sibling session's read is stale, or (observed under load) the
+    connection is invalidated and StaticPool's next checkout silently starts a
+    fresh, empty in-memory database ("no such table"). A tempfile-backed
+    engine gets a real pool (``AsyncAdaptedQueuePool``): each session gets its
+    own connection, correctly serialized by SQLite's own file locking — the
+    same isolation model production Postgres gives concurrent connections.
+    """
+    fd, path = tempfile.mkstemp(prefix="simverse_lab_e2e_", suffix=".db")
+    os.close(fd)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        yield engine
+    finally:
+        await engine.dispose()
+        os.unlink(path)
+
 
 @pytest.fixture
 def lab_env(db_engine, monkeypatch):
