@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, UTC
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.config import settings
 from app.lab.protocol import GrantClaims, canonical_json
@@ -180,6 +180,30 @@ async def revoke_run_grants(db, run_id: str) -> None:
     for row in result.scalars():
         row.revoked_at = now
     await db.commit()
+
+
+async def revoke_grants_before_epoch(db, *, run_id: str, epoch: int) -> int:
+    """Revoke every still-live grant on ``run_id`` issued under an epoch *below*
+    ``epoch`` — the structural half of a takeover fence. After a takeover bumps
+    the lease to ``epoch``, the pre-takeover owner's token (carrying an earlier
+    ``fencing_epoch``) must die at ``check_grant_active`` even within its TTL,
+    not merely be rejected by the Broker's lease reconciliation. A single
+    conditional UPDATE (revoked_at IS NULL predicate keeps it idempotent);
+    returns the number of grants newly revoked. The current owner's grant sits
+    *at* ``epoch`` (not below it) and is untouched."""
+    now = datetime.now(UTC)
+    result = await db.execute(
+        update(LabCapabilityGrant)
+        .where(
+            LabCapabilityGrant.run_id == run_id,
+            LabCapabilityGrant.fencing_epoch < epoch,
+            LabCapabilityGrant.revoked_at.is_(None),
+        )
+        .values(revoked_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    await db.commit()
+    return result.rowcount
 
 
 async def check_grant_active(db, claims: GrantClaims, *, expected_epoch: int | None = None) -> None:

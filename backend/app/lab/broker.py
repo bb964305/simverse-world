@@ -4,8 +4,10 @@
 Thin D architecture: the runtime only *intends* a tool call; nothing crosses to
 a real effect except through this module. A cooperative runtime is not evidence
 of safety, so the Broker re-derives every gate here — it verifies the grant is
-still active, re-runs the Policy Engine immediately before execution, screens
-egress targets, and consumes a one-shot approval atomically. The subtle,
+still active, reconciles the caller's fencing epoch against the run-lease
+authority (a taken-over owner is denied even though its own cached epoch still
+matches its token), re-runs the Policy Engine immediately before execution,
+screens egress targets, and consumes a one-shot approval atomically. The subtle,
 load-bearing invariants:
 
 * A hard deny (unknown tool / R4 / unregistered-financial) never writes a
@@ -33,7 +35,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
-from app.lab import budgets, grants, guard, policy, protocol
+from app.lab import budgets, grants, guard, leases, policy, protocol
 from app.lab.sandbox import isolation
 from app.models.lab_action import LabToolAction, LabApproval
 
@@ -237,6 +239,19 @@ async def request_action(db, *, claims, token, tool_name, args, idempotency_key=
         # R4 would misattribute it to attack-surface stats keyed on risk_class.
         await _deny("NA", f"grant_inactive: {exc}", hard=True)
 
+    # 2b. Lease reconciliation (structural fencing). The grant's epoch is only
+    # trustworthy if it still matches the lab_run_leases row — the authority. The
+    # P1 ``expected_epoch`` gate compared the caller's own cached epoch against
+    # the token's, which a stale owner passes (both are its stale epoch).
+    # Reconciling ``claims.fencing_epoch`` against the live lease closes that
+    # self-reference: a taken-over owner is denied here. A run with no lease row
+    # is epoch 0, so a zero-epoch grant passes — every existing test that never
+    # creates a lease is unaffected. This is additive to ``expected_epoch``.
+    try:
+        await leases.assert_epoch(db, run_id=claims.run_id, epoch=claims.fencing_epoch)
+    except leases.StaleEpoch:
+        await _deny("NA", "stale_epoch", hard=True)
+
     # 3. Policy: deny > ask > allow. Hard denies and governance routes never
     # create an approval row.
     decision = policy.decide(tool_name, args, claims)
@@ -369,6 +384,14 @@ async def execute_action(db, *, action_id, claims, executor, args, expected_epoc
     except grants.GrantError as exc:
         await _deny_now(f"grant_inactive: {exc}", hard=True)
 
+    # Lease reconciliation before execution (same structural fence as request):
+    # a taken-over owner whose token still verifies is denied because its epoch
+    # no longer matches the lease authority. No lease → epoch 0 → passes.
+    try:
+        await leases.assert_epoch(db, run_id=claims.run_id, epoch=claims.fencing_epoch)
+    except leases.StaleEpoch:
+        await _deny_now("stale_epoch", hard=True)
+
     decision = policy.decide(action.tool_name, args, claims)
     if decision.effect == "deny":
         await _deny_now(decision.reason, decision=decision, hard=decision.hard_deny)
@@ -392,7 +415,12 @@ async def execute_action(db, *, action_id, claims, executor, args, expected_epoc
         if approval.decision == "expired":
             raise ApprovalInvalid("expired")
         # decision == "approved": the conditional UPDATE + rowcount check is the
-        # real gate — exactly one caller can flip consumed_at from NULL.
+        # real gate — exactly one caller can flip consumed_at from NULL. The
+        # ``fencing_epoch`` predicate makes the consume epoch-bound *on the same
+        # atomic write* (not a separate check): a caller can only consume an
+        # approval minted under its own epoch, so a takeover between the lease
+        # reconciliation above and this UPDATE (TOCTOU) cannot let a cross-epoch
+        # consume land.
         stmt = (
             update(LabApproval)
             .where(
@@ -400,6 +428,7 @@ async def execute_action(db, *, action_id, claims, executor, args, expected_epoc
                 LabApproval.decision == "approved",
                 LabApproval.consumed_at.is_(None),
                 LabApproval.expires_at > now,
+                LabApproval.fencing_epoch == claims.fencing_epoch,
             )
             .values(consumed_at=now)
             .execution_options(synchronize_session=False)
@@ -417,7 +446,11 @@ async def execute_action(db, *, action_id, claims, executor, args, expected_epoc
     # side effect so a mid-flight crash leaves a durable reconciliation trail.
     claim = (
         update(LabToolAction)
-        .where(LabToolAction.id == action.id, LabToolAction.status == "approved")
+        .where(
+            LabToolAction.id == action.id,
+            LabToolAction.status == "approved",
+            LabToolAction.fencing_epoch == claims.fencing_epoch,
+        )
         .values(status="executing", attempts=LabToolAction.attempts + 1)
         .execution_options(synchronize_session=False)
     )

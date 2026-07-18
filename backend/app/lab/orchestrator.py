@@ -122,6 +122,11 @@ class _Orchestrator:
         self.actor = run.researcher_slug or "runtime"
         self.owner_id = f"orchestrator:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self.epoch = 0
+        # Set true the moment we learn we no longer own the run (a takeover fenced
+        # us). It gates the terminal writes AND the ``finally`` revoke: a fenced
+        # owner must write no terminal state and must NOT revoke the new owner's
+        # grants. Owned by ``execute`` / ``_succeed`` / ``_fail``.
+        self.fenced = False
         self.policy_version = settings.lab_policy_version
         self.token = None
         self.claims = None
@@ -133,7 +138,6 @@ class _Orchestrator:
 
     async def execute(self) -> None:
         db = self.db
-        fenced = False
         try:
             # Take the run lease FIRST — before touching run/task state. If another
             # owner already holds a live lease (queue redelivery / concurrent
@@ -142,6 +146,15 @@ class _Orchestrator:
             # (wrongly) refunding + revoking the holder's grant.
             lease = await leases.acquire_lease(db, run_id=self.run_id, owner_id=self.owner_id)
             self.epoch = lease.fencing_epoch
+
+            # If we TOOK OVER a previously-owned run (the lease epoch is now past
+            # 0), fence the prior owner structurally: revoke every grant issued
+            # under an earlier epoch so a stale holder's token fails
+            # check_grant_active within its TTL — belt-and-braces with the
+            # Broker's lease reconciliation. Our own grant is minted below at
+            # ``self.epoch`` (not below it), so this never revokes it.
+            if self.epoch > 0:
+                await grants.revoke_grants_before_epoch(db, run_id=self.run_id, epoch=self.epoch)
 
             # We own the run → the same opening transition as legacy, then WS.
             self.run.status = "running"
@@ -174,7 +187,7 @@ class _Orchestrator:
             # subclass — this single handler covers both). Abandon quietly: write
             # no terminal state, do NOT refund, and let ``finally`` skip revoke so
             # the holder's grant survives. Fencing must never be invertible.
-            fenced = True
+            self.fenced = True
             logger.warning("lab run %s not owned (%s); abandoning to lease holder",
                            self.run_id, exc)
             return
@@ -184,8 +197,11 @@ class _Orchestrator:
             logger.warning("lab run %s failed: %s", self.run_id, exc, exc_info=True)
             await self._fail(str(exc))
         finally:
-            if not fenced:
-                # Terminal state reached → every grant for the run is revoked.
+            if not self.fenced:
+                # Terminal state reached → every grant for the run is revoked. A
+                # fenced owner (lease lost / taken over mid-terminal) skips this
+                # so it never revokes the NEW owner's grants (fencing must never
+                # invert — the P1 _fail StaleEpoch bug).
                 await grants.revoke_run_grants(db, self.run_id)
 
     async def _event_loop(self) -> None:
@@ -338,6 +354,17 @@ class _Orchestrator:
 
     async def _succeed(self) -> None:
         db = self.db
+        # Epoch gate: never write a terminal state / settle the task if a takeover
+        # has fenced us. Reconcile against the lease authority BEFORE touching
+        # run.status, budgets, or mark_review; a stale owner sets ``self.fenced``
+        # and returns so the run is left entirely to the new owner (and the
+        # ``finally`` revoke is skipped — no grant of the new owner is touched).
+        try:
+            await leases.assert_epoch(db, run_id=self.run_id, epoch=self.epoch)
+        except leases.StaleEpoch:
+            self.fenced = True
+            return
+
         artifacts = await self.adapter.collect_artifacts(self.handle)
         for _ in artifacts:
             await budgets.reserve(db, run_id=self.run_id, dimension="artifact_count")
@@ -386,6 +413,18 @@ class _Orchestrator:
 
     async def _fail(self, reason: str) -> None:
         db = self.db
+        # Epoch gate: a takeover fences the terminal write. Reconcile against the
+        # lease authority BEFORE flipping run.status or refunding — a stale owner
+        # sets ``self.fenced`` and returns, leaving the run (and its escrow) to
+        # the new owner. Without this, a fenced loser would fail+refund a run the
+        # new owner is still driving, and the ``finally`` would revoke the new
+        # owner's grants.
+        try:
+            await leases.assert_epoch(db, run_id=self.run_id, epoch=self.epoch)
+        except leases.StaleEpoch:
+            self.fenced = True
+            return
+
         self.run = await db.get(LabRun, self.run_id)
         if self.run is not None:
             self.run.status = "failed"
@@ -395,7 +434,12 @@ class _Orchestrator:
         try:
             await self._emit(type="run.failed", payload={"reason": str(reason)[:200]})
         except leases.StaleEpoch:
-            raise  # fenced mid-failure → let the outer handler abandon
+            # Fenced between the gate above and the event append: mark fenced and
+            # return so the ``finally`` skips the revoke. Re-raising here left
+            # ``self.fenced`` False and inverted the fence (the P1 bug) — the
+            # finally then revoked the NEW owner's grants.
+            self.fenced = True
+            return
         except Exception:  # noqa: BLE001
             logger.warning("run.failed event append failed for %s", self.run_id, exc_info=True)
         self.task = await db.get(LabTask, self.task_id)
