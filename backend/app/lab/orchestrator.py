@@ -94,6 +94,25 @@ async def _mock_executor(tool_name: str, args: dict) -> dict:
     return {"tool": tool_name, "ok": True, "summary": f"executed {tool_name} (mock)"}
 
 
+# Code/shell tools (R1) that route through the rootless OCI sandbox when it is
+# enabled + configured. Network tools never run here — egress stays governed by
+# the Broker/isolation layer, not the container.
+_OCI_TOOLS = frozenset({"code.run", "shell.exec", "fs.write"})
+
+
+def _select_executor(tool_name: str):
+    """The executor the Broker runs for this tool intent. Default — and every
+    non-code tool — is the Mock echo, so the flag-off path is byte-for-byte
+    unchanged. Only when ``lab_oci_enabled`` AND an image is configured do
+    code/shell tools route through ``OciExecutor``. Imported lazily so neither
+    the executor module nor docker is touched on the default path (P2-E:
+    default path zero change; Executor exposed only via the Broker slot)."""
+    if settings.lab_oci_enabled and settings.lab_oci_image and tool_name in _OCI_TOOLS:
+        from app.lab.sandbox.oci_executor import OciExecutor, SandboxLimits
+        return OciExecutor(image=settings.lab_oci_image, limits=SandboxLimits()).as_broker_executor()
+    return _mock_executor
+
+
 async def run_one_v1(run_id: str) -> None:
     """Execute a single queued run through the v1 control plane. Same idempotent
     guard as legacy: only picks up runs still ``queued``."""
@@ -369,7 +388,7 @@ class _Orchestrator:
         db.expire(action)
         try:
             result = await broker.execute_action(
-                db, action_id=action_id, claims=self.claims, executor=_mock_executor,
+                db, action_id=action_id, claims=self.claims, executor=_select_executor(tool),
                 args=args, expected_epoch=self.epoch,
             )
         except broker.ActionDenied as exc:

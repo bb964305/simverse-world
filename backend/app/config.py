@@ -181,6 +181,12 @@ class Settings(BaseSettings):
     # P2 real sandbox: one-shot container image + default-deny egress allowlist.
     lab_sandbox_image: str = ""             # container image for isolated runs ("" = not provisioned)
     lab_egress_allowlist: list[str] = []    # allowed egress hosts (e.g. ["*.wikipedia.org"])
+    # P2-E rootless OCI executor: only R1 code/shell tools route through it, and
+    # only when both the flag is on AND an image is set. Off = Mock _mock_executor
+    # (default path, zero change). macOS+colima evidence is dev-grade; a prod gate
+    # needs a dedicated Linux runner (cgroup v2 + rootless + seccomp/AppArmor).
+    lab_oci_enabled: bool = False
+    lab_oci_image: str = ""                 # OCI executor image ("" = disabled even if the flag is on)
     # Real adapter endpoints — empty string = unconfigured (portrait/tts grouping
     # convention). The adapter still imports; start() raises LabAdapterUnconfigured.
     lab_openclaw_base_url: str = ""
