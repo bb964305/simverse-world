@@ -20,6 +20,7 @@ from app.models.lab_run import LabRun, LabRunStep
 from app.models.lab_task import LabTask
 from app.services.auth_service import get_current_user
 from app.services import coin_service
+from app.services import lab_artifact_service
 from app.services import lab_task_service as svc
 
 router = APIRouter(prefix="/lab", tags=["lab"])
@@ -255,6 +256,22 @@ async def run_approval(run_id: str, body: ApprovalBody, request: Request, db: As
 @router.get("/artifacts/{artifact_id}")
 async def get_artifact(artifact_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     user = await _require_user(request, db)
+    if settings.lab_agent_v1_enabled:
+        # v1: digest-verified read (V12) — a tampered row is blocked (409)
+        # instead of silently served. ACL denial still reads as 404 (never
+        # 403), same anti-probing rule as the legacy path below.
+        try:
+            art = await lab_artifact_service.verify_and_get(
+                db, artifact_id=artifact_id, user_id=user.id, is_admin=user.is_admin,
+            )
+        except acl.AclDenied:
+            raise HTTPException(status_code=404, detail="artifact not found")
+        except lab_artifact_service.DigestMismatch:
+            raise HTTPException(status_code=409, detail="artifact digest mismatch")
+        task = await db.get(LabTask, art.task_id)
+        unlocked = task is not None and task.status == "completed"
+        return svc.serialize_artifact(art, unlocked)
+
     art = await db.get(LabArtifact, artifact_id)
     if art is None:
         raise HTTPException(status_code=404, detail="artifact not found")

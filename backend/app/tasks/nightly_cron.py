@@ -95,6 +95,23 @@ async def run_nightly_jobs() -> None:
     except Exception:
         logger.error("Lab orphan-run sweep failed", exc_info=True)
 
+    # V12: pin still-referenced artifact evidence, then tombstone what's past
+    # its retention window. Safe to run unconditionally — flag-off/legacy
+    # artifacts never get an expires_at, so this sweep is a no-op for them.
+    try:
+        from app.services import lab_artifact_service
+        async with async_session() as db:
+            held = await lab_artifact_service.apply_retention_holds(db)
+        async with async_session() as db:
+            stats = await lab_artifact_service.cleanup_expired(db)
+        if held or stats.get("deleted_count") or stats.get("quarantined_count"):
+            logger.info(
+                "Lab: retention held %d artifacts, cleanup deleted=%d quarantined=%d",
+                held, stats.get("deleted_count", 0), stats.get("quarantined_count", 0),
+            )
+    except Exception:
+        logger.error("Lab artifact retention sweep failed", exc_info=True)
+
     # A1: weekly life-goal evaluation (Sundays only).
     if datetime.now(UTC).weekday() == 6:
         try:

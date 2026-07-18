@@ -464,3 +464,25 @@ async def test_held_lease_is_fenced_not_failed(lab_env):
         )).scalar_one() == 0
         lease = await s.get(LabRunLease, run_id)
         assert lease.owner_id == "holder-owner" and lease.fencing_epoch == 0
+
+
+# ── 9. V12 artifact integrity fields land on the happy path (P2-B) ────
+
+@pytest.mark.anyio
+async def test_happy_path_v1_artifact_has_integrity_fields(lab_env):
+    """finalize_artifact runs inside _succeed before commit — the artifact row
+    a happy-path run produces must already carry its tenant/digest/expiry, not
+    just the legacy kind/title/uri/text_md/meta_json fields."""
+    factory = lab_env
+    await _seed(factory)
+    task_id, run_id = await _make_task(factory, scopes=["web_search"], reward_sc=100)
+
+    await run_one(run_id)
+
+    async with factory() as s:
+        arts = (await s.execute(select(LabArtifact).where(LabArtifact.task_id == task_id))).scalars().all()
+        assert len(arts) == 1
+        a = arts[0]
+        assert a.tenant_id == "issuer"
+        assert a.sha256 is not None and len(a.sha256) == 64
+        assert a.expires_at is not None

@@ -216,6 +216,7 @@ class Settings(BaseSettings):
     lab_budget_artifact_count: int = 20
     lab_budget_artifact_bytes: int = 104_857_600
     lab_budget_active_workers: int = 3
+    lab_artifact_retention_days: int = 30   # V12: expires_at = finalized_at + this; retention_hold pins evidence
 
     model_config = {"env_file": ".env"}
 

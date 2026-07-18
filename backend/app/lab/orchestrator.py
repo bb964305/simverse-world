@@ -58,7 +58,7 @@ from app.models.lab_action import LabApproval
 from app.models.lab_artifact import LabArtifact
 from app.models.lab_run import LabRun, LabRunStep
 from app.models.lab_task import LabTask
-from app.services import lab_task_service
+from app.services import lab_artifact_service, lab_task_service
 
 logger = logging.getLogger(__name__)
 
@@ -369,10 +369,17 @@ class _Orchestrator:
         for _ in artifacts:
             await budgets.reserve(db, run_id=self.run_id, dimension="artifact_count")
         for a in artifacts:
-            db.add(LabArtifact(
+            artifact = LabArtifact(
                 run_id=self.run_id, task_id=self.task_id, kind=a.kind, title=a.title,
                 uri=a.uri, text_md=a.text_md, meta_json=(a.meta or None),
-            ))
+            )
+            # V12: stamp tenant/digest/size/expiry before the row lands (P2-B).
+            # No per-artifact action mapping exists yet on the Mock runtime, so
+            # producer_action_id is None — the brief allows that fallback.
+            await lab_artifact_service.finalize_artifact(
+                db, artifact=artifact, tenant_id=self.tenant_id, producer_action_id=None,
+            )
+            db.add(artifact)
         await db.commit()
         for _ in artifacts:
             await budgets.confirm(db, run_id=self.run_id, dimension="artifact_count")

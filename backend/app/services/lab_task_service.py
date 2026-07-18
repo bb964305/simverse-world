@@ -86,11 +86,16 @@ def serialize_step(s) -> dict:
 
 def serialize_artifact(a: LabArtifact, unlocked: bool) -> dict:
     """Artifact view. Locked (task not released) → content withheld, external
-    links never auto-exposed (anti-freeload + anti-injection, spec §5.3)."""
+    links never auto-exposed (anti-freeload + anti-injection, spec §5.3).
+    V12 integrity/retention fields are read-only metadata, not the withheld
+    content itself — they're always present (additive, backward compatible;
+    a pre-P2-B row just reports its column defaults)."""
     base = {
         "id": a.id, "run_id": a.run_id, "task_id": a.task_id,
         "kind": a.kind, "title": a.title, "unlocked": unlocked,
         "created_at": a.created_at.isoformat() if a.created_at else None,
+        "sha256": a.sha256, "scan_status": a.scan_status,
+        "verification_status": a.verification_status, "retention_hold": a.retention_hold,
     }
     if unlocked:
         base.update({"uri": a.uri, "text_md": a.text_md, "meta": a.meta_json or {}})

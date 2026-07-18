@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, UTC
 
-from sqlalchemy import String, Text, DateTime, JSON
+from sqlalchemy import String, Integer, Text, DateTime, JSON, Boolean
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -27,3 +27,16 @@ class LabArtifact(Base):
     text_md: Mapped[str | None] = mapped_column(Text, nullable=True)
     meta_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    # --- V12 integrity + retention (P2-B; DB-slice, no object store — see
+    # .superpowers/sdd/task-9-brief.md). All nullable/defaulted so existing
+    # (legacy, flag-off) rows keep working unchanged. ---
+    tenant_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)  # text_md's or uri's utf-8 digest
+    byte_size: Mapped[int] = mapped_column(Integer, default=0)
+    producer_action_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    provenance: Mapped[str] = mapped_column(String(30), default="runtime")  # runtime|verifier|system
+    scan_status: Mapped[str] = mapped_column(String(20), default="skipped")  # skipped|pending|clean|flagged
+    verification_status: Mapped[str] = mapped_column(String(20), default="unverified")  # unverified|verified|rejected
+    retention_hold: Mapped[bool] = mapped_column(Boolean, default=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
