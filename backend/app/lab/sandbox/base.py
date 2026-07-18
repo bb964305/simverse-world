@@ -32,12 +32,18 @@ class RunSpec:
 @dataclass
 class StepEvent:
     """One streamed step. ``approval`` is set (an ``{id, action, summary}`` dict)
-    when the step is a sensitive action that must pause for human review."""
+    when the step is a sensitive action that must pause for human review.
+
+    ``model_tokens`` is the LLM token count this step burned; the orchestrator
+    debits it against the run's ``model_tokens`` budget. It defaults to 0 so a
+    legacy adapter that never reports tokens simply spends nothing on that
+    dimension (no behaviour change)."""
     phase: str                       # think | tool_call | observation | message
     summary: str
     tool: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
     cost_usd_cents: int = 0
+    model_tokens: int = 0
     approval: dict[str, Any] | None = None
 
 
@@ -132,6 +138,7 @@ class HttpAgentAdapter:
                     phase=raw.get("phase", "message"), summary=raw.get("summary", ""),
                     tool=raw.get("tool"), payload=raw.get("payload") or {},
                     cost_usd_cents=int(raw.get("cost_usd_cents", 0)),
+                    model_tokens=int(raw.get("model_tokens", 0)),
                     approval=raw.get("approval"),
                 )
             if data.get("done"):

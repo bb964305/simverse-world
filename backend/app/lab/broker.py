@@ -111,6 +111,25 @@ def _reason_of(action: LabToolAction) -> str:
     return "denied"
 
 
+def _is_egress_action(tool, args: dict) -> bool:
+    """True if executing this call reaches the network — an http/browse-capability
+    tool carrying a ``url``/``target``. The egress budgets (``egress_requests`` /
+    ``egress_bytes``) accrue only for these; a web.search (no network target) or a
+    local tool never touches them. Keyed on capability + target so it matches the
+    same actions ``_validate_egress`` screens for the allowlist."""
+    if tool is None or getattr(tool, "capability", None) not in ("http", "browse"):
+        return False
+    return bool(args.get("url") or args.get("target"))
+
+
+def is_egress_action(tool_name: str, args: dict) -> bool:
+    """``_is_egress_action`` for a caller that only has the tool *name* (the
+    orchestrator, settling reservations on its release paths). Resolves the tool
+    through the same policy registry the Broker's own ``decision.tool`` comes
+    from, so both sides agree on which actions carry egress reservations."""
+    return _is_egress_action(policy.TOOL_REGISTRY.get(tool_name), args)
+
+
 def _validate_egress(tool, args: dict, claims) -> tuple[str, bool] | None:
     """Screen a tool call's egress target. Returns ``(reason, hard)`` to deny,
     or ``None`` to allow. Reuses ``sandbox.isolation`` — no rewritten matching.
@@ -266,14 +285,20 @@ async def request_action(db, *, claims, token, tool_name, args, idempotency_key=
         reason, hard = egress
         await _deny(decision.risk_class, reason, hard=hard, decision=decision)
 
-    # 3c. Hard budget: reserve one tool_calls unit before persisting the
-    # action. A run with no LabRunBudget row (legacy path / never
-    # initialised) bypasses budgeting entirely — reserve() is a silent no-op
-    # in that case. Exhaustion is terminal for the run: leave a denied audit
-    # row, revoke every grant, and re-raise BudgetExhausted (not ActionDenied
-    # — this is a distinct failure mode from a policy/grant/egress refusal).
+    # 3c. Hard budget: reserve one tool_calls unit (and, for a network-target
+    # action, one egress_requests unit) before persisting the action. A run with
+    # no LabRunBudget row (legacy path / never initialised) bypasses budgeting
+    # entirely — reserve() is a silent no-op in that case. Exhaustion of either
+    # dimension is terminal for the run: leave a denied audit row, revoke every
+    # grant, and re-raise BudgetExhausted (not ActionDenied — a distinct failure
+    # mode from a policy/grant/egress refusal). The egress reservation is settled
+    # (confirm/release) in lock-step with tool_calls: on execute in
+    # ``execute_action``, on an approval denial / execute-time refusal in the
+    # orchestrator.
     try:
         await budgets.reserve(db, run_id=claims.run_id, dimension="tool_calls")
+        if _is_egress_action(decision.tool, args):
+            await budgets.reserve(db, run_id=claims.run_id, dimension="egress_requests")
     except budgets.BudgetExhausted as exc:
         action = _build("denied", decision.risk_class,
                         result_json={"reason": f"budget_exhausted:{exc.dimension}"})
@@ -492,9 +517,12 @@ async def execute_action(db, *, action_id, claims, executor, args, expected_epoc
         action.result_json = {"error": guard.redact_text(str(exc))}
         await db.commit()
         await _emit(on_event, action)
-        # Deterministic failure — refund the tool_calls reservation. (No-op if
-        # the run has no budget row.)
+        # Deterministic failure — refund the tool_calls reservation (and the
+        # egress_requests reservation for a network action). (No-op if the run
+        # has no budget row.)
         await budgets.release(db, run_id=claims.run_id, dimension="tool_calls")
+        if _is_egress_action(decision.tool, args):
+            await budgets.release(db, run_id=claims.run_id, dimension="egress_requests")
         return action
 
     action.status = "succeeded"
@@ -507,4 +535,17 @@ async def execute_action(db, *, action_id, claims, executor, args, expected_epoc
     # Settle the tool_calls reservation as real spend. (No-op if the run has
     # no budget row.)
     await budgets.confirm(db, run_id=claims.run_id, dimension="tool_calls")
+    # Egress accounting for a network-target action: confirm the request unit,
+    # then debit the response size. egress_bytes is a direct spend of the raw
+    # executor result's canonical byte length — the effect already happened, so
+    # an over-limit spend records the debit and raises BudgetExhausted, which the
+    # orchestrator turns into the standard budget termination (no further steps
+    # execute). tool_calls/egress_requests are already settled above, so the
+    # counters are consistent when the run tears down.
+    if _is_egress_action(decision.tool, args):
+        await budgets.confirm(db, run_id=claims.run_id, dimension="egress_requests")
+        await budgets.spend(
+            db, run_id=claims.run_id, dimension="egress_bytes",
+            amount=len(protocol.canonical_json(result).encode("utf-8")),
+        )
     return action

@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, UTC
 
@@ -68,6 +69,13 @@ logger = logging.getLogger(__name__)
 _POLL_INTERVAL_S = 0.2
 _WORLD_LOCATION_ID = "experiment_building"
 _SUMMARY_FALLBACK = "研究完成"
+
+
+def _now_ms() -> int:
+    """Monotonic wall-clock source for budget accounting, in milliseconds.
+    A module-level indirection so tests can patch the clock and drive the
+    ``wall_clock_ms`` dimension deterministically without real sleeps."""
+    return int(time.monotonic() * 1000)
 
 
 class _RunFailed(Exception):
@@ -133,6 +141,15 @@ class _Orchestrator:
         self.adapter = None
         self.handle = None
         self.cost_cents = 0
+        # active_workers is a gauge: this owner reserves exactly one slot once it
+        # starts stepping and releases it on EVERY terminal path (see ``execute``
+        # finally). The flag guards the release so a run that never reserved (a
+        # held-lease abandon) does not spuriously free a slot it never took.
+        self._worker_reserved = False
+        # wall_clock_ms is billed as the growing delta of a monotonic clock; the
+        # start stamp is taken when the step loop begins.
+        self._wall_start_ms = 0
+        self._wall_spent_ms = 0
 
     # ── lifecycle ─────────────────────────────────────────────────────
 
@@ -179,6 +196,12 @@ class _Orchestrator:
                              payload={"adapter": self.run.adapter,
                                       "scopes": list(self.run.scopes_json or [])})
 
+            # Take this owner's active_workers slot now that the run is started
+            # (after run.started so an exhaustion event orders after it). Mock is
+            # single-worker so this always fits, but the reservation + terminal
+            # release is the structure P4 concurrency builds on.
+            await self._reserve_worker()
+
             await self._event_loop()
             await self._succeed()
         except leases.LeaseError as exc:
@@ -197,6 +220,16 @@ class _Orchestrator:
             logger.warning("lab run %s failed: %s", self.run_id, exc, exc_info=True)
             await self._fail(str(exc))
         finally:
+            if self._worker_reserved:
+                # Release this owner's active_workers slot on EVERY terminal path,
+                # INCLUDING fenced. This owner reserved exactly one slot at start,
+                # so releasing exactly one is balanced: a takeover owner holds its
+                # OWN separate reservation, and release() floors at zero, so this
+                # can neither double-free the new owner's slot nor go negative.
+                # (Skipping it on fence would instead leak this owner's slot
+                # forever.) Independent of the grant revoke below — this is the
+                # owner's own bookkeeping, not a grant of the new owner.
+                await budgets.release(db, run_id=self.run_id, dimension="active_workers")
             if not self.fenced:
                 # Terminal state reached → every grant for the run is revoked. A
                 # fenced owner (lease lost / taken over mid-terminal) skips this
@@ -220,18 +253,73 @@ class _Orchestrator:
         self.handle = await adapter.start(spec)
         await adapter.submit_goal(self.handle, spec.brief, spec.scopes)
 
+        self._wall_start_ms = _now_ms()
         async for ev in adapter.step_stream(self.handle):
             # Heartbeat the lease each step; a takeover fences us here (StaleEpoch
             # propagates → no terminal write, new owner takes over).
             await leases.heartbeat(db, run_id=self.run_id, owner_id=self.owner_id, epoch=self.epoch)
             self.run.heartbeat_at = datetime.now(UTC)
             self.cost_cents += int(ev.cost_usd_cents or 0)
+            # Hard budgets billed per step, before the step's effect: wall-clock
+            # as the elapsed-since-last-step delta, then this step's model tokens.
+            # Either exhausting drives the standard budget termination.
+            await self._charge_wall_clock()
+            await self._spend("model_tokens", int(ev.model_tokens or 0))
             if ev.tool:
                 await self._handle_tool(ev)
             else:
                 await self._emit(type="plan.updated",
                                  payload={"phase": ev.phase,
                                           "summary": guard.redact_text(ev.summary) or ""})
+
+    # ── hard-budget spend helpers ─────────────────────────────────────
+
+    async def _terminate_budget(self, dimension: str) -> None:
+        """Emit the single budget-exhaustion event and raise the refundable
+        failure. Grants are revoked and the task refunded by the terminal path
+        (``execute``'s ``finally`` + ``_fail``); the Broker revokes eagerly for
+        the dimensions it owns, this covers the orchestrator-owned ones."""
+        await self._emit(type="budget.exhausted", payload={"dimension": dimension})
+        raise _RunFailed(f"budget_exhausted:{dimension}")
+
+    async def _spend(self, dimension: str, amount: int) -> None:
+        """Direct-debit ``amount`` of ``dimension``; an exhaustion becomes the
+        standard budget termination. Zero/negative is a no-op (nothing to bill)."""
+        if amount <= 0:
+            return
+        try:
+            await budgets.spend(self.db, run_id=self.run_id, dimension=dimension, amount=amount)
+        except budgets.BudgetExhausted as exc:
+            await self._terminate_budget(exc.dimension)
+
+    async def _charge_wall_clock(self) -> None:
+        """Bill the wall-clock elapsed since the last checkpoint (monotonic
+        delta, never negative). The checkpoint advances before the spend so a
+        subsequent step bills only the new increment."""
+        elapsed = _now_ms() - self._wall_start_ms
+        delta = elapsed - self._wall_spent_ms
+        if delta > 0:
+            self._wall_spent_ms = elapsed
+            await self._spend("wall_clock_ms", delta)
+
+    async def _reserve_worker(self) -> None:
+        """Reserve this owner's single active_workers slot; an exhaustion (P4
+        multi-worker over-subscription) drives the standard termination. On
+        success, mark the slot so the terminal ``finally`` releases exactly it."""
+        try:
+            await budgets.reserve(self.db, run_id=self.run_id, dimension="active_workers")
+        except budgets.BudgetExhausted as exc:
+            await self._terminate_budget(exc.dimension)
+        self._worker_reserved = True
+
+    async def _release_reservations(self, is_egress: bool) -> None:
+        """Refund the reservations a tool step took at request time when it does
+        not execute (approval denied / execute-time refusal): tool_calls always,
+        egress_requests too for a network-target action — the mirror of the
+        Broker's own confirm/release on the executed path."""
+        await budgets.release(self.db, run_id=self.run_id, dimension="tool_calls")
+        if is_egress:
+            await budgets.release(self.db, run_id=self.run_id, dimension="egress_requests")
 
     # ── tool intents through the Broker ───────────────────────────────
 
@@ -240,6 +328,7 @@ class _Orchestrator:
         tool = ev.tool
         args = dict(ev.payload or {})
         summary = guard.redact_text(ev.summary) or ""
+        is_egress = broker.is_egress_action(tool, args)
 
         try:
             action = await broker.request_action(
@@ -263,10 +352,10 @@ class _Orchestrator:
         if action.status == "waiting_approval":
             approved = await self._await_approval(action, summary)
             if not approved:
-                # Owner denied (or timed out): the reservation the request took is
-                # neither confirmed nor released by the Broker — release it here
-                # (T5 handoff). The run survives a denied sensitive action.
-                await budgets.release(db, run_id=self.run_id, dimension="tool_calls")
+                # Owner denied (or timed out): the reservations the request took
+                # are neither confirmed nor released by the Broker — release them
+                # here (T5 handoff). The run survives a denied sensitive action.
+                await self._release_reservations(is_egress)
                 return
 
         action_id = action.id  # capture before expiring (avoids a sync lazy-load)
@@ -285,14 +374,20 @@ class _Orchestrator:
             )
         except broker.ActionDenied as exc:
             # Execute-time refusal (grant revoked / policy re-eval / approval
-            # denied): the Broker did not settle the reservation — release it.
-            await budgets.release(db, run_id=self.run_id, dimension="tool_calls")
+            # denied): the Broker did not settle the reservations — release them.
+            await self._release_reservations(is_egress)
             await self._emit(type="policy.decided", action_id=action.id,
                              payload={"tool": tool, "decision": "deny", "reason": exc.reason})
             return
         except broker.ApprovalRequired:
-            await budgets.release(db, run_id=self.run_id, dimension="tool_calls")
+            await self._release_reservations(is_egress)
             return
+        except budgets.BudgetExhausted as exc:
+            # egress_bytes over-limit inside execute_action: the action already
+            # executed and settled its request-side reservations; the response
+            # size pushed egress_bytes past the cap. The effect is done, so we
+            # terminate the run (no further steps run) rather than undo it.
+            await self._terminate_budget(exc.dimension)
         except broker.ApprovalInvalid as exc:
             # T3 handoff: an in-flight / no-longer-consumable approval
             # (``already_executing`` and friends) must NOT be retried — treat the
@@ -366,22 +461,31 @@ class _Orchestrator:
             return
 
         artifacts = await self.adapter.collect_artifacts(self.handle)
-        for _ in artifacts:
-            await budgets.reserve(db, run_id=self.run_id, dimension="artifact_count")
+        built = []
         for a in artifacts:
             artifact = LabArtifact(
                 run_id=self.run_id, task_id=self.task_id, kind=a.kind, title=a.title,
                 uri=a.uri, text_md=a.text_md, meta_json=(a.meta or None),
             )
             # V12: stamp tenant/digest/size/expiry before the row lands (P2-B).
-            # No per-artifact action mapping exists yet on the Mock runtime, so
-            # producer_action_id is None — the brief allows that fallback.
+            # finalize only mutates the Python object — nothing is in the session
+            # yet, so the budget charges below can fail the run without leaving a
+            # half-written artifact. No per-artifact action mapping exists on the
+            # Mock runtime, so producer_action_id is None (brief allows it).
             await lab_artifact_service.finalize_artifact(
                 db, artifact=artifact, tenant_id=self.tenant_id, producer_action_id=None,
             )
+            # Hard budgets, charged BEFORE staging the row: reserve one
+            # artifact_count unit, then debit artifact_bytes by the finalized
+            # size. An exhaustion of either drives the standard termination with
+            # nothing persisted — the row is only db.add-ed once all charges clear.
+            await budgets.reserve(db, run_id=self.run_id, dimension="artifact_count")
+            await self._spend("artifact_bytes", artifact.byte_size or 0)
+            built.append(artifact)
+        for artifact in built:
             db.add(artifact)
         await db.commit()
-        for _ in artifacts:
+        for _ in built:
             await budgets.confirm(db, run_id=self.run_id, dimension="artifact_count")
         await self.adapter.stop(self.handle)
 
