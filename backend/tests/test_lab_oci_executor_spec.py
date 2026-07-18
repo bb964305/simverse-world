@@ -43,14 +43,28 @@ def _executor(**limit_over) -> OciExecutor:
 
 # ── fake subprocess plumbing (monkeypatched onto the module) ──────────
 
-class _FakeProc:
-    def __init__(self, out: bytes = b"", err: bytes = b"", rc: int = 0, hang: bool = False):
-        self._out, self._err, self.returncode, self._hang = out, err, rc, hang
+class _FakeStream:
+    """Minimal asyncio.StreamReader stand-in: hands out ``data`` in chunks, then
+    EOF (b"").  ``hang=True`` never returns — drives the wall-clock timeout."""
+    def __init__(self, data: bytes = b"", hang: bool = False):
+        self._data, self._pos, self._hang = data, 0, hang
 
-    async def communicate(self):
+    async def read(self, n: int = -1) -> bytes:
         if self._hang:
             await asyncio.sleep(30)
-        return self._out, self._err
+        if self._pos >= len(self._data):
+            return b""
+        end = len(self._data) if n is None or n < 0 else self._pos + n
+        chunk = self._data[self._pos:end]
+        self._pos += len(chunk)
+        return chunk
+
+
+class _FakeProc:
+    def __init__(self, out: bytes = b"", err: bytes = b"", rc: int = 0, hang: bool = False):
+        self.stdout = _FakeStream(out, hang)
+        self.stderr = _FakeStream(err, hang)
+        self.returncode, self._hang = rc, hang
 
     async def wait(self):
         if self._hang:
@@ -145,6 +159,23 @@ async def test_run_success_reports_output_and_verified_teardown(monkeypatch):
     assert res.timed_out is False
     assert res.teardown_proof["removed"] is True
     assert res.teardown_proof["name"]
+
+
+@pytest.mark.anyio
+async def test_run_bounds_captured_output_to_cap(monkeypatch):
+    """Important #1: a high-output container must not balloon host memory. The
+    host keeps at most _MAX_STREAM_CHARS per stream (read-and-discard beyond),
+    not the whole stream — and flags truncation. Regression for the old
+    ``communicate()`` path that buffered everything before slicing."""
+    ex = _executor()
+    monkeypatch.setattr(oci, "_MAX_STREAM_CHARS", 4096)  # small cap for the test
+    over = b"A" * (256 * 1024)                           # far past the cap
+    _patch_run(monkeypatch, _FakeProc(out=over, err=b"", rc=0))
+    _patch_cmd(monkeypatch, inspect_rc=1)
+    res = await ex.run(argv=["yes"])
+    assert len(res.stdout.encode("utf-8")) <= 4096       # host kept ≤ cap, not 256 KiB
+    assert res.truncated is True
+    assert res.exit_code == 0                            # finite over-producer still returns
 
 
 @pytest.mark.anyio

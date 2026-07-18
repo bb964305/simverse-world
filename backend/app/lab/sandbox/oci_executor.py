@@ -41,9 +41,15 @@ _HOST_ENV_KEYS = ("PATH", "HOME", "DOCKER_HOST", "DOCKER_CONFIG", "XDG_RUNTIME_D
 # How long to wait reaping a killed container after a wall-clock timeout.
 _REAP_TIMEOUT_S = 5
 
-# Cap on captured stream length surfaced to the Broker (defence-in-depth against
-# an oversized-output attempt; the container's own --memory/tmpfs bound it too).
+# Per-stream capture cap (bytes). The host reads at most this much of stdout and
+# of stderr into memory; anything beyond is drained-and-discarded, not buffered —
+# so a container spewing continuous output (a `yes`-style oversized-output DoS)
+# can never grow the backend process's memory, independent of the container's own
+# --memory bound (which limits the container, not the host reading its pipe).
 _MAX_STREAM_CHARS = 64 * 1024
+
+# Chunk size for the draining reader.
+_READ_CHUNK = 64 * 1024
 
 
 class ExecutorError(Exception):
@@ -72,6 +78,7 @@ class SandboxResult:
     stderr: str
     timed_out: bool
     teardown_proof: dict = field(default_factory=dict)
+    truncated: bool = False        # a captured stream exceeded _MAX_STREAM_CHARS
 
 
 async def _exec_run(argv: list[str], env: dict) -> asyncio.subprocess.Process:
@@ -79,6 +86,32 @@ async def _exec_run(argv: list[str], env: dict) -> asyncio.subprocess.Process:
     return await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
     )
+
+
+async def _read_capped(stream, limit: int) -> tuple[bytes, bool]:
+    """Read ``stream`` to EOF but KEEP at most ``limit`` bytes. Bytes past the cap
+    are read-and-discarded (bounded transient memory, never accumulated) so a
+    runaway producer cannot balloon the host — while still draining the pipe so
+    the container isn't blocked on a full stdout buffer. Returns
+    ``(captured_bytes, truncated)``."""
+    if stream is None:
+        return b"", False
+    buf = bytearray()
+    truncated = False
+    while True:
+        chunk = await stream.read(_READ_CHUNK)
+        if not chunk:
+            break
+        if len(buf) < limit:
+            keep = chunk[: limit - len(buf)]
+            buf += keep
+            if len(chunk) > len(keep):
+                truncated = True
+        else:
+            truncated = True
+        # loop continues: beyond the cap we keep reading `chunk` only to drain it,
+        # discarding immediately — `buf` never grows past `limit`.
+    return bytes(buf), truncated
 
 
 async def _exec_cmd(argv: list[str], env: dict) -> tuple[int, str, str]:
@@ -159,9 +192,22 @@ class OciExecutor:
         host_env = self._host_env()
 
         timed_out = False
+        out_b = err_b = b""
+        truncated = False
         proc = await _exec_run(docker_argv, host_env)
         try:
-            out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=self.limits.wall_clock_s)
+            # Read stdout + stderr concurrently (both must be drained or a full
+            # pipe would block the container), each capped at _MAX_STREAM_CHARS so
+            # the host memory stays bounded no matter how much the container emits.
+            (out_b, out_trunc), (err_b, err_trunc) = await asyncio.wait_for(
+                asyncio.gather(
+                    _read_capped(proc.stdout, _MAX_STREAM_CHARS),
+                    _read_capped(proc.stderr, _MAX_STREAM_CHARS),
+                ),
+                timeout=self.limits.wall_clock_s,
+            )
+            truncated = out_trunc or err_trunc
+            await asyncio.wait_for(proc.wait(), timeout=_REAP_TIMEOUT_S)
             exit_code = proc.returncode if proc.returncode is not None else -1
         except asyncio.TimeoutError:
             timed_out = True
@@ -170,7 +216,6 @@ class OciExecutor:
                 await asyncio.wait_for(proc.wait(), timeout=_REAP_TIMEOUT_S)
             except Exception:
                 pass
-            out_b, err_b = b"", b""
             exit_code = proc.returncode if proc.returncode is not None else -1
 
         # --rm reaps on exit; force-remove is belt-and-braces (no-op if already gone).
@@ -183,6 +228,7 @@ class OciExecutor:
             stderr=self._decode(err_b),
             timed_out=timed_out,
             teardown_proof=teardown_proof,
+            truncated=truncated,
         )
 
     def as_broker_executor(self):
@@ -203,8 +249,9 @@ class OciExecutor:
                 "ok": ok,
                 "exit_code": res.exit_code,
                 "timed_out": res.timed_out,
-                "stdout": res.stdout[:_MAX_STREAM_CHARS],
-                "stderr": res.stderr[:_MAX_STREAM_CHARS],
+                "stdout": res.stdout,   # already capped at capture time
+                "stderr": res.stderr,
+                "truncated": res.truncated,
                 "summary": f"executed {tool_name} in oci sandbox (exit {res.exit_code})",
                 "teardown": res.teardown_proof,
             }

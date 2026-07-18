@@ -65,14 +65,22 @@ def _ex(**limit_over) -> OciExecutor:
 # ── 1. scratch writable, host filesystem unreachable (no bind mount) ──
 
 @pytest.mark.anyio
-async def test_scratch_writable_but_no_host_bind(oci_ready):
+async def test_scratch_writable_but_no_host_bind(oci_ready, tmp_path):
     ex = _ex()
     write = await ex.run(argv=["sh", "-c", "echo scratch_ok > /scratch/x && cat /scratch/x"])
     assert write.exit_code == 0 and "scratch_ok" in write.stdout
 
-    # A path that ONLY the host could provide is absent — proves no host mount.
-    host = await ex.run(argv=["ls", "/host_marker_never_mounted"])
-    assert host.exit_code != 0
+    # Discriminating no-bind proof (Minor #3): a REAL host file with known content
+    # is unreadable from inside by its host path (it WOULD be readable if any -v
+    # bound the host tree), and the container's mount table lists no bind of the
+    # host dir. A test against a never-existing path would pass even with a bind.
+    marker = tmp_path / "host_secret.txt"
+    marker.write_text("HOST_ONLY_SECRET_XYZ")
+    read = await ex.run(argv=["sh", "-c", f'cat "{marker}" 2>&1 || echo NO_HOST_FS'])
+    assert "HOST_ONLY_SECRET_XYZ" not in read.stdout  # host content never leaks in
+    assert "NO_HOST_FS" in read.stdout
+    mounts = await ex.run(argv=["cat", "/proc/mounts"])
+    assert str(tmp_path) not in mounts.stdout          # no host bind mount present
 
 
 # ── 2 & 3. no network: egress + metadata endpoint both unreachable ────
@@ -117,9 +125,17 @@ async def test_runs_as_non_root(oci_ready):
 @pytest.mark.anyio
 async def test_readonly_rootfs_scratch_writable(oci_ready):
     ex = _ex()
-    ro = await ex.run(argv=["sh", "-c", "touch /root_marker"])
-    assert ro.exit_code != 0  # rootfs is read-only
+    # Discriminating read-only proof (Minor #3): the ROOT mount is ``ro`` in
+    # /proc/mounts. A non-root ``touch /root_marker`` failing is NOT proof — it
+    # EACCESes on a writable rootfs too, so it has no discriminating power.
+    mounts = (await ex.run(argv=["cat", "/proc/mounts"])).stdout
+    root_opts = [
+        line.split()[3] for line in mounts.splitlines()
+        if len(line.split()) >= 4 and line.split()[1] == "/"
+    ]
+    assert root_opts and any("ro" in opts.split(",") for opts in root_opts)
 
+    # scratch tmpfs stays writable.
     rw = await ex.run(argv=["sh", "-c", "touch /scratch/ok && echo WROTE"])
     assert rw.exit_code == 0 and "WROTE" in rw.stdout
 
@@ -157,6 +173,20 @@ async def test_teardown_removes_container(oci_ready):
     # Independent confirmation: docker inspect can no longer find it.
     inspect = subprocess.run(["docker", "inspect", name], capture_output=True)
     assert inspect.returncode != 0
+
+
+# ── 11. oversized output is bounded (host DoS defence, Important #1) ──
+
+@pytest.mark.anyio
+async def test_oversized_output_is_capped(oci_ready):
+    ex = _ex()
+    # ~1 MiB to stdout; the host must keep at most the cap and flag truncation —
+    # never buffer the whole stream (transient host-memory DoS).
+    res = await ex.run(
+        argv=["awk", "BEGIN{for(i=0;i<50000;i++)print \"ABCDEFGHIJABCDEFGHIJ\"}"]
+    )
+    assert res.truncated is True
+    assert len(res.stdout.encode("utf-8")) <= 64 * 1024
 
 
 # ── 10. Broker-only boundary: approved code action → clean result ─────
