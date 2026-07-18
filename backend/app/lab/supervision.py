@@ -36,9 +36,11 @@ Design resolutions (the brief flagged these as open — pinned here + in tests):
 * **The unacked window counts *committed* events only.** A cursor deduped by the
   ledger (already recorded) is not double-counted; ACK only debits cursors this
   session actually counted.
-* **Session state is in-memory.** A supervisor restart re-derives the ACK
-  watermark from the ledger via ``replay_window`` semantics on reconnect — this
-  module owns no new table.
+* **Session state is in-memory.** ``RuntimeSession`` (including the ACK
+  watermark) lives only in the supervisor process and is lost on restart;
+  this module owns no new table. Persisting or re-deriving the watermark from
+  the ledger (e.g. ``max(provider_event_id)`` per run) is a design intent for
+  a durable supervisor, NOT implemented here — deferred to P3.
 
 Like ``ledger`` / ``leases`` / ``grants``, this module never opens its own
 session: the caller owns the transaction boundary. The window thresholds are

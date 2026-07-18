@@ -41,10 +41,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, UTC
 
 from app.config import settings
-from app.lab import broker, grants, leases, ledger, policy, supervision
+from app.lab import broker, grants, leases, policy, supervision
 from app.lab.protocol import RunEventEnvelope
 from app.models.lab_grant import LabCapabilityGrant
-from app.models.lab_lease import LabRunLease
 from app.models.lab_run import LabRun
 from app.models.lab_task import LabTask
 
