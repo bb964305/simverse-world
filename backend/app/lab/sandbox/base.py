@@ -153,6 +153,36 @@ class HttpAgentAdapter:
             if data.get("done"):
                 break
 
+    async def read_provider_events(self, handle: "HttpHandle") -> AsyncIterator[tuple[int, StepEvent]]:
+        """Like ``step_stream`` but surfaces the runtime's own monotonic step
+        ``seq`` as the *provider cursor* alongside each event, so a Gateway
+        supervisor can drive ``supervision.ingest_provider_event`` (dedup / ACK /
+        replay). The provider cursor is the runtime-side polling ``after`` value —
+        deliberately DISTINCT from the ledger's durable ``seq`` (P2-D/P2-F). This
+        makes a real HTTP adapter supervisable; the Mock path is untouched and does
+        not flow through supervision."""
+        from app.http import get_client
+        after = 0
+        while True:
+            resp = await get_client().get(
+                f"{self.base_url}/runs/{handle.session_id}/steps", headers=self._headers(),
+                timeout=self.timeout, params={"after": after},
+            )
+            resp.raise_for_status()
+            data = resp.json() or {}
+            for raw in data.get("steps", []):
+                cursor = int(raw.get("seq", after))
+                after = max(after, cursor)
+                yield cursor, StepEvent(
+                    phase=raw.get("phase", "message"), summary=raw.get("summary", ""),
+                    tool=raw.get("tool"), payload=raw.get("payload") or {},
+                    cost_usd_cents=int(raw.get("cost_usd_cents", 0)),
+                    model_tokens=int(raw.get("model_tokens", 0)),
+                    approval=raw.get("approval"),
+                )
+            if data.get("done"):
+                break
+
     async def approve(self, handle: "HttpHandle", approval_id: str, decision: bool) -> None:
         from app.http import get_client
         resp = await get_client().post(
