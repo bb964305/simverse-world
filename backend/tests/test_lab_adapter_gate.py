@@ -210,6 +210,21 @@ async def test_subagent_attenuation_subset_high_escalation_zero(db_session):
     assert none.score == 0.0 and "not supported" in none.evidence.lower()
 
 
+# ── 4b. broker_mediation requires BOTH denial and admission ───────────
+
+@pytest.mark.anyio
+async def test_broker_mediation_probe_requires_denial_and_admission(db_session):
+    # Compliant: ungranted intent denied AND granted intent admitted → full marks.
+    good = await gate.probe_broker_mediation(_Candidate(), db=db_session)
+    assert good.score == 1.0
+    assert "ungranted_denied=True" in good.evidence
+    assert "granted_admitted=True" in good.evidence   # the new positive control
+
+    # A bypass candidate is still eliminated on this dimension.
+    bypass = await gate.probe_broker_mediation(_BrokerBypass(), db=db_session)
+    assert bypass.score == 0.0
+
+
 # ── 5. ADR honestly records the undecided / Mock-only state ───────────
 
 def test_adr_records_unselected_mock_only():

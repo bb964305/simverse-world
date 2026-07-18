@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, UTC
 
 from app.config import settings
-from app.lab import broker, grants, leases, ledger, supervision
+from app.lab import broker, grants, leases, ledger, policy, supervision
 from app.lab.protocol import RunEventEnvelope
 from app.models.lab_grant import LabCapabilityGrant
 from app.models.lab_lease import LabRunLease
@@ -135,28 +135,56 @@ class _VirtualClock:
 
 
 async def probe_broker_mediation(candidate, *, db) -> DimensionResult:
-    """A conformant runtime causes NO effect except through the Broker. Probe:
-    present the candidate's declared tool intent to the Broker under a grant that
-    does NOT hold the capability — a conformant path is DENIED (the effect is
-    Broker-gated). A ``bypass_broker`` candidate (an out-of-band effect channel)
-    fails outright regardless of the gated intent."""
+    """A conformant runtime causes NO effect except through the Broker. Two
+    executable controls, each worth half the dimension:
+
+    * **NEGATIVE** — the candidate's declared intent under a grant that does NOT
+      hold the capability is DENIED (proof the Broker gates effects).
+    * **POSITIVE** — the SAME intent under a grant that DOES hold the capability is
+      ADMITTED (``approved``/``waiting_approval``) — proof the effect actually
+      flows *through* the Broker, not merely that ungranted calls bounce.
+
+    Full credit requires both. A ``bypass_broker`` candidate (an out-of-band
+    effect channel) fails outright regardless of either control."""
     key = "broker_mediation"
     if getattr(candidate, "bypass_broker", False):
         return DimensionResult(key, 0.0, "bypass_broker present: effects can escape the Broker")
 
     tool, args = candidate.emit_tool_intent()
-    run_id = f"gate-{uuid.uuid4().hex[:10]}"
-    _, claims = await grants.issue_run_grant(
-        db, tenant_id="gate", task_id="gate-task", run_id=run_id, agent_id=candidate.name,
-        capabilities=[],  # deliberately ungranted → the Broker must refuse the intent
+    descriptor = policy.TOOL_REGISTRY.get(tool)
+    capability = descriptor.capability if descriptor is not None else None
+
+    # NEGATIVE control: an ungranted intent must be refused.
+    denied_ok, denied_reason = False, "admitted (Broker not gating)"
+    _, ungranted = await grants.issue_run_grant(
+        db, tenant_id="gate", task_id="gate-task", run_id=f"gate-{uuid.uuid4().hex[:10]}",
+        agent_id=candidate.name, capabilities=[],
     )
-    token = grants.sign_grant(claims)  # the Broker verifies the presented token
     try:
-        await broker.request_action(db, claims=claims, token=token, tool_name=tool, args=args)
+        await broker.request_action(db, claims=ungranted, token=grants.sign_grant(ungranted),
+                                    tool_name=tool, args=args)
     except broker.ActionDenied as exc:
-        return DimensionResult(key, 1.0, f"Broker denied ungranted intent {tool!r}: {exc.reason}")
-    # The Broker admitted an ungranted intent — it is not gating effects.
-    return DimensionResult(key, 0.0, f"Broker admitted ungranted intent {tool!r} (not gated)")
+        denied_ok, denied_reason = True, exc.reason
+
+    # POSITIVE control: the same intent, properly granted, must be admitted — the
+    # effect is Broker-mediated (routed to execute/approval), not bypassed.
+    admitted_ok, admitted_status = False, "error"
+    _, granted = await grants.issue_run_grant(
+        db, tenant_id="gate", task_id="gate-task", run_id=f"gate-{uuid.uuid4().hex[:10]}",
+        agent_id=candidate.name, capabilities=[capability] if capability else [],
+    )
+    try:
+        action = await broker.request_action(db, claims=granted, token=grants.sign_grant(granted),
+                                             tool_name=tool, args=args)
+        admitted_status = action.status
+        admitted_ok = action.status in ("approved", "waiting_approval")
+    except broker.ActionDenied as exc:
+        admitted_status = f"denied:{exc.reason}"
+
+    score = round(0.5 * denied_ok + 0.5 * admitted_ok, 6)
+    evidence = (f"ungranted_denied={denied_ok}({denied_reason}), "
+                f"granted_admitted={admitted_ok}(status={admitted_status})")
+    return DimensionResult(key, score, evidence)
 
 
 async def probe_disconnect_replay_cancel(candidate, *, db) -> DimensionResult:
