@@ -203,6 +203,20 @@ class Settings(BaseSettings):
     # duplicate set of definitions was removed in PLAN_P3 批次 3).
     slow_query_ms: int = 0        # log SQL slower than N ms (0 = disabled)
 
+    # --- Lab Agent v1 (P0/P1 protocol + safety slice) ---
+    lab_agent_v1_enabled: bool = False      # feature flag: new grant/policy/broker/ledger path (off = legacy mock path)
+    lab_grant_secret: str = ""              # HMAC secret for run grants ("" = fall back to jwt secret)
+    lab_grant_ttl_s: int = 900              # grant TTL (PRD: 15 min)
+    lab_policy_version: str = "lab-policy-v1"
+    lab_budget_model_tokens: int = 200_000
+    lab_budget_tool_calls: int = 100
+    lab_budget_wall_clock_ms: int = 1_200_000   # 20 min
+    lab_budget_egress_requests: int = 200
+    lab_budget_egress_bytes: int = 104_857_600  # 100 MiB
+    lab_budget_artifact_count: int = 20
+    lab_budget_artifact_bytes: int = 104_857_600
+    lab_budget_active_workers: int = 3
+
     model_config = {"env_file": ".env"}
 
 

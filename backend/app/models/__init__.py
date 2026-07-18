@@ -40,3 +40,10 @@ import app.models.lab_artifact  # noqa: F401
 import app.models.world_change_proposal  # noqa: F401
 import app.models.dynamic_location  # noqa: F401
 import app.models.dynamic_mechanic  # noqa: F401
+# Lab Agent v1 — grant/policy/broker/ledger protocol contracts (P0, T1)
+import app.models.lab_event  # noqa: F401
+import app.models.lab_grant  # noqa: F401
+import app.models.lab_action  # noqa: F401
+import app.models.lab_lease  # noqa: F401
+import app.models.lab_budget  # noqa: F401
+import app.models.world_revision  # noqa: F401

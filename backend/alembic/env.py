@@ -38,6 +38,13 @@ from app.models.lab_artifact import LabArtifact
 from app.models.world_change_proposal import WorldChangeProposal
 from app.models.dynamic_location import DynamicLocation
 from app.models.dynamic_mechanic import DynamicMechanic
+# Lab Agent v1 — grant/policy/broker/ledger protocol contracts (migration 034)
+from app.models.lab_event import LabRunEvent, OutboxEvent
+from app.models.lab_grant import LabCapabilityGrant
+from app.models.lab_action import LabToolAction, LabApproval
+from app.models.lab_lease import LabRunLease
+from app.models.lab_budget import LabRunBudget
+from app.models.world_revision import WorldRevision
 
 config = context.config
 if config.config_file_name is not None:
