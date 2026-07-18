@@ -51,7 +51,12 @@ def lab_env(db_engine, monkeypatch):
         "lab_daily_tasks_per_user": 20, "lab_auto_release_hours": 72,
         "lab_task_deadline_hours": 24,
         "lab_agent_v1_enabled": True, "lab_grant_secret": "test-secret",
-        "lab_approval_timeout_s": 5, "lab_egress_allowlist": ["*.example.org"],
+        # 30s (not 5s): under full-suite concurrency the approval POST + the next
+        # orchestrator poll (_POLL_INTERVAL_S=0.2) can occasionally exceed a 5s
+        # window and trip _poll_decision's default-deny, flaking the approve/reject
+        # e2e. No test actually waits out this timeout, so a larger bound only adds
+        # headroom.
+        "lab_approval_timeout_s": 30, "lab_egress_allowlist": ["*.example.org"],
     }.items():
         monkeypatch.setattr(settings, k, v, raising=False)
     factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)

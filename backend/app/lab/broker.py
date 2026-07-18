@@ -537,11 +537,13 @@ async def execute_action(db, *, action_id, claims, executor, args, expected_epoc
     await budgets.confirm(db, run_id=claims.run_id, dimension="tool_calls")
     # Egress accounting for a network-target action: confirm the request unit,
     # then debit the response size. egress_bytes is a direct spend of the raw
-    # executor result's canonical byte length — the effect already happened, so
-    # an over-limit spend records the debit and raises BudgetExhausted, which the
-    # orchestrator turns into the standard budget termination (no further steps
-    # execute). tool_calls/egress_requests are already settled above, so the
-    # counters are consistent when the run tears down.
+    # executor result's canonical byte length. The effect already happened, but
+    # an over-limit spend does NOT bill this final chunk — budgets.spend leaves
+    # the counter untouched, marks the dimension exhausted, and raises
+    # BudgetExhausted, which the orchestrator turns into the standard budget
+    # termination (no further steps execute). tool_calls/egress_requests are
+    # already settled above, so the counters are consistent when the run tears
+    # down.
     if _is_egress_action(decision.tool, args):
         await budgets.confirm(db, run_id=claims.run_id, dimension="egress_requests")
         await budgets.spend(
