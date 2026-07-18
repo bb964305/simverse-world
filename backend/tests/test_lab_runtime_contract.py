@@ -16,6 +16,7 @@ Cross-session note (mirrors test_lab_task_flow / test_lab_e2e): each step opens
 its own ``async_session`` on the shared in-memory engine; supervision commits at
 every mutation so a fresh session always sees the prior one's writes.
 """
+import asyncio
 import uuid
 from datetime import datetime, UTC
 
@@ -115,6 +116,54 @@ class FakeRuntimeAdapter:
 
     async def health(self, handle):
         return {"alive": not self._stopped, "cancelled": self._stopped}
+
+
+class FakeRaisingAdapter:
+    """An untrusted runtime whose every cancel hook (and health) RAISES — the
+    supervisor must fence anyway."""
+    name = "boom"
+
+    def __init__(self):
+        self.calls: list[str] = []
+
+    async def cancel(self, handle):
+        self.calls.append("cancel")
+        raise RuntimeError("cancel boom")
+
+    async def terminate(self, handle):
+        self.calls.append("terminate")
+        raise RuntimeError("terminate boom")
+
+    async def kill(self, handle):
+        self.calls.append("kill")
+        raise RuntimeError("kill boom")
+
+    async def health(self, handle):
+        raise RuntimeError("health boom")
+
+
+class FakeHangingAdapter:
+    """An untrusted runtime whose cancel hooks HANG forever; only the injected
+    control timeout unblocks the supervisor, which must still fence."""
+    name = "hang"
+
+    def __init__(self):
+        self.calls: list[str] = []
+
+    async def cancel(self, handle):
+        self.calls.append("cancel")
+        await asyncio.sleep(3600)
+
+    async def terminate(self, handle):
+        self.calls.append("terminate")
+        await asyncio.sleep(3600)
+
+    async def kill(self, handle):
+        self.calls.append("kill")
+        await asyncio.sleep(3600)
+
+    async def health(self, handle):
+        return {"alive": True, "cancelled": False}  # never reports stopped
 
 
 async def _seed_run(factory, *, run_id="run1", task_id="task1", status="running",
@@ -321,6 +370,57 @@ async def test_v06_cancel_does_not_replay_completed_actions(sup_env):
     assert before == 0 and after == 0              # cancel executes/replays no actions
 
 
+@pytest.mark.anyio
+async def test_v06_cancel_fences_even_when_adapter_raises(sup_env):
+    """The adapter is untrusted: every cancel/terminate/kill/health hook raises.
+    Fencing (grant revocation + epoch bump + terminal run.failed) must land anyway
+    — a faulty runtime cannot dodge the fence."""
+    factory = sup_env
+    jti = await _seed_run(factory)
+    adapter = FakeRaisingAdapter()
+    clock = FakeClock()
+
+    async with factory() as db:
+        tier = await supervision.cancel_run(
+            db, run_id="run1", adapter=adapter, handle=None, reason="fault",
+            grace_s=0.2, kill_s=0.4, control_timeout_s=0.05, now=clock.now, sleep=clock.sleep,
+        )
+    assert tier == "kill"                           # health raises → never 'stopped'
+
+    async with factory() as db:
+        assert (await db.get(LabCapabilityGrant, jti)).revoked_at is not None
+        assert (await db.get(LabRunLease, "run1")).fencing_epoch == 1
+        run = await db.get(LabRun, "run1")
+        assert run.status == "cancelled"
+        evs = (await db.execute(
+            select(LabRunEvent).where(LabRunEvent.run_id == "run1", LabRunEvent.type == "run.failed")
+        )).scalars().all()
+        assert len(evs) == 1
+
+
+@pytest.mark.anyio
+async def test_v06_cancel_fences_even_when_adapter_hangs(sup_env):
+    """The adapter hangs forever on every cancel hook. The injected control
+    timeout unblocks each tier; fencing must still land (never a deadlock)."""
+    factory = sup_env
+    jti = await _seed_run(factory)
+    adapter = FakeHangingAdapter()
+    clock = FakeClock()
+
+    async with factory() as db:
+        tier = await supervision.cancel_run(
+            db, run_id="run1", adapter=adapter, handle=None, reason="hang",
+            grace_s=0.2, kill_s=0.4, control_timeout_s=0.02, now=clock.now, sleep=clock.sleep,
+        )
+    assert tier == "kill"
+    assert adapter.calls == ["cancel", "terminate", "kill"]  # each timed out, escalated
+
+    async with factory() as db:
+        assert (await db.get(LabCapabilityGrant, jti)).revoked_at is not None
+        assert (await db.get(LabRunLease, "run1")).fencing_epoch == 1
+        assert (await db.get(LabRun, "run1")).status == "cancelled"
+
+
 # ── kill switch drill ─────────────────────────────────────────────────
 
 @pytest.mark.anyio
@@ -379,6 +479,61 @@ async def test_kill_switch_all_cancels_refunds_revokes_idempotently(sup_env):
                 select(func.count()).select_from(LabRunEvent)
                 .where(LabRunEvent.run_id == f"run{i}", LabRunEvent.type == "run.failed")
             )).scalar_one() == 1
+
+
+@pytest.mark.anyio
+async def test_kill_switch_refund_retried_after_fail_task_error(sup_env, monkeypatch):
+    """Escrow-leak guard: if the refund raises, the run must NOT be committed as
+    cancelled (else it drops out of the active set and the hold is stranded). A
+    later drill retries and the issuer is made whole."""
+    from app.services import coin_service
+    from app.services import lab_task_service as _svc
+
+    factory = sup_env
+    async with factory() as s:
+        s.add(User(id="issuer", name="I", email="i@t.com", soul_coin_balance=1000))
+        await s.commit()
+    async with factory() as s:
+        task = LabTask(id="task1", issuer_user_id="issuer", title="t", reward_sc=10,
+                       platform_fee_sc=0, status="running")
+        s.add(task)
+        await s.flush()
+        task.hold_id = await coin_service.hold(s, "issuer", 10, "lab_task:task1")
+        s.add(LabRun(id="run1", task_id="task1", researcher_slug="sage",
+                     status="running", adapter="mock"))
+        await s.commit()
+        await leases.acquire_lease(s, run_id="run1", owner_id="o")
+    async with factory() as s:
+        assert await coin_service.get_balance(s, "issuer") == 990  # 10 escrowed
+
+    # fail_task raises on its FIRST invocation only, then behaves normally.
+    orig_fail = _svc.fail_task
+    calls = {"n": 0}
+
+    async def flaky_fail(db, task, reason=""):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("refund boom")
+        return await orig_fail(db, task, reason=reason)
+
+    monkeypatch.setattr(_svc, "fail_task", flaky_fail)
+
+    # First drill: refund throws → run stays active, hold NOT refunded (no leak).
+    async with factory() as db:
+        stats1 = await supervision.kill_switch_all(db)
+    assert stats1["runs_cancelled"] == 0
+    async with factory() as s:
+        assert (await s.get(LabRun, "run1")).status == "running"     # not stranded
+        assert await coin_service.get_balance(s, "issuer") == 990    # still escrowed
+
+    # Second drill: refund succeeds → escrow returned, run terminal.
+    async with factory() as db:
+        stats2 = await supervision.kill_switch_all(db)
+    assert stats2["runs_cancelled"] == 1
+    async with factory() as s:
+        assert (await s.get(LabRun, "run1")).status == "cancelled"
+        assert (await s.get(LabTask, "task1")).status == "failed"
+        assert await coin_service.get_balance(s, "issuer") == 1000   # fully refunded
 
 
 # ── admin REST kill-switch terminates active runs ─────────────────────

@@ -190,6 +190,10 @@ async def ack_through(db, session: RuntimeSession, *, provider_cursor: int) -> N
             session.unacked_events = max(0, session.unacked_events - 1)
             session.unacked_bytes = max(0, session.unacked_bytes - size)
     session.provider_cursor_acked = new_acked
+    # Prune cursors now below the ACK watermark: contiguity only ever walks
+    # forward from ``provider_cursor_acked``, so acked cursors are dead weight —
+    # this bounds ``_committed`` instead of letting it grow for the run's life.
+    session._committed = {c for c in session._committed if c > new_acked}
     session.paused = False
 
 
@@ -200,49 +204,64 @@ def replay_window(session: RuntimeSession) -> int:
 
 # ── cancel escalation + fencing ───────────────────────────────────────
 
-async def _adapter_maybe(adapter, method: str, handle):
-    """Call an OPTIONAL adapter method (cancel/terminate/kill); a legacy adapter
-    lacking it is a no-op, so wiring a real adapter through here never breaks the
-    Mock / legacy adapters that don't implement the escalation surface."""
+async def _adapter_maybe(adapter, method: str, handle, *, timeout_s: float):
+    """Call an OPTIONAL adapter control method (cancel/terminate/kill) defensively.
+    The adapter is UNTRUSTED — cancelling a malicious / faulty runtime is exactly
+    when its hook is most likely to raise or hang — so the call is bounded by
+    ``timeout_s`` and any error/timeout is swallowed. Fencing must never depend on
+    adapter goodwill (the caller lands revoke + epoch bump regardless). A legacy
+    adapter lacking the method is a silent no-op."""
     fn = getattr(adapter, method, None)
     if fn is None:
         return None
-    return await fn(handle)
+    try:
+        return await asyncio.wait_for(fn(handle), timeout=timeout_s)
+    except Exception:  # noqa: BLE001 — untrusted hook: timeout or any error → drop it
+        logger.warning("cancel escalation adapter.%s faulted/timed out", method, exc_info=True)
+        return None
 
 
-async def _runtime_stopped(adapter, handle) -> bool:
+async def _runtime_stopped(adapter, handle, *, timeout_s: float) -> bool:
     """Whether the runtime has stopped / acknowledged cancel. An adapter without
-    ``health`` (Mock / legacy: no live process to wait on) reports stopped, so a
-    cooperative cancel resolves immediately."""
+    ``health`` (Mock / legacy: no live process) reports stopped, so a cooperative
+    cancel resolves immediately. A health probe that hangs or throws is bounded by
+    ``timeout_s`` and read as 'not stopped' — unknown liveness fails toward further
+    escalation + fence, never a block."""
     fn = getattr(adapter, "health", None)
     if fn is None:
         return True
-    h = (await fn(handle)) or {}
+    try:
+        h = (await asyncio.wait_for(fn(handle), timeout=timeout_s)) or {}
+    except Exception:  # noqa: BLE001 — unknown liveness → escalate, never wait forever
+        return False
     return bool(h.get("cancelled")) or not bool(h.get("alive", False))
 
 
-async def _wait_stopped(adapter, handle, *, deadline: float, now, sleep) -> bool:
+async def _wait_stopped(adapter, handle, *, deadline: float, now, sleep, timeout_s: float) -> bool:
     """Poll runtime liveness until it stops or ``deadline`` (injected clock) — no
     real waits in tests, where ``sleep`` advances the clock."""
     while True:
-        if await _runtime_stopped(adapter, handle):
+        if await _runtime_stopped(adapter, handle, timeout_s=timeout_s):
             return True
         if now() >= deadline:
             return False
         await sleep(_CANCEL_POLL_S)
 
 
-async def _escalate_cancel(adapter, handle, *, grace_s: float, kill_s: float, now, sleep) -> str:
+async def _escalate_cancel(adapter, handle, *, grace_s: float, kill_s: float,
+                           now, sleep, timeout_s: float) -> str:
     """cooperative (≤grace_s) → TERM (≤kill_s total) → KILL. Returns the tier the
-    runtime finally acknowledged at."""
+    runtime finally acknowledged at. Every adapter call is timeout-bounded and
+    fault-swallowing (``_adapter_maybe`` / ``_runtime_stopped``), so this never
+    raises from adapter behaviour and never blocks forever."""
     t0 = now()
-    await _adapter_maybe(adapter, "cancel", handle)
-    if await _wait_stopped(adapter, handle, deadline=t0 + grace_s, now=now, sleep=sleep):
+    await _adapter_maybe(adapter, "cancel", handle, timeout_s=timeout_s)
+    if await _wait_stopped(adapter, handle, deadline=t0 + grace_s, now=now, sleep=sleep, timeout_s=timeout_s):
         return "cooperative"
-    await _adapter_maybe(adapter, "terminate", handle)
-    if await _wait_stopped(adapter, handle, deadline=t0 + kill_s, now=now, sleep=sleep):
+    await _adapter_maybe(adapter, "terminate", handle, timeout_s=timeout_s)
+    if await _wait_stopped(adapter, handle, deadline=t0 + kill_s, now=now, sleep=sleep, timeout_s=timeout_s):
         return "term"
-    await _adapter_maybe(adapter, "kill", handle)
+    await _adapter_maybe(adapter, "kill", handle, timeout_s=timeout_s)
     return "kill"
 
 
@@ -286,27 +305,36 @@ async def _emit_terminal(db, run_id: str, *, reason: str, extra: dict | None = N
 async def cancel_run(db, *, run_id: str, adapter, handle, reason: str,
                      grace_s: float = protocol.CANCEL_GRACE_S,
                      kill_s: float = protocol.CANCEL_KILL_S,
+                     control_timeout_s: float = protocol.CANCEL_GRACE_S,
                      now=None, sleep=asyncio.sleep) -> str:
     """Cooperatively cancel a run, escalating to TERM then KILL. Regardless of
-    which tier the runtime acknowledges at, this ALWAYS revokes the run's grants,
-    bumps the lease fencing epoch (fencing the orchestrator), flips the run to
-    ``cancelled``, and writes a terminal ``run.failed`` with the escalation
-    evidence. Returns ``"cooperative" | "term" | "kill"``. ``now`` / ``sleep`` are
-    injectable so escalation windows elapse instantly in tests."""
+    which tier the runtime acknowledges at — and regardless of any adapter fault —
+    this ALWAYS revokes the run's grants, bumps the lease fencing epoch (fencing
+    the orchestrator), flips the run to ``cancelled``, and writes a terminal
+    ``run.failed`` with the escalation evidence.
+
+    The fence lives in a ``finally`` and is unconditional: the adapter is
+    untrusted, so a ``cancel`` / ``terminate`` / ``kill`` / ``health`` hook that
+    raises or hangs (bounded by ``control_timeout_s``, swallowed) can never let a
+    malicious/faulty runtime dodge grant revocation + epoch bump. Returns
+    ``"cooperative" | "term" | "kill"``. ``now`` / ``sleep`` / ``control_timeout_s``
+    are injectable so escalation windows and hung-hook timeouts are instant in
+    tests."""
     clock = now if now is not None else time.monotonic
-    tier = await _escalate_cancel(adapter, handle, grace_s=grace_s, kill_s=kill_s,
-                                  now=clock, sleep=sleep)
-
-    await grants.revoke_run_grants(db, run_id)
-    await _bump_epoch(db, run_id)
-
-    run = await db.get(LabRun, run_id)
-    if run is not None and run.status not in ("succeeded", "failed", "cancelled"):
-        run.status = "cancelled"
-        run.ended_at = datetime.now(UTC)
-        await db.commit()
-
-    await _emit_terminal(db, run_id, reason=f"cancelled:{reason}", extra={"escalation": tier})
+    tier = "kill"  # worst-case default if escalation itself somehow raises
+    try:
+        tier = await _escalate_cancel(adapter, handle, grace_s=grace_s, kill_s=kill_s,
+                                      now=clock, sleep=sleep, timeout_s=control_timeout_s)
+    finally:
+        # Fencing must land under ANY escalation outcome or exception.
+        await grants.revoke_run_grants(db, run_id)
+        await _bump_epoch(db, run_id)
+        run = await db.get(LabRun, run_id)
+        if run is not None and run.status not in ("succeeded", "failed", "cancelled"):
+            run.status = "cancelled"
+            run.ended_at = datetime.now(UTC)
+            await db.commit()
+        await _emit_terminal(db, run_id, reason=f"cancelled:{reason}", extra={"escalation": tier})
     return tier
 
 
@@ -339,6 +367,20 @@ async def kill_switch_all(db, *, now: datetime | None = None) -> dict:
                     LabCapabilityGrant.revoked_at.is_(None),
                 )
             )).scalar_one()
+
+            # Refund the escrow FIRST (and let ``fail_task`` commit it) BEFORE
+            # flipping the run to a terminal state. If the refund raises, the run
+            # stays active and this drill (or the next) retries it — committing
+            # ``run=cancelled`` ahead of a guaranteed refund would strand the hold
+            # forever, since a cancelled run is no longer in _ACTIVE_RUN_STATES to
+            # be re-swept. ``fail_task``'s task-terminal guard makes the retry
+            # idempotent (never a double refund).
+            task = await db.get(LabTask, run.task_id)
+            refunded = False
+            if task is not None and task.status not in _TERMINAL_TASK_STATES:
+                await lab_task_service.fail_task(db, task, reason="kill_switch")
+                refunded = True
+
             await grants.revoke_run_grants(db, run_id)
             await _bump_epoch(db, run_id)
 
@@ -349,10 +391,7 @@ async def kill_switch_all(db, *, now: datetime | None = None) -> dict:
 
             stats["runs_cancelled"] += 1
             stats["grants_revoked"] += int(live_grants)
-
-            task = await db.get(LabTask, run.task_id)
-            if task is not None and task.status not in _TERMINAL_TASK_STATES:
-                await lab_task_service.fail_task(db, task, reason="kill_switch")
+            if refunded:
                 stats["tasks_failed"] += 1
         except Exception:  # noqa: BLE001 — isolate one bad run; the drill goes on
             logger.warning("kill_switch teardown failed for run %s", run_id, exc_info=True)
