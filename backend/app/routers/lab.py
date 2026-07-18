@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
+from app.lab import acl
 from app.models.lab_artifact import LabArtifact
 from app.models.lab_run import LabRun, LabRunStep
 from app.models.lab_task import LabTask
@@ -104,7 +105,7 @@ async def list_tasks(request: Request, scope: str = "mine", db: AsyncSession = D
 async def get_task(task_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     user = await _require_user(request, db)
     task = await db.get(LabTask, task_id)
-    if task is None or task.issuer_user_id != user.id:
+    if task is None or not acl.can_read_task(task, user_id=user.id, is_admin=user.is_admin):
         raise HTTPException(status_code=404, detail="task not found")
     run = None
     if task.accepted_run_id:
@@ -160,8 +161,8 @@ async def get_run(run_id: str, request: Request, db: AsyncSession = Depends(get_
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
     task = await db.get(LabTask, run.task_id)
-    if task is None or task.issuer_user_id != user.id:
-        raise HTTPException(status_code=403, detail="not your run")
+    if task is None or not acl.can_read_run(run, task, user_id=user.id, is_admin=user.is_admin):
+        raise HTTPException(status_code=404, detail="run not found")
     return svc.serialize_run(run)
 
 
@@ -172,8 +173,8 @@ async def get_run_steps(run_id: str, request: Request, after: int = 0, db: Async
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
     task = await db.get(LabTask, run.task_id)
-    if task is None or task.issuer_user_id != user.id:
-        raise HTTPException(status_code=403, detail="not your run")
+    if task is None or not acl.can_read_run(run, task, user_id=user.id, is_admin=user.is_admin):
+        raise HTTPException(status_code=404, detail="run not found")
     rows = (await db.execute(
         select(LabRunStep).where(LabRunStep.run_id == run_id, LabRunStep.seq > after)
         .order_by(LabRunStep.seq).limit(500)
@@ -196,8 +197,8 @@ async def run_approval(run_id: str, body: ApprovalBody, request: Request, db: As
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
     task = await db.get(LabTask, run.task_id)
-    if task is None or task.issuer_user_id != user.id:
-        raise HTTPException(status_code=403, detail="not your run")
+    if task is None or not acl.can_read_run(run, task, user_id=user.id, is_admin=user.is_admin):
+        raise HTTPException(status_code=404, detail="run not found")
     if run.status != "needs_approval":
         raise HTTPException(status_code=409, detail="no pending approval")
     approvals = list(run.approvals_json or [])
@@ -222,8 +223,8 @@ async def get_artifact(artifact_id: str, request: Request, db: AsyncSession = De
     if art is None:
         raise HTTPException(status_code=404, detail="artifact not found")
     task = await db.get(LabTask, art.task_id)
-    if task is None or task.issuer_user_id != user.id:
-        raise HTTPException(status_code=403, detail="not your artifact")
+    if task is None or not acl.can_read_task(task, user_id=user.id, is_admin=user.is_admin):
+        raise HTTPException(status_code=404, detail="artifact not found")
     # Anti-freeload: content unlocks only after the task is released (completed).
     unlocked = task.status == "completed"
     return svc.serialize_artifact(art, unlocked)

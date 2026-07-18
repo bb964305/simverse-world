@@ -33,7 +33,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
-from app.lab import grants, guard, policy, protocol
+from app.lab import budgets, grants, guard, policy, protocol
 from app.lab.sandbox import isolation
 from app.models.lab_action import LabToolAction, LabApproval
 
@@ -249,6 +249,23 @@ async def request_action(db, *, claims, token, tool_name, args, idempotency_key=
         reason, hard = egress
         await _deny(decision.risk_class, reason, hard=hard, decision=decision)
 
+    # 3c. Hard budget: reserve one tool_calls unit before persisting the
+    # action. A run with no LabRunBudget row (legacy path / never
+    # initialised) bypasses budgeting entirely — reserve() is a silent no-op
+    # in that case. Exhaustion is terminal for the run: leave a denied audit
+    # row, revoke every grant, and re-raise BudgetExhausted (not ActionDenied
+    # — this is a distinct failure mode from a policy/grant/egress refusal).
+    try:
+        await budgets.reserve(db, run_id=claims.run_id, dimension="tool_calls")
+    except budgets.BudgetExhausted as exc:
+        action = _build("denied", decision.risk_class,
+                        result_json={"reason": f"budget_exhausted:{exc.dimension}"})
+        stored, existed = await _persist(db, action)
+        if not existed:
+            await _emit(on_event, stored)
+        await grants.revoke_run_grants(db, claims.run_id)
+        raise
+
     # 4. ask → waiting_approval + a pending approval, committed together.
     if decision.effect == "ask":
         approval_id = str(uuid.uuid4())
@@ -440,6 +457,9 @@ async def execute_action(db, *, action_id, claims, executor, args, expected_epoc
         action.result_json = {"error": guard.redact_text(str(exc))}
         await db.commit()
         await _emit(on_event, action)
+        # Deterministic failure — refund the tool_calls reservation. (No-op if
+        # the run has no budget row.)
+        await budgets.release(db, run_id=claims.run_id, dimension="tool_calls")
         return action
 
     action.status = "succeeded"
@@ -449,4 +469,7 @@ async def execute_action(db, *, action_id, claims, executor, args, expected_epoc
         action.result_json = {"result": guard.redact_payload(result)}
     await db.commit()
     await _emit(on_event, action)
+    # Settle the tool_calls reservation as real spend. (No-op if the run has
+    # no budget row.)
+    await budgets.confirm(db, run_id=claims.run_id, dimension="tool_calls")
     return action
