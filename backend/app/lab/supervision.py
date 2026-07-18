@@ -36,11 +36,22 @@ Design resolutions (the brief flagged these as open — pinned here + in tests):
 * **The unacked window counts *committed* events only.** A cursor deduped by the
   ledger (already recorded) is not double-counted; ACK only debits cursors this
   session actually counted.
-* **Session state is in-memory.** ``RuntimeSession`` (including the ACK
-  watermark) lives only in the supervisor process and is lost on restart;
-  this module owns no new table. Persisting or re-deriving the watermark from
-  the ledger (e.g. ``max(provider_event_id)`` per run) is a design intent for
-  a durable supervisor, NOT implemented here — deferred to P3.
+* **Session state is in-memory; the ACK watermark re-derives from the
+  ledger.** ``RuntimeSession`` lives only in the supervisor process, so a
+  restart loses its in-flight flow-control state (unacked window, pause,
+  cancel) — but not durability: ``reopen_session`` recovers
+  ``provider_cursor_acked`` via ``rederive_acked_watermark`` (the highest
+  COMMITTED ``provider_event_id`` in the ledger, not necessarily what the
+  crashed session had actually ACKed back to the runtime — everything at or
+  below it is already durable, so handing it back as acked cannot lose data;
+  the runtime resumes at ``max + 1`` and the ledger's dedup absorbs any
+  resend below that). Every other field resets fresh. ``record_checkpoint`` /
+  ``latest_checkpoint`` / ``resume_decision`` give a restarted supervisor a
+  ledger-backed resume DECISION (checkpoint present → resume from its ref;
+  absent → new attempt). This module owns no new table — both pipelines read
+  ``lab_run_events`` that already exists. Honest boundary: actually driving a
+  real runtime to continue execution from a checkpoint still needs a real
+  adapter (P2-F) through this same seam — deferred, no endpoint exists yet.
 
 Like ``ledger`` / ``leases`` / ``grants``, this module never opens its own
 session: the caller owns the transaction boundary. The window thresholds are
@@ -60,6 +71,7 @@ from sqlalchemy import func, select, update
 from app.config import settings
 from app.lab import grants, leases, ledger, protocol
 from app.lab.protocol import HandshakeManifest, RunEventEnvelope
+from app.models.lab_event import LabRunEvent
 from app.models.lab_grant import LabCapabilityGrant
 from app.models.lab_lease import LabRunLease
 from app.models.lab_run import LabRun
@@ -136,6 +148,46 @@ async def open_session(db, *, run_id: str, manifest: HandshakeManifest) -> Runti
     return RuntimeSession(run_id=run_id, manifest=manifest)
 
 
+# ── restart recovery: watermark re-derivation ───────────────────────────
+
+async def rederive_acked_watermark(db, *, run_id: str) -> int:
+    """The ACK watermark a restarted supervisor recovers for ``run_id``: the
+    highest COMMITTED ``provider_event_id`` cursor already durable in the
+    ledger — NOT necessarily the cursor the crashed session had actually told
+    the runtime was acked (that in-memory fact is gone with the old
+    ``RuntimeSession``). Every cursor at or below this value is guaranteed
+    already recorded, so handing it back as ``provider_cursor_acked`` cannot
+    lose data: the runtime resumes at ``max + 1``, and any resend below that
+    is absorbed for free by the ledger's ``provider_event_id`` dedup. Rows
+    with a NULL ``provider_event_id`` (non-provider-sourced events, e.g. a
+    supervisor-authored ``run.failed``) carry no cursor and are excluded.
+    ``provider_event_id`` is stored as a string, so the max is computed in
+    Python — a SQL ``MAX`` would sort lexicographically and mis-rank e.g.
+    ``"9"`` above ``"10"``."""
+    cursors = (
+        await db.execute(
+            select(LabRunEvent.provider_event_id).where(
+                LabRunEvent.run_id == run_id,
+                LabRunEvent.provider_event_id.isnot(None),
+            )
+        )
+    ).scalars().all()
+    return max((int(c) for c in cursors), default=0)
+
+
+async def reopen_session(db, *, run_id: str, manifest: HandshakeManifest) -> RuntimeSession:
+    """Equivalent to ``open_session`` for a supervisor reconnecting to an
+    in-flight run after a restart: the same fail-closed handshake validation,
+    but ``provider_cursor_acked`` is recovered via ``rederive_acked_watermark``
+    instead of starting at 0. Every other ``RuntimeSession`` field resets
+    fresh (unacked window empty, not paused, not cancelled) — those are pure
+    in-process flow-control state with no durable counterpart, so a crash
+    simply drops them."""
+    session = await open_session(db, run_id=run_id, manifest=manifest)
+    session.provider_cursor_acked = await rederive_acked_watermark(db, run_id=run_id)
+    return session
+
+
 # ── provider event stream: dedup / backpressure / ACK / replay ─────────
 
 async def ingest_provider_event(db, session: RuntimeSession, *, provider_cursor: int,
@@ -202,6 +254,61 @@ async def ack_through(db, session: RuntimeSession, *, provider_cursor: int) -> N
 def replay_window(session: RuntimeSession) -> int:
     """The cursor a reconnecting runtime must resume from (acked + 1)."""
     return session.provider_cursor_acked + 1
+
+
+# ── checkpoint recording + resume decision ──────────────────────────────
+
+async def record_checkpoint(db, *, run_id: str, seq: int, checkpoint_ref: str,
+                            expected_epoch: int | None = None) -> LabRunEvent:
+    """Emit a ``checkpoint.created`` event recording where a runtime's durable
+    state lives (``checkpoint_ref``), through the same ledger + redaction path
+    as any other event — so a later restart's resume decision
+    (``latest_checkpoint`` / ``resume_decision``) has something to resume
+    from. Gated by ``expected_epoch`` like any ledger write: given, a stale
+    epoch (a takeover fenced this writer since it last read one) raises
+    ``leases.StaleEpoch`` and writes nothing; omitted, the checkpoint is
+    stamped with the run's current epoch and written ungated."""
+    run = await db.get(LabRun, run_id)
+    task = await db.get(LabTask, run.task_id) if run is not None else None
+    tenant_id = task.issuer_user_id if task is not None else (run.researcher_slug if run is not None else "unknown")
+    epoch = expected_epoch if expected_epoch is not None else await leases.current_epoch(db, run_id)
+    envelope = RunEventEnvelope(
+        event_id=str(uuid.uuid4()), tenant_id=tenant_id, run_id=run_id,
+        task_id=run.task_id if run is not None else "", seq=seq, type="checkpoint.created",
+        actor="supervisor", fencing_epoch=epoch, policy_version=settings.lab_policy_version,
+        occurred_at=datetime.now(UTC), payload={"checkpoint_ref": checkpoint_ref},
+    )
+    return await ledger.append_event(
+        db, envelope=envelope, expected_epoch=expected_epoch, outbox_topic="lab_run_event",
+    )
+
+
+def latest_checkpoint(events: list[LabRunEvent]) -> dict | None:
+    """The payload of the most recent ``checkpoint.created`` event in
+    ``events`` (ledger order), or ``None`` if the run never checkpointed. A
+    pure helper over an already-read event list — no ledger I/O — so the
+    resume decision it feeds (``resume_decision``) is testable with a fake
+    event stream."""
+    for event in reversed(events):
+        if event.type == "checkpoint.created":
+            return event.payload_json
+    return None
+
+
+def resume_decision(events: list[LabRunEvent]) -> dict:
+    """Whether a supervisor restart should resume from the run's last
+    committed checkpoint or start a fresh attempt, given its event list.
+    Honest boundary: this is only the DECISION — a committed checkpoint means
+    the runtime should resume from its ``checkpoint_ref`` without replaying
+    already-completed side effects; no checkpoint means a new attempt.
+    Actually driving a real runtime to continue execution from that ref needs
+    a real adapter (P2-F) through this same seam — deferred, no endpoint
+    exists yet; this function only classifies the ledger state a caller would
+    act on once one does."""
+    checkpoint = latest_checkpoint(events)
+    if checkpoint is None:
+        return {"action": "new_attempt"}
+    return {"action": "resume", "checkpoint_ref": checkpoint.get("checkpoint_ref")}
 
 
 # ── cancel escalation + fencing ───────────────────────────────────────

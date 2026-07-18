@@ -421,6 +421,119 @@ async def test_v06_cancel_fences_even_when_adapter_hangs(sup_env):
         assert (await db.get(LabRun, "run1")).status == "cancelled"
 
 
+# ── A2: supervisor watermark re-derivation + checkpoint records ────────
+
+def _fake_event(*, type_: str, payload: dict, run_id: str = "run1", seq: int = 1) -> LabRunEvent:
+    """An unpersisted LabRunEvent row — enough surface for the pure decision
+    helpers (latest_checkpoint / resume_decision) without touching the ledger."""
+    return LabRunEvent(
+        event_id=str(uuid.uuid4()), tenant_id="t1", run_id=run_id, task_id="task1",
+        seq=seq, type=type_, actor="runtime", fencing_epoch=0,
+        policy_version="lab-policy-v1", payload_json=payload, occurred_at=datetime.now(UTC),
+    )
+
+
+@pytest.mark.anyio
+async def test_rederive_watermark_recovers_committed_max_not_pre_restart_ack(sup_env):
+    """The crashed session had only acked up to 2 (a gap-safe partial ACK), but
+    all three events are already durably committed to the ledger — rederive
+    must return the committed max (3), not the stale in-memory ack (2), since
+    everything at or below 3 is safely already recorded."""
+    factory = sup_env
+    async with factory() as db:
+        session = await supervision.open_session(db, run_id="run1", manifest=_good_manifest())
+        for c in (1, 2, 3):
+            await _ingest(db, session, c)
+        await supervision.ack_through(db, session, provider_cursor=2)
+        assert session.provider_cursor_acked == 2  # pre-restart state, for contrast
+
+    async with factory() as db:
+        assert await supervision.rederive_acked_watermark(db, run_id="run1") == 3
+
+    async with factory() as db:
+        reopened = await supervision.reopen_session(db, run_id="run1", manifest=_good_manifest())
+        assert reopened.provider_cursor_acked == 3
+        # Every other field resets fresh — no durable counterpart.
+        assert reopened.unacked_events == 0
+        assert reopened.unacked_bytes == 0
+        assert reopened.paused is False
+        assert reopened.cancelled is False
+
+
+@pytest.mark.anyio
+async def test_rederive_watermark_zero_when_no_events(sup_env):
+    factory = sup_env
+    async with factory() as db:
+        assert await supervision.rederive_acked_watermark(db, run_id="run-nonexistent") == 0
+
+
+@pytest.mark.anyio
+async def test_rederive_watermark_ignores_null_provider_event_id(sup_env):
+    """An event with no provider_event_id (e.g. a supervisor-authored run.failed)
+    carries no cursor and must not be folded into the max."""
+    factory = sup_env
+    async with factory() as db:
+        envelope = RunEventEnvelope(
+            event_id=str(uuid.uuid4()), tenant_id="t1", run_id="run1", task_id="task1",
+            seq=1, type="run.started", actor="runtime", fencing_epoch=0,
+            policy_version="lab-policy-v1", occurred_at=datetime.now(UTC), payload={},
+        )
+        await ledger.append_event(db, envelope=envelope, outbox_topic="lab_run_event")
+        assert await supervision.rederive_acked_watermark(db, run_id="run1") == 0
+
+
+@pytest.mark.anyio
+async def test_record_checkpoint_writes_event_with_redacted_payload(sup_env):
+    factory = sup_env
+    await _seed_run(factory, with_grant=False)
+    async with factory() as db:
+        event = await supervision.record_checkpoint(
+            db, run_id="run1", seq=1,
+            checkpoint_ref="s3://bucket/run1/ckpt-1?token=abcdefghijklmnop",
+        )
+    assert event.type == "checkpoint.created"
+    ref = event.payload_json["checkpoint_ref"]
+    assert "ckpt-1" in ref
+    assert "abcdefghijklmnop" not in ref  # secret-looking token redacted
+
+
+@pytest.mark.anyio
+async def test_record_checkpoint_stale_epoch_writes_nothing(sup_env):
+    factory = sup_env
+    await _seed_run(factory, with_grant=False)  # acquires the lease at epoch 0
+    async with factory() as db:
+        with pytest.raises(leases.StaleEpoch):
+            await supervision.record_checkpoint(
+                db, run_id="run1", seq=1, checkpoint_ref="ckpt-x", expected_epoch=5,
+            )
+    async with factory() as db:
+        assert await _event_count(db, type_="checkpoint.created") == 0
+
+
+def test_latest_checkpoint_returns_payload_of_last_of_several():
+    events = [
+        _fake_event(type_="plan.updated", payload={}),
+        _fake_event(type_="checkpoint.created", payload={"checkpoint_ref": "ckpt-1"}),
+        _fake_event(type_="tool.completed", payload={}),
+        _fake_event(type_="checkpoint.created", payload={"checkpoint_ref": "ckpt-2"}),
+    ]
+    assert supervision.latest_checkpoint(events) == {"checkpoint_ref": "ckpt-2"}
+
+
+def test_latest_checkpoint_none_when_absent():
+    events = [_fake_event(type_="plan.updated", payload={})]
+    assert supervision.latest_checkpoint(events) is None
+
+
+def test_resume_decision_resumes_from_checkpoint_when_present():
+    events = [_fake_event(type_="checkpoint.created", payload={"checkpoint_ref": "ckpt-9"})]
+    assert supervision.resume_decision(events) == {"action": "resume", "checkpoint_ref": "ckpt-9"}
+
+
+def test_resume_decision_new_attempt_when_no_checkpoint():
+    assert supervision.resume_decision([]) == {"action": "new_attempt"}
+
+
 # ── kill switch drill ─────────────────────────────────────────────────
 
 @pytest.mark.anyio
