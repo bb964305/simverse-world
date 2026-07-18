@@ -30,7 +30,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app.config import settings
-from app.lab import broker, grants, leases, orchestrator
+from app.lab import broker, grants, ledger, leases, orchestrator
 from app.models.lab_action import LabApproval, LabToolAction
 from app.models.lab_grant import LabCapabilityGrant
 from app.models.lab_lease import LabRunLease
@@ -295,3 +295,91 @@ async def test_no_lease_epoch_zero_request_execute_unchanged(db_session):
         args={"url": "https://a.example.org/y"},
     )
     assert a2.status == "approved"
+
+
+# ── 7. _fail emit-StaleEpoch must NOT invert the fence (full execute() path) ───
+#    Regression for orchestrator.py _fail: the *top* epoch gate passes (scenario
+#    #4 already covers the fenced-at-entry case), but a takeover lands between the
+#    gate and the run.failed append, so ``_emit`` truly raises StaleEpoch. The P1
+#    code re-raised there, leaving the local ``fenced`` False → execute()'s
+#    ``finally`` ran ``revoke_run_grants`` and revoked the NEW owner's grants. The
+#    fix sets ``self.fenced`` and returns so the finally SKIPS revoke. This drives
+#    the whole execute() path so the real finally runs and the survival of the new
+#    owner's grant is a pinned behavior, not a comment.
+
+@pytest.mark.anyio
+async def test_fail_emit_stale_epoch_does_not_invert_fence(db_session, monkeypatch):
+    db = db_session
+    db.add(LabTask(id="task1", issuer_user_id="issuer", title="t", deliverable_kind="report"))
+    db.add(LabRun(id="run1", task_id="task1", researcher_slug="sage", status="queued",
+                  adapter="mock", scopes_json=["web_search"], budget_usd_cents=0))
+    await db.commit()
+
+    # Silence WS side effects; the adapter raises on start so execute() falls into
+    # the terminal-failure path → _fail.
+    for fn in ("_ws_task_update", "_ws_run_step", "_ws_run_approval"):
+        monkeypatch.setattr(f"app.lab.orchestrator.{fn}", AsyncMock())
+
+    class _RaisingAdapter:
+        name = "mock"
+
+        async def start(self, spec):
+            raise RuntimeError("adapter boom")
+
+    monkeypatch.setattr("app.lab.orchestrator.get_adapter", lambda name: _RaisingAdapter())
+
+    # Inject the takeover AT the run.failed append. _fail's top gate has already
+    # passed (lease still epoch 0), so this is the only fence _fail can hit — the
+    # emit path under test. Bump the lease + mint the NEW owner's grant, then let
+    # the real append_event run and raise StaleEpoch (expected_epoch 0 vs lease 1).
+    orig_append = ledger.append_event
+    new_owner: dict[str, str] = {}
+
+    async def _takeover_then_append(db_, *, envelope, **kwargs):
+        if envelope.type == "run.failed" and "jti" not in new_owner:
+            lease = await db_.get(LabRunLease, "run1")
+            lease.fencing_epoch = 1
+            lease.owner_id = "new-owner"
+            await db_.commit()
+            _, claims = await grants.issue_run_grant(
+                db_, tenant_id="issuer", task_id="task1", run_id="run1",
+                agent_id="new", capabilities=["web_search"], fencing_epoch=1,
+            )
+            new_owner["jti"] = claims.jti
+        return await orig_append(db_, envelope=envelope, **kwargs)
+
+    monkeypatch.setattr(ledger, "append_event", _takeover_then_append)
+
+    run = await db.get(LabRun, "run1")
+    task = await db.get(LabTask, "task1")
+    orch = orchestrator._Orchestrator(db, run, task)
+
+    await orch.execute()
+
+    # The takeover was actually injected at the run.failed emit, and _fail caught
+    # the StaleEpoch on the *emit* path (top gate had passed) → fenced, not raised.
+    assert "jti" in new_owner
+    assert orch.fenced is True
+
+    # THE regression: execute()'s finally saw self.fenced and SKIPPED revoke, so
+    # the new owner's grant survives. On the P1 code the finally revoked every
+    # grant on the run (revoke_run_grants), including this one.
+    new_grant = await db.get(LabCapabilityGrant, new_owner["jti"])
+    assert new_grant.revoked_at is None
+    old_grant = await db.get(LabCapabilityGrant, orch.claims.jti)
+    assert old_grant.revoked_at is None  # fenced loser revokes nothing at all
+
+    # No refund / task settlement by the fenced loser: fail_task sits after the
+    # emit and is never reached, so the task is not flipped to failed.
+    task_after = await db.get(LabTask, "task1")
+    assert task_after.status != "failed"
+
+    # BOUNDARY (flagged to lead): unlike the top-gate path (scenario #4, where the
+    # run is never flipped), on THIS emit path run.status="failed" is committed
+    # *before* the run.failed append that detects the fence — the terminal write
+    # precedes the fence point, so it is not suppressed here. The fence's
+    # guarantee on this path is narrower: no revoke inversion + no refund (both
+    # asserted above). Pinned so any future product gating of this write is a
+    # conscious change.
+    run_after = await db.get(LabRun, "run1")
+    assert run_after.status == "failed"
