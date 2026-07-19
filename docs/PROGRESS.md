@@ -30,6 +30,14 @@
 - [x] **门禁**：新增 `test_lab_p3_projections.py`（3 绿）；artifact/task/e2e/world/governance/tenant_acl 回归 50 passed。
 - **remainder（记跟进，未阻塞）**：part 4「capability profiles」为较大设计项（命名 scope 包）——`deliverable_kind` 已是自由串且 `world_change` 可直接传入，正式的 profile 校验/枚举留后续；part 1 的 `LabRunStep/approvals_json` 兼容投影"弃用遥测"计数器未加。均非安全不变量，前端 T6 消费投影即可推进。
 
+## Kickoff LAB_REMAINING — 最终 verifier pass（2026-07-19，Cowork）
+- [x] **后端全量回归 1040 passed / 0 failed**（沙箱用 `DATABASE_URL=…////tmp/svglobal.db` 规避 FUSE mount SQLite；两个走全局 engine 的测试在真实磁盘路径通过，非代码回归）。
+- [x] **前端门禁**：eslint 0 / `tsc --noEmit` 0 / `tsc -b` 0 / `vite build` rc=0（`--outDir /tmp` 规避 mount emptyDir unlink）/ vitest 52 passed。
+- [x] **地图**：`verify-lab-art.mjs` 全绿；前后端 tilemap `cmp` 字节一致。
+- [x] **资产**：`assets:verify` rc=0；`assets:verify:release` rc=1（正确 fail-closed，A0 未清）。
+- [x] **E2E world apply/revert + conflict + admin kill-switch 演练**：8 passed。
+- **本会话完成 T0/T1/T2/T3/T5**（commits cf8872c/9575998/70cc09f/2cd7186/4c89817/e3394e5/83d9e5b）；**T4/T6/T7/T8 与被阻塞项（V04–V06 真机、V11 OCI、$visual-verdict）见** `docs/adr/LAB_REMAINING-status.md`（书面阻塞报告 + 剩余工作优先级；T7 为安全敏感子系统，需 test-first 勿赶）。
+
 - **Cowork 沙箱环境备忘（后续 T 复用）**：① host 的 `backend/.venv`（macOS 路径 shebang）与 `frontend/node_modules`（darwin-arm64 原生 binding）在 Linux 沙箱不可用；用 `uv venv --python 3.12 /tmp/svenv` + `uv pip install`（含 anthropic）建后端环境；前端补 `@rolldown/binding-linux-arm64-gnu@1.0.0-rc.12` 后 vitest/vite 可跑。② 后端需 Python ≥3.11（`from datetime import UTC`），沙箱默认 3.10 不行。③ 测试统一用 `DATABASE_URL=sqlite+aiosqlite:////tmp/svglobal.db` 规避 mount SQLite；`vite build` 用 `--outDir /tmp/svdist` 规避 mount `emptyDir` unlink EPERM。④ git：`.git/HEAD.lock` 陈旧锁 mount 上不可 unlink → 提交走 `git write-tree` + `git commit-tree -p HEAD` + 直接覆写 `.git/refs/heads/<branch>` 松散 ref（不锁 HEAD）；对象临时文件 EPERM 警告无害。
 
 ## Phase 0 — 止血（OPTIMIZATION_PLAN §2）
