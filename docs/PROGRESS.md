@@ -54,6 +54,13 @@
 - **阻塞（需基础设施）**：chaos/容量、staging 演练需独立服务身份/进程 + staging 集群（当前只有 API+agent-worker 两服务），计划记在文档。
 - **门禁**：telemetry/retention/workers/e2e/governance 回归 35 passed；budget/world 接线后回归绿。
 
+## Kickoff LAB_REMAINING — T7-wire / T8-alerts / T4 / T6 可行切片（2026-07-19，Cowork）
+- [x] **T7-wire（`085f8e8`）**：orchestrator `_event_loop` 新增 `delegate` step 分支 → `workers.delegate_worker` 发角色化 depth-1 子授权（衰减、cap 3、超限非致命），emit content-free `agent.delegated`；子授权随 run 终态 `revoke_run_grants` 清理。`test_lab_e2e::test_delegation_v1`（4 委托：3 发 1 超限拒）绿。
+- [x] **T8-alerts（`085f8e8`）**：其余 5 告警接线——`stale_epoch`/`blocked_egress` 在 broker `_deny` 汇聚点（按 reason code），`approval_timeout` 在 broker 过期处，`cleanup_quarantine` 在 artifact 清理，`orphan_heartbeat` 在 nightly sweep；全 content-free。`test_lab_telemetry` 证 broker egress 拒绝 emit BLOCKED_EGRESS 且不泄露 URL。
+- [x] **T4 可行切片**：`researching` 作为**只读 Resident activity** 接入 StatusVisuals（青绿环 + 🔬，canChat=false）；把纯数据 `STATUS_CONFIG` 抽到 Phaser-free `statusConfig.ts`（可单测）。`StatusVisuals.test.ts` 绿。**延后（需渲染+$visual-verdict）**：`lab_fx_32` 信标 atlas + 场景 beacon 接线（帧 taxonomy 已在 art-spec 定义）。
+- [x] **T6 可行切片（安全骨架）**：`services/labState.ts` 纯函数 `resolveLabDisplay` 实现 art-spec **六条解析规则**（Task 10 态 / Run 6 态分开；terminal run 清 phase/approval；needs_approval>running；verifying 仅覆盖 running；connection overlay 冻结不改写 badge；researching 只读；未知→静态"未知状态"不回退 idle/running）；`labArtifactBadges.ts`（6 类型 + 7 状态角标）。10 单测绿。已接进 `ExperimentPanel`（任务/运行双 badge、artifact 类型+来源+状态角标）。**延后（需渲染+$visual-verdict）**：四轨时间线全量重构、审批视觉分离、apply/revert 收敛动效、三档视口 + reduced-motion 截图矩阵。
+- **门禁**：前端 eslint 0 / tsc 0 / vite build rc=0 / vitest **64 passed**（+12）；后端相关回归绿。硬约束 #6：未批 Playwright 前用 lint/tsc/build 代替 $visual-verdict。**不生成一次性占位像素图冒充美术**（诚实：像素/视觉验收留待渲染环境）。
+
 - **Cowork 沙箱环境备忘（后续 T 复用）**：① host 的 `backend/.venv`（macOS 路径 shebang）与 `frontend/node_modules`（darwin-arm64 原生 binding）在 Linux 沙箱不可用；用 `uv venv --python 3.12 /tmp/svenv` + `uv pip install`（含 anthropic）建后端环境；前端补 `@rolldown/binding-linux-arm64-gnu@1.0.0-rc.12` 后 vitest/vite 可跑。② 后端需 Python ≥3.11（`from datetime import UTC`），沙箱默认 3.10 不行。③ 测试统一用 `DATABASE_URL=sqlite+aiosqlite:////tmp/svglobal.db` 规避 mount SQLite；`vite build` 用 `--outDir /tmp/svdist` 规避 mount `emptyDir` unlink EPERM。④ git：`.git/HEAD.lock` 陈旧锁 mount 上不可 unlink → 提交走 `git write-tree` + `git commit-tree -p HEAD` + 直接覆写 `.git/refs/heads/<branch>` 松散 ref（不锁 HEAD）；对象临时文件 EPERM 警告无害。
 
 ## Phase 0 — 止血（OPTIMIZATION_PLAN §2）

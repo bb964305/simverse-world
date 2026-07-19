@@ -1,21 +1,7 @@
 import Phaser from 'phaser'
+import { STATUS_CONFIG, type StatusConfig } from './statusConfig'
 
-export interface StatusConfig {
-  label: string
-  canChat: boolean
-  bubble: string
-  alpha: number
-  tint: number | null
-}
-
-export const STATUS_CONFIG: Record<string, StatusConfig> = {
-  idle:        { label: '🟢 空闲',  canChat: true,  bubble: '💭', alpha: 1.0, tint: null },
-  sleeping:    { label: '💤 沉睡',  canChat: false, bubble: '💤', alpha: 0.5, tint: 0x8888cc },
-  chatting:    { label: '💬 对话中', canChat: false, bubble: '💬', alpha: 1.0, tint: null },
-  popular:     { label: '🔥 热门',  canChat: true,  bubble: '🔥', alpha: 1.0, tint: null },
-  walking:     { label: '🚶 移动中', canChat: false, bubble: '🚶', alpha: 1.0, tint: null },
-  socializing: { label: '🗣️ 交谈中', canChat: false, bubble: '🗣️', alpha: 1.0, tint: 0x22c55e },
-}
+export { STATUS_CONFIG, type StatusConfig }
 
 const IDLE_THOUGHTS = ['💭', '☕', '🤔', '📖', '✨', '🎵']
 
@@ -112,6 +98,15 @@ export function applyStatusVisuals(
     glow.fillCircle(x, y, 30)
     scene.tweens.add({ targets: glow, alpha: 0.2, duration: 1000, yoyo: true, repeat: -1 })
     objects.push(glow)
+  } else if (status === 'researching') {
+    // Teal scanning ring (青绿环) — a distinct research activity halo.
+    const ring = scene.add.graphics().setDepth(0)
+    ring.lineStyle(2, 0x14b8a6, 0.5)
+    ring.strokeCircle(x, y, 26)
+    ring.lineStyle(2, 0x14b8a6, 0.25)
+    ring.strokeCircle(x, y, 38)
+    scene.tweens.add({ targets: ring, alpha: 0.3, duration: 900, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' })
+    objects.push(ring)
   }
 
   const bubbleText = scene.add.text(x + 20, y - 48, cfg.bubble, {

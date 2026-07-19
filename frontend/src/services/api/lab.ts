@@ -68,6 +68,14 @@ export interface LabArtifact {
   text_md?: string | null
   meta?: Record<string, unknown>
   created_at: string | null
+  // Manifest metadata (always present, read-only; P3/T5).
+  sha256?: string | null
+  byte_size?: number
+  producer_action_id?: string | null
+  provenance?: string | null
+  scan_status?: string | null
+  verification_status?: string | null
+  retention_hold?: boolean
 }
 
 export interface CreateLabTaskInput {

@@ -9,6 +9,8 @@ import {
   getWorldLocations, getMe,
   type LabResearcher, type LabTask, type LabRun, type LabRunStep, type LabArtifact, type WorldLocation,
 } from '../services/api'
+import { resolveLabDisplay } from '../services/labState'
+import { artifactKindBadge, artifactStatusBadges } from '../services/labArtifactBadges'
 
 interface LabApproval { id: string; tool?: string | null; summary?: string; status?: string }
 
@@ -287,7 +289,8 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
             color: 'var(--text)', fontSize: 12,
           }}>
             <div style={{ fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
-            <div style={{ color: ACCENT, fontSize: 11 }}>{t.status}</div>
+            {(() => { const b = resolveLabDisplay({ taskStatus: t.status }).task
+              return <div style={{ color: b.known ? ACCENT : 'var(--text-muted)', fontSize: 11 }}>{b.label}</div> })()}
           </button>
         ))}
       </div>
@@ -295,9 +298,17 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
         {!selected && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>选择一个委托查看运行直播</div>}
         {selected && (
           <div>
-            {run && <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
-              运行 {run.status} · 适配器 {run.adapter}
-            </div>}
+            {run && (() => {
+              // Dual state: Task and Run badges render separately (never merged);
+              // a terminal run clears transient phase/approval (art-spec 6 rules).
+              const d = resolveLabDisplay({ taskStatus: task?.status, runStatus: run.status })
+              return <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <span>任务 <b style={{ color: d.task.known ? ACCENT : '#a1a1aa' }}>{d.task.label}</b></span>
+                {d.run && <span>运行 <b style={{ color: d.run.known ? ACCENT : '#a1a1aa' }}>{d.run.label}</b></span>}
+                {d.phase === 'verifying' && <span style={{ color: '#3b82f6' }}>验证中</span>}
+                <span>适配器 {run.adapter}</span>
+              </div>
+            })()}
             {run && (run.approvals as LabApproval[] | undefined || [])
               .filter((a) => a.status === 'pending').map((a) => (
               <div key={a.id} style={{
@@ -404,7 +415,14 @@ function ArtifactsTab() {
           <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>{t.title}</div>
           {(artifacts[t.id] || []).map((a) => (
             <div key={a.id} style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 8 }}>
-              <div style={{ fontSize: 12, color: ACCENT, marginBottom: 6 }}>{a.title}（{a.kind}）</div>
+              <div style={{ fontSize: 12, color: ACCENT, marginBottom: 6, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                <span>{artifactKindBadge(a.kind).icon} {a.title}</span>
+                <span style={{ color: 'var(--text-muted)' }}>{artifactKindBadge(a.kind).label}</span>
+                {a.provenance && <span style={{ color: 'var(--text-muted)', fontSize: 10 }}>来源 {a.provenance}</span>}
+                {artifactStatusBadges(a).map((b) => (
+                  <span key={b.key} style={{ fontSize: 10, border: '1px solid var(--border)', borderRadius: 4, padding: '0 4px' }}>{b.label}</span>
+                ))}
+              </div>
               {a.unlocked && a.text_md && (
                 <div style={{ fontSize: 12, lineHeight: 1.6 }}><ReactMarkdown>{a.text_md}</ReactMarkdown></div>
               )}
