@@ -80,9 +80,15 @@ async def transfer(db: AsyncSession, from_user: str, to_user: str, amount: int, 
     return True
 
 
-async def hold(db: AsyncSession, user_id: str, amount: int, reason: str) -> str | None:
-    """Freeze ``amount`` from a user into a CoinHold (escrow). Debit + hold-row +
-    ledger commit atomically. Returns hold_id, or None if insufficient funds."""
+async def hold_pending(db: AsyncSession, user_id: str, amount: int, reason: str) -> CoinHold | None:
+    """Flush-only variant of :func:`hold`: the debit + CoinHold + ledger row are
+    flushed, NOT committed, so the caller can commit them in ONE transaction with
+    related state (e.g. a LabTask + its ``hold_id`` linkage) — closing the crash
+    window where a task committed without its hold, or a hold without its task
+    link (recovery plan Phase 2, gap #9). Returns the (uncommitted) CoinHold with
+    its ``id`` populated, or None if the balance guard matched 0 rows
+    (insufficient funds) — in which case nothing was written for the hold and the
+    caller owns the rollback."""
     if amount <= 0:
         return None
     debited = await db.execute(
@@ -92,12 +98,22 @@ async def hold(db: AsyncSession, user_id: str, amount: int, reason: str) -> str 
         .execution_options(synchronize_session=False)
     )
     if debited.rowcount == 0:
-        # Nothing written → no rollback (would expire the caller's ORM objects,
-        # e.g. the freshly-created LabTask in lab_task_service). See charge().
+        # Nothing written → no rollback here (would expire the caller's ORM
+        # objects mid-flow); the caller decides whether to abandon. See charge().
         return None
     h = CoinHold(user_id=user_id, amount=amount, reason=reason, status="held")
     db.add(h)
     db.add(Transaction(user_id=user_id, amount=-amount, reason=f"hold:{reason}"))
+    await db.flush()  # populate h.id without committing; caller owns the commit
+    return h
+
+
+async def hold(db: AsyncSession, user_id: str, amount: int, reason: str) -> str | None:
+    """Freeze ``amount`` from a user into a CoinHold (escrow). Debit + hold-row +
+    ledger commit atomically. Returns hold_id, or None if insufficient funds."""
+    h = await hold_pending(db, user_id, amount, reason)
+    if h is None:
+        return None
     await db.commit()
     await db.refresh(h)
     return h.id

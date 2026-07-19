@@ -204,21 +204,23 @@ async def create_task(
     task = LabTask(
         issuer_user_id=issuer_id, researcher_slug=researcher_slug, title=title[:200],
         brief_md=brief or "", scopes_json=scopes, reward_sc=reward_sc, platform_fee_sc=fee,
-        deliverable_kind=deliverable_kind, status="draft", deadline_at=deadline_at,
+        deliverable_kind=deliverable_kind, status="funded", deadline_at=deadline_at,
     )
     db.add(task)
-    await db.commit()
-    await db.refresh(task)
+    await db.flush()  # populate task.id for the hold reason, without committing
 
-    hold_id = await coin_service.hold(db, issuer_id, reward_sc + fee, f"lab_task:{task.id}")
-    if hold_id is None:
-        # Roll the task back to a terminal state; no money moved.
-        task.status = "cancelled"
-        await db.commit()
+    # Transactional funding (recovery plan Phase 2, gap #9): the task, its escrow
+    # hold, the debit, and the ledger row commit TOGETHER, so a crash can never
+    # leave a funded task without a hold or a hold without its task link. On
+    # insufficient balance nothing persists — the whole funding transaction is
+    # abandoned before any charge.
+    hold = await coin_service.hold_pending(db, issuer_id, reward_sc + fee, f"lab_task:{task.id}")
+    if hold is None:
+        await db.rollback()
         raise LabTaskError("insufficient balance")
-    task.hold_id = hold_id
-    task.status = "funded"
-    await db.commit()
+    task.hold_id = hold.id
+    await db.commit()  # task(funded) + hold + debit + ledger row, one transaction
+    await db.refresh(task)
 
     await _assign_and_start(db, task)
     await db.refresh(task)
