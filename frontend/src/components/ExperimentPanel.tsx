@@ -12,6 +12,7 @@ import {
 } from '../services/api'
 import { resolveLabDisplay, selectLabTask, canDecideApproval, approvalId } from '../services/labState'
 import { artifactKindBadge, artifactStatusBadges } from '../services/labArtifactBadges'
+import { LabTimeline } from './LabTimeline'
 
 // ExperimentPanel — Lab / 实验楼 entry panel (spec §9). Self-mounted in TopNav.
 // Panel-local state (spec sanctions this over a store slice); live run steps come
@@ -316,14 +317,18 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
         {selected && (
           <div>
             {run && (() => {
-              // Dual state: Task and Run badges render separately (never merged);
-              // a terminal run clears transient phase/approval (art-spec 6 rules).
-              const d = resolveLabDisplay({ taskStatus: selectedTask?.status, runStatus: run.status })
-              return <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <span>任务 <b style={{ color: d.task.known ? ACCENT : '#a1a1aa' }}>{d.task.label}</b></span>
-                {d.run && <span>运行 <b style={{ color: d.run.known ? ACCENT : '#a1a1aa' }}>{d.run.label}</b></span>}
-                {d.phase === 'verifying' && <span style={{ color: '#3b82f6' }}>验证中</span>}
-                <span>适配器 {run.adapter}</span>
+              // Four-track timeline: Task, Run, event-phase, and connection stay
+              // SEPARATE tracks (never merged); a terminal run clears transient
+              // phase/approval (art-spec 6 rules). `verifying` overlays only a
+              // running run; the connection track freezes animations truthfully.
+              const latest = steps.length ? steps[steps.length - 1] : null
+              const d = resolveLabDisplay({
+                taskStatus: selectedTask?.status, runStatus: run.status,
+                eventPhase: latest?.phase === 'verifying' ? 'verifying' : null,
+              })
+              return <div style={{ marginBottom: 8 }}>
+                <LabTimeline display={d} />
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>适配器 {run.adapter}</div>
               </div>
             })()}
             {run && ((run.approvals as LabApproval[] | undefined) || [])
