@@ -217,6 +217,11 @@ async def cleanup_expired(db, *, now: datetime | None = None) -> dict:
             meta["cleanup_failed"] = True
             a.meta_json = meta
             quarantined_count += 1
+            from app.lab import telemetry
+            telemetry.emit_alert(
+                telemetry.LabAlert.CLEANUP_QUARANTINE,
+                run_id=a.run_id, tenant_id=a.tenant_id, artifact_id=a.id, reason="tombstone_failed",
+            )
 
     # Sorted so the roll-up digest is deterministic regardless of row-fetch
     # order (SQLite has no ORDER BY here).

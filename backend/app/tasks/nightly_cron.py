@@ -148,6 +148,10 @@ async def sweep_orphan_lab_runs() -> int:
             run.ended_at = datetime.now(UTC)
             run.error = "orphaned: heartbeat stale"
             await db.commit()
+            from app.lab import telemetry
+            telemetry.emit_alert(
+                telemetry.LabAlert.ORPHAN_HEARTBEAT, run_id=run.id, reason="heartbeat_stale",
+            )
             task = await db.get(LabTask, run.task_id)
             if task is not None and task.status not in ("completed", "cancelled", "expired", "failed"):
                 try:

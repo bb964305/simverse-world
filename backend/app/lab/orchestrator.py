@@ -50,7 +50,7 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.database import async_session
-from app.lab import broker, budgets, compiler, grants, guard, leases, ledger
+from app.lab import broker, budgets, compiler, grants, guard, leases, ledger, workers
 from app.lab.protocol import RunEventEnvelope
 from app.lab.runner import _ws_run_approval, _ws_run_step, _ws_task_update
 from app.lab.sandbox import get_adapter
@@ -284,10 +284,43 @@ class _Orchestrator:
             await self._spend("model_tokens", int(ev.model_tokens or 0))
             if ev.tool:
                 await self._handle_tool(ev)
+            elif ev.phase == "delegate":
+                await self._handle_delegation(ev)
             else:
                 await self._emit(type="plan.updated",
                                  payload={"phase": ev.phase,
                                           "summary": guard.redact_text(ev.summary) or ""})
+
+    # ── specialist-worker delegation (P4) ─────────────────────────────
+
+    async def _handle_delegation(self, ev) -> None:
+        """The runtime intends to delegate to a specialist worker. Issue an
+        attenuated, role-scoped child grant — ``workers.delegate_worker``
+        enforces the depth-1 capability subset (role∩parent, never an
+        escalation) and the concurrency cap of 3. A cap/role refusal is
+        non-fatal: the run continues with the workers it already has. Child
+        grants are revoked with the run's grants on any terminal path
+        (``execute`` finally → ``revoke_run_grants``), so cancellation cleans
+        them up. The event payload is content-free (role/agent id/caps/jti)."""
+        payload = ev.payload or {}
+        role = str(payload.get("role") or "")
+        agent_id = str(payload.get("agent_id") or f"{role or 'worker'}-{uuid.uuid4().hex[:6]}")
+        try:
+            _token, child = await workers.delegate_worker(
+                self.db, parent_claims=self.claims, role=role, agent_id=agent_id,
+            )
+        except workers.WorkerLimitError:
+            await self._emit(type="agent.delegated",
+                             payload={"role": role, "agent_id": agent_id, "refused": "worker_cap"})
+            return
+        except workers.WorkerRoleError:
+            await self._emit(type="agent.delegated",
+                             payload={"role": role, "agent_id": agent_id, "refused": "unknown_role"})
+            return
+        await self._emit(type="agent.delegated",
+                         payload={"role": role, "agent_id": agent_id,
+                                  "child_jti": child.jti, "depth": child.depth,
+                                  "capabilities": list(child.capabilities)})
 
     # ── hard-budget spend helpers ─────────────────────────────────────
 

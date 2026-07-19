@@ -49,3 +49,34 @@ def test_emit_alert_never_raises_on_unknown_but_structural_extra():
 def test_unknown_alert_type_rejected():
     with pytest.raises(ValueError):
         telemetry.emit_alert("not_an_alert", run_id="r")  # type: ignore[arg-type]
+
+
+@pytest.mark.anyio
+async def test_broker_egress_denial_emits_blocked_egress(db_session, monkeypatch):
+    """Wiring proof: an http.request to a host outside the grant's egress
+    allowlist is denied by the Broker AND raises a content-free BLOCKED_EGRESS
+    alert (only ids + reason code, never the URL)."""
+    from app.config import settings
+    from app.lab import broker, grants
+
+    monkeypatch.setattr(settings, "lab_grant_secret", "test-secret", raising=False)
+    seen = []
+    monkeypatch.setattr("app.lab.telemetry.emit_alert",
+                        lambda alert, **f: seen.append((alert, f)) or {})
+
+    db = db_session
+    token, claims = await grants.issue_run_grant(
+        db, tenant_id="owner-1", task_id="task1", run_id="run1", agent_id="a",
+        capabilities=["http"], egress=["*.allowed.org"],
+    )
+    with pytest.raises(broker.ActionDenied):
+        await broker.request_action(
+            db, claims=claims, token=token, tool_name="http.request",
+            args={"url": "https://evil.example.com/x", "method": "POST"}, expected_epoch=0,
+        )
+    kinds = [a for (a, _f) in seen]
+    assert telemetry.LabAlert.BLOCKED_EGRESS in kinds
+    # the emitted record carries no URL / content — only structural fields
+    payloads = [f for (a, f) in seen if a == telemetry.LabAlert.BLOCKED_EGRESS]
+    blob = " ".join(str(v) for f in payloads for v in f.values())
+    assert "evil.example.com" not in blob

@@ -35,7 +35,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
-from app.lab import budgets, grants, guard, leases, policy, protocol
+from app.lab import budgets, grants, guard, leases, policy, protocol, telemetry
 from app.lab.sandbox import isolation
 from app.models.lab_action import LabToolAction, LabApproval
 
@@ -244,6 +244,13 @@ async def request_action(db, *, claims, token, tool_name, args, idempotency_key=
         stored, existed = await _persist(db, action)
         if not existed:
             await _emit(on_event, stored)
+        # Content-free security alerts, keyed on the fixed reason CODE only.
+        if reason == "stale_epoch":
+            telemetry.emit_alert(telemetry.LabAlert.STALE_EPOCH, run_id=claims.run_id,
+                                 tenant_id=claims.tenant_id, epoch=claims.fencing_epoch)
+        elif reason in ("egress_not_granted", "egress_blocked_host"):
+            telemetry.emit_alert(telemetry.LabAlert.BLOCKED_EGRESS, run_id=claims.run_id,
+                                 tenant_id=claims.tenant_id, reason=reason)
         raise ActionDenied(reason, decision=decision, action=stored, hard=hard)
 
     # 2. Grant: verify the presented token, bind it to these claims, and confirm
@@ -355,6 +362,10 @@ async def decide_approval(db, *, approval_id, decider_user_id, approve, task_own
     if _aware(approval.expires_at) <= now:
         approval.decision = "expired"
         await db.commit()
+        telemetry.emit_alert(
+            telemetry.LabAlert.APPROVAL_TIMEOUT,
+            run_id=approval.run_id, approval_id=approval.id, reason="expired",
+        )
         raise ApprovalInvalid("expired")
 
     approval.decision = "approved" if approve else "denied"

@@ -206,6 +206,19 @@ class FakeTwoToolAdapter(_BaseFake):
         yield StepEvent(phase="message", summary="收尾")
 
 
+class FakeDelegatingAdapter(_BaseFake):
+    """Delegates to four specialist workers; the 4th exceeds the concurrency
+    cap of 3 and is refused (the run survives)."""
+
+    async def step_stream(self, handle):
+        yield StepEvent(phase="think", summary="规划分工")
+        yield StepEvent(phase="delegate", summary="派 Scout", payload={"role": "scout", "agent_id": "scout-1"})
+        yield StepEvent(phase="delegate", summary="派 Builder", payload={"role": "builder", "agent_id": "builder-1"})
+        yield StepEvent(phase="delegate", summary="派 Verifier", payload={"role": "verifier", "agent_id": "verifier-1"})
+        yield StepEvent(phase="delegate", summary="派第四个（超并发上限）", payload={"role": "archivist", "agent_id": "arch-1"})
+        yield StepEvent(phase="message", summary="收尾")
+
+
 # ── 1. happy path v1 ──────────────────────────────────────────────────
 
 @pytest.mark.anyio
@@ -526,3 +539,44 @@ async def test_happy_path_v1_artifact_has_integrity_fields(lab_env):
         assert a.tenant_id == "issuer"
         assert a.sha256 is not None and len(a.sha256) == 64
         assert a.expires_at is not None
+
+
+# ── 10. P4 specialist-worker delegation wired into the run (T7) ───────────
+
+@pytest.mark.anyio
+async def test_delegation_v1(lab_env, monkeypatch):
+    """The orchestrator issues an attenuated, role-scoped child grant per
+    ``delegate`` step; the 4th exceeds the concurrency cap of 3 and is refused
+    (run survives); every child grant is revoked at run end (cleanup)."""
+    factory = lab_env
+    await _seed(factory)
+    monkeypatch.setattr("app.lab.orchestrator.get_adapter", lambda name: FakeDelegatingAdapter())
+    task_id, run_id = await _make_task(
+        factory, scopes=["web_search", "http", "browse", "code"], reward_sc=100,
+    )
+
+    await run_one(run_id)
+
+    async with factory() as s:
+        run = await s.get(LabRun, run_id)
+        assert run.status == "succeeded"
+
+        rows = (await s.execute(
+            select(LabCapabilityGrant).where(LabCapabilityGrant.run_id == run_id)
+        )).scalars().all()
+        children = [g for g in rows if g.parent_jti is not None]
+        assert len(children) == 3  # scout/builder/verifier issued; 4th refused by the cap
+        parent = next(g for g in rows if g.parent_jti is None)
+        for c in children:
+            assert c.depth == 1
+            assert c.parent_jti == parent.jti
+            assert set(c.capabilities_json).issubset(set(parent.capabilities_json))
+            assert c.revoked_at is not None  # cleaned up on the terminal path
+        scout = next(g for g in children if g.agent_id == "scout-1")
+        assert set(scout.capabilities_json) == {"web_search", "http", "browse"}
+        verifier = next(g for g in children if g.agent_id == "verifier-1")
+        assert set(verifier.capabilities_json) == {"code"}  # read-only test-exec
+
+    evs = await _events(factory, run_id)
+    delegated = [t for (t, _seq) in evs if t == "agent.delegated"]
+    assert len(delegated) == 4  # 3 issued + 1 cap-refused, each emits a content-free event
