@@ -10,6 +10,12 @@
 - [x] **书面阻塞报告**：`docs/adr/T1-P2-blocking-report.md`（缺哪些 env、如何跑真机评估、被阻塞 V04–V06/V11）。
 - [x] **OCI runner 准备件**：`deploy/lab-oci-runner/{provision-runner.sh,README.md}`——专用 Linux runner（cgroup v2 + rootless + seccomp/AppArmor + 受控 egress）指纹校验 + 拉镜像 + 跑 `pytest -m lab_oci` 存证；脚本**不翻** `lab_oci_enabled`。V11 证据待该 runner 产出。
 
+## Kickoff LAB_REMAINING — T2 A0 素材授权审计（2026-07-19，Cowork）
+- [x] **受版本控制来源清单**：`docs/art/asset-provenance.json`（16 条第三方 raster：9×CuteRPG_*、Room_Builder_32x32、interiors_pt1-5、blocks_1，+ 角色 sprite 类目）——含 file/sha256(16)/bytes/dims/pack/author_store/source_url/license/modifications/commercial+derivative/distribution_status/audit_status。全部 `audit=pending, distribution=blocked`（诚实：仓库原无授权记录）。人读版 `docs/art/A0-asset-provenance.md`。
+- [x] **关键发现**：Room Builder + interiors = **LimeZu Modern Interiors**（itch.io，付费≥$1.5 允许商用/改，**禁止转售/再分发源素材**，需署名）→ 公共仓库直放原始 PNG 属"分发源素材"很可能违约，即便已购买；须只发布合成 tilemap 输出 + 署名 + 购买凭证。CuteRPG_*/blocks/角色 sprite 来源 **未证实**（打包在 Stanford generative_agents/Smallville），需找一手许可否则发布前替换。
+- [x] **V23 发布打包检查**：`frontend/scripts/verify-asset-provenance.mjs`（Node 内置，无新依赖）+ npm `assets:verify`/`assets:verify:release`。默认=完整性（每个在架第三方资产必须有清单条目且字节 hash 匹配，防未记录改动/新包偷渡）→ 现绿；`--release`=打包门（要求全部 cleared+allowed）→ 现按预期 fail-closed（16 blocked）。
+- **门禁**：eslint/tsc/vitest 不受影响（纯新增脚本+文档+package.json script）；`assets:verify` rc=0，`assets:verify:release` rc=1（正确）。
+
 - **Cowork 沙箱环境备忘（后续 T 复用）**：① host 的 `backend/.venv`（macOS 路径 shebang）与 `frontend/node_modules`（darwin-arm64 原生 binding）在 Linux 沙箱不可用；用 `uv venv --python 3.12 /tmp/svenv` + `uv pip install`（含 anthropic）建后端环境；前端补 `@rolldown/binding-linux-arm64-gnu@1.0.0-rc.12` 后 vitest/vite 可跑。② 后端需 Python ≥3.11（`from datetime import UTC`），沙箱默认 3.10 不行。③ 测试统一用 `DATABASE_URL=sqlite+aiosqlite:////tmp/svglobal.db` 规避 mount SQLite；`vite build` 用 `--outDir /tmp/svdist` 规避 mount `emptyDir` unlink EPERM。④ git：`.git/HEAD.lock` 陈旧锁 mount 上不可 unlink → 提交走 `git write-tree` + `git commit-tree -p HEAD` + 直接覆写 `.git/refs/heads/<branch>` 松散 ref（不锁 HEAD）；对象临时文件 EPERM 警告无害。
 
 ## Phase 0 — 止血（OPTIMIZATION_PLAN §2）

@@ -1,0 +1,152 @@
+{
+  "schema_version": 1,
+  "generated": "2026-07-19",
+  "task": "A0 — asset provenance & licensing audit (art-spec §资产来源与风险; V23)",
+  "asset_root": "frontend/public/assets/village",
+  "notes": [
+    "This manifest is the version-controlled source-of-truth for third-party art provenance.",
+    "audit_status: pending = no authoritative license record confirmed yet; cleared = record confirmed AND commercial+derivative+distribution rights allow the intended use.",
+    "distribution_status: blocked = must NOT be exported in a public/release build until cleared; prototype-only = local prototyping allowed but no derived atlas exported for distribution.",
+    "hashes are the first 16 hex chars of sha256 over the committed bytes (drift detection).",
+    "Per hard-constraint #5 and art-spec item 2, CuteRPG / Room Builder / interiors may only be used for LOCAL prototype validation until their authorization is confirmed."
+  ],
+  "distribution_policy": {
+    "release_requires": "every present third-party asset has audit_status=cleared AND distribution_status=allowed",
+    "prototype_allows": "third-party assets may be present for local prototyping; release packaging is blocked while any is blocked/prototype-only"
+  },
+  "assets": [
+    {
+      "file": "tilemap/CuteRPG_Desert_B.png", "sha256_16": "a3b77168f04d8c6b", "bytes": 22518, "dims": "512x512",
+      "pack": "CuteRPG (pack origin unconfirmed)",
+      "author_store": "UNVERIFIED — bundled in Stanford joonspk-research/generative_agents (Smallville). One secondary source claims the Smallville tileset is by LimeZu, but the CuteRPG_* pack's original author/store is not confirmed.",
+      "source_url": "https://github.com/joonspk-research/generative_agents (bundled copy); original asset-pack URL UNKNOWN",
+      "license": "UNVERIFIED", "license_version": null,
+      "modifications": "none (as committed 2026-07-06)",
+      "commercial_use": "unknown", "derivative_use": "unknown",
+      "distribution_status": "blocked", "audit_status": "pending"
+    },
+    {
+      "file": "tilemap/CuteRPG_Desert_C.png", "sha256_16": "78e15fd0bd608f7b", "bytes": 24102, "dims": "512x512",
+      "pack": "CuteRPG (pack origin unconfirmed)", "author_store": "UNVERIFIED — see CuteRPG_Desert_B.png",
+      "source_url": "https://github.com/joonspk-research/generative_agents (bundled)", "license": "UNVERIFIED", "license_version": null,
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "unknown", "derivative_use": "unknown",
+      "distribution_status": "blocked", "audit_status": "pending"
+    },
+    {
+      "file": "tilemap/CuteRPG_Field_B.png", "sha256_16": "c2b4504f86139088", "bytes": 20444, "dims": "512x512",
+      "pack": "CuteRPG (pack origin unconfirmed)", "author_store": "UNVERIFIED — see CuteRPG_Desert_B.png",
+      "source_url": "https://github.com/joonspk-research/generative_agents (bundled)", "license": "UNVERIFIED", "license_version": null,
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "unknown", "derivative_use": "unknown",
+      "distribution_status": "blocked", "audit_status": "pending"
+    },
+    {
+      "file": "tilemap/CuteRPG_Field_C.png", "sha256_16": "baed604f2a3af373", "bytes": 17278, "dims": "512x512",
+      "pack": "CuteRPG (pack origin unconfirmed)", "author_store": "UNVERIFIED — see CuteRPG_Desert_B.png",
+      "source_url": "https://github.com/joonspk-research/generative_agents (bundled)", "license": "UNVERIFIED", "license_version": null,
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "unknown", "derivative_use": "unknown",
+      "distribution_status": "blocked", "audit_status": "pending"
+    },
+    {
+      "file": "tilemap/CuteRPG_Forest_B.png", "sha256_16": "e217184126100f34", "bytes": 19839, "dims": "512x512",
+      "pack": "CuteRPG (pack origin unconfirmed)", "author_store": "UNVERIFIED — see CuteRPG_Desert_B.png",
+      "source_url": "https://github.com/joonspk-research/generative_agents (bundled)", "license": "UNVERIFIED", "license_version": null,
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "unknown", "derivative_use": "unknown",
+      "distribution_status": "blocked", "audit_status": "pending"
+    },
+    {
+      "file": "tilemap/CuteRPG_Forest_C.png", "sha256_16": "43fb62dcce64cb4d", "bytes": 22285, "dims": "512x512",
+      "pack": "CuteRPG (pack origin unconfirmed)", "author_store": "UNVERIFIED — see CuteRPG_Desert_B.png",
+      "source_url": "https://github.com/joonspk-research/generative_agents (bundled)", "license": "UNVERIFIED", "license_version": null,
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "unknown", "derivative_use": "unknown",
+      "distribution_status": "blocked", "audit_status": "pending"
+    },
+    {
+      "file": "tilemap/CuteRPG_Harbor_C.png", "sha256_16": "c4e1e925972a7f1d", "bytes": 14307, "dims": "512x512",
+      "pack": "CuteRPG (pack origin unconfirmed)", "author_store": "UNVERIFIED — see CuteRPG_Desert_B.png",
+      "source_url": "https://github.com/joonspk-research/generative_agents (bundled)", "license": "UNVERIFIED", "license_version": null,
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "unknown", "derivative_use": "unknown",
+      "distribution_status": "blocked", "audit_status": "pending"
+    },
+    {
+      "file": "tilemap/CuteRPG_Mountains_B.png", "sha256_16": "f0144655cea00d68", "bytes": 22091, "dims": "512x512",
+      "pack": "CuteRPG (pack origin unconfirmed)", "author_store": "UNVERIFIED — see CuteRPG_Desert_B.png",
+      "source_url": "https://github.com/joonspk-research/generative_agents (bundled)", "license": "UNVERIFIED", "license_version": null,
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "unknown", "derivative_use": "unknown",
+      "distribution_status": "blocked", "audit_status": "pending"
+    },
+    {
+      "file": "tilemap/CuteRPG_Village_B.png", "sha256_16": "af92963707bbd9e2", "bytes": 21351, "dims": "512x512",
+      "pack": "CuteRPG (pack origin unconfirmed)", "author_store": "UNVERIFIED — see CuteRPG_Desert_B.png",
+      "source_url": "https://github.com/joonspk-research/generative_agents (bundled)", "license": "UNVERIFIED", "license_version": null,
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "unknown", "derivative_use": "unknown",
+      "distribution_status": "blocked", "audit_status": "pending"
+    },
+    {
+      "file": "tilemap/Room_Builder_32x32.png", "sha256_16": "a6bd5690110f94d8", "bytes": 394420, "dims": "2432x3488",
+      "pack": "LimeZu — Modern Interiors (Room Builder), 32x32 variant (likely)",
+      "author_store": "LimeZu (itch.io) — LIKELY, to be confirmed with proof of purchase/tier",
+      "source_url": "https://limezu.itch.io/moderninteriors",
+      "license": "LimeZu Modern Interiors license (paid >= $1.50 tier: commercial + edit allowed, credit required, NO redistribution/resale of the source asset). Some listings mention CC-BY. MUST confirm exact tier/terms for the copy in this repo.",
+      "license_version": "itch listing as of 2026-07 (confirm)",
+      "modifications": "none (as committed 2026-07-06)",
+      "commercial_use": "allowed under paid tier (confirm purchase)",
+      "derivative_use": "allowed under paid tier (edit for your project)",
+      "distribution_status": "blocked",
+      "audit_status": "pending",
+      "risk": "The license forbids redistributing/reselling the SOURCE asset. Committing the raw PNG in a public repo distributes the source — likely a violation even with a valid purchase. Ship only the COMPOSED tilemap output, keep raw packs out of the public/release build, and add the required LimeZu credit."
+    },
+    {
+      "file": "tilemap/interiors_pt1.png", "sha256_16": "67cdb13cd6977794", "bytes": 600217, "dims": "512x10016",
+      "pack": "LimeZu — Modern Interiors (interiors part 1)", "author_store": "LimeZu (itch.io) — LIKELY, confirm purchase/tier",
+      "source_url": "https://limezu.itch.io/moderninteriors", "license": "see Room_Builder_32x32.png", "license_version": "confirm",
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "allowed under paid tier (confirm)", "derivative_use": "allowed under paid tier",
+      "distribution_status": "blocked", "audit_status": "pending", "risk": "No source redistribution — see Room_Builder_32x32.png."
+    },
+    {
+      "file": "tilemap/interiors_pt2.png", "sha256_16": "9fa6d54340f3c16d", "bytes": 745288, "dims": "512x10016",
+      "pack": "LimeZu — Modern Interiors (interiors part 2)", "author_store": "LimeZu (itch.io) — LIKELY, confirm purchase/tier",
+      "source_url": "https://limezu.itch.io/moderninteriors", "license": "see Room_Builder_32x32.png", "license_version": "confirm",
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "allowed under paid tier (confirm)", "derivative_use": "allowed under paid tier",
+      "distribution_status": "blocked", "audit_status": "pending", "risk": "No source redistribution — see Room_Builder_32x32.png."
+    },
+    {
+      "file": "tilemap/interiors_pt3.png", "sha256_16": "93d523ee6297d54c", "bytes": 798927, "dims": "512x10032",
+      "pack": "LimeZu — Modern Interiors (interiors part 3)", "author_store": "LimeZu (itch.io) — LIKELY, confirm purchase/tier",
+      "source_url": "https://limezu.itch.io/moderninteriors", "license": "see Room_Builder_32x32.png", "license_version": "confirm",
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "allowed under paid tier (confirm)", "derivative_use": "allowed under paid tier",
+      "distribution_status": "blocked", "audit_status": "pending", "risk": "No source redistribution — see Room_Builder_32x32.png."
+    },
+    {
+      "file": "tilemap/interiors_pt4.png", "sha256_16": "1ef07dde26c68313", "bytes": 318740, "dims": "512x4000",
+      "pack": "LimeZu — Modern Interiors (interiors part 4)", "author_store": "LimeZu (itch.io) — LIKELY, confirm purchase/tier",
+      "source_url": "https://limezu.itch.io/moderninteriors", "license": "see Room_Builder_32x32.png", "license_version": "confirm",
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "allowed under paid tier (confirm)", "derivative_use": "allowed under paid tier",
+      "distribution_status": "blocked", "audit_status": "pending", "risk": "No source redistribution — see Room_Builder_32x32.png."
+    },
+    {
+      "file": "tilemap/interiors_pt5.png", "sha256_16": "aae724a186f1d1ea", "bytes": 719783, "dims": "512x9024",
+      "pack": "LimeZu — Modern Interiors (interiors part 5)", "author_store": "LimeZu (itch.io) — LIKELY, confirm purchase/tier",
+      "source_url": "https://limezu.itch.io/moderninteriors", "license": "see Room_Builder_32x32.png", "license_version": "confirm",
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "allowed under paid tier (confirm)", "derivative_use": "allowed under paid tier",
+      "distribution_status": "blocked", "audit_status": "pending", "risk": "No source redistribution — see Room_Builder_32x32.png."
+    },
+    {
+      "file": "tilemap/blocks_1.png", "sha256_16": "1cef1851b09819b7", "bytes": 6086, "dims": "320x256",
+      "pack": "collision/blocks helper (origin unconfirmed)",
+      "author_store": "UNVERIFIED — bundled in generative_agents (Smallville) map assets",
+      "source_url": "https://github.com/joonspk-research/generative_agents (bundled)", "license": "UNVERIFIED", "license_version": null,
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "unknown", "derivative_use": "unknown",
+      "distribution_status": "blocked", "audit_status": "pending"
+    },
+    {
+      "file": "agents/*/texture.png", "sha256_16": "VARIES", "bytes": 0, "dims": "96x128 (per sheet)",
+      "pack": "character sprite sheets (25 residents) — origin unconfirmed",
+      "author_store": "UNVERIFIED — character sprites bundled in generative_agents (Smallville). Same audit obligation as tilesets.",
+      "source_url": "https://github.com/joonspk-research/generative_agents (bundled)", "license": "UNVERIFIED", "license_version": null,
+      "modifications": "repacked into per-agent atlas + sprite.json (Simverse)", "commercial_use": "unknown", "derivative_use": "unknown",
+      "distribution_status": "blocked", "audit_status": "pending",
+      "category": true,
+      "note": "Category entry — the 25 agents/<name>/texture.png sheets are covered collectively; enumerate individually if any single sprite's provenance diverges."
+    }
+  ]
+}
