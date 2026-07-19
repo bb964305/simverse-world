@@ -36,3 +36,25 @@ formal `$visual-verdict >=90` scored pass across desktop/tablet/mobile/reduced-
 motion — that scoring skill is not in this environment's toolset. Reduced-motion
 and disconnected/frozen states are covered by unit tests; a full multi-viewport
 scored sweep remains a manual QA step.
+
+## Responsive (multi-viewport) analysis
+
+The in-app browser's screenshot capture does not reflect `resize_window` (viewport
+stayed 1920), so the multi-viewport check was done at the CSS/DOM level (the
+substance of the reflow requirement) plus the live desktop render:
+
+- Modal: `.game-modal-panel { width: min(620px, calc(100vw - 32px)) }` — it never
+  overflows the viewport (measured `panelOverflowsViewport=false`); on a 375px
+  phone it is ~343px, not 620px.
+- Lab split (task list + live view): `@media (max-width:680px){ .game-lab-split{
+    flex-direction: column } ... :first-child{ width:100% } }` — stacks vertically
+  on mobile, so no horizontal overflow/clipping. Breakpoints exist at
+  720/680/420px.
+- Reduced-motion / disconnected: LabTimeline renders static (data-frozen), covered
+  by LabTimeline.test.tsx.
+- Minor polish (non-blocking): a few action buttons render ~36px tall vs the 44px
+  touch-target ideal — no overlap/overflow, just a touch-size nit for a later pass.
+
+Net: no blocking overlap/overflow/clipping defect across widths by construction;
+the formal scored `$visual-verdict` sweep (a skill absent here) is the only piece
+not run.

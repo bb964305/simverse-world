@@ -52,3 +52,20 @@ on real Postgres/Redis with the Mock adapter. They do NOT enable a real Adapter
 OCI canary; V11 isolation evidence is in `../lab-oci-evidence/`). Chaos/capacity/
 rollback drills against a full multi-service staging cluster with least-privilege
 identities remain.
+
+## Additional operational drills (2026-07-20) — real Postgres + Redis
+
+Run via `drill_ops.py` against the same real pgvector Postgres + Redis:
+
+- **Orphan recovery/refund:** a run with a heartbeat past the TTL, swept by
+  `sweep_orphan_lab_runs()` → `reaped=1, run=failed, task=failed, refunded=110`
+  (reward 100 + fee 10) → PASS. The reaper recovers a crashed-runner run and
+  refunds the escrow.
+- **World rollback:** an `add_lore` proposal approved (applied) then reverted →
+  `applied='学院的秘密档案'`, lore restored on revert → PASS.
+- **Capacity saturation:** `lab_max_concurrent_runs=3` reserved, the 4th reserve
+  refused → PASS. The Redis concurrency semaphore rejects admission past the cap.
+
+Still remaining for Phase 8: chaos (Redis/DB interruption mid-run) and the full
+multi-service least-privilege cluster (separate identities/network policies per
+API/runner/broker/executor/storage/governor) — needs real cluster infra.
