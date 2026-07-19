@@ -343,11 +343,24 @@ Genuinely remaining — none of it a code task I can complete unilaterally:
    `$visual-verdict ≥90` scored multi-viewport sweep — that scoring skill is not in
    this environment's toolset; reduced-motion/frozen states are unit-tested, and a
    scored desktop/tablet/mobile pass remains a manual QA step.
-2. **Externally BLOCKED (verified, never faked):** P7 real Adapter (no
-   Hermes/OpenClaw/computer-use endpoint exists anywhere — probed the runner host);
-   Phase 10 asset licensing (16 manifest entries need first-party license/purchase
-   — a legal/procurement action); a production object-storage SDK (needs approval);
-   a full multi-service least-privilege staging cluster for chaos/capacity drills.
+2. **Externally BLOCKED (verified, never faked) — the achievable design/audit
+   parts are now DONE; only the external inputs remain:**
+   - **P7 real Adapter:** no Hermes/OpenClaw/computer-use endpoint exists anywhere
+     (probed the runner host). Needs a real endpoint + credentials.
+   - **Asset licensing:** the manifest audit confirms all 16 entries are genuinely
+     third-party (CuteRPG tilesets, LimeZu Room Builder — commercial/unverified,
+     "NO redistribution"); none are first-party/CC0, so none are clearable without
+     real license/purchase evidence or authentic replacement art.
+   - **Object-storage SDK:** the storage + controlled-download CONTRACT is now
+     documented (`ADR-lab-artifact-storage.md`); adopting an S3 SDK is a bounded
+     change pending approval. The security gate (no unverified body/URI leaves the
+     API) ships today.
+   - **Multi-service staging cluster:** the production trust TOPOLOGY is now
+     documented (`ADR-lab-production-topology.md`); the single-node executor +
+     runner + kill-switch + orphan/rollback/capacity/chaos drills are proven, but
+     the distinct per-plane identities/network policies need the real cluster.
+   - **`$visual-verdict` scoring tool:** absent from this environment; the UI is
+     built, unit-tested, run live, and responsive-verified.
 
 ## External blockers
 
