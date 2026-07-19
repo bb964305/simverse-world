@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "map:expand": "node scripts/expand-town-map.mjs",
+    "map:verify-art": "node scripts/verify-lab-art.mjs",
     "assets:verify": "node scripts/verify-asset-provenance.mjs",
     "assets:verify:release": "node scripts/verify-asset-provenance.mjs --release",
     "test": "vitest run",

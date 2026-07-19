@@ -16,6 +16,13 @@
 - [x] **V23 发布打包检查**：`frontend/scripts/verify-asset-provenance.mjs`（Node 内置，无新依赖）+ npm `assets:verify`/`assets:verify:release`。默认=完整性（每个在架第三方资产必须有清单条目且字节 hash 匹配，防未记录改动/新包偷渡）→ 现绿；`--release`=打包门（要求全部 cleared+allowed）→ 现按预期 fail-closed（16 blocked）。
 - **门禁**：eslint/tsc/vitest 不受影响（纯新增脚本+文档+package.json script）；`assets:verify` rc=0，`assets:verify:release` rc=1（正确）。
 
+## Kickoff LAB_REMAINING — T3 A1 确定性地图落图（V16/V17，2026-07-19，Cowork）
+- [x] **重构**：`expand-town-map.mjs` 拆为纯函数 `buildExpandedTilemap(tilemap,maze)`（无磁盘 IO，可被 verifier import）+ 底部 CLI 写盘包装（仅 `import.meta.url===argv[1]` 时执行）。导出 `paintExperimentBuilding`、`makeGidResolver`、`LAB`、`LAB_BLOCKOUT`。
+- [x] **`paintExperimentBuilding()`（幂等）**：① 清占地 (108,72)-(124,86) + 北接入路 (115,66)-(117,72) 的森林（Exterior Decoration L1/L2→0）；② Interior Ground 铺地板、Wall 画外墙轮廓（复用 workshop 实证 GID：CuteRPG_Field_C 局部233 / Room_Builder 局部4842，按 tileset name+local 解析，非写死全局 GID）；③ **Collisions 按 blockout 重新作者化**——外墙+维护带 block、北墙 u7-9 三格入口缺口、内部走廊/热点正面全 0；④ Object Interaction Blocks 写 5 热点作者标记（v1 无运行时消费者）；⑤ 只碰这 6 层，World/Arena/Sector/Spawning/Special **零改动**。
+- [x] **`verify-lab-art.mjs`（只读，不污染工作树）**：双次生成字节一致 + 已painted幂等；17×15 bounds + wall ring 与 blockout 逐格吻合；原始 Collisions flood-fill 从 hub(75,56)+access(116,65) → 入口(116,72)/中心(116,79)/5 热点全可达、主走廊≥2 宽；生成过程对 5 个语义块层字节不变；前后端 `cmp` 字节一致；`maze.size=[128,180]`；Collisions 只用 `blocks` atlas（不碰缺失的 blocks_2/3）；sprite atlas 帧名稳定。**全绿**。
+- [x] **落图**：`node expand-town-map.mjs` 生成前后端两份，`cmp` 字节一致。改动**完全限定**在 footprint+access（538 格全在区内，区外 0 格），backend map/pathfinder 测试 58 passed，前端 lint/tsc 绿。npm 加 `map:verify-art`。
+- **诚实边界（阻塞/延后）**：无缝墙体/家具像素（沙箱玻璃舱、服务器柜、Governor 投影台，interiors_pt 组合）与 `$visual-verdict ≥90` 需渲染+视觉迭代环境，本会话无法跑 → 归入 T4/A2/A5 视觉 QA。当前落图为**结构正确的 blockout**（可识别建筑轮廓 + 权威 Collisions + 可达性），furniture-body 碰撞随可见家具一并加入（现在加=亮地板隐形墙，art-spec 明禁）。
+
 - **Cowork 沙箱环境备忘（后续 T 复用）**：① host 的 `backend/.venv`（macOS 路径 shebang）与 `frontend/node_modules`（darwin-arm64 原生 binding）在 Linux 沙箱不可用；用 `uv venv --python 3.12 /tmp/svenv` + `uv pip install`（含 anthropic）建后端环境；前端补 `@rolldown/binding-linux-arm64-gnu@1.0.0-rc.12` 后 vitest/vite 可跑。② 后端需 Python ≥3.11（`from datetime import UTC`），沙箱默认 3.10 不行。③ 测试统一用 `DATABASE_URL=sqlite+aiosqlite:////tmp/svglobal.db` 规避 mount SQLite；`vite build` 用 `--outDir /tmp/svdist` 规避 mount `emptyDir` unlink EPERM。④ git：`.git/HEAD.lock` 陈旧锁 mount 上不可 unlink → 提交走 `git write-tree` + `git commit-tree -p HEAD` + 直接覆写 `.git/refs/heads/<branch>` 松散 ref（不锁 HEAD）；对象临时文件 EPERM 警告无害。
 
 ## Phase 0 — 止血（OPTIMIZATION_PLAN §2）
