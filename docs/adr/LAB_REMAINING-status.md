@@ -15,10 +15,12 @@ is satisfied honestly.
 | T2 | A0 asset provenance manifest + V23 release-packaging gate (fails-closed while unaudited) | `4c89817` |
 | T3 | Deterministic Experiment Building blockout + `verify-lab-art.mjs` (V16/V17 core) | `e3394e5` |
 | T5 | P3 world-snapshot revision anchor (V22) + artifact manifest fields; approval projection & cursor API already existed | `83d9e5b` |
+| T7 | P4 specialist-worker role layer: depth-1 delegation, concurrency cap 3, read-only Verifier, Cartographer-never-apply, redacted Archivist memory, aggregate budget | `6ea580b` |
+| T8 (partial) | P5 content-free telemetry/alert taxonomy (7 conditions) wired at 2 sites; hardening report (retention drill, kill/rollback runbook, gVisor/Kata/Firecracker eval) | `e5afe29` |
 
 ### Final verifier results (this session)
 
-- Backend full regression: **1040 passed, 0 failed** (sandbox uses
+- Backend full regression: **1054 passed, 0 failed** (sandbox uses
   `DATABASE_URL=sqlite+aiosqlite:////tmp/svglobal.db` to avoid the FUSE-mount
   SQLite limitation — see PROGRESS env notes; the 2 global-engine tests pass on
   a real disk path).
@@ -45,20 +47,19 @@ is satisfied honestly.
 
 ## Remaining (feasible follow-up, in priority order)
 
-### T7 — P4 expert workers (backend; FEASIBLE, do not rush)
+### T7 follow-up — orchestrator wiring (small)
 
-The **security primitive is already done and tested**: `grants.issue_child_grant`
-enforces depth-1, capability/egress/budget subset, and rejects escalation
-(`test_lab_grants`); `protocol` rejects depth > 1. Remaining is the role layer:
-- Scout / Builder / Verifier / Archivist / World Cartographer role definitions;
-- depth-1 delegation orchestration with a concurrency cap of 3;
-- aggregate budget persistence across parent+children;
-- independent Verifier (read-only + test execution) and Archivist (redacted
-  summary → long-term memory);
-- extend V03/V10 assertions + cancel/cleanup tests.
+The role layer + all P4-exit invariants are DONE and tested (`workers.py`,
+`test_lab_workers.py`, 9 green). The only follow-up is calling `delegate_worker`
+inside `orchestrator.run_one_v1`'s real run lifecycle (integration wiring, not a
+safety invariant).
 
-**Caution:** this is a security-sensitive subsystem (delegation + budget). It
-must be built test-first with the fail-closed invariants intact, not rushed.
+### T8 follow-up — remaining alert wire points (small)
+
+`telemetry.emit_alert` is wired at budget-exhaustion and world-apply-failure;
+the other 5 alerts (orphan_heartbeat, stale_epoch, blocked_egress,
+approval_timeout, cleanup_quarantine) are single best-effort calls at the sites
+listed in `T8-hardening.md`. Chaos/capacity + staging drills are infra-blocked.
 
 ### T4 — A2 map polish & status FX (art; visual-QA blocked)
 
