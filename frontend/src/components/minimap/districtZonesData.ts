@@ -17,7 +17,20 @@ export interface LocationConfig {
   color: string
   bgColor: string
   bgColorDim: string
-  tileRect: { x: number; y: number; w: number; h: number }
+  tileRect: TileRect
+}
+
+export interface TileRect { x: number; y: number; w: number; h: number }
+
+// map_data stores location bounds as INCLUSIVE tile ranges [x1, y1, x2, y2]:
+// both endpoints are occupied tiles, so the extent is (x2 - x1 + 1) wide, not
+// (x2 - x1). Static (this file) and dynamic (DistrictZones overlay) locations
+// must convert bounds → rect the same way (test-spec V22), so both go through
+// this single helper. Off-by-one here shrinks every rendered footprint by one
+// tile on each axis — the defect this fixes for the Experiment Building.
+export function inclusiveBoundsToTileRect(bounds: readonly number[]): TileRect {
+  const [x1, y1, x2, y2] = bounds
+  return { x: x1, y: y1, w: x2 - x1 + 1, h: y2 - y1 + 1 }
 }
 
 export const LOCATIONS: LocationConfig[] = [
@@ -58,10 +71,12 @@ export const LOCATIONS: LocationConfig[] = [
     tileRect: { x: 106, y: 45, w: 26, h: 17 },
   },
   {
-    // Lab / experiment building — bounds mirror map_data (108,72,124,86).
+    // Lab / experiment building — bounds mirror map_data inclusive (108,72,124,86)
+    // → 17×15 tiles. Derived through the shared converter so it can never drift
+    // back to the off-by-one 16×14 footprint again (V17/V22).
     key: 'experiment_building', label: '实验楼', icon: '🧪',
     color: 'rgba(20,184,166,0.8)', bgColor: 'rgba(20,184,166,0.35)', bgColorDim: 'rgba(20,184,166,0.12)',
-    tileRect: { x: 108, y: 72, w: 16, h: 14 },
+    tileRect: inclusiveBoundsToTileRect([108, 72, 124, 86]),
   },
   // Outdoor areas — neutral
   {

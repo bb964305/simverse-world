@@ -1,7 +1,7 @@
 // Location data + types live in districtZonesData.ts so this file only
 // exports a component (react-refresh/only-export-components).
 import { useState, useEffect } from 'react'
-import { LOCATIONS, MAP_TILES_W, MAP_TILES_H, type LocationKey } from './districtZonesData'
+import { LOCATIONS, MAP_TILES_W, MAP_TILES_H, inclusiveBoundsToTileRect, type LocationKey } from './districtZonesData'
 import { bridge } from '../../game/phaserBridge'
 import { getWorldLocations, type WorldLocation } from '../../services/api'
 
@@ -82,8 +82,10 @@ export function DistrictZones({ selected, onSelect, mapWidth = 180, mapHeight = 
 
       {/* Dynamic overlay layer — runtime buildings added by approved proposals. */}
       {dynamic.map((loc) => {
-        const b = loc.bounds as number[]
-        const pos = tileToMinimap(b[0], b[1], b[2] - b[0], b[3] - b[1], mapWidth, mapHeight)
+        // Same inclusive-bounds → rect conversion the static layer uses (V22);
+        // previously this dropped the +1 and under-drew dynamic footprints.
+        const r = inclusiveBoundsToTileRect(loc.bounds as number[])
+        const pos = tileToMinimap(r.x, r.y, r.w, r.h, mapWidth, mapHeight)
         return (
           <div
             key={`dyn-${loc.slug}`}
