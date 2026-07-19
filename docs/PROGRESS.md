@@ -38,6 +38,15 @@
 - [x] **E2E world apply/revert + conflict + admin kill-switch 演练**：8 passed。
 - **本会话完成 T0/T1/T2/T3/T5**（commits cf8872c/9575998/70cc09f/2cd7186/4c89817/e3394e5/83d9e5b）；**T4/T6/T7/T8 与被阻塞项（V04–V06 真机、V11 OCI、$visual-verdict）见** `docs/adr/LAB_REMAINING-status.md`（书面阻塞报告 + 剩余工作优先级；T7 为安全敏感子系统，需 test-first 勿赶）。
 
+## Kickoff LAB_REMAINING — T7 P4 专家 worker（2026-07-19，Cowork）
+- [x] **角色层 `app/lab/workers.py`**（建在已测的 grant 衰减原语之上）：5 角色模板 Scout/Builder/Verifier/Archivist/World Cartographer，capability 由角色 tool 集经 `TOOL_REGISTRY` 派生（不写死）。`delegate_worker` 发 depth-1 子授权，caps = 角色模板 ∩ parent（永不逾越父级 escalation，V03）；`grants.issue_run_grant(parent=)` 复核 depth/子集/预算/tenant/exp。
+- [x] **并发上限 3**：count-based（数 run 上未撤销的子授权），第 4 个 fail-closed 抛 `WorkerLimitError` 且**不终止 run**（区别于预算维度耗尽的 terminate）；`finish_worker` 撤授权释放槽位。
+- [x] **聚合预算持久化**：所有 worker 共享同一 `LabRunBudget`（run_id 唯一行）→ tool/model/egress/artifact 花费天然聚合、随 resume 存活（测试证 parent+child 花 1+2 tool_calls → run used=3）。
+- [x] **独立 Verifier 只读+测试执行**：tools={code.run,shell.exec} 无 fs.write、read_only=True；**World Cartographer** tools={world.propose} 永无 world.apply（caps 无 world_apply）；防御断言 worker 永不持 world_apply/financial/secrets。
+- [x] **Archivist 脱敏摘要入长期记忆**：`archivist_summary` 对产物标题/过程要点全走 `guard.redact_text`（email/secret 抹除）→ 只落已验收产物元数据引用 + 脱敏要点，写 Principal Researcher 记忆（source=lab_archivist）。
+- [x] **取消/清理**：`grants.revoke_run_grants(run)` 撤全部子授权 → active_worker_count=0（V03/V10 取消+清理扩展）。
+- [x] **门禁**：`test_lab_workers.py`（9 绿）；grants/tenant_acl/budgets/fencing 回归 65 passed。**follow-up**：把 `delegate_worker` 接进 `orchestrator.run_one_v1` 的实际 run 生命周期（编排接线，非安全不变量；原语+角色+全部 P4-exit 不变量已测）。
+
 - **Cowork 沙箱环境备忘（后续 T 复用）**：① host 的 `backend/.venv`（macOS 路径 shebang）与 `frontend/node_modules`（darwin-arm64 原生 binding）在 Linux 沙箱不可用；用 `uv venv --python 3.12 /tmp/svenv` + `uv pip install`（含 anthropic）建后端环境；前端补 `@rolldown/binding-linux-arm64-gnu@1.0.0-rc.12` 后 vitest/vite 可跑。② 后端需 Python ≥3.11（`from datetime import UTC`），沙箱默认 3.10 不行。③ 测试统一用 `DATABASE_URL=sqlite+aiosqlite:////tmp/svglobal.db` 规避 mount SQLite；`vite build` 用 `--outDir /tmp/svdist` 规避 mount `emptyDir` unlink EPERM。④ git：`.git/HEAD.lock` 陈旧锁 mount 上不可 unlink → 提交走 `git write-tree` + `git commit-tree -p HEAD` + 直接覆写 `.git/refs/heads/<branch>` 松散 ref（不锁 HEAD）；对象临时文件 EPERM 警告无害。
 
 ## Phase 0 — 止血（OPTIMIZATION_PLAN §2）
