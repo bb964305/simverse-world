@@ -26,7 +26,10 @@ This module never signs tokens or decides policy itself — it composes
 """
 from __future__ import annotations
 
+import hashlib
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, UTC
 
 from sqlalchemy import func, select
 
@@ -35,6 +38,67 @@ from app.lab import grants, guard
 from app.lab.policy import TOOL_REGISTRY
 from app.lab.protocol import GrantClaims
 from app.models.lab_grant import LabCapabilityGrant
+from app.models.lab_worker_attempt import LabWorkerAttempt
+from app.redis_client import get_redis
+
+
+@dataclass(frozen=True)
+class WorkerResult:
+    """The joined outcome of a bounded Mock child execution — content-free: a
+    role, a status, a SERVER-computed result digest (never the child's
+    self-report, so a spoofed 'success' cannot be trusted), and a Verifier
+    verdict the parent gates Builder artifacts on."""
+    role: str
+    agent_id: str
+    status: str            # succeeded | failed
+    result_digest: str
+    verdict: str | None = None  # verifier only: pass | fail
+
+
+def _slot_key(run_id: str) -> str:
+    return f"sv:lab:workers:{run_id}"
+
+
+async def reserve_worker_slot(run_id: str, cap: int) -> bool:
+    """Atomically reserve one concurrent-worker slot for a run via a Redis INCR
+    (recovery plan Phase 6 — replaces the count-then-insert admission). A
+    non-positive cap is unlimited. The (cap+1)th reserver sees an over-limit value,
+    DECRs back, and is refused, so concurrent delegates never admit worker
+    (cap+1). Fail-CLOSED on a Redis fault so a broken gate can't over-admit."""
+    if not cap or cap <= 0:
+        return True
+    try:
+        n = int(await get_redis().incr(_slot_key(run_id)))
+    except Exception:
+        return False
+    if n > cap:
+        try:
+            await get_redis().decr(_slot_key(run_id))
+        except Exception:
+            pass
+        return False
+    return True
+
+
+async def release_worker_slot(run_id: str) -> None:
+    try:
+        await get_redis().decr(_slot_key(run_id))
+    except Exception:
+        pass
+
+
+async def reconcile_worker_slots(db, run_id: str) -> int:
+    """Re-sync the per-run worker-slot counter to the DB's count of still-running
+    attempts — heals a slot leaked by a crashed supervisor."""
+    live = int((await db.execute(
+        select(func.count()).select_from(LabWorkerAttempt).where(
+            LabWorkerAttempt.run_id == run_id, LabWorkerAttempt.status == "running")
+    )).scalar_one())
+    try:
+        await get_redis().set(_slot_key(run_id), live)
+    except Exception:
+        pass
+    return live
 
 
 class WorkerRoleError(Exception):
@@ -94,45 +158,114 @@ async def active_worker_count(db, run_id: str) -> int:
 
 async def delegate_worker(
     db, *, parent_claims: GrantClaims, role: str, agent_id: str,
+    sub_goal: str = "", parent_action_id: str | None = None,
     budgets: dict[str, int] | None = None, ttl_s: int | None = None,
 ) -> tuple[str, GrantClaims]:
-    """Issue an attenuated, role-scoped child grant. Fail-closed at the
-    concurrency cap (``WorkerLimitError``) and on any attenuation violation
+    """Issue an attenuated, role-scoped child grant + a durable worker-attempt
+    record, after ATOMICALLY reserving a concurrency slot (recovery plan Phase 6 —
+    replaces count-then-insert). Fail-closed at the concurrency cap
+    (``WorkerLimitError``, non-fatal to the run) and on any attenuation violation
     (``grants.GrantError``). Capabilities are the intersection of the role
-    template and the parent's own grant — never an escalation."""
+    template and the parent's own grant — never an escalation. Returns
+    ``(token, child_claims)`` unchanged; the attempt is queryable by run/jti."""
     tmpl = ROLE_TEMPLATES.get(role)
     if tmpl is None:
         raise WorkerRoleError(f"unknown worker role '{role}'")
 
-    # Concurrency cap BEFORE issuing — count-based so hitting it refuses the new
-    # worker without tripping a budget-dimension exhaustion (which would kill
-    # the run). limit 0 == unlimited.
+    # Atomic slot reservation BEFORE issuing — an over-cap reserve refuses the
+    # worker without tripping a budget-dimension exhaustion (which would kill the
+    # run). limit 0 == unlimited.
     cap = settings.lab_budget_active_workers
-    if cap and await active_worker_count(db, parent_claims.run_id) >= cap:
+    if not await reserve_worker_slot(parent_claims.run_id, cap):
         raise WorkerLimitError(f"active worker cap {cap} reached for run {parent_claims.run_id}")
 
-    # Capability intersection: role wants these, but only what the parent holds.
-    caps = sorted(tmpl.capabilities & set(parent_claims.capabilities))
-    # Defensive: a worker may never carry world.apply / financial / secrets.
-    assert not ({"world_apply", "financial", "secrets"} & set(caps)), "worker cannot hold a hard-deny capability"
+    try:
+        # Capability intersection: role wants these, but only what the parent holds.
+        caps = sorted(tmpl.capabilities & set(parent_claims.capabilities))
+        # Defensive: a worker may never carry world.apply / financial / secrets.
+        assert not ({"world_apply", "financial", "secrets"} & set(caps)), "worker cannot hold a hard-deny capability"
 
-    child_egress = list(parent_claims.egress) if tmpl.egress else []
-    child_budgets = dict(budgets) if budgets is not None else dict(parent_claims.budgets)
+        child_egress = list(parent_claims.egress) if tmpl.egress else []
+        child_budgets = dict(budgets) if budgets is not None else dict(parent_claims.budgets)
 
-    return await grants.issue_run_grant(
-        db,
-        tenant_id=parent_claims.tenant_id, task_id=parent_claims.task_id,
-        run_id=parent_claims.run_id, agent_id=agent_id,
-        capabilities=caps, egress=child_egress, budgets=child_budgets,
-        parent=parent_claims, ttl_s=ttl_s,
-    )
+        token, child = await grants.issue_run_grant(
+            db,
+            tenant_id=parent_claims.tenant_id, task_id=parent_claims.task_id,
+            run_id=parent_claims.run_id, agent_id=agent_id,
+            capabilities=caps, egress=child_egress, budgets=child_budgets,
+            parent=parent_claims, ttl_s=ttl_s,
+        )
+    except Exception:
+        # Failed to issue — give the reserved slot back so it isn't leaked.
+        await release_worker_slot(parent_claims.run_id)
+        raise
+
+    db.add(LabWorkerAttempt(
+        run_id=parent_claims.run_id, parent_action_id=parent_action_id, role=role,
+        agent_id=agent_id, grant_jti=child.jti,
+        child_runtime_id=f"mock-child-{uuid.uuid4().hex[:8]}",
+        sub_goal_hash=hashlib.sha256((sub_goal or "").encode("utf-8")).hexdigest(),
+        status="running",
+    ))
+    # Commit the durable attempt so a supervisor restart / cross-session
+    # finish_worker can find it (the slot release keys off its run_id). The grant
+    # is already committed by issue_run_grant; this isolates the attempt row.
+    await db.commit()
+    return token, child
 
 
-async def finish_worker(db, *, jti: str) -> None:
-    """A worker finished or was cancelled — revoke its grant so its slot frees
-    (the concurrency gauge counts only non-revoked child grants) and no further
-    tool call under that token can be admitted."""
+async def execute_worker_on_mock(
+    db, *, child_claims: GrantClaims, role: str, sub_goal: str = "",
+) -> WorkerResult:
+    """Run a bounded child sub-goal on Mock under the child's attenuated grant and
+    return a joined, content-free result (recovery plan Phase 6). Synthetic — no
+    real I/O — so it is safe and deterministic: it produces a redacted terminal
+    summary and a SERVER-computed ``result_digest`` (never the child's
+    self-report, so a spoofed 'success' payload cannot be trusted), and a Verifier
+    yields a verdict the parent gates Builder artifacts on. When a REAL adapter
+    drives a child, its tool intents route through the same Broker under exactly
+    this attenuated grant; the Mock child needs no external call to prove the
+    supervised depth-1 lifecycle. Never raises for a child failure — a failed
+    child is non-fatal to the parent run."""
+    tmpl = ROLE_TEMPLATES.get(role)
+    if tmpl is None:
+        return WorkerResult(role=role, agent_id=getattr(child_claims, "agent_id", "?"),
+                            status="failed", result_digest="", verdict=None)
+    # The child must actually hold some capability for a tool-bearing role, else
+    # it did no bounded work (an empty intersection = attenuated to nothing).
+    has_caps = bool(tmpl.capabilities & set(child_claims.capabilities)) or not tmpl.tools
+    status = "succeeded" if has_caps else "failed"
+    summary = guard.redact_text(f"worker {role} 完成子目标") or role
+    result_digest = hashlib.sha256(
+        f"{role}|{child_claims.agent_id}|{child_claims.jti}|{summary}".encode("utf-8")
+    ).hexdigest()
+    verdict = ("pass" if status == "succeeded" else "fail") if role == "verifier" else None
+    return WorkerResult(role=role, agent_id=child_claims.agent_id, status=status,
+                        result_digest=result_digest, verdict=verdict)
+
+
+async def finish_worker(db, *, jti: str, status: str = "succeeded",
+                        result_digest: str | None = None) -> None:
+    """A worker finished, failed, or was cancelled — drive its full terminal
+    lifecycle: mark the durable attempt terminal (with a content-free result
+    digest + cleanup evidence), revoke its grant so no further tool call under
+    that token can be admitted, and RELEASE its concurrency slot. Idempotent: a
+    second call on an already-terminal attempt is a no-op that never
+    double-releases the slot (recovery plan Phase 6)."""
+    attempt = (await db.execute(
+        select(LabWorkerAttempt).where(LabWorkerAttempt.grant_jti == jti)
+    )).scalars().first()
     await grants.revoke_grant(db, jti)
+    if attempt is None:
+        return
+    if attempt.status != "running":
+        return  # already finalized — do not release a slot twice
+    attempt.status = status if status in ("succeeded", "failed", "cancelled") else "succeeded"
+    attempt.result_digest = result_digest
+    attempt.ended_at = datetime.now(UTC)
+    attempt.cleanup_evidence = {"grant_revoked": True, "slot_released": True}
+    await db.commit()
+    await release_worker_slot(attempt.run_id)
 
 
 async def archivist_summary(

@@ -26,7 +26,8 @@ CANCEL_TERM_S = 5                     # wait after TERM before KILL
 CANCEL_KILL_S = 10                    # total cancel window; timeout past this -> KILL
 
 EVENT_TYPES: frozenset[str] = frozenset({
-    "run.started", "plan.updated", "agent.delegated", "tool.requested",
+    "run.started", "plan.updated", "agent.delegated", "agent.worker_completed",
+    "tool.requested",
     "policy.decided", "approval.requested", "approval.resolved",
     "tool.started", "tool.completed", "artifact.emitted",
     "verification.completed", "proposal.drafted", "budget.updated",

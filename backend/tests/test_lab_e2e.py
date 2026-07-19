@@ -35,6 +35,7 @@ from app.models.lab_grant import LabCapabilityGrant
 from app.models.lab_lease import LabRunLease
 from app.models.lab_run import LabRun, LabRunStep
 from app.models.lab_task import LabTask
+from app.models.lab_worker_attempt import LabWorkerAttempt
 from app.models.resident import Resident
 from app.models.user import User
 from app.models.world_change_proposal import WorldChangeProposal
@@ -550,9 +551,11 @@ async def test_happy_path_v1_artifact_has_integrity_fields(lab_env):
 
 @pytest.mark.anyio
 async def test_delegation_v1(lab_env, monkeypatch):
-    """The orchestrator issues an attenuated, role-scoped child grant per
-    ``delegate`` step; the 4th exceeds the concurrency cap of 3 and is refused
-    (run survives); every child grant is revoked at run end (cleanup)."""
+    """Each ``delegate`` step issues an attenuated, role-scoped child grant,
+    executes a bounded child on Mock, joins its result into the parent stream, and
+    finishes it (revoke grant + release slot + a terminal durable attempt). With
+    execution the slot frees between workers, so all four run; the concurrent
+    cap-3 refusal is proven directly in test_lab_workers."""
     factory = lab_env
     await _seed(factory)
     monkeypatch.setattr("app.lab.orchestrator.get_adapter", lambda name: FakeDelegatingAdapter())
@@ -570,18 +573,29 @@ async def test_delegation_v1(lab_env, monkeypatch):
             select(LabCapabilityGrant).where(LabCapabilityGrant.run_id == run_id)
         )).scalars().all()
         children = [g for g in rows if g.parent_jti is not None]
-        assert len(children) == 3  # scout/builder/verifier issued; 4th refused by the cap
+        assert len(children) == 4  # all four execute + finish (slots free between)
         parent = next(g for g in rows if g.parent_jti is None)
         for c in children:
             assert c.depth == 1
             assert c.parent_jti == parent.jti
             assert set(c.capabilities_json).issubset(set(parent.capabilities_json))
-            assert c.revoked_at is not None  # cleaned up on the terminal path
+            assert c.revoked_at is not None  # finished -> grant revoked (cleanup)
         scout = next(g for g in children if g.agent_id == "scout-1")
         assert set(scout.capabilities_json) == {"web_search", "http", "browse"}
         verifier = next(g for g in children if g.agent_id == "verifier-1")
         assert set(verifier.capabilities_json) == {"code"}  # read-only test-exec
 
+    # Durable worker attempts: one per child, all terminal, each with a durable
+    # locator (grant jti + child runtime id) and a server-computed result digest.
+    async with factory() as s:
+        attempts = (await s.execute(
+            select(LabWorkerAttempt).where(LabWorkerAttempt.run_id == run_id)
+        )).scalars().all()
+        assert len(attempts) == 4
+        assert all(a.status == "succeeded" for a in attempts)
+        assert all(a.result_digest and a.grant_jti and a.child_runtime_id for a in attempts)
+        assert all(a.cleanup_evidence and a.cleanup_evidence.get("grant_revoked") for a in attempts)
+
     evs = await _events(factory, run_id)
-    delegated = [t for (t, _seq) in evs if t == "agent.delegated"]
-    assert len(delegated) == 4  # 3 issued + 1 cap-refused, each emits a content-free event
+    assert len([t for (t, _seq) in evs if t == "agent.delegated"]) == 4        # each issued
+    assert len([t for (t, _seq) in evs if t == "agent.worker_completed"]) == 4  # each joined

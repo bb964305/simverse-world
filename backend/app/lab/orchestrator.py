@@ -305,9 +305,11 @@ class _Orchestrator:
         payload = ev.payload or {}
         role = str(payload.get("role") or "")
         agent_id = str(payload.get("agent_id") or f"{role or 'worker'}-{uuid.uuid4().hex[:6]}")
+        sub_goal = str(payload.get("sub_goal") or payload.get("summary") or "")
         try:
             _token, child = await workers.delegate_worker(
                 self.db, parent_claims=self.claims, role=role, agent_id=agent_id,
+                sub_goal=sub_goal,
             )
         except workers.WorkerLimitError:
             await self._emit(type="agent.delegated",
@@ -321,6 +323,18 @@ class _Orchestrator:
                          payload={"role": role, "agent_id": agent_id,
                                   "child_jti": child.jti, "depth": child.depth,
                                   "capabilities": list(child.capabilities)})
+        # Supervised bounded execution of the child on Mock, then join its result
+        # into the parent event stream and finish it (revoke grant + release slot).
+        # A Verifier's failed verdict is surfaced so the parent never accepts a
+        # Builder artifact behind an unvalidated verification (P4 §validate).
+        result = await workers.execute_worker_on_mock(
+            self.db, child_claims=child, role=role, sub_goal=sub_goal)
+        await self._emit(type="agent.worker_completed",
+                         payload={"role": role, "agent_id": agent_id, "child_jti": child.jti,
+                                  "status": result.status, "result_digest": result.result_digest,
+                                  "verdict": result.verdict})
+        await workers.finish_worker(
+            self.db, jti=child.jti, status=result.status, result_digest=result.result_digest)
 
     # ── hard-budget spend helpers ─────────────────────────────────────
 

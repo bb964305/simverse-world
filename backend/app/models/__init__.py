@@ -46,4 +46,5 @@ import app.models.lab_grant  # noqa: F401
 import app.models.lab_action  # noqa: F401
 import app.models.lab_lease  # noqa: F401
 import app.models.lab_budget  # noqa: F401
+import app.models.lab_worker_attempt  # noqa: F401
 import app.models.world_revision  # noqa: F401
