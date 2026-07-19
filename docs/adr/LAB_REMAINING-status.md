@@ -23,13 +23,15 @@ phases landed as verified commits on top of `04ab151`:
 | `99a5ac2` | 8 | Standalone `lab-runner` deploy service + deploy-level kill switch (gap #7). |
 | `9b2cf54` | 4b | Task content moderation gate (structural + pluggable blocklist) before funding, completing gap #6. |
 | `df3cdd4` | 2b | Transactional funding: task + escrow hold commit in one transaction (gap #9, funding part). |
+| `55db37c` | 5 | Frontend renders approval controls from the server-authoritative projection, not local guesses (gap #5, controls part). |
 
-Recovery baseline `04ab151` → HEAD `df3cdd4`: 10 verified commits, backend
-1078 passed. Remaining highest-priority correctness gaps still open: #4
-(concurrency admission), #5 (Agent v1 approval UI contract), #9's run-enqueue
-outbox routing, #10 (artifact safety pipeline). Externally blocked: #7's
-OCI-isolated substrate, Phase 7 real Adapter, Phase 10 asset licensing (see
-External blockers).
+Recovery baseline `04ab151` → HEAD `55db37c`: 11 verified commits; backend 1078
+passed, frontend lint/tsc/build green with 70 Vitest tests. Highest-priority
+correctness gaps CLOSED or PARTIAL: #1, #2, #3, #5, #6, #8, #9, #11 (8 of 11).
+Still OPEN: #4 (concurrency admission), #10 (artifact safety pipeline), plus #9's
+run-enqueue outbox routing and Phase 9 UI convergence/visual. Externally blocked:
+#7's OCI-isolated substrate, Phase 7 real Adapter, Phase 10 asset licensing (see
+External blockers). None of the blocked items were faked.
 
 ## Executive status
 
@@ -205,9 +207,12 @@ remaining; **[BLOCKED]** = external infrastructure.
    has no runtime consumer; per-researcher admission is also incomplete. Needs a
    DB-persisted slot semaphore with CAS reserve + idempotent release across every
    terminal/reaper path (Phase 4 remaining).
-5. **[OPEN] Agent v1 approval UI contract is incomplete.** The panel does not use
-   the server-authoritative run projection and can expose stale or missing
-   controls (Phase 5 remaining).
+5. **[PARTIAL — `55db37c`] Agent v1 approval UI contract.** The panel now loads
+   the run through `getLabRun()` and renders approve/deny only where the server
+   projection grants it (`canDecideApproval`: `can_decide` + `allowed_actions`
+   includes `approve`), so observers/non-owners see no controls; `LabRun.approvals`
+   is now typed (no more `unknown[]`). STILL OPEN: the artifact safety pipeline
+   (gap #10) and the four-track timeline / reconnect-truthfulness (Phase 9).
 6. **[CLOSED — `bfdd0b0` + `9b2cf54`] Pricing/content entry policy.** Minimum SC
    price is derived from `effective_budget_usd(scopes) * lab_sc_per_usd` and
    underpriced tasks are rejected before any hold; a moderation gate (structural
