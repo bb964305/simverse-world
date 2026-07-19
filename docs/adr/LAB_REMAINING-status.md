@@ -1,11 +1,31 @@
 # LAB Agent v1 - current status and remaining work
 
-Last verified: 2026-07-19. Branch: `feat/lab-agent-v1` at `04ab151`.
+Last verified: 2026-07-19. Branch: `feat/lab-agent-v1` at `99a5ac2`.
 
 This report distinguishes code that exists, behavior that was reproduced in the
 current worktree, and work that remains blocked by external infrastructure. It
 supersedes the earlier mixed T0-T8 session notes in this file. Detailed history
 remains in `docs/PROGRESS.md`.
+
+## Recovery-plan execution (2026-07-19 session)
+
+Executing `.omx/plans/lab-agent-recovery-completion-plan.md`, the following
+phases landed as verified commits on top of `04ab151`:
+
+| Commit | Phase | What it closed |
+|---|---|---|
+| `4882b2c` | 0 | Stale git index normalized (index-only reset of 37 HEAD-matching paths); P0 gate wording scoped to real-runtime enablement. |
+| `e894263` | 1 | Frontend build regression fixed (gap #1); Adapter resolution made fail-closed (gap #8). |
+| `7a3026f` | 2a | Cancelled task can no longer revive via `mark_review` or double-refund; cancel fences the run (gap #2). |
+| `8aaa709` | 3 | World overlay + revision + outbox + proposal status commit in one transaction; approve/revert CAS (gap #3). |
+| `bfdd0b0` | 4a | Underpriced tasks rejected before any hold via scope-derived minimum SC price (gap #6, pricing part). |
+| `f95ec01` | 2c | Durable outbox now has a claim/retry/topic-router dispatcher engine + dead-letter (gap #11). |
+| `99a5ac2` | 8 | Standalone `lab-runner` deploy service + deploy-level kill switch (gap #7). |
+
+Remaining highest-priority correctness gaps still open: #4 (concurrency
+admission), #5 (Agent v1 approval UI contract), #9 (funding/queue crash windows),
+#10 (artifact safety pipeline). Externally blocked: #7's OCI-isolated substrate,
+Phase 7 real Adapter, Phase 10 asset licensing (see External blockers).
 
 ## Executive status
 
@@ -32,23 +52,24 @@ Approximate completion, as an engineering judgment rather than a release metric:
 
 ## Reproduced verification
 
-The following commands were run against the current worktree on 2026-07-19:
+The following commands were run against the current worktree on 2026-07-19,
+after the recovery-plan commits above:
 
 | Gate | Result |
 |---|---|
-| Backend full suite | `1056 passed, 11 deselected, 178 warnings` |
-| Focused Lab backend suite | `28 passed` |
-| Frontend Vitest | `64 passed` across 16 files |
+| Backend full suite | `1072 passed, 11 deselected, 178 warnings` (was 1056; +16 new recovery tests) |
+| Focused Lab backend suite | `286 passed` (`-k lab`) |
+| Frontend Vitest | `67 passed` across 16 files (was 64; +3 contract tests) |
 | Frontend ESLint | Passed |
-| Frontend `tsc -b` | **Failed**: `ExperimentPanel.tsx:304` references undefined `task` |
-| Frontend `npm run build` | **Failed** on the same TS2552 error |
+| Frontend `tsc -b` | **Passed** (was red at `ExperimentPanel.tsx:304`; fixed in `e894263`) |
+| Frontend `npm run build` | **Passed**: real `dist/index.html` + `dist/assets` emitted |
 | Lab map verifier | Passed: deterministic, 17x15, reachable, byte-identical |
-| Asset integrity gate | Passed: all listed files byte-match the manifest |
-| Asset release gate | Correctly failed: 16 manifest entries remain `pending` / `blocked` |
+| Alembic migration head | Single linear head `036_add_outbox_dispatch` |
+| Asset release gate | Correctly failed: 16 manifest entries remain `pending` / `blocked` (Phase 10, blocked) |
 
-The earlier `1054 passed` / `52 passed` figures and the claim that `tsc -b` and
-the package build were green are stale. The current reproducible counts are
-1056/64, and the current package build is red.
+The frontend production build is now GREEN; the earlier `1056/64` and red-build
+figures are superseded. The asset release gate remains intentionally red (asset
+licensing is externally blocked — Phase 10).
 
 ## Milestone assessment
 
@@ -162,41 +183,55 @@ Commits: `e5afe29`, `085f8e8`.
 
 ## Highest-priority correctness gaps
 
-1. **Frontend build regression.** `ExperimentPanel.tsx:304` references `task`
-   instead of deriving the selected task from `tasks`.
-2. **Running-task cancellation race.** `cancel_task()` refunds and marks a task
-   cancelled without cancelling/fencing its run; a completing orchestrator can
-   later call `mark_review()` and revive the task.
-3. **Non-atomic world apply.** Overlay mutations commit inside
-   `app/lab/apply.py` before the revision, outbox entry, and proposal status are
-   committed in `proposal_service.py`; a crash can split world state from its
-   audit record.
-4. **Configured concurrency is not enforced.** `lab_max_concurrent_runs` has no
-   runtime consumer; per-researcher admission is also incomplete.
-5. **Agent v1 approval UI contract is incomplete.** The panel does not use the
-   server-authoritative run projection and can expose stale or missing controls.
-6. **Pricing/content entry policy is incomplete.** `lab_sc_per_usd` is not used
-   to establish a minimum SC price, and task briefs have no explicit content
-   moderation gate before funding/dispatch.
-7. **Production process topology is incomplete.** `deploy/backend/docker-compose.yml`
-   has API and agent-worker services but no standalone `python -m app.lab.main`
-   Lab Runner service.
-8. **Adapter resolution is fail-open.** `get_adapter()` silently falls back to
-   Mock for an unknown/import-failed runtime (`backend/app/lab/sandbox/__init__.py:15`).
-   A configured real runtime must fail before `run.started`, not silently execute
-   Mock work.
-9. **Funding/queue crash windows remain.** Task creation, hold linkage, run
-   creation, accepted-run linkage, and Redis enqueue cross separate commit/I/O
-   boundaries (`backend/app/services/lab_task_service.py:187`), without a durable
-   dispatch outbox/reconciler covering every intermediate state.
-10. **Artifact safety is metadata-only.** No server-side scan/quarantine/verified
-    release pipeline prevents an unverified body or remote URI from leaving the
-    API after task completion (`backend/app/services/lab_task_service.py:87`).
-11. **The durable outbox has no production dispatcher.** The repository provides
-    `read_outbox()` / `mark_published()` (`backend/app/lab/ledger.py:227`) but no
-    claimant/retry/topic router for run events, queue/control, world changes, or
-    artifact cleanup. A post-commit publish failure therefore has no general
-    replay worker.
+Status legend: **[CLOSED]** = fixed + verified this session; **[OPEN]** =
+remaining; **[BLOCKED]** = external infrastructure.
+
+1. **[CLOSED — `e894263`] Frontend build regression.** `ExperimentPanel.tsx:304`
+   referenced an out-of-scope `task`; now derives `selectedTask` once via
+   `selectLabTask(tasks, selected)`. `tsc -b` + `npm run build` green.
+2. **[CLOSED — `7a3026f`] Running-task cancellation race.** `cancel_task()` now
+   fences every active run (bumps the lease epoch + CAS run->cancelled) BEFORE
+   refunding; `mark_review()` is CAS-guarded from a live state so a completing
+   orchestrator/runner can never revive a cancelled task.
+3. **[CLOSED — `8aaa709`] Non-atomic world apply.** Revisioned apply now flushes
+   the overlay and commits it together with the revision, outbox record, and
+   proposal status in one transaction (apply helpers made flush-only); reload/
+   broadcast happen only after the commit. approve/revert are CAS-guarded.
+4. **[OPEN] Configured concurrency is not enforced.** `lab_max_concurrent_runs`
+   has no runtime consumer; per-researcher admission is also incomplete. Needs a
+   DB-persisted slot semaphore with CAS reserve + idempotent release across every
+   terminal/reaper path (Phase 4 remaining).
+5. **[OPEN] Agent v1 approval UI contract is incomplete.** The panel does not use
+   the server-authoritative run projection and can expose stale or missing
+   controls (Phase 5 remaining).
+6. **[PARTIAL — `bfdd0b0`] Pricing/content entry policy.** Minimum SC price is now
+   derived from `effective_budget_usd(scopes) * lab_sc_per_usd` and underpriced
+   tasks are rejected before any hold. STILL OPEN: an explicit content-moderation
+   gate on title/brief before funding/dispatch.
+7. **[PARTIAL — `99a5ac2`] Production process topology.** A standalone
+   `lab-runner` service (`python -m app.lab.main`) with health/restart/DB+Redis
+   deps + deploy-level kill switch is now in `deploy/backend/docker-compose.yml`.
+   STILL BLOCKED: real OCI-isolated execution needs a dedicated rootless-Linux
+   host (Phase 8).
+8. **[CLOSED — `e894263`] Adapter resolution is fail-open.** `get_adapter()` now
+   raises `LabAdapterUnavailable` for an unknown/empty/import-failed runtime;
+   only an explicit `mock` selects Mock. A configured real runtime fails before
+   `run.started`, never silently executes Mock work.
+9. **[OPEN] Funding/queue crash windows remain.** Task creation, hold linkage,
+   run creation, accepted-run linkage, and Redis enqueue still cross separate
+   commit/I/O boundaries; a flush-only hold variant + a `lab.run.enqueue` outbox
+   event + reconciler are still needed (Phase 2 remaining). The outbox DISPATCHER
+   that would replay such events now exists (gap #11), but the enqueue is not yet
+   routed through it.
+10. **[OPEN] Artifact safety is metadata-only.** No server-side scan/quarantine/
+    verified release pipeline prevents an unverified body or remote URI from
+    leaving the API after task completion (Phase 5 remaining).
+11. **[CLOSED (engine) — `f95ec01`] The durable outbox has a dispatcher.**
+    `app/lab/outbox_dispatcher.py` provides row claim/lease, topic routing,
+    bounded retry/backoff, dead-letter/quarantine of unknown topics, and
+    idempotent `published_at` acknowledgement (migration `036`). The live WS/Redis
+    publisher wiring + loop start are a deployment step (Phase 8), so a
+    post-commit publish failure is now REPLAYABLE by design, pending activation.
 
 ## External blockers
 
