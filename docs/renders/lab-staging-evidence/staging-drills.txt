@@ -1,0 +1,7 @@
+=== reset + seed a task, then engage the runtime KILL SWITCH ===
+SEEDED run 47497956-d886-491c-ba29-da59014fa13b
+KILL SWITCH engaged, runtime_enabled = False
+=== run runner 8s WITH kill switch on (must NOT consume) ===
+[kill-on] TASK=assigned queue_depth=1  (expect assigned + still queued)
+=== disengage kill switch, run runner 12s (must consume now) ===
+[kill-off] TASK=review RUN=succeeded queue_depth=0  (expect review + succeeded + 0)

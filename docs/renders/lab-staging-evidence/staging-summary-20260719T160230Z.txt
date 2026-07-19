@@ -1,0 +1,16 @@
+# Lab Phase 8 staging drills — 20260719T160230Z
+Host: Linux 6.8.0-1047-oracle aarch64, Ubuntu 22.04; rootless Docker 29.2.1
+DB: pgvector/pgvector:pg16 (real Postgres) @127.0.0.1:55432 ; Redis: redis:8-alpine @56379
+
+## 1. Alembic migrations on REAL Postgres
+alembic current: 036_add_outbox_dispatch (head)
+outbox dispatch columns (036):
+
+## 2. Deployment smoke (real lab-runner consumes queue)
+   result: TASK=review RUN=succeeded issuer_balance=890 queue_depth 1->0 (see drill-smoke.sh)
+
+## 3. Runtime kill-switch drill
+=== reset + seed a task, then engage the runtime KILL SWITCH ===
+KILL SWITCH engaged, runtime_enabled = False
+[kill-on] TASK=assigned queue_depth=1  (expect assigned + still queued)
+[kill-off] TASK=review RUN=succeeded queue_depth=0  (expect review + succeeded + 0)

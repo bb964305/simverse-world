@@ -266,6 +266,35 @@ Honest boundary: this proves the executor's isolation contract on a qualifying
 host; it does NOT flip `lab_oci_enabled` (still `False`, pending a staging
 canary), and it is NOT P7 — no real Adapter endpoint exists on this runner.
 
+## Phase 8 — staging drills on real Postgres + Redis (2026-07-19)
+
+On the same runner, against real `pgvector/pgvector:pg16` Postgres + `redis:8`
+(rootless containers, NOT SQLite/fakeredis):
+
+- **Migrations:** `alembic upgrade head` → `036_add_outbox_dispatch (head)`,
+  exit 0 — the full chain incl. the recovery plan's new `036` applies on real
+  Postgres (the "verify on real Postgres before deploy" the migration files
+  require; the local suite only exercises SQLite `create_all`). Real FK
+  enforcement also caught a seed-data bug SQLite accepted.
+- **Deployment smoke:** the actual `python -m app.lab.main` Lab Runner consumed a
+  seeded queued run and drove funding → run → review: `TASK=review RUN=succeeded
+  issuer_balance=890 queue_depth 1→0` (escrow 100+10 correct).
+- **Kill-switch drill:** engaged → run stays `assigned`, queue_depth 1 (not
+  consumed); disengaged → `review`/`succeeded`/0 (consumed).
+
+Evidence: `docs/renders/lab-staging-evidence/`. Still remaining for Phase 8:
+chaos/capacity/rollback drills against a full multi-service staging cluster with
+least-privilege identities; the outbox dispatcher loop activation with a live
+publisher registry; gVisor pilot.
+
+## Phase 10 — observability (2026-07-19)
+
+Content-free SLO metrics + a `collect_snapshot()` (queue depth, active/orphan run
+counts, oldest-unpublished-outbox age, dead-letter count, run-latency + approval-
+age histograms) landed in `app/lab/slo.py`, refreshed by the Runner's periodic
+loop. Grafana dashboards + the /metrics scrape are deployment config. Asset
+licensing (V23 release gate) remains externally BLOCKED.
+
 ## External blockers
 
 - **Real Hermes/OpenClaw/computer-use endpoints and credentials for V04-V06 (P7).**
