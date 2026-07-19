@@ -16,7 +16,10 @@ is satisfied honestly.
 | T3 | Deterministic Experiment Building blockout + `verify-lab-art.mjs` (V16/V17 core) | `e3394e5` |
 | T5 | P3 world-snapshot revision anchor (V22) + artifact manifest fields; approval projection & cursor API already existed | `83d9e5b` |
 | T7 | P4 specialist-worker role layer: depth-1 delegation, concurrency cap 3, read-only Verifier, Cartographer-never-apply, redacted Archivist memory, aggregate budget | `6ea580b` |
-| T8 (partial) | P5 content-free telemetry/alert taxonomy (7 conditions) wired at 2 sites; hardening report (retention drill, kill/rollback runbook, gVisor/Kata/Firecracker eval) | `e5afe29` |
+| T8 | P5 content-free telemetry/alert taxonomy (7 conditions) wired at ALL 7 sites; hardening report (retention drill, kill/rollback runbook, gVisor/Kata/Firecracker eval) | `e5afe29`, `085f8e8` |
+| T7-wire | delegate_worker wired into orchestrator run lifecycle (delegate step → attenuated child grant, cap-3, terminal revoke) + e2e test | `085f8e8` |
+| T4 (code slice) | `researching` read-only Resident-activity overhead + Phaser-free testable statusConfig | `d539ed4` |
+| T6 (code slice) | 6-rule dual-state resolver (`labState.ts`) + 6-kind/7-badge artifact mapping, wired into ExperimentPanel; +LabArtifact manifest fields | `d539ed4` |
 
 ### Final verifier results (this session)
 
@@ -61,21 +64,24 @@ the other 5 alerts (orphan_heartbeat, stale_epoch, blocked_egress,
 approval_timeout, cleanup_quarantine) are single best-effort calls at the sites
 listed in `T8-hardening.md`. Chaos/capacity + staging drills are infra-blocked.
 
-### T4 — A2 map polish & status FX (art; visual-QA blocked)
+### T4 — A2 map polish & status FX (code slice DONE; art visual-QA blocked)
 
-`lab_fx_32.png/json` beacon animations, `researching` icon, GameScene/
-StatusVisuals wiring. The state-resolution rules (art-spec 6 rules) are code and
-can be built; the FX **art** + `$visual-verdict` need a rendering env. The T3
-building is a structurally-correct blockout awaiting seamless furniture art
-(interiors_pt sandbox pods / server racks / Governor table).
+DONE: `researching` read-only Resident-activity overhead in StatusVisuals; the
+state-resolution rules live in `labState.ts` (below). REMAINING (needs a
+rendering env + `$visual-verdict`): the `lab_fx_32.png/json` beacon atlas (frame
+taxonomy already specified in art-spec) + the scene beacon driven by run state,
+and seamless furniture art for the T3 building blockout (interiors_pt sandbox
+pods / server racks / Governor table). No throwaway placeholder art was shipped.
 
-### T6 — A3/A4 frontend UI migration (frontend; depends on T5, visual-QA blocked)
+### T6 — A3/A4 frontend UI migration (safety backbone DONE; visual rebuild blocked)
 
-`ExperimentPanel.tsx` rebuild (4-track timeline, dual Task/Run state, exec vs
-world-governance approval split, artifact list, apply/revert convergence, 3
-viewports + reduced motion + 44px touch + contrast). Backend projections it
-consumes are ready (T5). The build + `$visual-verdict ≥90` loop needs the
-rendering env; Playwright introduction needs explicit approval (hard-#6).
+DONE: the dual-state resolver (`labState.ts`, the 6 parsing rules — the part
+that must never confuse Task/Run/phase/activity/connection) + artifact badge
+mapping, both unit-tested and wired into `ExperimentPanel`. REMAINING (needs a
+rendering env + `$visual-verdict ≥90`): the full 4-track-timeline panel rebuild,
+exec-vs-world-governance approval visual split, apply/revert convergence
+animation, and the 3-viewport + reduced-motion + 44px-touch + contrast screenshot
+matrix. Playwright introduction needs explicit approval (hard-#6).
 
 ### T8 — P5 hardening (mixed)
 
