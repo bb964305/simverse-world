@@ -69,3 +69,14 @@ Run via `drill_ops.py` against the same real pgvector Postgres + Redis:
 Still remaining for Phase 8: chaos (Redis/DB interruption mid-run) and the full
 multi-service least-privilege cluster (separate identities/network policies per
 API/runner/broker/executor/storage/governor) — needs real cluster infra.
+
+## Chaos drill (2026-07-20) — Redis data-loss recovery
+
+`drill_chaos.py` on real Postgres+Redis: a task was funded and its run enqueued
+(Redis queue depth 1), then **Redis was wiped** (`flushall`, depth → 0). The
+durable record survives in Postgres: the run stays `queued` and the
+`lab.run.enqueue` outbox event is still there, unpublished. Running the outbox
+dispatcher then **replayed the enqueue** onto the fresh Redis (depth → 1) and the
+run dequeued correctly → PASS. A Redis crash cannot lose a queued run — the
+durable outbox recovers it (gap #9). DB-interruption partial-commit safety is
+covered by the transactional-funding + world-atomicity unit tests.
