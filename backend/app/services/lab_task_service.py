@@ -87,21 +87,25 @@ def serialize_step(s) -> dict:
 
 
 def serialize_artifact(a: LabArtifact, unlocked: bool) -> dict:
-    """Artifact view. Locked (task not released) → content withheld, external
-    links never auto-exposed (anti-freeload + anti-injection, spec §5.3).
-    V12 integrity/retention fields are read-only metadata, not the withheld
-    content itself — they're always present (additive, backward compatible;
-    a pre-P2-B row just reports its column defaults)."""
+    """Artifact view. Content (body + remote URI) is released ONLY when the task
+    is released (``unlocked``) AND the artifact is scan-clean + verified — a
+    skipped/unverified/flagged artifact keeps its body and remote URL
+    server-quarantined even after task completion (anti-freeload + anti-injection
+    + gap #10). V12 integrity/retention fields are read-only metadata, always
+    present so the client can render the reason it is withheld. The returned
+    ``unlocked`` reflects the FULL releasability, not just task-release."""
+    from app.services.lab_artifact_service import is_releasable
+    releasable = bool(unlocked) and is_releasable(a)
     base = {
         "id": a.id, "run_id": a.run_id, "task_id": a.task_id,
-        "kind": a.kind, "title": a.title, "unlocked": unlocked,
+        "kind": a.kind, "title": a.title, "unlocked": releasable,
         "created_at": a.created_at.isoformat() if a.created_at else None,
         "sha256": a.sha256, "byte_size": a.byte_size,
         "producer_action_id": a.producer_action_id, "provenance": a.provenance,
         "scan_status": a.scan_status,
         "verification_status": a.verification_status, "retention_hold": a.retention_hold,
     }
-    if unlocked:
+    if releasable:
         base.update({"uri": a.uri, "text_md": a.text_md, "meta": a.meta_json or {}})
     return base
 

@@ -53,6 +53,18 @@ class DigestMismatch(ArtifactError):
     """Stored content no longer matches its recorded digest — retrieval blocked."""
 
 
+class ArtifactQuarantined(ArtifactError):
+    """The artifact is not yet scan-clean AND verified, so its body/URI must not
+    leave the API (recovery plan Phase 5, gap #10). Routers map this to 409."""
+
+
+def is_releasable(a: LabArtifact) -> bool:
+    """Whether an artifact's body/URI may leave the API: scan-clean AND verified.
+    A skipped/pending/flagged scan, or an unverified/rejected verification, keeps
+    the content server-quarantined regardless of task-release state."""
+    return a.scan_status == "clean" and a.verification_status == "verified"
+
+
 def _digest_content(a: LabArtifact) -> str:
     """The string an artifact's integrity digest/size are computed over,
     picked by ``kind`` rather than "whichever field is non-None": a
@@ -75,14 +87,26 @@ def compute_sha256(a: LabArtifact) -> str:
 
 async def finalize_artifact(
     db, *, artifact: LabArtifact, tenant_id: str, producer_action_id: str | None = None,
+    scanned_clean: bool = True,
 ) -> LabArtifact:
     """Stamp integrity/retention fields on a just-created artifact. Does not
-    commit — the caller (orchestrator._succeed) commits the whole batch."""
+    commit — the caller (orchestrator._succeed) commits the whole batch.
+
+    ``scanned_clean`` is the TRUST BOUNDARY (recovery plan Phase 5, gap #10). The
+    one real untrusted producer — a real runtime Adapter — passes ``False`` so its
+    artifacts stay quarantined (scan_status skipped / unverified) until a real
+    scanner clears them, and no unverified body/URI can leave the API. It defaults
+    to ``True`` because the Mock adapter produces synthetic, safe content (nothing
+    to scan) and legacy/test callers finalize trusted content; the orchestrator
+    passes ``scanned_clean=(adapter == "mock")`` explicitly."""
     artifact.tenant_id = tenant_id
     artifact.producer_action_id = producer_action_id
     artifact.sha256 = compute_sha256(artifact)
     artifact.byte_size = len(_digest_content(artifact).encode("utf-8"))
     artifact.expires_at = datetime.now(UTC) + timedelta(days=settings.lab_artifact_retention_days)
+    if scanned_clean:
+        artifact.scan_status = "clean"
+        artifact.verification_status = "verified"
     return artifact
 
 
@@ -99,6 +123,11 @@ async def verify_and_get(db, *, artifact_id: str, user_id: str, is_admin: bool) 
         raise acl.AclDenied("artifact not found")
     if art.sha256 is not None and compute_sha256(art) != art.sha256:
         raise DigestMismatch(f"artifact {artifact_id} digest mismatch")
+    # Content-release gate: never hand back an unscanned/unverified body or remote
+    # URI, even to the owner, even after task completion (gap #10). A legacy row
+    # (never finalized: NULL sha256) predates this pipeline and is exempt.
+    if art.sha256 is not None and not is_releasable(art):
+        raise ArtifactQuarantined(f"artifact {artifact_id} not scan-clean+verified")
     return art
 
 

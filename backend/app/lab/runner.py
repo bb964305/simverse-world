@@ -205,6 +205,9 @@ async def run_one(run_id: str) -> None:
                 db.add(LabArtifact(
                     run_id=run.id, task_id=task.id, kind=a.kind, title=a.title,
                     uri=a.uri, text_md=a.text_md, meta_json=(a.meta or None),
+                    # Legacy flag-off path runs only the trusted Mock adapter, so
+                    # its synthetic artifacts release after task completion (gap #10).
+                    scan_status="clean", verification_status="verified",
                 ))
             await adapter.stop(handle)
 

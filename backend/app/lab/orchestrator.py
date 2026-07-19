@@ -545,8 +545,13 @@ class _Orchestrator:
             # yet, so the budget charges below can fail the run without leaving a
             # half-written artifact. No per-artifact action mapping exists on the
             # Mock runtime, so producer_action_id is None (brief allows it).
+            # Trust boundary (gap #10): Mock output is synthetic + safe, so its
+            # artifacts release after task completion. A REAL adapter's artifacts
+            # stay quarantined (scan_status skipped / unverified) until a real
+            # scanner clears them — no unverified real body/URI leaves the API.
             await lab_artifact_service.finalize_artifact(
                 db, artifact=artifact, tenant_id=self.tenant_id, producer_action_id=None,
+                scanned_clean=(self.run.adapter == "mock"),
             )
             # Hard budgets, charged BEFORE staging the row: reserve one
             # artifact_count unit, then debit artifact_bytes by the finalized

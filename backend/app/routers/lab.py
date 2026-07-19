@@ -268,6 +268,9 @@ async def get_artifact(artifact_id: str, request: Request, db: AsyncSession = De
             raise HTTPException(status_code=404, detail="artifact not found")
         except lab_artifact_service.DigestMismatch:
             raise HTTPException(status_code=409, detail="artifact digest mismatch")
+        except lab_artifact_service.ArtifactQuarantined:
+            # Not scan-clean + verified — never hand back the body/URI (gap #10).
+            raise HTTPException(status_code=409, detail="artifact quarantined (pending scan/verification)")
         task = await db.get(LabTask, art.task_id)
         unlocked = task is not None and task.status == "completed"
         return svc.serialize_artifact(art, unlocked)

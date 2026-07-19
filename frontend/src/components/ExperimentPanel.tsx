@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, type CSSProperties } from 'react'
-import ReactMarkdown from 'react-markdown'
+import ReactMarkdown, { type Components } from 'react-markdown'
 import { bridge } from '../game/phaserBridge'
 import { onWSMessage } from '../services/ws'
 import { useGameStore } from '../stores/gameStore'
@@ -19,6 +19,15 @@ import { artifactKindBadge, artifactStatusBadges } from '../services/labArtifact
 
 type LabTab = 'publish' | 'live' | 'artifacts'
 const ACCENT = '#14b8a6'
+
+// Defense-in-depth for artifact bodies (gap #10): even released (clean+verified)
+// Markdown must not create a directly clickable untrusted link or issue a remote
+// image request. Links render as inert text; images render as an inert
+// placeholder that never fetches the remote resource.
+const INERT_MD_COMPONENTS: Components = {
+  a: ({ children }) => <span style={{ textDecoration: 'underline', textUnderlineOffset: 2 }}>{children}</span>,
+  img: ({ alt }) => <span style={{ color: 'var(--text-muted)' }}>🖼️ {alt || '图片（远程加载已屏蔽）'}</span>,
+}
 const SCOPES = ['web_search', 'browse', 'code', 'http']
 
 const TABS: { key: LabTab; label: string }[] = [
@@ -438,7 +447,7 @@ function ArtifactsTab() {
                 ))}
               </div>
               {a.unlocked && a.text_md && (
-                <div style={{ fontSize: 12, lineHeight: 1.6 }}><ReactMarkdown>{a.text_md}</ReactMarkdown></div>
+                <div style={{ fontSize: 12, lineHeight: 1.6 }}><ReactMarkdown components={INERT_MD_COMPONENTS}>{a.text_md}</ReactMarkdown></div>
               )}
               {a.unlocked && a.uri && (
                 <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
