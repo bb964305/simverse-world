@@ -161,6 +161,16 @@ async def create_task(
     if not scopes:
         raise LabTaskError("at least one valid scope is required")
 
+    # Minimum price: the reward must cover the compute the scopes authorize
+    # (effective_budget_usd * lab_sc_per_usd), rejected BEFORE any hold so an
+    # underpriced task never charges the issuer (recovery plan Phase 4, gap #6).
+    from app.lab import pricing
+    minimum_reward = pricing.minimum_reward_sc(scopes)
+    if reward_sc < minimum_reward:
+        raise LabTaskError(
+            f"reward {reward_sc} below minimum {minimum_reward} SC for the requested scopes"
+        )
+
     # Per-player daily publish cap.
     since = datetime.now(UTC) - timedelta(days=1)
     today = (await db.execute(
