@@ -295,6 +295,42 @@ age histograms) landed in `app/lab/slo.py`, refreshed by the Runner's periodic
 loop. Grafana dashboards + the /metrics scrape are deployment config. Asset
 licensing (V23 release gate) remains externally BLOCKED.
 
+## Phase 6 — specialist workers execute on Mock (2026-07-20)
+
+The P4 exit gate is met: supervised Mock child execution at depth 1 with a durable
+attempt record + atomic concurrency, not merely grant issuance.
+
+- New `LabWorkerAttempt` model + migration `037` (grant jti, child runtime
+  locator, sub-goal hash, status, cursor, result digest, cleanup evidence) —
+  verified on real Postgres (`alembic upgrade head` → `037`, table present).
+- Atomic slot admission via a per-run Redis counter (reserve/release/reconcile)
+  replaces count-then-insert; fail-closed, self-healing.
+- `execute_worker_on_mock` runs a bounded child under the attenuated grant and
+  returns a joined, content-free result with a SERVER-computed digest (anti-spoof)
+  + a Verifier verdict; `finish_worker` drives the terminal lifecycle (attempt
+  terminal + grant revoked + slot released) idempotently. The orchestrator now
+  delegate → execute → join (`agent.worker_completed`) → finish.
+- Still remaining: real-adapter child tool intents through the Broker (P7 blocked);
+  parallel concurrent-session children (Mock executes sequentially; the cap is
+  atomic regardless).
+
+## Session close (2026-07-20) — what remains
+
+Backend `pytest tests/` = **1094 passed / 11 deselected**; frontend lint/tsc/build
+0, Vitest **72 passed**; alembic single head `037` (verified on real Postgres).
+All 11 highest-priority correctness gaps are CLOSED. Genuinely remaining:
+
+- **Phase 9 visual gate** (`$visual-verdict ≥90`, four-track timeline): a running-
+  app visual-QA session + iterative UI polish, not a TDD code deliverable; the
+  testable correctness part (revision convergence) is done.
+- **Phase 5 object-storage download proxy**: needs an approved storage backend/SDK
+  decision (the plan forbids adding an SDK without approval). The security gate
+  (no unverified body/URI leaves the API) is already closed.
+- **Externally BLOCKED (verified, never faked):** P7 real Adapter (no
+  Hermes/OpenClaw/computer-use endpoint exists — probed the runner host), Phase 10
+  asset licensing (16 manifest entries unlicensed), and full multi-service
+  least-privilege staging cluster chaos/capacity drills.
+
 ## External blockers
 
 - **Real Hermes/OpenClaw/computer-use endpoints and credentials for V04-V06 (P7).**
