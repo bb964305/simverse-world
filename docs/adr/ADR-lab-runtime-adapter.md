@@ -1,6 +1,11 @@
 # ADR: Simverse Lab Runtime Adapter Selection
 
 - **Status: Proposed / 未选型 (undecided)**
+- **Gate scope:** This selection gate blocks **real-runtime enablement and any
+  production-capability claim** — not Mock-backed control-plane correctness work.
+  Mock/economy/governance/frontend hardening may proceed and is never counted as
+  real-runtime evidence; enabling a real Adapter or OCI path still requires a
+  recorded ≥80/100 selection with every mandatory dimension ≥0.6.
 - Date: 2026-07-18
 - Context tasks: P2-F (executable adapter gate + this ADR), building on P2-D
   (supervision) and P2-E (OCI executor).
