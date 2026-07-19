@@ -262,14 +262,16 @@ async def run_one(run_id: str) -> None:
 
 async def _reconcile_slots_safe() -> None:
     """Heal any concurrency slot leaked by a prior crashed Runner (re-sync the
-    Redis counters to the DB's true active-run count). Never raises."""
+    Redis counters to the DB's true active-run count) and refresh the content-free
+    SLO gauges from ground truth. Never raises."""
     try:
         from app.database import async_session
-        from app.lab import concurrency
+        from app.lab import concurrency, slo
         async with async_session() as db:
             await concurrency.reconcile(db)
+            await slo.collect_snapshot(db)
     except Exception:
-        logger.warning("lab concurrency reconcile failed", exc_info=True)
+        logger.warning("lab concurrency/slo reconcile failed", exc_info=True)
 
 
 async def _process_run(run_id: str) -> str:
