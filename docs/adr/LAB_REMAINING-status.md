@@ -21,11 +21,15 @@ phases landed as verified commits on top of `04ab151`:
 | `bfdd0b0` | 4a | Underpriced tasks rejected before any hold via scope-derived minimum SC price (gap #6, pricing part). |
 | `f95ec01` | 2c | Durable outbox now has a claim/retry/topic-router dispatcher engine + dead-letter (gap #11). |
 | `99a5ac2` | 8 | Standalone `lab-runner` deploy service + deploy-level kill switch (gap #7). |
+| `9b2cf54` | 4b | Task content moderation gate (structural + pluggable blocklist) before funding, completing gap #6. |
+| `df3cdd4` | 2b | Transactional funding: task + escrow hold commit in one transaction (gap #9, funding part). |
 
-Remaining highest-priority correctness gaps still open: #4 (concurrency
-admission), #5 (Agent v1 approval UI contract), #9 (funding/queue crash windows),
-#10 (artifact safety pipeline). Externally blocked: #7's OCI-isolated substrate,
-Phase 7 real Adapter, Phase 10 asset licensing (see External blockers).
+Recovery baseline `04ab151` → HEAD `df3cdd4`: 10 verified commits, backend
+1078 passed. Remaining highest-priority correctness gaps still open: #4
+(concurrency admission), #5 (Agent v1 approval UI contract), #9's run-enqueue
+outbox routing, #10 (artifact safety pipeline). Externally blocked: #7's
+OCI-isolated substrate, Phase 7 real Adapter, Phase 10 asset licensing (see
+External blockers).
 
 ## Executive status
 
@@ -204,10 +208,12 @@ remaining; **[BLOCKED]** = external infrastructure.
 5. **[OPEN] Agent v1 approval UI contract is incomplete.** The panel does not use
    the server-authoritative run projection and can expose stale or missing
    controls (Phase 5 remaining).
-6. **[PARTIAL — `bfdd0b0`] Pricing/content entry policy.** Minimum SC price is now
-   derived from `effective_budget_usd(scopes) * lab_sc_per_usd` and underpriced
-   tasks are rejected before any hold. STILL OPEN: an explicit content-moderation
-   gate on title/brief before funding/dispatch.
+6. **[CLOSED — `bfdd0b0` + `9b2cf54`] Pricing/content entry policy.** Minimum SC
+   price is derived from `effective_budget_usd(scopes) * lab_sc_per_usd` and
+   underpriced tasks are rejected before any hold; a moderation gate (structural
+   checks + a pluggable operator blocklist, content-free rejection codes) rejects
+   disallowed title/brief before funding. A substantive content policy remains
+   operator-supplied (the enforcement point is in place).
 7. **[PARTIAL — `99a5ac2`] Production process topology.** A standalone
    `lab-runner` service (`python -m app.lab.main`) with health/restart/DB+Redis
    deps + deploy-level kill switch is now in `deploy/backend/docker-compose.yml`.
@@ -217,12 +223,12 @@ remaining; **[BLOCKED]** = external infrastructure.
    raises `LabAdapterUnavailable` for an unknown/empty/import-failed runtime;
    only an explicit `mock` selects Mock. A configured real runtime fails before
    `run.started`, never silently executes Mock work.
-9. **[OPEN] Funding/queue crash windows remain.** Task creation, hold linkage,
-   run creation, accepted-run linkage, and Redis enqueue still cross separate
-   commit/I/O boundaries; a flush-only hold variant + a `lab.run.enqueue` outbox
-   event + reconciler are still needed (Phase 2 remaining). The outbox DISPATCHER
-   that would replay such events now exists (gap #11), but the enqueue is not yet
-   routed through it.
+9. **[PARTIAL — `df3cdd4`] Funding/queue crash windows.** Task creation + hold
+   linkage are now transactional: `coin_service.hold_pending` + create_task
+   commit the task (funded) + hold + debit + ledger row in ONE transaction, and
+   insufficient balance persists nothing. STILL OPEN: run creation → Redis enqueue
+   still crosses a commit/I/O boundary; routing a `lab.run.enqueue` event through
+   the Phase 2c outbox dispatcher (now built) + a reconciler is the follow-up.
 10. **[OPEN] Artifact safety is metadata-only.** No server-side scan/quarantine/
     verified release pipeline prevents an unverified body or remote URI from
     leaving the API after task completion (Phase 5 remaining).
