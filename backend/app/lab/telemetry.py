@@ -33,6 +33,7 @@ class LabAlert(str, Enum):
     BUDGET_EXHAUSTED = "budget_exhausted"        # a budget dimension hit its limit → grant revoked, run stopped
     WORLD_APPLY_FAILED = "world_apply_failed"    # a world proposal apply/revert failed
     CLEANUP_QUARANTINE = "cleanup_quarantine"    # a workspace/artifact could not be cleaned → quarantined
+    TASK_MODERATION_REJECTED = "task_moderation_rejected"  # task title/brief failed the content gate (code only)
 
 
 # The ONLY fields an alert may carry — all structural, none content-bearing.

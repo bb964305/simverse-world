@@ -19,7 +19,12 @@ ENV_EXAMPLE = Path(__file__).resolve().parents[1] / ".env.example"
 
 # Settings fields intentionally NOT in .env.example (internal knobs with safe
 # defaults / derived values). Add here only with a reason.
-UNDOCUMENTED_OK: dict[str, str] = {}
+UNDOCUMENTED_OK: dict[str, str] = {
+    # Operator-supplied task content blocklist; empty by default and a list type
+    # that does not fit the scalar .env format — configured in code/secrets when a
+    # real content policy exists, not via the plain .env template.
+    "lab_task_blocklist": "operator content policy; empty default, list type",
+}
 
 
 def _example_keys() -> set[str]:

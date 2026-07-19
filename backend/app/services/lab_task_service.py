@@ -161,6 +161,17 @@ async def create_task(
     if not scopes:
         raise LabTaskError("at least one valid scope is required")
 
+    # Content moderation: reject a disallowed title/brief BEFORE any hold, and
+    # record only a stable content-free CODE in telemetry (recovery plan Phase 4,
+    # gap #6). The gate is structural + an operator-supplied blocklist.
+    from app.lab import moderation, telemetry
+    reject_code = moderation.moderate_task(title, brief)
+    if reject_code is not None:
+        telemetry.emit_alert(
+            telemetry.LabAlert.TASK_MODERATION_REJECTED, issuer_user_id=issuer_id, reason=reject_code,
+        )
+        raise LabTaskError(f"task rejected by content policy: {reject_code}")
+
     # Minimum price: the reward must cover the compute the scopes authorize
     # (effective_budget_usd * lab_sc_per_usd), rejected BEFORE any hold so an
     # underpriced task never charges the issuer (recovery plan Phase 4, gap #6).
