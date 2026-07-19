@@ -89,6 +89,12 @@ async def _fail_apply(db, p: WorldChangeProposal, note: str, reason: str) -> Non
     p.status = "failed"
     p.review_note = f"{note or ''} | apply failed: {reason}".strip(" |")
     await db.commit()
+    # Content-free alert: only the proposal id + a fixed reason CODE (never the
+    # raw failure text, which could carry content).
+    from app.lab import telemetry
+    telemetry.emit_alert(
+        telemetry.LabAlert.WORLD_APPLY_FAILED, proposal_id=p.id, reason="apply_failed",
+    )
     if p.cost_sc > 0 and p.author_slug:
         await coin_service.treasury_credit(db, p.author_slug, p.cost_sc, f"proposal_refund:{p.id}")
 

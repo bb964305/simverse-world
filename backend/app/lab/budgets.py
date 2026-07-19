@@ -85,6 +85,11 @@ async def _touch(db, run_id: str) -> None:
 async def _exhaust(db, row: LabRunBudget, dimension: str) -> None:
     row.exhausted_dimension = dimension
     await db.commit()
+    from app.lab import telemetry
+    telemetry.emit_alert(
+        telemetry.LabAlert.BUDGET_EXHAUSTED,
+        run_id=row.run_id, tenant_id=row.tenant_id, dimension=dimension, reason="limit",
+    )
     raise BudgetExhausted(dimension)
 
 

@@ -47,6 +47,13 @@
 - [x] **取消/清理**：`grants.revoke_run_grants(run)` 撤全部子授权 → active_worker_count=0（V03/V10 取消+清理扩展）。
 - [x] **门禁**：`test_lab_workers.py`（9 绿）；grants/tenant_acl/budgets/fencing 回归 65 passed。**follow-up**：把 `delegate_worker` 接进 `orchestrator.run_one_v1` 的实际 run 生命周期（编排接线，非安全不变量；原语+角色+全部 P4-exit 不变量已测）。
 
+## Kickoff LAB_REMAINING — T8 P5 硬化（部分，2026-07-19，Cowork）
+- [x] **content-free 遥测/告警 `app/lab/telemetry.py`**：7 告警枚举（orphan_heartbeat/stale_epoch/blocked_egress/approval_timeout/budget_exhausted/world_apply_failed/cleanup_quarantine）。**content-free by construction**——只收结构化字段白名单（id/dimension/reason code/count/hash），传 content-bearing 字段（summary/content/payload/text/args/thought…）抛 `TelemetryLeak`（硬约束 #3 在调用点强制，非信任）；best-effort 不抛进安全路径。已接线 2 处高信号点：`budgets._exhaust`（budget_exhausted）、`proposal_service._fail_apply`（world_apply_failed，只传 proposal_id + 固定 reason code，绝不传原始失败文本）；其余 5 处 wire point 记在 `docs/adr/T8-hardening.md`（单行 emit，非安全不变量）。测试 `test_lab_telemetry.py` 5 绿。
+- [x] **retention/cleanup 证据**：既有 `test_lab_retention.py`（tombstone/hold/quarantine）本会话绿——即演练。
+- [x] **kill/rollback runbook + 生产隔离候选评估**：`docs/adr/T8-hardening.md` 写 staging kill/rollback 五步 + gVisor/Kata/Firecracker 对比（推荐先试 gVisor `--runtime=runsc`，最小改动，待 Linux runner）。
+- **阻塞（需基础设施）**：chaos/容量、staging 演练需独立服务身份/进程 + staging 集群（当前只有 API+agent-worker 两服务），计划记在文档。
+- **门禁**：telemetry/retention/workers/e2e/governance 回归 35 passed；budget/world 接线后回归绿。
+
 - **Cowork 沙箱环境备忘（后续 T 复用）**：① host 的 `backend/.venv`（macOS 路径 shebang）与 `frontend/node_modules`（darwin-arm64 原生 binding）在 Linux 沙箱不可用；用 `uv venv --python 3.12 /tmp/svenv` + `uv pip install`（含 anthropic）建后端环境；前端补 `@rolldown/binding-linux-arm64-gnu@1.0.0-rc.12` 后 vitest/vite 可跑。② 后端需 Python ≥3.11（`from datetime import UTC`），沙箱默认 3.10 不行。③ 测试统一用 `DATABASE_URL=sqlite+aiosqlite:////tmp/svglobal.db` 规避 mount SQLite；`vite build` 用 `--outDir /tmp/svdist` 规避 mount `emptyDir` unlink EPERM。④ git：`.git/HEAD.lock` 陈旧锁 mount 上不可 unlink → 提交走 `git write-tree` + `git commit-tree -p HEAD` + 直接覆写 `.git/refs/heads/<branch>` 松散 ref（不锁 HEAD）；对象临时文件 EPERM 警告无害。
 
 ## Phase 0 — 止血（OPTIMIZATION_PLAN §2）
