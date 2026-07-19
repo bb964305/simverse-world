@@ -23,6 +23,7 @@ from sqlalchemy import update
 from app.models.lab_lease import LabRunLease
 from app.models.lab_run import LabRun
 from app.models.lab_task import LabTask
+from app.models.world_change_proposal import WorldChangeProposal
 
 
 async def cas_task_status(
@@ -52,6 +53,22 @@ async def cas_run_status(
         update(LabRun)
         .where(LabRun.id == run_id, LabRun.status.in_(tuple(expected)))
         .values(**values)
+        .execution_options(synchronize_session=False)
+    )
+    return (result.rowcount or 0) == 1
+
+
+async def cas_proposal_status(
+    db, *, proposal_id: str, expected: Iterable[str], new: str, **extra
+) -> bool:
+    """Move a WorldChangeProposal from any ``expected`` status to ``new``
+    atomically. Returns True iff exactly one row moved — two racing admins
+    cannot both apply/revert the same proposal (recovery plan Phase 3). Does not
+    commit."""
+    result = await db.execute(
+        update(WorldChangeProposal)
+        .where(WorldChangeProposal.id == proposal_id, WorldChangeProposal.status.in_(tuple(expected)))
+        .values(status=new, **extra)
         .execution_options(synchronize_session=False)
     )
     return (result.rowcount or 0) == 1

@@ -94,15 +94,25 @@ async def _existing_dynamic_slug(db, slug: str) -> bool:
 
 # ── dispatch ──────────────────────────────────────────────────────────
 
-async def apply_proposal(db, proposal: WorldChangeProposal, *, broadcast: bool = True) -> None:
-    """Validate + write the overlay for an approved proposal, then reload the
-    world (in-process) and signal the other processes. Raises ApplyError on a
-    structural/conflict failure (the caller keeps the proposal un-applied).
+async def apply_proposal(db, proposal: WorldChangeProposal, *, broadcast: bool = True,
+                         commit: bool = True) -> None:
+    """Validate + write the overlay for an approved proposal. Raises ApplyError on
+    a structural/conflict failure (the caller keeps the proposal un-applied).
 
-    ``broadcast=False`` lets a caller that will send its own (richer)
-    world_changed payload afterward — e.g. proposal_service for a revisioned
-    kind, once it has built the canonical envelope — skip this function's
-    bare broadcast instead of the client seeing two pushes for one apply."""
+    The per-kind ``_apply_*`` helpers only mutate + flush; whether the overlay is
+    committed here is the caller's choice (recovery plan Phase 3):
+
+    * ``commit=True`` (legacy / non-revisioned kinds) — commit the overlay, reload
+      the world in-process, signal the other processes, and optionally broadcast.
+      Preserves the pre-T6 behaviour byte-for-byte.
+    * ``commit=False`` (revisioned kinds) — flush only and return. The caller
+      (``proposal_service.approve_proposal``) then commits the overlay together
+      with the immutable revision, the outbox record, and the proposal's terminal
+      status in ONE transaction, and reloads/broadcasts AFTER that commit — so a
+      crash before the commit leaves no visible overlay split from its audit.
+
+    ``broadcast=False`` lets a caller send its own richer world_changed envelope
+    afterward instead of the client seeing two pushes for one apply."""
     kind = proposal.kind
     patch = proposal.patch_json or {}
     if kind == "add_location":
@@ -116,6 +126,10 @@ async def apply_proposal(db, proposal: WorldChangeProposal, *, broadcast: bool =
     else:
         raise ApplyError(f"unsupported proposal kind '{kind}'")
 
+    if not commit:
+        return  # caller owns the atomic commit + reload + publish + broadcast
+
+    await db.commit()
     await reload_world()
     await publish_world_reload()
     if broadcast:
@@ -130,7 +144,7 @@ async def _apply_add_location(db, proposal, patch: dict) -> None:
     if await _existing_dynamic_slug(db, slug):
         raise ApplyError(f"dynamic slug '{slug}' already recorded")
     db.add(DynamicLocation(slug=slug, data_json=patch["data"], active=True, proposal_id=proposal.id))
-    await db.commit()
+    await db.flush()
 
 
 async def _apply_edit_location(db, proposal, patch: dict) -> None:
@@ -145,7 +159,7 @@ async def _apply_edit_location(db, proposal, patch: dict) -> None:
         if field in (patch.get("data") or {}):
             data[field] = patch["data"][field]
     row.data_json = data
-    await db.commit()
+    await db.flush()
 
 
 async def _apply_add_mechanic(db, proposal, patch: dict) -> None:
@@ -156,7 +170,7 @@ async def _apply_add_mechanic(db, proposal, patch: dict) -> None:
         raise ApplyError(f"mechanic code '{code}' already exists")
     db.add(DynamicMechanic(code=code, kind=kind, spec_json=patch.get("spec") or {},
                            active=True, proposal_id=proposal.id))
-    await db.commit()
+    await db.flush()
 
 
 async def _apply_add_lore(db, proposal, patch: dict) -> None:
@@ -173,7 +187,7 @@ async def _apply_add_lore(db, proposal, patch: dict) -> None:
     else:
         db.add(DynamicMechanic(code=code, kind="lore", spec_json={"location_id": loc, "text": text},
                                active=True, proposal_id=proposal.id))
-    await db.commit()
+    await db.flush()
 
 
 async def revert_proposal(db, proposal: WorldChangeProposal) -> None:
