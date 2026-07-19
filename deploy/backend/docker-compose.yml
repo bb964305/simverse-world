@@ -79,5 +79,41 @@ services:
       DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-changeme}@db:5432/skills_world
       REDIS_URL: redis://redis:6379/0
 
+  # Standalone Lab Runner (recovery plan Phase 8 / status report gap #7): consumes
+  # the Redis run queue and executes sandbox adapters in a process SEPARATE from
+  # the API and agent-worker, so a long-lived, isolation-heavy, possibly-crashing
+  # run never blocks request handling or resident ticks. Independently scalable
+  # (LAB_RUNNER_REPLICAS). Two kill switches: deploy-level (LAB_ENABLED=false →
+  # main.py stays dormant) and runtime (the Redis sv:lab:enabled flag the loop
+  # checks each iteration). Least-privilege: it needs DB + Redis only; keep any
+  # real-runtime/OCI credentials out of the API/agent-worker env and scoped here
+  # once a real Adapter is selected (Phase 7). NOTE: real OCI execution requires a
+  # dedicated rootless-Linux host (Phase 8 blocked) — this service runs the Mock
+  # adapter until then.
+  lab-runner:
+    build:
+      context: ../backend
+      dockerfile: ../deploy/Dockerfile
+    command: python -m app.lab.main
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-changeme}@db:5432/skills_world
+      REDIS_URL: redis://redis:6379/0
+    deploy:
+      replicas: ${LAB_RUNNER_REPLICAS:-1}
+    healthcheck:
+      # Non-HTTP worker: prove it can reach its work source (Redis). Uses the
+      # app image's own redis client so no extra tooling is needed.
+      test: ["CMD-SHELL", "python -c \"import os,asyncio; from redis.asyncio import from_url; asyncio.run(from_url(os.environ['REDIS_URL']).ping())\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
 volumes:
   pgdata:

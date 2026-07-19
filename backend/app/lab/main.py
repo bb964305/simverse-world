@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 async def main() -> None:
     init_sentry("lab-runner")  # no-op without SENTRY_DSN
-    logger.info("lab-runner starting: runner_loop")
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -35,6 +34,25 @@ async def main() -> None:
             registered.append(sig)
         except NotImplementedError:  # pragma: no cover — non-Unix platforms
             pass
+
+    # Deploy-level kill switch (distinct from the Redis runtime flag the runner
+    # loop already honors per-iteration): when the feature is disabled at deploy
+    # time, the service stays up but DORMANT — it consumes no queue work — until
+    # SIGTERM. This lets an operator scale the runner without draining the queue
+    # and complements the runtime kill switch (is_lab_runtime_enabled).
+    from app.config import settings
+    if not getattr(settings, "lab_enabled", True):
+        logger.warning("lab-runner: lab_enabled=false at deploy — staying dormant (no queue consume)")
+        try:
+            await stop_event.wait()
+        finally:
+            for sig in registered:
+                loop.remove_signal_handler(sig)
+            await close_redis()
+            logger.info("lab-runner stopped (dormant)")
+        return
+
+    logger.info("lab-runner starting: runner_loop")
 
     # P3: the runner may emit proposals + apply them via the shared engine; keep
     # its LOCATIONS in sync by subscribing to reload signals too.
