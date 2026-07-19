@@ -566,10 +566,25 @@ class _Orchestrator:
         await self._emit(type="artifact.emitted",
                          payload={"count": len(artifacts), "summary": guard.redact_text(summary) or ""})
 
+        # Advance the task first (CAS-guarded). If it was cancelled/finalized
+        # concurrently, mark_review is a no-op and returns False: do NOT emit a
+        # completion, draft a world proposal, or overwrite the cancel path's run
+        # terminal — just return so the ``finally`` still revokes this run's
+        # grants. The cancel path owns the refund. (The epoch fence normally trips
+        # earlier at ``_emit``; this closes the residual window between the last
+        # emit and mark_review.)
+        reviewed = await lab_task_service.mark_review(
+            db, self.task, self.run, result_summary=summary)
+        if not reviewed:
+            logger.info("run %s finished but task %s no longer reviewable "
+                        "(cancelled/terminal); skipping completion",
+                        self.run_id, self.task_id)
+            return
+
         self.run.status = "succeeded"
         self.run.ended_at = datetime.now(UTC)
         self.run.cost_usd_cents = self.cost_cents
-        await lab_task_service.mark_review(db, self.task, self.run, result_summary=summary)
+        await db.commit()
 
         # An exploration task (deliverable_kind=world_change) drafts a pending
         # proposal through the Compiler — the only sanctioned path into the world

@@ -208,32 +208,41 @@ async def run_one(run_id: str) -> None:
                 ))
             await adapter.stop(handle)
 
-            run.status = "succeeded"
-            run.ended_at = datetime.now(UTC)
-            run.cost_usd_cents = cost_cents
             summary = "; ".join(a.title for a in artifacts) if artifacts else "研究完成"
             from app.services.lab_task_service import mark_review
-            await mark_review(db, task, run, result_summary=summary)
+            # CAS-guarded: if the task was cancelled/finalized concurrently this is
+            # a no-op (returns False) and we must NOT overwrite the cancel path's
+            # run terminal or draft a proposal for a dead task (recovery plan
+            # Phase 2, gap #2). The legacy path has no lease epoch to fence it, so
+            # this return value is its revival guard.
+            reviewed = await mark_review(db, task, run, result_summary=summary)
+            if reviewed:
+                run.status = "succeeded"
+                run.ended_at = datetime.now(UTC)
+                run.cost_usd_cents = cost_cents
 
-            # P3: an exploration-type task (deliverable_kind=world_change) yields a
-            # pending WorldChangeProposal for admin review — never auto-applied.
-            if task.deliverable_kind == "world_change":
-                try:
-                    from app.services.proposal_service import create_proposal
-                    await create_proposal(
-                        db, kind="add_lore",
-                        title=f"探索产出：{task.title}"[:200],
-                        rationale=(summary or "研究员在实验楼的一段冒险"),
-                        patch={"location_id": "experiment_building",
-                               "text": (summary or "研究员在实验楼的一段冒险")},
-                        origin="lab_run", origin_ref=run.id, author_slug=run.researcher_slug,
-                        cost_sc=0,
-                    )
-                except Exception:
-                    logger.warning("proposal creation from run %s failed", run.id, exc_info=True)
+                # P3: an exploration-type task (deliverable_kind=world_change) yields
+                # a pending WorldChangeProposal for admin review — never auto-applied.
+                if task.deliverable_kind == "world_change":
+                    try:
+                        from app.services.proposal_service import create_proposal
+                        await create_proposal(
+                            db, kind="add_lore",
+                            title=f"探索产出：{task.title}"[:200],
+                            rationale=(summary or "研究员在实验楼的一段冒险"),
+                            patch={"location_id": "experiment_building",
+                                   "text": (summary or "研究员在实验楼的一段冒险")},
+                            origin="lab_run", origin_ref=run.id, author_slug=run.researcher_slug,
+                            cost_sc=0,
+                        )
+                    except Exception:
+                        logger.warning("proposal creation from run %s failed", run.id, exc_info=True)
 
-            await db.commit()
-            await _ws_task_update(task)
+                await db.commit()
+                await _ws_task_update(task)
+            else:
+                logger.info("legacy run %s finished but task %s no longer reviewable; "
+                            "leaving cancel terminal intact", run.id, task.id)
         except Exception as e:
             logger.warning("lab run %s failed: %s", run.id, e, exc_info=True)
             run.status = "failed"

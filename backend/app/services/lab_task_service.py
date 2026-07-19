@@ -19,6 +19,7 @@ from sqlalchemy import select, func
 from app.config import settings
 from app.database import async_session
 from app.events.bus import on, emit
+from app.lab import transitions
 from app.models.lab_artifact import LabArtifact
 from app.models.lab_run import LabRun
 from app.models.lab_task import LabTask
@@ -255,14 +256,28 @@ async def dispatch_open_tasks(db) -> int:
 
 # ── review / settle / fail / accept / reject / cancel ─────────────────
 
-async def mark_review(db, task: LabTask, run: LabRun, result_summary: str = "") -> None:
-    """Runner success hook: task → review with a 72h auto-release window."""
-    task.status = "review"
-    task.accepted_run_id = run.id
-    task.result_summary_md = result_summary or task.result_summary_md
-    task.review_deadline_at = datetime.now(UTC) + timedelta(hours=settings.lab_auto_release_hours)
-    task.updated_at = datetime.now(UTC)
+async def mark_review(db, task: LabTask, run: LabRun, result_summary: str = "") -> bool:
+    """Runner success hook: task → review with a 72h auto-release window.
+
+    Guarded by a compare-and-set from a live (``assigned``/``running``) state so a
+    stale runner/orchestrator that finished AFTER the task was cancelled/failed/
+    expired can never revive it (status report gap #2). Returns True iff the task
+    actually moved to review; False (no-op) means it was already terminal — the
+    caller owns no completion for it. Belt-and-braces with the orchestrator's
+    epoch fence."""
+    moved = await transitions.cas_task_status(
+        db, task_id=task.id, expected=("assigned", "running"), new="review",
+        accepted_run_id=run.id,
+        result_summary_md=result_summary or task.result_summary_md,
+        review_deadline_at=datetime.now(UTC) + timedelta(hours=settings.lab_auto_release_hours),
+    )
     await db.commit()
+    if moved:
+        await db.refresh(task)
+    else:
+        logger.info("mark_review skipped for task %s (status=%s, not revivable)",
+                    task.id, task.status)
+    return moved
 
 
 async def fail_task(db, task: LabTask, reason: str = "") -> None:
@@ -339,16 +354,47 @@ async def cancel_task(db, task_id: str, user_id: str) -> LabTask:
     task = await _require_own_task(db, task_id, user_id)
     if task.status in ("completed", "cancelled", "failed", "expired"):
         raise LabTaskError("task already finalized")
-    # Not-yet-in-review → full refund. (Running runs are left to terminate; the
-    # refund still fires here since the hold is untouched until settle.)
+
+    # Fence every active run BEFORE the task is finalized and the money returned,
+    # so a live orchestrator can no longer settle or mark_review after the refund
+    # (recovery plan Phase 2: refund is final only once execution can no longer
+    # write). Bumping the lease epoch trips the orchestrator's assert_epoch /
+    # heartbeat / emit; CASing the run to cancelled makes a still-queued run be
+    # skipped by run_one_v1's queued-guard. The API process holds no in-process
+    # adapter handle, so cancel->TERM->KILL of a real runtime is the durable
+    # cancel control-request's job; the Mock path has no live process, so the
+    # epoch fence + status flip fully stop it here.
+    active_runs = (await db.execute(
+        select(LabRun).where(
+            LabRun.task_id == task.id, LabRun.status.in_(ACTIVE_RUN_STATES)
+        )
+    )).scalars().all()
+    for run in active_runs:
+        await transitions.bump_run_epoch(db, run.id)
+        await transitions.cas_run_status(
+            db, run_id=run.id, expected=ACTIVE_RUN_STATES, new="cancelled",
+            ended_at=datetime.now(UTC),
+        )
+
+    # CAS the task to cancelled from a non-terminal state. Losing the race (a
+    # concurrent settle/fail/expire finalized it first) means we must not refund.
+    moved = await transitions.cas_task_status(
+        db, task_id=task.id,
+        expected=("draft", "funded", "assigned", "running", "review", "rejected"),
+        new="cancelled",
+    )
+    await db.commit()
+    if not moved:
+        await db.refresh(task)
+        raise LabTaskError("task already finalized")
+
+    # Refund exactly once. coin_service's hold ``status=='held'`` guard makes a
+    # duplicate cancel or a raced refund a safe no-op (never a double refund).
     if task.hold_id:
         try:
             await coin_service.refund(db, task.hold_id, f"lab_cancel:{task.id}")
         except coin_service.CoinError:
-            logger.warning("cancel refund skipped for task %s", task.id)
-    task.status = "cancelled"
-    task.updated_at = datetime.now(UTC)
-    await db.commit()
+            logger.warning("cancel refund skipped for task %s (hold not held)", task.id)
     await db.refresh(task)
     return task
 
