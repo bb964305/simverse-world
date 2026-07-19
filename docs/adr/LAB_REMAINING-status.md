@@ -316,20 +316,32 @@ attempt record + atomic concurrency, not merely grant issuance.
 
 ## Session close (2026-07-20) — what remains
 
-Backend `pytest tests/` = **1094 passed / 11 deselected**; frontend lint/tsc/build
-0, Vitest **72 passed**; alembic single head `037` (verified on real Postgres).
-All 11 highest-priority correctness gaps are CLOSED. Genuinely remaining:
+Backend `pytest tests/` = **1098 passed / 11 deselected**; frontend lint/tsc/build
+0, Vitest **77 passed**; alembic single head `037` (036+037 verified on real
+Postgres). All 11 highest-priority correctness gaps are CLOSED, and every Phase's
+code deliverable is landed:
 
-- **Phase 9 visual gate** (`$visual-verdict ≥90`, four-track timeline): a running-
-  app visual-QA session + iterative UI polish, not a TDD code deliverable; the
-  testable correctness part (revision convergence) is done.
-- **Phase 5 object-storage download proxy**: needs an approved storage backend/SDK
-  decision (the plan forbids adding an SDK without approval). The security gate
-  (no unverified body/URI leaves the API) is already closed.
-- **Externally BLOCKED (verified, never faked):** P7 real Adapter (no
-  Hermes/OpenClaw/computer-use endpoint exists — probed the runner host), Phase 10
-  asset licensing (16 manifest entries unlicensed), and full multi-service
-  least-privilege staging cluster chaos/capacity drills.
+- **Phase 5:** artifact quarantine gate + an authenticated, digest-checking
+  download boundary (`GET /lab/artifacts/{id}/download`; text streams with its
+  sha256, remote URIs never server-proxied). The production object-storage SDK is
+  deferred (the plan forbids adding an SDK without approval) — the boundary needs
+  none.
+- **Phase 9:** revision-cursor convergence + a four-track timeline component
+  (Task / Run / phase / connection as separate tracks, reduced-motion static,
+  truthful unknown states), unit-tested and wired into the panel.
+
+Genuinely remaining — none of it a code task I can complete unilaterally:
+
+1. **`$visual-verdict ≥90` subjective pass** — a screenshot-scoring QA of the
+   running app. The UI it grades (timeline, reduced-motion, truthful states) is
+   built and unit-tested; the scoring tool + a running-app browser session are not
+   cleanly available here (a concurrent app already holds ports 8000/5173 and the
+   local proxy hijacks localhost).
+2. **Externally BLOCKED (verified, never faked):** P7 real Adapter (no
+   Hermes/OpenClaw/computer-use endpoint exists anywhere — probed the runner host);
+   Phase 10 asset licensing (16 manifest entries need first-party license/purchase
+   — a legal/procurement action); a production object-storage SDK (needs approval);
+   a full multi-service least-privilege staging cluster for chaos/capacity drills.
 
 ## External blockers
 
