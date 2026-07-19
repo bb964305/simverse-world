@@ -333,10 +333,17 @@ code deliverable is landed:
 Genuinely remaining — none of it a code task I can complete unilaterally:
 
 1. **`$visual-verdict ≥90` subjective pass** — a screenshot-scoring QA of the
-   running app. The UI it grades (timeline, reduced-motion, truthful states) is
-   built and unit-tested; the scoring tool + a running-app browser session are not
-   cleanly available here (a concurrent app already holds ports 8000/5173 and the
-   local proxy hijacks localhost).
+   running app. ATTEMPTED 2026-07-20: stood the full stack up on free ports
+   (backend `0.0.0.0:8010` → `{"status":"ok"}`, frontend served HTTP 200, a lab
+   task seeded to `assigned`) — the app RUNS. The browser session is then blocked
+   by the environment: the macOS system proxy (`127.0.0.1:1082`) routes the
+   browser's requests — even LAN and Tailscale IPs — and cannot reach the locally
+   bound servers, so every navigation is a Chrome error page (curl reaches them
+   fine with `--noproxy`). The only fix, changing the system proxy, is a
+   prohibited system-settings change, and `$visual-verdict` is not in the
+   available skill set. The UI it grades (four-track timeline, reduced-motion,
+   truthful states) is built and unit-tested; what remains is the subjective
+   score, not code.
 2. **Externally BLOCKED (verified, never faked):** P7 real Adapter (no
    Hermes/OpenClaw/computer-use endpoint exists anywhere — probed the runner host);
    Phase 10 asset licensing (16 manifest entries need first-party license/purchase
