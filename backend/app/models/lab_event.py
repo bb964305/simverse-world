@@ -53,3 +53,13 @@ class OutboxEvent(Base):
     payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Dispatcher state (recovery plan Phase 2, gap #11). ``published_at`` stays
+    # the success marker; ``dispatch_status`` adds the dead-letter/quarantine
+    # terminal for a row that must never be marked published. A row is eligible
+    # when published_at IS NULL AND dispatch_status='pending' AND
+    # next_attempt_at<=now AND (locked_until IS NULL OR locked_until<=now).
+    dispatch_status: Mapped[str] = mapped_column(String(12), default="pending", index=True)  # pending|published|dead
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(200), nullable=True)
