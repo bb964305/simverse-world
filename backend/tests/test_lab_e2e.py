@@ -255,8 +255,11 @@ async def test_happy_path_v1(lab_env):
         seqs = [e.seq for e in evs]
         assert seqs == list(range(1, len(seqs) + 1))  # gap-free 1..N
 
-        outbox = (await s.execute(select(OutboxEvent).where(OutboxEvent.run_id == run_id))).scalars().all()
-        assert len(outbox) == len(evs)  # every canonical event has an outbox row
+        outbox = (await s.execute(select(OutboxEvent).where(
+            OutboxEvent.run_id == run_id, OutboxEvent.topic == "lab_run_event"
+        ))).scalars().all()
+        assert len(outbox) == len(evs)  # every canonical event has a run-event outbox row
+        # (the durable lab.run.enqueue dispatch row is a separate topic, not a run event)
 
         steps = (await s.execute(select(LabRunStep).where(LabRunStep.run_id == run_id))).scalars().all()
         assert len(steps) >= 1  # legacy-UI compat projection still lands
@@ -438,8 +441,10 @@ async def test_flag_off_legacy_regression(lab_env, monkeypatch):
             select(func.count()).select_from(LabToolAction).where(LabToolAction.run_id == run_id)
         )).scalar_one() == 0
         assert (await s.execute(
-            select(func.count()).select_from(OutboxEvent).where(OutboxEvent.run_id == run_id)
-        )).scalar_one() == 0
+            select(func.count()).select_from(OutboxEvent).where(
+                OutboxEvent.run_id == run_id, OutboxEvent.topic == "lab_run_event")
+        )).scalar_one() == 0  # legacy flag-off path emits no canonical run events
+        # (the durable lab.run.enqueue dispatch row IS written — it is topic-scoped out above)
         assert await s.get(LabRunBudget, run_id) is None
         assert await s.get(LabRunLease, run_id) is None
 

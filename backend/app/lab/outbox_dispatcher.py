@@ -43,7 +43,28 @@ BACKOFF_CAP_S = 300
 
 # Topics the dispatcher knows how to route. A row whose topic is absent from the
 # active publisher registry is quarantined rather than dropped.
-KNOWN_TOPICS = ("lab_run_event", "world_changed", "lab_control", "artifact_cleanup")
+KNOWN_TOPICS = ("lab.run.enqueue", "lab_run_event", "world_changed", "lab_control", "artifact_cleanup")
+
+
+async def _publish_run_enqueue(payload: dict) -> None:
+    """Durable-dispatch sink for ``lab.run.enqueue``: LPUSH the run onto the Redis
+    work queue. Idempotent at the consumer — the runner's queued-guard + run lease
+    skip a run already picked up, so a replayed enqueue cannot double-execute."""
+    from app.lab import queue as lab_queue
+    run_id = (payload or {}).get("run_id")
+    if run_id:
+        await lab_queue.enqueue_run(run_id)
+
+
+def default_publishers() -> "dict[str, Publisher]":
+    """The live publisher registry the Lab Runner activates (Phase 8 deployment).
+
+    Only ``lab.run.enqueue`` is wired: it is the one topic with a purely durable
+    guarantee (re-deliver a lost enqueue) and an idempotent consumer. The
+    ``lab_run_event`` / ``world_changed`` topics are deliberately NOT wired here —
+    their live path is the inline WS broadcast; wiring the dispatcher to re-broadcast
+    them would double-deliver until the deployment owns that de-dup topology."""
+    return {"lab.run.enqueue": _publish_run_enqueue}
 
 
 def backoff_seconds(attempts: int) -> float:

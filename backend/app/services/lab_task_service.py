@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import math
+import uuid
 from datetime import datetime, timedelta, UTC
 
 from sqlalchemy import select, func
@@ -243,6 +244,7 @@ async def _assign_and_start(db, task: LabTask) -> None:
 
 async def _start_run(db, task: LabTask) -> LabRun:
     from app.lab import queue as lab_queue
+    from app.models.lab_event import OutboxEvent
 
     budget_cents = int(round(settings.lab_default_budget_usd * 100))
     run = LabRun(
@@ -250,10 +252,20 @@ async def _start_run(db, task: LabTask) -> LabRun:
         status="queued", scopes_json=list(task.scopes_json or []), budget_usd_cents=budget_cents,
     )
     db.add(run)
-    await db.commit()
-    await db.refresh(run)
+    await db.flush()  # populate run.id without committing
     task.accepted_run_id = run.id
-    await db.commit()
+    # Durable dispatch (recovery plan Phase 2, gap #9): the run, its accepted-run
+    # link, and a ``lab.run.enqueue`` outbox event commit in ONE transaction, so a
+    # crash between the commit and the Redis LPUSH cannot lose the run — the outbox
+    # dispatcher replays the enqueue. The inline enqueue below is the fast path;
+    # duplicate delivery is idempotent (the runner's queued-guard + the run lease
+    # skip a run already picked up).
+    db.add(OutboxEvent(
+        event_id=str(uuid.uuid4()), tenant_id=task.issuer_user_id, run_id=run.id,
+        topic="lab.run.enqueue", payload_json={"run_id": run.id},
+    ))
+    await db.commit()  # run + accepted_run_id + enqueue outbox, one transaction
+    await db.refresh(run)
     await lab_queue.enqueue_run(run.id)
     return run
 
