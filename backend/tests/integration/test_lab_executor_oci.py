@@ -15,6 +15,8 @@ runtime: no host FS, no network, no docker socket, non-root, read-only rootfs,
 pids/wall-clock quotas, and verified teardown — plus the Broker-only boundary.
 """
 import json
+import os
+import platform
 import subprocess
 
 import pytest
@@ -25,10 +27,32 @@ pytestmark = pytest.mark.lab_oci
 
 _IMAGE = "alpine:latest"
 
+# Dedicated-gate mode (recovery plan Phase 8): with LAB_OCI_REQUIRED=1 a missing
+# prerequisite FAILS the suite instead of skipping it, so a "green" run on the
+# dedicated Linux runner cannot be an all-skipped no-op. It also asserts the host
+# is genuinely a qualifying rootless-Linux-cgroup-v2 runtime, not colima/Docker
+# Desktop on macOS (which the PRD explicitly rejects as production evidence).
+_REQUIRED = os.environ.get("LAB_OCI_REQUIRED") == "1"
+
 
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+def _require_or_skip(reason: str) -> None:
+    if _REQUIRED:
+        pytest.fail(f"LAB_OCI_REQUIRED=1 but {reason}")
+    pytest.skip(reason)
+
+
+def _docker_info() -> str:
+    try:
+        return subprocess.run(
+            ["docker", "info"], capture_output=True, timeout=15, text=True
+        ).stdout or ""
+    except Exception:
+        return ""
 
 
 def _docker_available() -> bool:
@@ -49,13 +73,26 @@ def _image_available() -> bool:
 
 @pytest.fixture(scope="module")
 def oci_ready():
-    """Skip the whole module (don't fail) when the real runtime isn't here. The
-    probe runs only when a lab_oci test executes, so the default gate never pays
-    for it."""
+    """Skip the whole module (don't fail) when the real runtime isn't here, UNLESS
+    LAB_OCI_REQUIRED=1 — then every missing prerequisite fails, and the host must
+    prove it is a qualifying rootless-Linux-cgroup-v2 runtime. The probe runs only
+    when a lab_oci test executes, so the default gate never pays for it."""
+    if _REQUIRED:
+        # Discriminate the dedicated Linux runner from colima/Docker Desktop:
+        if platform.system() != "Linux":
+            pytest.fail(
+                "LAB_OCI_REQUIRED=1 but the test host is not Linux "
+                f"({platform.system()}); colima/Docker Desktop is dev-grade, not production evidence"
+            )
+        info = _docker_info().lower()
+        if "cgroup version: 2" not in info:
+            pytest.fail("LAB_OCI_REQUIRED=1 but docker does not report the unified cgroup v2 hierarchy")
+        if "rootless" not in info:
+            pytest.fail("LAB_OCI_REQUIRED=1 but docker is not rootless")
     if not _docker_available():
-        pytest.skip("docker unavailable (colima not running) — lab_oci evidence not collectable here")
+        _require_or_skip("docker unavailable (daemon not running) — lab_oci evidence not collectable here")
     if not _image_available():
-        pytest.skip(f"image {_IMAGE} not pulled — `docker pull {_IMAGE}` to collect evidence")
+        _require_or_skip(f"image {_IMAGE} not pulled — `docker pull {_IMAGE}` to collect evidence")
 
 
 def _ex(**limit_over) -> OciExecutor:

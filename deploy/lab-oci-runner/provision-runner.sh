@@ -36,6 +36,24 @@ if ! command -v "$RUNNER" >/dev/null 2>&1; then
 fi
 "$RUNNER" info >/dev/null || { echo "$RUNNER not usable rootless — fix before collecting evidence"; exit 3; }
 
+log "1b. cgroup v2 controller delegation for the rootless user"
+# WITHOUT this, a rootless daemon cannot set CPU limits and every ``docker run``
+# with ``--cpus`` fails: "NanoCPUs can not be set, as your kernel does not
+# support CPU CFS scheduler or the cgroup is not mounted" (exit 125). By default
+# systemd delegates only ``memory pids`` to user slices; the OCI executor also
+# needs ``cpu``/``cpuset``. This drop-in delegates them; re-log the user (or
+# ``systemctl restart user@$(id -u).service``) so it takes effect.
+DELEGATED="$(cat "/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers" 2>/dev/null || echo '')"
+if ! echo "$DELEGATED" | grep -qw cpu; then
+  echo "delegating cpu/cpuset (current: ${DELEGATED:-none})"
+  sudo mkdir -p /etc/systemd/system/user@.service.d
+  printf '[Service]\nDelegate=cpu cpuset io memory pids\n' | sudo tee /etc/systemd/system/user@.service.d/delegate.conf >/dev/null
+  sudo systemctl daemon-reload
+  echo "NOTE: re-login this user (or 'sudo systemctl restart user@$(id -u).service' after stopping rootless docker) so cpu/cpuset delegation applies, then re-run."
+else
+  echo "cpu already delegated: $DELEGATED"
+fi
+
 log "2. security posture checks (must be enabled for production-grade evidence)"
 # seccomp: docker applies the default profile unless --security-opt seccomp=unconfined.
 # AppArmor: kernel module must be loaded; docker applies docker-default.

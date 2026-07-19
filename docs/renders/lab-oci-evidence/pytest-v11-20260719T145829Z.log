@@ -1,0 +1,35 @@
+=== host fingerprint ===
+Linux arm 6.8.0-1047-oracle #48~22.04.1-Ubuntu SMP Sun Mar  8 03:21:31 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+ Storage Driver: overlayfs
+ Cgroup Version: 2
+  rootless
+ Architecture: aarch64
+=== V11 run ===
+============================= test session starts ==============================
+platform linux -- Python 3.11.14, pytest-9.1.1, pluggy-1.6.0 -- /home/ubuntu/sv/backend/.venv-oci/bin/python
+rootdir: /home/ubuntu/sv/backend
+configfile: pyproject.toml
+plugins: anyio-4.14.2, asyncio-1.4.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 11 items
+
+tests/integration/test_lab_executor_oci.py::test_scratch_writable_but_no_host_bind PASSED [  9%]
+tests/integration/test_lab_executor_oci.py::test_no_network_egress_blocked PASSED [ 18%]
+tests/integration/test_lab_executor_oci.py::test_no_network_metadata_endpoint_unreachable PASSED [ 27%]
+tests/integration/test_lab_executor_oci.py::test_no_docker_socket_in_container PASSED [ 36%]
+tests/integration/test_lab_executor_oci.py::test_runs_as_non_root PASSED [ 45%]
+tests/integration/test_lab_executor_oci.py::test_readonly_rootfs_scratch_writable PASSED [ 54%]
+tests/integration/test_lab_executor_oci.py::test_pids_limit_bounds_fork_storm PASSED [ 63%]
+tests/integration/test_lab_executor_oci.py::test_wall_clock_timeout_kills_container PASSED [ 72%]
+tests/integration/test_lab_executor_oci.py::test_teardown_removes_container PASSED [ 81%]
+tests/integration/test_lab_executor_oci.py::test_oversized_output_is_capped PASSED [ 90%]
+tests/integration/test_lab_executor_oci.py::test_broker_executor_runs_code_action_and_returns_clean_result PASSED [100%]
+
+=============================== warnings summary ===============================
+app/routers/onboarding.py:45
+  /home/ubuntu/sv/backend/app/routers/onboarding.py:45: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class ResidentResponse(BaseModel):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================== 11 passed, 1 warning in 12.31s ========================
+V11_EXIT=0

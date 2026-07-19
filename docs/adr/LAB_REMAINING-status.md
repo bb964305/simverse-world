@@ -244,11 +244,36 @@ remaining; **[BLOCKED]** = external infrastructure.
     publisher wiring + loop start are a deployment step (Phase 8), so a
     post-commit publish failure is now REPLAYABLE by design, pending activation.
 
+## Phase 8 — OCI isolation V11: PROVEN on a dedicated Linux runner (2026-07-19)
+
+The V11 adversarial OCI-isolation suite now passes on a **real dedicated Linux
+runner** (`100.93.72.102`: Oracle Cloud aarch64, Ubuntu 22.04, kernel
+6.8.0-oracle, **rootless Docker 29.2.1, cgroup v2, AppArmor, in-container
+Seccomp=2**), no longer only colima/dev-grade:
+
+- `LAB_OCI_IMAGE=alpine:latest LAB_OCI_REQUIRED=1 pytest -m lab_oci
+  tests/integration/test_lab_executor_oci.py` → **11 passed, 0 skipped, 0 failed**.
+- A new `LAB_OCI_REQUIRED=1` dedicated-gate mode makes a missing
+  Linux/daemon/image/rootless/cgroup-v2 prerequisite FAIL rather than skip, so a
+  green run cannot be an all-skipped no-op. The first run legitimately caught a
+  real setup defect (rootless CPU cgroup not delegated → every `--cpus` run
+  failed 125); after delegating `cpu cpuset` all 11 pass. `provision-runner.sh`
+  now performs that delegation.
+- Evidence bundle: `docs/renders/lab-oci-evidence/` (host fingerprint, cgroup
+  delegation, seccomp/AppArmor posture, full pytest log).
+
+Honest boundary: this proves the executor's isolation contract on a qualifying
+host; it does NOT flip `lab_oci_enabled` (still `False`, pending a staging
+canary), and it is NOT P7 — no real Adapter endpoint exists on this runner.
+
 ## External blockers
 
-- Real Hermes/OpenClaw/computer-use endpoints and credentials for V04-V06.
-- A dedicated Linux runner with rootless OCI, cgroup v2, seccomp/AppArmor, and
-  controlled egress for V11.
+- **Real Hermes/OpenClaw/computer-use endpoints and credentials for V04-V06 (P7).**
+  STILL BLOCKED: the `100.93.72.102` runner is an OCI execution host, not an
+  agent-runtime provider; no real runtime endpoint is configured anywhere. The
+  ADR stays 未选型; no scores were fabricated.
+- ~~A dedicated Linux runner with rootless OCI... for V11.~~ **RESOLVED** — see the
+  Phase 8 section above; the qualifying runner exists and V11 passes on it.
 - Staging services/identities for kill, rollback, chaos, capacity, and alert
   exercises.
 - First-party license/purchase evidence or replacement assets for the 16 blocked

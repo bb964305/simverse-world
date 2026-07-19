@@ -1,0 +1,23 @@
+# Lab OCI V11 isolation evidence — 20260719T145829Z
+## host fingerprint
+Linux arm 6.8.0-1047-oracle #48~22.04.1-Ubuntu SMP Sun Mar  8 03:21:31 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+NAME="Ubuntu"
+VERSION="22.04.5 LTS (Jammy Jellyfish)"
+## cgroup v2 + delegated controllers (rootless user 1001)
+fs type: cgroup2fs
+delegated: cpuset cpu io memory pids
+## LSM (kernel)
+lockdown,capability,landlock,yama,apparmor
+## docker (rootless daemon)
+ Server Version: 29.2.1
+ Storage Driver: overlayfs
+ Cgroup Driver: systemd
+ Cgroup Version: 2
+  rootless
+ Kernel Version: 6.8.0-1047-oracle
+ Architecture: aarch64
+## in-container seccomp (2 = filtered) + no-new-privs
+NoNewPrivs:	0
+Seccomp:	2
+Seccomp_filters:	1
+## in-container apparmor profile
