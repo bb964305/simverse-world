@@ -1,4 +1,4 @@
-"""T1 — adapter-selection fail-closed guard (hard-constraint #1).
+"""T1 / recovery-plan Phase 1 — adapter-selection fail-closed guard.
 
 No real runtime endpoint is configured in this session (ADR
 `docs/adr/ADR-lab-runtime-adapter.md` stays 未选型 / undecided; the written
@@ -10,8 +10,10 @@ fabricate a real adapter while it is unconfigured:
 - each real HTTP adapter is import-safe but *fail-closed* — ``start()`` raises
   ``LabAdapterUnconfigured`` while its ``base_url`` is empty, so a run can never
   proceed against a runtime we cannot actually exercise;
-- the adapter registry degrades unknown/real-unconfigured names to Mock rather
-  than hard-crashing the runner.
+- adapter *resolution* is fail-closed: only an explicit ``mock`` selects Mock.
+  An unknown name, an empty/implicit name, or a real adapter whose import fails
+  raises ``LabAdapterUnavailable`` — the registry must NOT degrade to Mock, so a
+  configured real runtime cannot silently execute Mock work.
 
 If real endpoints are later provisioned, these assertions on the *default*
 (empty) settings still hold under test config; the live evaluation is a
@@ -21,7 +23,11 @@ import pytest
 
 from app.config import settings
 from app.lab.sandbox import get_adapter
-from app.lab.sandbox.base import LabAdapterUnconfigured, RunSpec
+from app.lab.sandbox.base import (
+    LabAdapterUnavailable,
+    LabAdapterUnconfigured,
+    RunSpec,
+)
 from app.lab.sandbox.computer_use import ComputerUseAdapter
 from app.lab.sandbox.hermes import HermesAdapter
 from app.lab.sandbox.mock import MockAdapter
@@ -63,16 +69,48 @@ async def test_real_adapter_start_is_fail_closed_when_unconfigured(adapter_cls):
         await adapter.start(_spec())
 
 
-def test_registry_returns_mock_and_degrades_unknown_to_mock():
+def test_registry_returns_mock_only_for_explicit_mock():
+    # Explicit mock is the ONLY name that resolves to Mock.
     assert isinstance(get_adapter("mock"), MockAdapter)
-    assert isinstance(get_adapter(""), MockAdapter)
-    assert isinstance(get_adapter("no_such_runtime"), MockAdapter)
+    assert isinstance(get_adapter("MOCK"), MockAdapter)
+
+
+def test_registry_fails_closed_on_unknown_name():
+    # Fail-closed: an unknown runtime must raise, NOT degrade to Mock. Otherwise
+    # a misconfigured deployment would silently run Mock while claiming a real
+    # runtime.
+    with pytest.raises(LabAdapterUnavailable):
+        get_adapter("no_such_runtime")
+
+
+def test_registry_fails_closed_on_empty_or_implicit_name():
+    # Empty / whitespace / None is not an explicit mock selection.
+    with pytest.raises(LabAdapterUnavailable):
+        get_adapter("")
+    with pytest.raises(LabAdapterUnavailable):
+        get_adapter("   ")
+    with pytest.raises(LabAdapterUnavailable):
+        get_adapter(None)  # type: ignore[arg-type]
 
 
 def test_registry_returns_real_adapters_by_name_still_unconfigured():
     # Named real adapters construct (import-safe) but carry no endpoint, so any
-    # run through them will fail-closed at start().
+    # run through them will fail-closed at start() — that is fail-closed, not a
+    # silent Mock substitution.
     assert isinstance(get_adapter("hermes"), HermesAdapter)
     assert get_adapter("hermes").base_url == ""
     assert isinstance(get_adapter("openclaw"), OpenClawAdapter)
     assert isinstance(get_adapter("computer_use"), ComputerUseAdapter)
+
+
+def test_registry_reraises_import_failure_as_unavailable(monkeypatch):
+    # If a real adapter's import/construct fails, resolution must fail closed,
+    # not fall back to Mock.
+    import app.lab.sandbox.hermes as hermes_mod
+
+    def _boom(*a, **k):
+        raise ImportError("simulated missing optional dependency")
+
+    monkeypatch.setattr(hermes_mod, "HermesAdapter", _boom)
+    with pytest.raises(LabAdapterUnavailable):
+        get_adapter("hermes")

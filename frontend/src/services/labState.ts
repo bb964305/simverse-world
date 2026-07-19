@@ -53,6 +53,18 @@ function badge(value: string | null | undefined, labels: Record<string, string>)
   return label ? { value: v, label, known: true } : { value: v || 'unknown', label: '未知状态', known: false }
 }
 
+// Single derivation point for the currently-selected task. The panel holds
+// `tasks` (list) and `selected` (id) separately; deriving the task object once
+// here keeps the status badge, TaskActions, and any live view reading the SAME
+// source instead of an out-of-scope variable (the Phase 1 build regression).
+export function selectLabTask<T extends { id: string }>(
+  tasks: readonly T[],
+  selected: string | null | undefined,
+): T | undefined {
+  if (!selected) return undefined
+  return tasks.find((t) => t.id === selected)
+}
+
 export function resolveLabDisplay(input: LabDisplayInput): LabDisplay {
   const task = badge(input.taskStatus, TASK_LABELS)
   const run = input.runStatus == null || input.runStatus === '' ? null : badge(input.runStatus, RUN_LABELS)

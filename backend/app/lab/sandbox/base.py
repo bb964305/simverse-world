@@ -87,6 +87,14 @@ class LabAdapterUnconfigured(RuntimeError):
     the external runtime (spec §13 P2: 空串=未配置, 无外部依赖也必须能 import)."""
 
 
+class LabAdapterUnavailable(RuntimeError):
+    """Raised by ``get_adapter`` when a requested runtime cannot be resolved:
+    an unknown name, an empty/implicit name, or a real adapter whose import
+    fails. Resolution is fail-closed — a configured runtime must never silently
+    fall back to Mock and execute Mock work (recovery plan Phase 1). Only an
+    explicit ``mock`` selects Mock."""
+
+
 class HttpAgentAdapter:
     """Shared skeleton for HTTP-backed real adapters (OpenClaw / Hermes /
     computer-use). Subclasses set ``name`` and read their own base_url/api_key

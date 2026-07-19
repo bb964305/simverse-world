@@ -1,6 +1,30 @@
 import { describe, expect, it } from 'vitest'
-import { resolveLabDisplay } from './labState'
+import { resolveLabDisplay, selectLabTask } from './labState'
 import { artifactKindBadge, artifactStatusBadges } from './labArtifactBadges'
+
+describe('selectLabTask — single derivation point (Phase 1 build contract)', () => {
+  const tasks = [
+    { id: 't1', status: 'running' },
+    { id: 't2', status: 'review' },
+  ]
+
+  it('returns the selected task so status display + actions share one source', () => {
+    expect(selectLabTask(tasks, 't2')).toEqual({ id: 't2', status: 'review' })
+  })
+
+  it('returns undefined when nothing is selected or the id is missing', () => {
+    expect(selectLabTask(tasks, null)).toBeUndefined()
+    expect(selectLabTask(tasks, '')).toBeUndefined()
+    expect(selectLabTask(tasks, 'gone')).toBeUndefined()
+  })
+
+  it('feeds resolveLabDisplay: selected task + run render as separate badges', () => {
+    const t = selectLabTask(tasks, 't1')
+    const d = resolveLabDisplay({ taskStatus: t?.status, runStatus: 'succeeded' })
+    expect(d.task).toMatchObject({ value: 'running', known: true })
+    expect(d.run).toMatchObject({ value: 'succeeded', known: true })
+  })
+})
 
 describe('resolveLabDisplay — 6 rules', () => {
   it('rule 1: renders Task and Run canonical badges separately', () => {

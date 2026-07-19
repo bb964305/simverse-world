@@ -9,7 +9,7 @@ import {
   getWorldLocations, getMe,
   type LabResearcher, type LabTask, type LabRun, type LabRunStep, type LabArtifact, type WorldLocation,
 } from '../services/api'
-import { resolveLabDisplay } from '../services/labState'
+import { resolveLabDisplay, selectLabTask } from '../services/labState'
 import { artifactKindBadge, artifactStatusBadges } from '../services/labArtifactBadges'
 
 interface LabApproval { id: string; tool?: string | null; summary?: string; status?: string }
@@ -277,6 +277,9 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
     try { await cancelLabTask(id); onBalanceChange(); loadTasks() } catch { /* ignore */ }
   }
 
+  // Derive the selected task once; status display and TaskActions share it.
+  const selectedTask = selectLabTask(tasks, selected)
+
   return (
     <div className="game-lab-split" style={{ display: 'flex', gap: 12 }}>
       <div style={{ width: 200, borderRight: '1px solid var(--border)', paddingRight: 12 }}>
@@ -301,7 +304,7 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
             {run && (() => {
               // Dual state: Task and Run badges render separately (never merged);
               // a terminal run clears transient phase/approval (art-spec 6 rules).
-              const d = resolveLabDisplay({ taskStatus: task?.status, runStatus: run.status })
+              const d = resolveLabDisplay({ taskStatus: selectedTask?.status, runStatus: run.status })
               return <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 <span>任务 <b style={{ color: d.task.known ? ACCENT : '#a1a1aa' }}>{d.task.label}</b></span>
                 {d.run && <span>运行 <b style={{ color: d.run.known ? ACCENT : '#a1a1aa' }}>{d.run.label}</b></span>}
@@ -330,7 +333,7 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
               ))}
               {steps.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>暂无步骤</div>}
             </div>
-            <TaskActions task={tasks.find((t) => t.id === selected)} onSettle={settle} onCancel={cancel} />
+            <TaskActions task={selectedTask} onSettle={settle} onCancel={cancel} />
           </div>
         )}
       </div>
