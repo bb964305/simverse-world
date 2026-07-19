@@ -69,6 +69,21 @@ async def current_revision_id(db, location_slug: str | None = None) -> str | Non
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
+async def current_source_cursor(db) -> int:
+    """The durable ``seq`` of the latest ``world_changed`` event (the max
+    ``OutboxEvent.id`` on that topic), or 0 before any apply/revert. This is the
+    same monotonic cursor the WS envelope carries, so a snapshot reader
+    (``/world/locations``, Codex) can converge on exactly the revision the last
+    pushed event advanced to (art-spec V22: one common world_revision_id +
+    source_cursor across main map / minimap / Codex)."""
+    from sqlalchemy import func
+
+    val = (await db.execute(
+        select(func.max(OutboxEvent.id)).where(OutboxEvent.topic == "world_changed")
+    )).scalar_one_or_none()
+    return int(val or 0)
+
+
 async def _lore_spec(db, location_slug: str) -> dict | None:
     row = (await db.execute(
         select(DynamicMechanic).where(DynamicMechanic.code == f"lore:{location_slug}")

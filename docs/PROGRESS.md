@@ -23,6 +23,13 @@
 - [x] **落图**：`node expand-town-map.mjs` 生成前后端两份，`cmp` 字节一致。改动**完全限定**在 footprint+access（538 格全在区内，区外 0 格），backend map/pathfinder 测试 58 passed，前端 lint/tsc 绿。npm 加 `map:verify-art`。
 - **诚实边界（阻塞/延后）**：无缝墙体/家具像素（沙箱玻璃舱、服务器柜、Governor 投影台，interiors_pt 组合）与 `$visual-verdict ≥90` 需渲染+视觉迭代环境，本会话无法跑 → 归入 T4/A2/A5 视觉 QA。当前落图为**结构正确的 blockout**（可识别建筑轮廓 + 权威 Collisions + 可达性），furniture-body 碰撞随可见家具一并加入（现在加=亮地板隐形墙，art-spec 明禁）。
 
+## Kickoff LAB_REMAINING — T5 P3 后端 API 与投影（2026-07-19，Cowork）
+- [x] **既有（P1/P2 已落，实测覆盖）**：① cursor 事件 API `GET /runs/{id}/steps?after=<seq>`（stable seq 断点续读）；② 审批投影 `acl.approval_projection`→`allowed_actions/can_decide/decision_scope/status`，router 在 flag-on 时投影，`broker.decide_approval` 绑定 decider=owner/admin、伪造决策 409、非 owner/观察者 allowed_actions=[]（test_lab_approval_flow/tenant_acl 覆盖）；③ artifact digest 校验 `verify_and_get`（篡改 409 / ACL 404）。
+- [x] **part 3 artifact manifest（本次）**：`serialize_artifact` 增补 `producer_action_id`、`provenance`、`byte_size`（连同已存在的 `kind/sha256/scan_status/verification_status/retention_hold`），locked 也返回（只读元数据，additive/兼容）。
+- [x] **part 5 world 快照 revision 锚（本次，V22）**：`GET /world/locations` 返回 `world_revision_id`（最新 applied revision）+ `source_cursor`（`world_changed` outbox 最大 seq）；新增 `world_revision_service.current_source_cursor()`。测试证 cursor 从 0 起、apply 后 == WS 信封 seq、rev_id == 信封 world_revision_id → 主图/小地图/Codex 可收敛到同一 revision。
+- [x] **门禁**：新增 `test_lab_p3_projections.py`（3 绿）；artifact/task/e2e/world/governance/tenant_acl 回归 50 passed。
+- **remainder（记跟进，未阻塞）**：part 4「capability profiles」为较大设计项（命名 scope 包）——`deliverable_kind` 已是自由串且 `world_change` 可直接传入，正式的 profile 校验/枚举留后续；part 1 的 `LabRunStep/approvals_json` 兼容投影"弃用遥测"计数器未加。均非安全不变量，前端 T6 消费投影即可推进。
+
 - **Cowork 沙箱环境备忘（后续 T 复用）**：① host 的 `backend/.venv`（macOS 路径 shebang）与 `frontend/node_modules`（darwin-arm64 原生 binding）在 Linux 沙箱不可用；用 `uv venv --python 3.12 /tmp/svenv` + `uv pip install`（含 anthropic）建后端环境；前端补 `@rolldown/binding-linux-arm64-gnu@1.0.0-rc.12` 后 vitest/vite 可跑。② 后端需 Python ≥3.11（`from datetime import UTC`），沙箱默认 3.10 不行。③ 测试统一用 `DATABASE_URL=sqlite+aiosqlite:////tmp/svglobal.db` 规避 mount SQLite；`vite build` 用 `--outDir /tmp/svdist` 规避 mount `emptyDir` unlink EPERM。④ git：`.git/HEAD.lock` 陈旧锁 mount 上不可 unlink → 提交走 `git write-tree` + `git commit-tree -p HEAD` + 直接覆写 `.git/refs/heads/<branch>` 松散 ref（不锁 HEAD）；对象临时文件 EPERM 警告无害。
 
 ## Phase 0 — 止血（OPTIMIZATION_PLAN §2）

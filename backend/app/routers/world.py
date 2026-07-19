@@ -12,10 +12,16 @@ router = APIRouter(prefix="/world", tags=["world"])
 @router.get("/locations")
 async def get_locations(db: AsyncSession = Depends(get_db)):
     from app.agent import map_data
+    from app.services import world_revision_service as wrsvc
 
     # Idempotent re-merge so a caller always gets the freshest overlay even if a
     # reload signal was missed (e.g. this worker just started).
     await map_data.load_dynamic_locations()
+    # Revision anchor so main map / minimap / Codex commit at ONE common
+    # revision (art-spec V22). source_cursor is the durable world_changed seq;
+    # world_revision_id is the latest applied revision.
+    world_revision_id = await wrsvc.current_revision_id(db)
+    source_cursor = await wrsvc.current_source_cursor(db)
     out = []
     for slug, loc in map_data.LOCATIONS.items():
         bounds = loc.get("bounds")
@@ -33,4 +39,8 @@ async def get_locations(db: AsyncSession = Depends(get_db)):
             "boosted_actions": loc.get("boosted_actions", []),
             "dynamic": slug in map_data._dynamic_slugs,
         })
-    return {"locations": out}
+    return {
+        "locations": out,
+        "world_revision_id": world_revision_id,
+        "source_cursor": source_cursor,
+    }

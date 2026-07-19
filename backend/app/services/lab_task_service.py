@@ -94,7 +94,9 @@ def serialize_artifact(a: LabArtifact, unlocked: bool) -> dict:
         "id": a.id, "run_id": a.run_id, "task_id": a.task_id,
         "kind": a.kind, "title": a.title, "unlocked": unlocked,
         "created_at": a.created_at.isoformat() if a.created_at else None,
-        "sha256": a.sha256, "scan_status": a.scan_status,
+        "sha256": a.sha256, "byte_size": a.byte_size,
+        "producer_action_id": a.producer_action_id, "provenance": a.provenance,
+        "scan_status": a.scan_status,
         "verification_status": a.verification_status, "retention_hold": a.retention_hold,
     }
     if unlocked:
