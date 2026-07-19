@@ -332,18 +332,17 @@ code deliverable is landed:
 
 Genuinely remaining — none of it a code task I can complete unilaterally:
 
-1. **`$visual-verdict ≥90` subjective pass** — a screenshot-scoring QA of the
-   running app. ATTEMPTED 2026-07-20: stood the full stack up on free ports
-   (backend `0.0.0.0:8010` → `{"status":"ok"}`, frontend served HTTP 200, a lab
-   task seeded to `assigned`) — the app RUNS. The browser session is then blocked
-   by the environment: the macOS system proxy (`127.0.0.1:1082`) routes the
-   browser's requests — even LAN and Tailscale IPs — and cannot reach the locally
-   bound servers, so every navigation is a Chrome error page (curl reaches them
-   fine with `--noproxy`). The only fix, changing the system proxy, is a
-   prohibited system-settings change, and `$visual-verdict` is not in the
-   available skill set. The UI it grades (four-track timeline, reduced-motion,
-   truthful states) is built and unit-tested; what remains is the subjective
-   score, not code.
+1. **Frontend visual verification — DONE (2026-07-20).** The full stack was run
+   end to end (backend + frontend + Redis on `127.0.0.1` — the macOS system proxy
+   bypasses localhost, so Chrome reaches it; LAN/Tailscale IPs get hijacked by the
+   proxy). Authenticated as a seeded player, entered the game, opened the 实验楼
+   panel, and confirmed all three tabs render — including the **four-track timeline
+   live**: 任务/运行/阶段/连接 as four separate truthful tracks (assigned / queued /
+   `—` / online), adapter + cancel control present. No blocking visual defect.
+   Evidence: `docs/renders/lab-visual-evidence/`. What is NOT done is the formal
+   `$visual-verdict ≥90` scored multi-viewport sweep — that scoring skill is not in
+   this environment's toolset; reduced-motion/frozen states are unit-tested, and a
+   scored desktop/tablet/mobile pass remains a manual QA step.
 2. **Externally BLOCKED (verified, never faked):** P7 real Adapter (no
    Hermes/OpenClaw/computer-use endpoint exists anywhere — probed the runner host);
    Phase 10 asset licensing (16 manifest entries need first-party license/purchase
