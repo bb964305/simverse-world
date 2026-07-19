@@ -1,6 +1,26 @@
 import { describe, expect, it } from 'vitest'
-import { resolveLabDisplay, selectLabTask } from './labState'
+import { resolveLabDisplay, selectLabTask, canDecideApproval, approvalId } from './labState'
 import { artifactKindBadge, artifactStatusBadges } from './labArtifactBadges'
+
+describe('canDecideApproval — server-authoritative controls (Phase 5)', () => {
+  it('v1 projection: only an owner with allowed approve + can_decide may decide', () => {
+    expect(canDecideApproval({ allowed_actions: ['approve', 'deny'], can_decide: true, status: 'pending' })).toBe(true)
+    // observer / non-owner: server returns no actions and can_decide false
+    expect(canDecideApproval({ allowed_actions: [], can_decide: false, status: 'pending' })).toBe(false)
+    // can_decide true but server did not grant approve (e.g. already decided scope)
+    expect(canDecideApproval({ allowed_actions: [], can_decide: true, status: 'pending' })).toBe(false)
+  })
+
+  it('legacy flag-off path (no projection) falls back to pending status', () => {
+    expect(canDecideApproval({ status: 'pending' })).toBe(true)
+    expect(canDecideApproval({ status: 'approved' })).toBe(false)
+  })
+
+  it('approvalId prefers the v1 projection id, falls back to the legacy id', () => {
+    expect(approvalId({ approval_id: 'a1', id: 'legacy' })).toBe('a1')
+    expect(approvalId({ id: 'legacy' })).toBe('legacy')
+  })
+})
 
 describe('selectLabTask — single derivation point (Phase 1 build contract)', () => {
   const tasks = [

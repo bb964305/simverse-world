@@ -4,15 +4,14 @@ import { bridge } from '../game/phaserBridge'
 import { onWSMessage } from '../services/ws'
 import { useGameStore } from '../stores/gameStore'
 import {
-  listLabResearchers, createLabTask, getLabTasks, getLabTask,
+  listLabResearchers, createLabTask, getLabTasks, getLabTask, getLabRun,
   cancelLabTask, acceptLabResult, rejectLabResult, getLabRunSteps, respondLabApproval,
   getWorldLocations, getMe,
-  type LabResearcher, type LabTask, type LabRun, type LabRunStep, type LabArtifact, type WorldLocation,
+  type LabResearcher, type LabTask, type LabRun, type LabRunStep, type LabArtifact,
+  type LabApproval, type WorldLocation,
 } from '../services/api'
-import { resolveLabDisplay, selectLabTask } from '../services/labState'
+import { resolveLabDisplay, selectLabTask, canDecideApproval, approvalId } from '../services/labState'
 import { artifactKindBadge, artifactStatusBadges } from '../services/labArtifactBadges'
-
-interface LabApproval { id: string; tool?: string | null; summary?: string; status?: string }
 
 // ExperimentPanel — Lab / 实验楼 entry panel (spec §9). Self-mounted in TopNav.
 // Panel-local state (spec sanctions this over a store slice); live run steps come
@@ -217,8 +216,14 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
     let cancelled = false
     const pull = async () => {
       try {
-        const { run: r } = await getLabTask(selected)
+        let r = (await getLabTask(selected)).run
         if (cancelled) return
+        if (r) {
+          // Load the server-authoritative run projection so approval controls
+          // reflect allowed_actions/can_decide, not the legacy approvals blob.
+          try { r = await getLabRun(r.id) } catch { /* keep the getLabTask run */ }
+          if (cancelled) return
+        }
         runRef.current = r
         setRun(r)
         if (r) {
@@ -312,19 +317,25 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
                 <span>适配器 {run.adapter}</span>
               </div>
             })()}
-            {run && (run.approvals as LabApproval[] | undefined || [])
-              .filter((a) => a.status === 'pending').map((a) => (
-              <div key={a.id} style={{
+            {run && ((run.approvals as LabApproval[] | undefined) || [])
+              // Render approve/deny ONLY when the SERVER says this viewer may
+              // decide (allowed_actions/can_decide); observers and non-owners get
+              // no controls. Legacy flag-off falls back to pending status.
+              .filter((a) => canDecideApproval(a)).map((a) => {
+              const aid = approvalId(a)
+              return (
+              <div key={aid} style={{
                 border: '1px solid #f59e0b66', background: '#f59e0b12', borderRadius: 8,
                 padding: 10, marginBottom: 8,
               }}>
                 <div style={{ fontSize: 12, marginBottom: 6 }}>⚠️ 敏感动作待批准：{a.summary || a.tool}</div>
                 <div style={{ display: 'flex', gap: 8 }}>
-                  <button onClick={async () => { await respondLabApproval(run.id, a.id, true); }} style={btn(ACCENT)}>批准</button>
-                  <button onClick={async () => { await respondLabApproval(run.id, a.id, false); }} style={btn('#ef4444')}>拒绝</button>
+                  <button onClick={async () => { if (aid) await respondLabApproval(run.id, aid, true); }} style={btn(ACCENT)}>批准</button>
+                  <button onClick={async () => { if (aid) await respondLabApproval(run.id, aid, false); }} style={btn('#ef4444')}>拒绝</button>
                 </div>
               </div>
-            ))}
+              )
+            })}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 300, overflowY: 'auto' }}>
               {steps.map((s) => (
                 <div key={`${s.run_id}-${s.seq}`} style={{ fontSize: 12, lineHeight: 1.5 }}>

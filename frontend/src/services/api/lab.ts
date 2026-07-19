@@ -31,6 +31,23 @@ export interface LabTask {
   completed_at: string | null
 }
 
+// Server-authoritative approval projection (backend acl.approval_projection).
+// The v1 GET /lab/runs/{id} returns these fields; the flag-off legacy path
+// returns only id/tool/summary/status, so the projection fields are optional and
+// the frontend must never invent authority the server didn't grant.
+export interface LabApproval {
+  approval_id?: string          // v1 projection id
+  id?: string                   // legacy approvals_json id
+  action_id?: string | null
+  allowed_actions?: string[]    // present only on the v1 projection
+  can_decide?: boolean
+  decision_scope?: string | null
+  status?: string               // pending|approved|denied|expired
+  tool?: string | null
+  summary?: string
+  preview?: unknown
+}
+
 export interface LabRun {
   id: string
   task_id: string
@@ -40,7 +57,7 @@ export interface LabRun {
   scopes: string[]
   budget_usd_cents: number
   cost_usd_cents: number
-  approvals: unknown[]
+  approvals: LabApproval[]
   error: string | null
   started_at: string | null
   ended_at: string | null

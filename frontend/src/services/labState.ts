@@ -53,6 +53,35 @@ function badge(value: string | null | undefined, labels: Record<string, string>)
   return label ? { value: v, label, known: true } : { value: v || 'unknown', label: '未知状态', known: false }
 }
 
+// ── Agent v1 approval authority (server-authoritative) ─────────────────
+// The panel must render approve/deny ONLY when the SERVER says the viewer may
+// decide — never inferred from local state — so an observer or non-owner sees no
+// controls (recovery plan Phase 5). When the v1 projection is present we honor
+// allowed_actions + can_decide; on the flag-off legacy path (no projection) we
+// fall back to the pending status the legacy blob carried.
+
+export interface ApprovalLike {
+  approval_id?: string
+  id?: string
+  allowed_actions?: string[]
+  can_decide?: boolean
+  status?: string
+}
+
+export function approvalId(a: ApprovalLike): string | undefined {
+  return a.approval_id ?? a.id
+}
+
+export function canDecideApproval(a: ApprovalLike): boolean {
+  if (a.allowed_actions !== undefined) {
+    // v1 projection is authoritative: both the capability and a live pending
+    // decision must be present.
+    return a.can_decide === true && a.allowed_actions.includes('approve')
+  }
+  // Legacy flag-off path: the blob only exposes status.
+  return a.status === 'pending'
+}
+
 // Single derivation point for the currently-selected task. The panel holds
 // `tasks` (list) and `selected` (id) separately; deriving the task object once
 // here keeps the status badge, TaskActions, and any live view reading the SAME
