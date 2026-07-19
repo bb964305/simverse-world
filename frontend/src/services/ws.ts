@@ -1,7 +1,14 @@
 import { useGameStore } from '../stores/gameStore'
 import { bridge } from '../game/phaserBridge'
+import {
+  INITIAL_CONVERGENCE, isNewerRevision, advanceConvergence, type WorldConvergence,
+} from './worldRevision'
 
 let socket: WebSocket | null = null
+// Highest applied world source_cursor, so a re-delivered world_changed cannot
+// fire a duplicate convergence effect (Phase 9). A reconnect refetches world
+// state through the normal 'world:changed' consumers, which converge forward.
+let worldConvergence: WorldConvergence = INITIAL_CONVERGENCE
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 // Consecutive failed-connection counter driving the exponential backoff.
 // Reset to 0 when the server confirms auth (auth_ok) — that is the only
@@ -82,8 +89,15 @@ export function connectWS(): void {
       // World governance: an applied/reverted proposal changed the map. Minimap
       // /codex re-pull GET /world/locations on this signal (they listen for the
       // bridge event); the dynamic layer is runtime data, not a compile-time key.
+      // Revision-aware convergence (Phase 9): only emit when the world_changed
+      // source_cursor (seq) advances past what we've applied, so a re-delivered
+      // or out-of-order event cannot trigger a duplicate convergence/refetch.
       if (data.type === 'world_changed') {
-        bridge.emit('world:changed')
+        const ev = { seq: Number(data.seq ?? 0), world_revision_id: (data.world_revision_id as string) ?? null }
+        if (isNewerRevision(worldConvergence, ev)) {
+          worldConvergence = advanceConvergence(worldConvergence, ev)
+          bridge.emit('world:changed')
+        }
       }
       // Handle online players
       if (data.type === 'player_moved') {
