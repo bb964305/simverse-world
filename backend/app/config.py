@@ -171,6 +171,7 @@ class Settings(BaseSettings):
     lab_creator_share: float = 0.2          # researcher's creator gets this share of reward_sc; rest → treasury
     lab_platform_fee_rate: float = 0.1      # platform fee added on top of reward (fee = ceil(reward*rate)) → sink
     lab_max_concurrent_runs: int = 3        # global cap on concurrently-running runs
+    lab_max_concurrent_per_researcher: int = 1  # per-researcher cap on concurrently-running runs (0 = disabled)
     lab_daily_tasks_per_user: int = 20      # per-player daily task-publish cap
     lab_default_budget_usd: float = 0.5     # per-run LLM/compute budget ceiling
     lab_sc_per_usd: int = 100               # SC↔USD conversion (price scopes / validate reward vs budget)

@@ -257,9 +257,47 @@ async def run_one(run_id: str) -> None:
                 logger.error("lab task fail/refund failed for %s", task.id, exc_info=True)
 
 
+async def _reconcile_slots_safe() -> None:
+    """Heal any concurrency slot leaked by a prior crashed Runner (re-sync the
+    Redis counters to the DB's true active-run count). Never raises."""
+    try:
+        from app.database import async_session
+        from app.lab import concurrency
+        async with async_session() as db:
+            await concurrency.reconcile(db)
+    except Exception:
+        logger.warning("lab concurrency reconcile failed", exc_info=True)
+
+
+async def _process_run(run_id: str) -> str:
+    """Peek the dequeued run, reserve a concurrency slot, execute, release.
+    Extracted from ``runner_loop`` so the admission cap is unit-testable. Returns:
+    ``"ran"`` (executed), ``"full"`` (cap reached — caller requeues + backs off),
+    or ``"skipped"`` (run vanished or was cancelled/terminal before pickup)."""
+    from app.database import async_session
+    from app.lab import concurrency
+    slug = status = None
+    async with async_session() as db:
+        run = await db.get(LabRun, run_id)
+        if run is None:
+            return "skipped"
+        slug, status = run.researcher_slug, run.status
+    if status != "queued":
+        return "skipped"  # cancelled / already terminal before a Runner picked it up
+    if not await concurrency.try_reserve(researcher_slug=slug):
+        return "full"
+    try:
+        await run_one(run_id)
+        return "ran"
+    finally:
+        await concurrency.release(researcher_slug=slug)
+
+
 async def runner_loop() -> None:
     """Long-lived consume loop for the standalone Lab Runner process."""
     logger.info("lab runner loop started (adapter default=%s)", settings.lab_adapter)
+    await _reconcile_slots_safe()  # heal a slot leaked by a prior crashed runner
+    i = 0
     while True:
         try:
             run_id = await lab_queue.dequeue_run(timeout=5)
@@ -272,9 +310,20 @@ async def runner_loop() -> None:
                 await asyncio.sleep(2.0)
                 continue
             try:
-                await run_one(run_id)
-            finally:
+                outcome = await _process_run(run_id)
+            except Exception:
+                logger.warning("lab run %s processing error; continuing", run_id, exc_info=True)
+                outcome = "error"
+            if outcome == "full":
+                # Global/per-researcher cap reached: requeue and back off so a
+                # freed slot lets it in later. Do NOT ack (it stays queued).
+                await lab_queue.requeue_run(run_id)
+                await asyncio.sleep(1.0)
+            else:
                 await lab_queue.ack_run(run_id)
+            i += 1
+            if i % 50 == 0:
+                await _reconcile_slots_safe()
         except asyncio.CancelledError:
             break
         except Exception:
