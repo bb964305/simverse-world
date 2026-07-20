@@ -57,3 +57,15 @@ Reproduce:
   `../lab-oci-evidence/`); and a staging canary.
 - The server currently completes the loop then serves buffered steps via the same
   poll-with-cursor protocol; live incremental streaming is a follow-up.
+
+## Real-socket deployment proof (2026-07-20)
+
+The reference runtime was also run as a STANDALONE HTTP SERVICE over a real socket
+(`python -m app.lab.runtime_ref.server` on 127.0.0.1:8900) and driven over real
+HTTP + the real LLM (`real-socket-e2e.txt`): POST /runs → session, POST /goal →
+the live model produced 8 real protocol steps (think→web.search→browser.navigate→
+message, ~1443 real tokens) with the genuine conclusion "neon-lit cityscapes and
+cybernetic body modifications", GET /artifacts → the real text artifact, done=true.
+This closes the earlier "deploy the runtime server behind a real socket" follow-up
+— the only remaining production step is OCI-isolated tool execution + a staging
+canary (not a code deliverable).
