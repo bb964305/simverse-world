@@ -233,6 +233,15 @@ class Settings(BaseSettings):
     lab_budget_active_workers: int = 3
     lab_artifact_retention_days: int = 30   # V12: expires_at = finalized_at + this; retention_hold pins evidence
 
+    # --- Lab Agent protocol v2 rollout (Approved v10, default-deny) ---
+    # Each trust plane has an independent gate. A closed v2 gate never permits
+    # fallback to protocol v1 or Mock execution.
+    lab_agent_v2_enabled: bool = False
+    lab_terminalizer_v2_enabled: bool = False
+    lab_outbox_v2_enabled: bool = False
+    lab_runtime_v2_canary_enabled: bool = False
+    lab_global_admission_enabled: bool = False
+
     model_config = {"env_file": ".env"}
 
 

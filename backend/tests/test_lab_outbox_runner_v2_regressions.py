@@ -1,0 +1,192 @@
+"""Approved-v10 P4 topic ownership and Runner lifecycle regressions."""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.lab import outbox_dispatcher as dispatcher
+from app.models.lab_event import OutboxEvent
+
+
+@pytest.fixture
+def factory(db_engine):
+    return async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+
+
+async def _add(factory, *, event_id: str, topic: str, run_id: str | None = "run-1") -> int:
+    async with factory() as db:
+        row = OutboxEvent(
+            event_id=event_id,
+            tenant_id="tenant-1",
+            run_id=run_id,
+            topic=topic,
+            payload_json={"value": event_id},
+        )
+        db.add(row)
+        await db.commit()
+        await db.refresh(row)
+        return row.id
+
+
+def test_topic_registry_has_exactly_one_trust_plane_owner():
+    assert dispatcher.TOPIC_OWNERS == {
+        "lab.run.enqueue": "lab_runner",
+        "lab_control": "lab_runner",
+        "lab_run_event": "realtime_relay",
+        "world_changed": "world_relay",
+        "artifact_cleanup": "artifact_cleanup",
+    }
+    assert set(dispatcher.TOPIC_OWNERS) == set(dispatcher.KNOWN_TOPICS)
+    assert dispatcher.owned_topics("lab_runner") == frozenset(
+        {"lab.run.enqueue", "lab_control"}
+    )
+
+
+@pytest.mark.anyio
+async def test_runner_claims_only_owned_topics_and_publisher_receives_full_envelope(factory):
+    ids = {
+        topic: await _add(factory, event_id=f"event-{index}", topic=topic)
+        for index, topic in enumerate(dispatcher.KNOWN_TOPICS)
+    }
+    seen: list[dict] = []
+
+    async def publish(envelope: dict) -> None:
+        seen.append(envelope)
+
+    publishers = {topic: publish for topic in dispatcher.KNOWN_TOPICS}
+    async with factory() as db:
+        stats = await dispatcher.dispatch_once(
+            db,
+            publishers=publishers,
+            owned_topics=dispatcher.owned_topics("lab_runner"),
+        )
+
+    assert stats["published"] == 2
+    assert {item["topic"] for item in seen} == {"lab.run.enqueue", "lab_control"}
+    assert {
+        (
+            item["outbox_id"],
+            item["event_id"],
+            item["tenant_id"],
+            item["run_id"],
+            item["payload"]["value"],
+        )
+        for item in seen
+    } == {
+        (ids[topic], f"event-{index}", "tenant-1", "run-1", f"event-{index}")
+        for index, topic in enumerate(dispatcher.KNOWN_TOPICS)
+        if topic in {"lab.run.enqueue", "lab_control"}
+    }
+
+    async with factory() as db:
+        rows = (await db.execute(select(OutboxEvent))).scalars().all()
+    published = {row.topic for row in rows if row.published_at is not None}
+    pending = {row.topic for row in rows if row.dispatch_status == "pending"}
+    assert published == {"lab.run.enqueue", "lab_control"}
+    assert pending == {"lab_run_event", "world_changed", "artifact_cleanup"}
+
+
+@pytest.mark.anyio
+async def test_known_but_unregistered_stays_pending_while_truly_unknown_quarantines(factory):
+    known_id = await _add(factory, event_id="known", topic="world_changed", run_id=None)
+    unknown_id = await _add(factory, event_id="unknown", topic="operator_typo")
+
+    async with factory() as db:
+        stats = await dispatcher.dispatch_once(
+            db,
+            publishers=dispatcher.default_publishers(owner="lab_runner"),
+            owned_topics=dispatcher.owned_topics("lab_runner"),
+        )
+
+    async with factory() as db:
+        known = await db.get(OutboxEvent, known_id)
+        unknown = await db.get(OutboxEvent, unknown_id)
+
+    assert known.dispatch_status == "pending"
+    assert known.published_at is None
+    assert known.attempts == 0
+    assert known.locked_until is None
+    assert unknown.dispatch_status == "dead"
+    assert unknown.published_at is None
+    assert unknown.last_error == "unknown_topic"
+    assert stats["quarantined"] == 1
+    assert stats["published"] == 0
+
+
+@pytest.mark.anyio
+async def test_runner_service_starts_only_runner_owned_dispatch_topics():
+    from app.lab.main import RunnerService
+
+    stop = asyncio.Event()
+    dispatcher_started = asyncio.Event()
+    captured: dict = {}
+
+    async def standby():
+        await stop.wait()
+
+    async def dispatch_loop(session_factory, *, publishers, owned_topics, stop_event):
+        captured["publishers"] = set(publishers)
+        captured["owned_topics"] = frozenset(owned_topics)
+        dispatcher_started.set()
+        await stop_event.wait()
+
+    service = RunnerService(
+        session_factory=object(),
+        runner_loop=standby,
+        world_reload_loop=standby,
+        dispatcher_loop=dispatch_loop,
+    )
+    running = asyncio.create_task(service.run(stop_event=stop))
+    await asyncio.wait_for(dispatcher_started.wait(), timeout=1)
+    await service.wait_ready(timeout=1)
+
+    assert service.ready is True
+    assert captured == {
+        "publishers": {"lab.run.enqueue", "lab_control"},
+        "owned_topics": frozenset({"lab.run.enqueue", "lab_control"}),
+    }
+    stop.set()
+    await asyncio.wait_for(running, timeout=1)
+    assert service.ready is False
+
+
+@pytest.mark.anyio
+async def test_critical_dispatcher_failure_fails_readiness_and_cancels_siblings():
+    from app.lab.main import RunnerService
+
+    stop = asyncio.Event()
+    crash = asyncio.Event()
+    cancelled: set[str] = set()
+
+    async def sibling(name: str):
+        try:
+            await stop.wait()
+        except asyncio.CancelledError:
+            cancelled.add(name)
+            raise
+
+    async def dispatch_loop(session_factory, *, publishers, owned_topics, stop_event):
+        await crash.wait()
+        raise RuntimeError("injected critical dispatcher crash")
+
+    service = RunnerService(
+        session_factory=object(),
+        runner_loop=lambda: sibling("runner"),
+        world_reload_loop=lambda: sibling("world_reload"),
+        dispatcher_loop=dispatch_loop,
+    )
+    running = asyncio.create_task(service.run(stop_event=stop))
+    await service.wait_ready(timeout=1)
+    assert service.ready is True
+
+    crash.set()
+    with pytest.raises(RuntimeError, match="critical dispatcher"):
+        await asyncio.wait_for(running, timeout=1)
+
+    assert service.ready is False
+    assert service.failure == "outbox_dispatcher: injected critical dispatcher crash"
+    assert cancelled == {"runner", "world_reload"}

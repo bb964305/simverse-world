@@ -30,6 +30,10 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "httpx>=0.27", "anyio[trio]>=4.0",
 asyncio_mode = "auto"
 markers = [
     "lab_oci: real-container OCI isolation evidence (colima = dev-grade; excluded from the default gate — opt in with `-m lab_oci`)",
+    "lab_postgres: required disposable real-Postgres release evidence",
+    "lab_redis: required isolated real-Redis release evidence",
+    "lab_staging: required live isolated-service staging evidence",
+    "lab_capacity: required fixed-seed release-capacity evidence",
 ]
 addopts = "-m 'not lab_oci'"
 

@@ -136,3 +136,13 @@ async def client(db_engine):
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """A required release run cannot become green by skipping prerequisites."""
+    if os.environ.get("LAB_RELEASE_GATE", "").lower() not in {"1", "true", "yes", "on"}:
+        return
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    skipped = len((reporter.stats if reporter is not None else {}).get("skipped", []))
+    if skipped:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED

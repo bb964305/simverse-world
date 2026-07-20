@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "status": "BLOCKED_PENDING_EXTERNAL_ATTESTATION",
+  "status_reason": "No protected external attestation, trust root, approver policy, service/image digests, or executable production network-policy evidence is available.",
+  "request_hash_algorithm": "sha256-jcs-like-jq-cS-v1",
+  "request_hash": "e8cbab7eeaf38c91b24dc80da137b6164ebec098e6b55978de366f1cf6732660",
+  "request": {
+    "plan": "lab-agent-blocker-resolution-plan Approved v10",
+    "approval_eligible": false,
+    "approval_scope": [
+      "deploy:lab-runtime",
+      "deploy:lab-executor",
+      "deploy:artifact-cleanup",
+      "identity:lab-runtime",
+      "identity:lab-executor",
+      "identity:artifact-cleanup",
+      "network:lab-v2-trust-planes",
+      "db-role:lab-terminalizer-v2"
+    ],
+    "services": [
+      {
+        "name": "lab-runtime",
+        "image_digest": "UNRESOLVED",
+        "identity": "runtime-only",
+        "allowed_capabilities": [
+          "model-provider-egress",
+          "runtime-local-checkpoint-volume",
+          "scoped-inbound-runtime-api"
+        ],
+        "denied_capabilities": [
+          "simverse-db",
+          "redis",
+          "world-write",
+          "oci-host"
+        ]
+      },
+      {
+        "name": "lab-executor",
+        "image_digest": "UNRESOLVED",
+        "identity": "executor-only",
+        "allowed_capabilities": [
+          "broker-authorized-scoped-actions",
+          "rootless-oci-endpoint"
+        ],
+        "denied_capabilities": [
+          "simverse-db",
+          "redis",
+          "model-provider",
+          "world-write"
+        ]
+      },
+      {
+        "name": "artifact-cleanup",
+        "image_digest": "UNRESOLVED",
+        "identity": "cleanup-only",
+        "allowed_capabilities": [
+          "artifact-delete-by-scoped-command"
+        ],
+        "denied_capabilities": [
+          "simverse-db-direct-dml",
+          "redis",
+          "model-provider",
+          "world-write",
+          "oci-host"
+        ]
+      }
+    ],
+    "existing_process_changes": [
+      {
+        "name": "lab-runner",
+        "change": "mount a dedicated lab_terminalizer_v2 DSN in one isolated component; no Docker socket or model key"
+      }
+    ],
+    "network_policy_hash": "UNRESOLVED",
+    "topology_hash": "UNRESOLVED",
+    "required_service_identity": "TLS plus production mTLS with per-audience identities",
+    "default_flags": {
+      "lab_agent_v2_enabled": false,
+      "lab_terminalizer_v2_enabled": false,
+      "lab_outbox_v2_enabled": false,
+      "lab_runtime_v2_canary_enabled": false,
+      "lab_global_admission_enabled": false
+    },
+    "unresolved_fields": [
+      "services[*].image_digest",
+      "network_policy_hash",
+      "topology_hash"
+    ]
+  },
+  "external_attestation": null,
+  "trust_root": null,
+  "approver_policy": null,
+  "agent_constraints": [
+    "This file is a request only and grants no production authority.",
+    "Agents and reviewers must not create an attestation, trust root, approver policy, signature, or approval scope.",
+    "Any scope, digest, or topology change requires a newly issued protected external attestation.",
+    "P5, production service/image/network changes, and P7 release remain blocked while status is not externally verified APPROVED."
+  ]
+}

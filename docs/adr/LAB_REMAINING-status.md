@@ -1,5 +1,45 @@
 # LAB Agent v1 - current status and remaining work
 
+## Approved-v10 completion override (2026-07-21)
+
+This section supersedes every older completion/production-readiness claim below.
+The implementation baseline is `feat/lab-agent-v1@77b64c2`; the untouched backend
+suite is `1106 passed, 1 skipped, 11 deselected`. Those tests do not close the
+seven release blockers found by the 2026-07-20 review:
+
+1. escrow/task terminalization is not one atomic, race-safe transaction;
+2. the reference Runtime does not resume from real Broker results;
+3. real execution bypasses durable supervision/control semantics;
+4. outbox dispatch is not lifecycle-owned and topic ownership is unsafe;
+5. Runtime run routes lack scoped fail-closed service authentication;
+6. production credentials and trust planes are not isolated; and
+7. formal staging/visual/asset release evidence is incomplete.
+
+P0 state:
+
+- Immutable dirty baseline: captured outside the repository; 20 existing paths,
+  raw status digest `0ef6f179...b04`, unchanged after worktree creation.
+- Completion worktree: `feat/lab-agent-completion`, created from `77b64c2`.
+- D0: `BLOCKED_PENDING_EXTERNAL_ATTESTATION`; no protected attestation, trust
+  root, approver policy, final image digests, or production network evidence.
+- D1a: `PASS`, A' hybrid retained. Postgres role/controlled-entrypoint and Redis
+  physical-queue spikes pass; the 37-finding source writer inventory has no unknown sites; A'
+  is 28 files/29 symbols/11 tables/3 backfills/3 services/one financial domain,
+  versus B at 38/39/19/8/5/two domains.
+- Protocol-v2, terminalizer, outbox-v2, Runtime canary, and global admission
+  rollout flags all remain default-off.
+- Asset release: still 16 concrete blocked files plus one resident-texture
+  category; replacement is required because no authoritative license evidence
+  is available.
+- Expected-red baseline: 52 new behavior/integration cases collect. The 42 local
+  cases expose 27 failures and seven missing-surface errors; all ten asserted
+  required-environment cases fail nonzero when their infrastructure is withheld.
+  JUnit and hashes are sealed outside Git under `p0-expected-red/`.
+
+No wording below may be read as D1b, D1c, AC01-AC21, or release approval. The
+authoritative decision record is `docs/adr/ADR-lab-v2-cutover.md` and the only
+implementation/release authority is the Approved-v10 blocker-resolution plan.
+
 Last verified: 2026-07-19. Branch: `feat/lab-agent-v1` at `99a5ac2`.
 
 This report distinguishes code that exists, behavior that was reproduced in the
