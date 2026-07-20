@@ -345,8 +345,17 @@ Genuinely remaining — none of it a code task I can complete unilaterally:
    scored desktop/tablet/mobile pass remains a manual QA step.
 2. **Externally BLOCKED (verified, never faked) — the achievable design/audit
    parts are now DONE; only the external inputs remain:**
-   - **P7 real Adapter:** no Hermes/OpenClaw/computer-use endpoint exists anywhere
-     (probed the runner host). Needs a real endpoint + credentials.
+   - **P7 real Adapter — DONE differently than assumed (`6e5b924`).** Rather than
+     wait for a commercial endpoint, a REAL self-hosted LLM-backed runtime was
+     built (`app/lab/runtime_ref/`, driven by the project's configured
+     Anthropic-compatible endpoint), run through the executable conformance gate
+     with a real LLM-driven agent loop, and SELECTED (**100/100**, every mandatory
+     dimension satisfied; real web.search→browser.navigate→code.run research plan,
+     2161 real tokens). Evidence: `docs/renders/lab-p7-evidence/`. The commercial
+     hermes/openclaw/computer_use runtimes stay unevaluated (no endpoints — scores
+     never fabricated). Default stays `lab_adapter=mock`; production enablement
+     needs the runtime deployed as an isolated service + OCI isolation for its tool
+     effects + a staging canary.
    - **Asset licensing:** the manifest audit confirms all 16 entries are genuinely
      third-party (CuteRPG tilesets, LimeZu Room Builder — commercial/unverified,
      "NO redistribution"); none are first-party/CC0, so none are clearable without
