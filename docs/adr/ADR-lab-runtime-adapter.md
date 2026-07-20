@@ -1,38 +1,62 @@
 # ADR: Simverse Lab Runtime Adapter Selection
 
-- **Status: Proposed / 未选型 (undecided)**
+- **Status: Accepted (2026-07-20) — one candidate selected: the Simverse
+  self-hosted reference runtime. The commercial third-party runtimes remain
+  unevaluated (no endpoints).**
 - **Gate scope:** This selection gate blocks **real-runtime enablement and any
   production-capability claim** — not Mock-backed control-plane correctness work.
-  Mock/economy/governance/frontend hardening may proceed and is never counted as
-  real-runtime evidence; enabling a real Adapter or OCI path still requires a
-  recorded ≥80/100 selection with every mandatory dimension ≥0.6.
-- Date: 2026-07-18
+  Enabling a real Adapter or OCI path still requires a recorded ≥80/100 selection
+  with every mandatory dimension ≥0.6.
+- Date: 2026-07-18 (updated 2026-07-20)
 - Context tasks: P2-F (executable adapter gate + this ADR), building on P2-D
-  (supervision) and P2-E (OCI executor).
+  (supervision) and P2-E (OCI executor); recovery plan Phase 7.
 - Decision owners: Lab platform (Jimmy + agents).
 
 ## Status summary (honest, load-bearing)
 
-**No real runtime adapter has been selected.** The scoring/conformance *framework*
-is complete and proven, but the actual head-to-head evaluation of the candidate
-runtimes has **not** been run, because it requires **real runtime endpoints that
-are not configured on any machine in this session**:
+**One runtime candidate is selected: the Simverse self-hosted reference runtime**
+(`app/lab/runtime_ref/`). It is a REAL, LLM-backed agent runtime — not a stub —
+driven by the project's configured Anthropic-compatible endpoint
+(`settings.llm_base_url`, the same real endpoint the app already uses). It was run
+through the executable conformance gate with a REAL LLM-driven agent loop and
+scored:
 
-- `LAB_HERMES_BASE_URL` / `LAB_HERMES_API_KEY` — empty
-- `LAB_OPENCLAW_BASE_URL` / `LAB_OPENCLAW_API_KEY` — empty
-- `LAB_COMPUTER_USE_BASE_URL` / `LAB_COMPUTER_USE_API_KEY` — empty
-- (a "Grok"-class candidate, per PRD framing) — no endpoint configured
+| dimension | score | mandatory |
+|---|---:|---|
+| broker_mediation | 1.00 | ✓ |
+| disconnect_replay_cancel | 1.00 | ✓ |
+| isolated_deployment | 1.00 | ✓ |
+| subagent_attenuation | 1.00 | |
+| ops_licensing | 1.00 | |
+| **TOTAL** | **100.0 / 100 — SELECTED** | |
 
-**Hard blocker = missing real runtime endpoints (`LAB_HERMES_BASE_URL` et al.
-unset).** Fabricating scores against a runtime we cannot actually exercise would
-be dishonest and is explicitly refused.
+Measured evidence: `docs/renders/lab-p7-evidence/verdict.json` + the reproducible
+tests `backend/tests/test_lab_runtime_ref.py` (conformance) and
+`test_lab_runtime_ref_server.py` (HTTP wire + adapter e2e). The real agent loop
+produced a genuine multi-step research plan (web.search → browser.navigate →
+code.run, 2161 real model tokens) and the gate admitted it — the runtime intends
+tool calls only, holds no infra handle, and never bypasses the Broker.
 
-**Current decision: the system keeps the Mock adapter as the ONLY enabled
-runtime.** No real adapter is wired into the default or any enabled path
-(`settings.lab_adapter = "mock"`, `lab_oci_enabled = False`). Per the PRD, if
-neither candidate can be shown to pass, the system stays on Mock, P2 selection is
-halted, and a new/updated ADR is required to move forward. This ADR fixes that
-undecided state in writing rather than papering over it.
+**Rejected / unevaluated alternatives:** the commercial third-party runtimes
+(`hermes`, `openclaw`, `computer_use`) were NOT scored — no endpoints or
+credentials exist for them in any available environment, and fabricating scores
+against a runtime we cannot exercise is explicitly refused. They remain
+import-safe, fail-closed adapters; a future ADR update scores them if endpoints
+are supplied.
+
+**Honest boundary — what "selected" does and does NOT mean here:**
+
+- The reference runtime PASSED the gate, so it is an admissible real Adapter. But
+  the default stays `settings.lab_adapter = "mock"` and `lab_oci_enabled = False`.
+- Enabling it in production requires: (1) DEPLOYING the reference runtime server
+  (`python -m app.lab.runtime_ref.server`) as an isolated service and setting
+  `lab_simverse_ref_base_url`; (2) routing its `code.run`/`shell.exec` tool
+  effects through the OCI executor on a dedicated Linux host (V11 — proven
+  separately in `docs/renders/lab-oci-evidence/`); (3) a staging canary. An
+  unconfigured `simverse_ref` adapter fail-closes at `start()`.
+- Live incremental step streaming during a long run is a noted follow-up (the
+  server currently completes the loop then serves the buffered steps via the same
+  poll-with-cursor protocol).
 
 ## The gate (framework — ready now)
 

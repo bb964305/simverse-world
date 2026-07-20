@@ -103,6 +103,16 @@ def test_registry_returns_real_adapters_by_name_still_unconfigured():
     assert isinstance(get_adapter("computer_use"), ComputerUseAdapter)
 
 
+def test_simverse_ref_is_a_real_adapter_and_fail_closed_when_unconfigured():
+    # The Phase 7 selected candidate is a real adapter: it constructs by name but
+    # carries no endpoint by default, so it is fail-closed until deployed + set.
+    from app.lab.sandbox.simverse_ref import SimverseRefAdapter
+    adapter = get_adapter("simverse_ref")
+    assert isinstance(adapter, SimverseRefAdapter)
+    assert adapter.base_url == ""  # unconfigured by default → start() fail-closes
+    assert settings.lab_simverse_ref_base_url == ""
+
+
 def test_registry_reraises_import_failure_as_unavailable(monkeypatch):
     # If a real adapter's import/construct fails, resolution must fail closed,
     # not fall back to Mock.

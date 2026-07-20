@@ -191,6 +191,8 @@ class Settings(BaseSettings):
     lab_oci_image: str = ""                 # OCI executor image ("" = disabled even if the flag is on)
     # Real adapter endpoints — empty string = unconfigured (portrait/tts grouping
     # convention). The adapter still imports; start() raises LabAdapterUnconfigured.
+    lab_simverse_ref_base_url: str = ""     # Simverse reference runtime (Phase 7 selected candidate) endpoint
+    lab_simverse_ref_api_key: str = ""
     lab_openclaw_base_url: str = ""
     lab_openclaw_api_key: str = ""
     lab_hermes_base_url: str = ""

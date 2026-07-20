@@ -1,0 +1,59 @@
+{
+  "candidate": "simverse_ref",
+  "total": 100.0,
+  "passed_mandatory": true,
+  "selected": true,
+  "per_dimension": [
+    {
+      "key": "broker_mediation",
+      "score": 1.0,
+      "evidence": "ungranted_denied=True(capability_not_granted), granted_admitted=True(status=approved)"
+    },
+    {
+      "key": "disconnect_replay_cancel",
+      "score": 1.0,
+      "evidence": "replay_dedup=True, replay_window_ok=True, fenced(grants+epoch)=True, cancel_tier=cooperative"
+    },
+    {
+      "key": "isolated_deployment",
+      "score": 1.0,
+      "evidence": "no DB/Redis/world handle accepted at construction"
+    },
+    {
+      "key": "subagent_attenuation",
+      "score": 1.0,
+      "evidence": "child caps ['browse', 'web_search'] ⊆ parent ['web_search', 'browse', 'code'] (attenuated)"
+    },
+    {
+      "key": "ops_licensing",
+      "score": 1.0,
+      "evidence": "license manifest present: /Volumes/data/dev/simverse-world/backend/app/lab/runtime_ref/ops-manifest.json"
+    }
+  ],
+  "real_agent": {
+    "steps": 10,
+    "tool_intents": [
+      [
+        "web.search",
+        {
+          "query": "cyberpunk aesthetics key visual motifs"
+        }
+      ],
+      [
+        "browser.navigate",
+        {
+          "query": "https://en.wikipedia.org/wiki/Cyberpunk#Visual_style"
+        }
+      ],
+      [
+        "code.run",
+        {
+          "query": "import requests\nfrom bs4 import BeautifulSoup\nurl = 'https://en.wikipedia.org/wiki/Cyberpunk'\nresponse = requests.get(url)\nsoup = BeautifulSoup(response.text, 'html.parser')\n# Find the section about visual style\n# The section id is 'Visual_style' or 'Aesthetics'\nimport re\nfor header in soup.find_all(['h2', 'h3']):\n    if 'visual' in header.get_text().lower() or 'aesthetics' in header.get_text().lower():\n        print(header.get_text())\n        # Print all following p tags until next header\n        for sibling in header.find_next_siblings():\n            if sibling.name in ['h2', 'h3']:\n                break\n            if sibling.name == 'p' or sibling.name == 'ul':\n                print(sibling.get_text())"
+        }
+      ]
+    ],
+    "model_tokens": 2161
+  },
+  "llm_endpoint_protocol": "anthropic-messages-compatible",
+  "model": "deepseek-v4-flash"
+}

@@ -1,0 +1,26 @@
+{
+  "runtime": "simverse_ref",
+  "runtime_version": "1.0",
+  "kind": "self-hosted reference runtime (LLM-backed)",
+  "license": {
+    "id": "internal-proprietary",
+    "redistribution": "internal-only",
+    "note": "First-party Simverse reference runtime. No third-party runtime code is redistributed; the model provider is the project's configured Anthropic-compatible endpoint."
+  },
+  "model_provider": {
+    "protocol": "anthropic-messages-compatible",
+    "endpoint_config": "settings.llm_base_url (operator-supplied)",
+    "credential_config": "settings.llm_api_key (operator-supplied secret, never in the sandbox)"
+  },
+  "operations": {
+    "isolation": "runs as a standalone HTTP process; holds no DB/Redis/world handle",
+    "egress": "only the configured model endpoint; tool effects are Broker-mediated",
+    "cancel": "cooperative; the Gateway supervision layer fences on top",
+    "credential_surface": "one model-endpoint secret",
+    "scaling": "stateless per-run sessions; horizontally scalable"
+  },
+  "compatibility": {
+    "protocol_version": 1,
+    "event_schema_versions": [1]
+  }
+}
