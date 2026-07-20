@@ -37,12 +37,22 @@ produced a genuine multi-step research plan (web.search → browser.navigate →
 code.run, 2161 real model tokens) and the gate admitted it — the runtime intends
 tool calls only, holds no infra handle, and never bypasses the Broker.
 
-**Rejected / unevaluated alternatives:** the commercial third-party runtimes
-(`hermes`, `openclaw`, `computer_use`) were NOT scored — no endpoints or
-credentials exist for them in any available environment, and fabricating scores
-against a runtime we cannot exercise is explicitly refused. They remain
-import-safe, fail-closed adapters; a future ADR update scores them if endpoints
-are supplied.
+**Second candidate scored — commercial qwen3.7 endpoint (2026-07-20).** An
+operator-supplied commercial LLM endpoint (Alibaba DashScope Coding,
+`coding.dashscope.aliyuncs.com/apps/anthropic`, model `qwen3.7-plus`) was probed
+live and used to drive a REAL agent loop as a second candidate (`agent_qwen`):
+5 steps, 1403 real tokens, gate verdict **100.0/100 — SELECTED**
+(`docs/renders/lab-p7-evidence/verdict-agent-qwen.json`, via
+`scripts/p7_score_agent_endpoint.py`). This proves the runtime is portable across
+commercial model providers. Honest scope: it validates the runtime with a
+commercial MODEL, not a distinct third-party agent-runtime PRODUCT.
+
+**Still unevaluated:** the commercial agent-runtime PRODUCTS with their own wire
+protocols (`hermes`, `openclaw`, native `computer_use`) were NOT scored — no such
+endpoints exist in any available environment, and fabricating scores is explicitly
+refused. They remain import-safe, fail-closed adapters; a runtime with a non-Lab
+wire needs a translation shim (subclass `HttpAgentAdapter`), then scores unchanged
+via `scripts/p7_score_endpoint.py`.
 
 **Honest boundary — what "selected" does and does NOT mean here:**
 

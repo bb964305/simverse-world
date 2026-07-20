@@ -69,3 +69,27 @@ cybernetic body modifications", GET /artifacts → the real text artifact, done=
 This closes the earlier "deploy the runtime server behind a real socket" follow-up
 — the only remaining production step is OCI-isolated tool execution + a staging
 canary (not a code deliverable).
+
+## Second real candidate — commercial qwen3.7 endpoint (2026-07-20)
+
+The user supplied a commercial LLM endpoint in `.env` (Alibaba DashScope Coding,
+`coding.dashscope.aliyuncs.com/apps/anthropic`, model `qwen3.7-plus`, Anthropic-
+messages-compatible). It was probed live (real round-trip, `PONG`) and then used
+to drive a REAL agent loop as a second conformance candidate (`agent_qwen`):
+
+- Real agent loop on the commercial qwen endpoint: 5 steps, 1 tool intent, **1403
+  real model tokens**.
+- Conformance verdict (`verdict-agent-qwen.json`): all five dimensions 1.00,
+  **TOTAL=100.0, SELECTED=True**.
+
+Honest framing: this scores the runtime BACKED BY a commercial model provider —
+proving the runtime is portable across commercial endpoints — via `scripts/
+p7_score_agent_endpoint.py`. It is NOT a distinct third-party agent-runtime
+PRODUCT with its own wire protocol (those, e.g. a native computer-use API, would
+need a translation shim). The API key was never printed or committed (`.env` is
+gitignored; a pydantic `extra_forbidden` validation leak was caught and the temp
+file deleted; `agent_*` are now declared Settings fields so no validation error
+echoes the secret).
+
+Net: two real candidates now pass the gate (the reference runtime on the default
+endpoint, and the commercial qwen endpoint), both 100/100.

@@ -199,6 +199,11 @@ class Settings(BaseSettings):
     lab_hermes_api_key: str = ""
     lab_computer_use_base_url: str = ""
     lab_computer_use_api_key: str = ""
+    # Operator-supplied commercial runtime endpoint (P7 candidate). Anthropic-
+    # messages-compatible; used to score a second real candidate through the gate.
+    agent_base_url: str = ""
+    agent_api_key: str = ""
+    agent_model: str = ""
 
     # --- Rate Limiting (OPTIMIZATION_PLAN P1-1, limit sub-item) ---
     # WS chat_msg sliding window is in-process (single-worker model); REST uses

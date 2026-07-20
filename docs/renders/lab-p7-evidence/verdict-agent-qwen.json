@@ -1,0 +1,48 @@
+{
+  "candidate": "agent_qwen",
+  "model": "qwen3.7-plus",
+  "endpoint_protocol": "anthropic-messages-compatible (commercial)",
+  "endpoint_host": "coding.dashscope.aliyuncs.com",
+  "total": 100.0,
+  "passed_mandatory": true,
+  "selected": true,
+  "per_dimension": [
+    {
+      "key": "broker_mediation",
+      "score": 1.0,
+      "evidence": "ungranted_denied=True(capability_not_granted), granted_admitted=True(status=approved)"
+    },
+    {
+      "key": "disconnect_replay_cancel",
+      "score": 1.0,
+      "evidence": "replay_dedup=True, replay_window_ok=True, fenced(grants+epoch)=True, cancel_tier=cooperative"
+    },
+    {
+      "key": "isolated_deployment",
+      "score": 1.0,
+      "evidence": "no DB/Redis/world handle accepted at construction"
+    },
+    {
+      "key": "subagent_attenuation",
+      "score": 1.0,
+      "evidence": "child caps ['browse', 'web_search'] ⊆ parent ['web_search', 'browse', 'code'] (attenuated)"
+    },
+    {
+      "key": "ops_licensing",
+      "score": 1.0,
+      "evidence": "license manifest present: /Volumes/data/dev/simverse-world/backend/app/lab/runtime_ref/ops-manifest.json"
+    }
+  ],
+  "real_agent": {
+    "steps": 5,
+    "tool_intents": [
+      [
+        "web.search",
+        {
+          "query": "cyberpunk aesthetics key visual motifs"
+        }
+      ]
+    ],
+    "model_tokens": 1403
+  }
+}
