@@ -227,15 +227,18 @@ async def test_broker_mediation_probe_requires_denial_and_admission(db_session):
 
 # ── 5. ADR honestly records the undecided / Mock-only state ───────────
 
-def test_adr_records_unselected_mock_only():
+def test_adr_records_reference_runtime_selected_commercial_unevaluated():
+    """The ADR now records the honest post-P7 state: the self-hosted reference
+    runtime is SELECTED (100/100), the commercial runtimes stay UNEVALUATED (no
+    endpoints — no fabricated scores), and Mock remains the default."""
     adr = Path(__file__).resolve().parents[2] / "docs" / "adr" / "ADR-lab-runtime-adapter.md"
     assert adr.exists(), f"ADR missing at {adr}"
     text = adr.read_text(encoding="utf-8")
-    assert "Proposed" in text
-    # honest undecided state, verbatim-ish anchors the test pins.
-    assert "未选型" in text
-    assert "Mock" in text
-    assert "LAB_HERMES_BASE_URL" in text            # the hard blocker: no real endpoints
+    assert "Accepted" in text                        # decision recorded
+    assert "SELECTED" in text                         # the reference runtime passed the gate
+    assert "reference runtime" in text
+    assert "unevaluated" in text                      # commercial runtimes not scored (honest)
+    assert "mock" in text                             # Mock stays the default enabled runtime
 
 
 # ── 6. HttpAgentAdapter is supervisable via a fake HTTP client ────────
