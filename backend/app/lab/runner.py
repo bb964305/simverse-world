@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime, UTC
 from uuid import uuid4
 
@@ -25,6 +26,70 @@ from app.models.lab_run import LabRun, LabRunStep
 from app.models.lab_task import LabTask
 
 logger = logging.getLogger(__name__)
+
+RunHandler = Callable[[str], Awaitable[None]]
+PROTOCOL_V2_ADAPTER = "simverse_ref"
+
+
+class ProtocolConsumerUnavailable(ValueError):
+    """The selected protocol has no execution handler in this build."""
+
+
+_PROTOCOL_HANDLERS: dict[int, RunHandler] = {}
+
+
+def configured_protocol_version() -> int:
+    """Return the one execution protocol admitted by this process."""
+    return 2 if settings.lab_agent_v2_enabled else 1
+
+
+def register_protocol_handler(protocol_version: int, handler: RunHandler) -> None:
+    """Install a production run handler for an exact protocol version.
+
+    P3 registers its supervised v2 handler through this boundary. Duplicate
+    registration is rejected so imports cannot silently replace a live consumer.
+    """
+    if type(protocol_version) is not int or protocol_version not in (1, 2):
+        raise ValueError(f"unsupported Lab protocol_version: {protocol_version!r}")
+    if not callable(handler):
+        raise TypeError("protocol handler must be callable")
+    current = _PROTOCOL_HANDLERS.get(protocol_version)
+    if current is not None and current is not handler:
+        raise ValueError(
+            f"protocol_version {protocol_version} already has a registered consumer"
+        )
+    _PROTOCOL_HANDLERS[protocol_version] = handler
+
+
+def require_protocol_handler(
+    protocol_version: int, *, adapter: str | None = None
+) -> RunHandler:
+    """Resolve an approved handler before admission, claim, or startup."""
+    if type(protocol_version) is not int or protocol_version not in (1, 2):
+        raise ProtocolConsumerUnavailable(
+            f"unsupported Lab protocol_version: {protocol_version!r}"
+        )
+    handler = _PROTOCOL_HANDLERS.get(protocol_version)
+    if handler is None:
+        available = ", ".join(str(version) for version in sorted(_PROTOCOL_HANDLERS))
+        raise ProtocolConsumerUnavailable(
+            f"Lab protocol_version {protocol_version} consumer is not ready; "
+            f"this build can consume only protocol_version {available or 'none'}"
+        )
+    configured_adapter = (
+        settings.lab_adapter if adapter is None else adapter
+    )
+    normalized_adapter = (configured_adapter or "").strip().lower()
+    if (
+        protocol_version == 2
+        and normalized_adapter != PROTOCOL_V2_ADAPTER
+    ):
+        raise ProtocolConsumerUnavailable(
+            "Lab protocol_version 2 requires "
+            f"lab_adapter={PROTOCOL_V2_ADAPTER!r}; configured "
+            f"{configured_adapter!r} is not an approved v2 adapter"
+        )
+    return handler
 
 
 async def _ws_task_update(task: LabTask) -> None:
@@ -121,6 +186,15 @@ async def _handle_approval(db, task: LabTask, run: LabRun, adapter, handle, ev) 
 async def run_one(run_id: str) -> None:
     """Execute a single queued run end-to-end. Idempotent guard: only picks up
     runs still in ``queued``."""
+    async with async_session() as db:
+        queued_run = await db.get(LabRun, run_id)
+        if queued_run is None:
+            logger.warning("lab run %s vanished before execution", run_id)
+            return
+        if queued_run.protocol_version != 1:
+            raise RuntimeError(
+                f"protocol v{queued_run.protocol_version} run cannot enter the v1 execution path"
+            )
     if settings.lab_agent_v1_enabled:
         # v1 control-plane path (grant/policy/broker/ledger/budgets). The legacy
         # body below is preserved byte-for-byte as the rollback path (flag off).
@@ -260,6 +334,15 @@ async def run_one(run_id: str) -> None:
                 logger.error("lab task fail/refund failed for %s", task.id, exc_info=True)
 
 
+async def _run_v1(run_id: str) -> None:
+    # Resolve ``run_one`` at call time so normal instrumentation/patching still
+    # observes the legacy handler while the registry remains stable.
+    await run_one(run_id)
+
+
+register_protocol_handler(1, _run_v1)
+
+
 async def _reconcile_slots_safe() -> None:
     """Heal any concurrency slot leaked by a prior crashed Runner (re-sync the
     Redis counters to the DB's true active-run count) and refresh the content-free
@@ -274,11 +357,12 @@ async def _reconcile_slots_safe() -> None:
         logger.warning("lab concurrency/slo reconcile failed", exc_info=True)
 
 
-async def _process_run(run_id: str) -> str:
+async def _process_run(run_id: str, *, protocol_version: int) -> str:
     """Peek the dequeued run, reserve a concurrency slot, execute, release.
     Extracted from ``runner_loop`` so the admission cap is unit-testable. Returns:
     ``"ran"`` (executed), ``"full"`` (cap reached — caller requeues + backs off),
     or ``"skipped"`` (run vanished or was cancelled/terminal before pickup)."""
+    handler = require_protocol_handler(protocol_version)
     from app.database import async_session
     from app.lab import concurrency
     slug = status = None
@@ -286,46 +370,67 @@ async def _process_run(run_id: str) -> str:
         run = await db.get(LabRun, run_id)
         if run is None:
             return "skipped"
+        if run.protocol_version != protocol_version:
+            logger.error(
+                "refusing cross-protocol queue claim for run %s: queue=v%s row=v%s",
+                run_id,
+                protocol_version,
+                run.protocol_version,
+            )
+            return "skipped"
+        require_protocol_handler(protocol_version, adapter=run.adapter)
         slug, status = run.researcher_slug, run.status
     if status != "queued":
         return "skipped"  # cancelled / already terminal before a Runner picked it up
     if not await concurrency.try_reserve(researcher_slug=slug):
         return "full"
     try:
-        await run_one(run_id)
+        await handler(run_id)
         return "ran"
     finally:
         await concurrency.release(researcher_slug=slug)
 
 
-async def runner_loop() -> None:
+async def runner_loop(*, protocol_version: int = 1) -> None:
     """Long-lived consume loop for the standalone Lab Runner process."""
+    require_protocol_handler(protocol_version)
+    await lab_queue.require_legacy_queues_drained()
     logger.info("lab runner loop started (adapter default=%s)", settings.lab_adapter)
     await _reconcile_slots_safe()  # heal a slot leaked by a prior crashed runner
     i = 0
     while True:
         try:
-            run_id = await lab_queue.dequeue_run(timeout=5)
+            run_id = await lab_queue.dequeue_run(
+                protocol_version=protocol_version, timeout=5
+            )
             if run_id is None:
                 continue
             from app.lab import is_lab_runtime_enabled
             if not await is_lab_runtime_enabled():
                 # Kill switch on: put it back and back off so we don't hot-spin.
-                await lab_queue.requeue_run(run_id)
+                await lab_queue.requeue_run(
+                    run_id, protocol_version=protocol_version
+                )
                 await asyncio.sleep(2.0)
                 continue
             try:
-                outcome = await _process_run(run_id)
+                outcome = await _process_run(
+                    run_id, protocol_version=protocol_version
+                )
             except Exception:
                 logger.warning("lab run %s processing error; continuing", run_id, exc_info=True)
                 outcome = "error"
             if outcome == "full":
                 # Global/per-researcher cap reached: requeue and back off so a
                 # freed slot lets it in later. Do NOT ack (it stays queued).
-                await lab_queue.requeue_run(run_id)
+                await lab_queue.requeue_run(
+                    run_id, protocol_version=protocol_version
+                )
                 await asyncio.sleep(1.0)
             else:
-                await lab_queue.ack_run(run_id)
+                await lab_queue.ack_run(
+                    run_id, protocol_version=protocol_version
+                )
             i += 1
             if i % 50 == 0:
                 await _reconcile_slots_safe()

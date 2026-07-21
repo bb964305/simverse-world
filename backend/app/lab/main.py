@@ -9,8 +9,12 @@ from collections.abc import Awaitable, Callable
 import app.models  # noqa: F401
 from app.config import settings
 from app.database import async_session
-from app.lab import outbox_dispatcher, terminalizer
-from app.lab.runner import runner_loop
+from app.lab import (
+    outbox_dispatcher,
+    queue as lab_queue,
+    runner as runner_module,
+    terminalizer,
+)
 from app.observability import init_sentry
 from app.redis_client import close_redis
 
@@ -26,7 +30,8 @@ class RunnerService:
         self,
         *,
         session_factory=async_session,
-        runner_loop: RunnerLoop = runner_loop,
+        runner_loop: RunnerLoop | None = None,
+        protocol_version: int | None = None,
         world_reload_loop: RunnerLoop | None = None,
         dispatcher_loop: DispatcherLoop | None = None,
         terminalizer_loop: TerminalizerLoop | None = None,
@@ -36,7 +41,20 @@ class RunnerService:
         from app.lab.apply import world_reload_subscriber
 
         self.session_factory = session_factory
-        self.runner_loop = runner_loop
+        self.protocol_version = (
+            protocol_version
+            if protocol_version is not None
+            else runner_module.configured_protocol_version()
+        )
+        if runner_loop is None:
+            async def configured_runner_loop() -> None:
+                await runner_module.runner_loop(
+                    protocol_version=self.protocol_version
+                )
+
+            self.runner_loop = configured_runner_loop
+        else:
+            self.runner_loop = runner_loop
         self.world_reload_loop = world_reload_loop or world_reload_subscriber
         self.dispatcher_loop = dispatcher_loop
         self.terminalizer_loop = terminalizer_loop
@@ -57,6 +75,11 @@ class RunnerService:
             await self.terminalizer_engine.dispose()
 
     async def run(self, *, stop_event: asyncio.Event) -> None:
+        # Resolve capability before creating runner/world/outbox/terminalizer
+        # tasks. A flag cannot make this process advertise readiness when its
+        # matching consumer implementation is absent.
+        runner_module.require_protocol_handler(self.protocol_version)
+        await lab_queue.require_legacy_queues_drained()
         tasks: dict[str, asyncio.Task] = {
             "runner": asyncio.create_task(self.runner_loop(), name="runner"),
             "world_reload": asyncio.create_task(
@@ -110,6 +133,8 @@ class RunnerService:
 
 
 def build_runner_service() -> RunnerService:
+    protocol_version = runner_module.configured_protocol_version()
+    runner_module.require_protocol_handler(protocol_version)
     terminalizer_factory = None
     terminalizer_engine = None
     # Legacy command/event recovery is part of the default Lab Runner lifecycle.
@@ -134,6 +159,7 @@ def build_runner_service() -> RunnerService:
 
     return RunnerService(
         session_factory=async_session,
+        protocol_version=protocol_version,
         dispatcher_loop=(
             outbox_dispatcher.run_dispatch_loop
             if settings.lab_outbox_v2_enabled
@@ -174,6 +200,11 @@ async def main() -> None:
             await close_redis()
             logger.info("lab-runner stopped (dormant)")
         return
+
+    # Preserve the v1 startup order while ensuring an unsupported v2 build
+    # fails before world/outbox/queue work.
+    if settings.lab_agent_v2_enabled:
+        runner_module.require_protocol_handler(2)
 
     from app.lab.apply import reload_world
 

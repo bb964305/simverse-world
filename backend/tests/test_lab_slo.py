@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
 from app.lab import slo
-from app.lab.queue import QUEUE_KEY
+from app.lab.queue import queue_keys
 from app.models.lab_run import LabRun
 from app.models.lab_event import OutboxEvent
 from app.redis_client import get_redis
@@ -38,12 +38,15 @@ async def test_collect_snapshot_reports_structural_slos(db_engine, monkeypatch):
         db.add(dead)
         await db.commit()
 
-    await get_redis().lpush(QUEUE_KEY, "run-a", "run-b")  # queue depth 2
+    await get_redis().lpush(queue_keys(1)[0], "run-a")
+    await get_redis().lpush(queue_keys(2)[0], "run-b")
 
     async with factory() as db:
         snap = await slo.collect_snapshot(db, now=now)
 
     assert snap["queue_depth"] == 2
+    assert snap["queue_depth_v1"] == 1
+    assert snap["queue_depth_v2"] == 1
     assert snap["active_runs"] == 2                    # r1, r2 (r3 terminal excluded)
     assert snap["orphan_candidates"] == 1              # r2 past TTL
     assert snap["dead_letter"] == 1                    # o2

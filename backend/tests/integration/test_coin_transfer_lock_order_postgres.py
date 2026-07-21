@@ -45,7 +45,7 @@ def migrated_database() -> tuple[str, str]:
     database_url, run_id = _required_database()
     env = {**os.environ, "DATABASE_URL": database_url, "DEBUG": "true"}
     result = subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", "038_add_lab_terminalization_v2"],
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=BACKEND_ROOT,
         env=env,
         text=True,

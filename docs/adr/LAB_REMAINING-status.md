@@ -34,6 +34,23 @@ P0 state:
   has zero missing/unknown sites. The exact cohort matrix contains 1120 unique
   tuples, and seven rows collected directly from a disposable migrated database
   map without anomalies or unresolved classifications.
+- P2 protocol/session subset: `PASS`, default-off. Revision 039 is the single
+  migration head and adds immutable explicit run protocol versions plus
+  session/turn/intent/result/control state with composite cross-binding
+  constraints. v1/v2 use four physically distinct Redis lists; legacy lists must
+  drain before Runner startup. P2 deliberately registers no v2 execution handler,
+  so v2 admission and consumption fail before side effects until P3 lands.
+- The reference Runtime's v2 surface now requires a durable file and scoped
+  `lab-runtime` JWT keyring with current/next rotation. Every run route authenticates
+  before session lookup, exact retries reuse receipts, cross-binding replay fails,
+  and the standalone/module entrypoints cannot silently expose unauthenticated v1.
+  Session-affine provider creation is registered before external I/O and bound to
+  the live lease owner/epoch; restart reattaches, while host loss/divergence
+  quarantines. Fresh PostgreSQL evidence is 3 migration and 10 Runtime cases.
+- P2 does **not** implement the model/tool-result loop: goal/result/control routes
+  remain fail-closed scaffolds, and the v2 Runner handler remains absent. P3 must
+  still prove real Broker result resume, provider ACK/replay/backpressure, and
+  Artifact provenance. P4/P4b and all production topology work also remain open.
 - Current comparison after P1: A' is 28 files/29 symbols/12 tables/3
   backfills/3 services/one financial domain, versus B at 38/39/20/8/5/two.
   Evidence and hashes are recorded in `docs/adr/ADR-lab-v2-cutover.md`.
@@ -47,7 +64,8 @@ P0 state:
   required-environment cases fail nonzero when their infrastructure is withheld.
   JUnit and hashes are sealed outside Git under `p0-expected-red/`.
 
-No wording below may be read as overall D1b, D1c, AC01-AC21, or release approval. The
+No wording below may be read as overall D1b, D1c, AC01-AC21, or release approval.
+The P1/P2 results above are default-off implementation subsets only. The
 authoritative decision record is `docs/adr/ADR-lab-v2-cutover.md` and the only
 implementation/release authority is the Approved-v10 blocker-resolution plan.
 

@@ -38,9 +38,22 @@ KNOWN_TOPICS = tuple(TOPIC_OWNERS)
 async def _publish_run_enqueue(envelope: dict) -> None:
     from app.lab import queue as lab_queue
 
-    run_id = (envelope.get("payload") or {}).get("run_id")
-    if run_id:
-        await lab_queue.enqueue_run(run_id)
+    payload = envelope.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("lab.run.enqueue payload must be an object")
+    envelope_run_id = envelope.get("run_id")
+    run_id = payload.get("run_id")
+    protocol_version = payload.get("protocol_version")
+    if (
+        not isinstance(envelope_run_id, str)
+        or not envelope_run_id
+        or not isinstance(run_id, str)
+        or run_id != envelope_run_id
+    ):
+        raise ValueError("lab.run.enqueue envelope and payload run binding mismatch")
+    if type(protocol_version) is not int or protocol_version not in {1, 2}:
+        raise ValueError("lab.run.enqueue payload has invalid protocol_version")
+    await lab_queue.enqueue_run(run_id, protocol_version=protocol_version)
 
 
 async def _publish_lab_control(_envelope: dict) -> None:

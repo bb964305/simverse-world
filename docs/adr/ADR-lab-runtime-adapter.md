@@ -1,8 +1,7 @@
 # ADR: Simverse Lab Runtime Adapter Selection
 
-- **Status: Accepted (2026-07-20) — one candidate selected: the Simverse
-  self-hosted reference runtime. The commercial third-party runtimes remain
-  unevaluated (no endpoints).**
+- **Status: Conditionally accepted for the default-off P2 session boundary.
+  Real execution and release selection remain pending P3 result-loop evidence.**
 - **Gate scope:** This selection gate blocks **real-runtime enablement and any
   production-capability claim** — not Mock-backed control-plane correctness work.
   Enabling a real Adapter or OCI path still requires a recorded ≥80/100 selection
@@ -12,7 +11,43 @@
   (supervision) and P2-E (OCI executor); recovery plan Phase 7.
 - Decision owners: Lab platform (Jimmy + agents).
 
-## Status summary (honest, load-bearing)
+## Approved-v10 protocol-v2 override (2026-07-21)
+
+This section supersedes the v1 scoring and completion language retained below as
+historical evidence. The earlier 100/100 runs exercised the buffered v1 protocol,
+which could complete the model loop before Broker execution and therefore did
+not prove real result resume, ACK/replay, or Artifact provenance. Those scores
+must not be used to enable a real Runtime or satisfy the P3/release gate.
+
+The Simverse reference Runtime remains the only admitted P2 implementation, but
+only for its protocol-v2 session boundary:
+
+- handshake is strict v2, `broker_only`, `session_affine`, and requires
+  deterministic create/reattach capability;
+- Gateway registration commits before provider create and is bound to the exact
+  live lease owner/epoch; same-host restart reattaches, while host/volume loss or
+  a divergent provider locator quarantines;
+- Runtime state and command receipts use a durable hardened SQLite file;
+- all run routes authenticate a short-lived, action-scoped `lab-runtime` JWT
+  before session lookup, with current/next key rotation and exact retry binding;
+- v2 `goal`, `results`, and control endpoints remain 501 scaffolds in P2, and no
+  v2 Runner handler is registered. This is intentional fail-closed behavior until
+  P3 supplies the real intent/result/supervision loop.
+
+The standalone development entrypoint is now explicit. Running
+`python -m app.lab.runtime_ref.server` requires
+`LAB_RUNTIME_PROTOCOL_VERSION`. Version 2 additionally requires
+`LAB_RUNTIME_STORE_PATH`, `LAB_RUNTIME_AUTH_ISSUER`, exact audience
+`lab-runtime`, and a JSON current/next keyring. Missing or partial configuration
+exits; importing `module:app` exposes no `/runs` route. Version 1 is available
+only when explicitly requested for legacy compatibility.
+
+All rollout flags remain false. No Runtime service, image, production network,
+TLS/mTLS identity, or durable volume is authorized while D0 is absent. P3 must
+replace the historical score with sentinel success/deny/fail/replay and reattach
+evidence before this ADR can become an execution selection record.
+
+## Historical v1 selection evidence (superseded for protocol v2)
 
 **One runtime candidate is selected: the Simverse self-hosted reference runtime**
 (`app/lab/runtime_ref/`). It is a REAL, LLM-backed agent runtime — not a stub —
@@ -58,15 +93,13 @@ via `scripts/p7_score_endpoint.py`.
 
 - The reference runtime PASSED the gate, so it is an admissible real Adapter. But
   the default stays `settings.lab_adapter = "mock"` and `lab_oci_enabled = False`.
-- Enabling it in production requires: (1) DEPLOYING the reference runtime server
-  (`python -m app.lab.runtime_ref.server`) as an isolated service and setting
-  `lab_simverse_ref_base_url`; (2) routing its `code.run`/`shell.exec` tool
-  effects through the OCI executor on a dedicated Linux host (V11 — proven
-  separately in `docs/renders/lab-oci-evidence/`); (3) a staging canary. An
-  unconfigured `simverse_ref` adapter fail-closes at `start()`.
-- Live incremental step streaming during a long run is a noted follow-up (the
-  server currently completes the loop then serves the buffered steps via the same
-  poll-with-cursor protocol).
+- Under the former v1 assumptions, production enablement would have required
+  deploying the server and setting `lab_simverse_ref_base_url`. Approved-v10 now
+  additionally requires D0, the explicit v2 standalone configuration above, P3
+  result-loop evidence, isolated Executor routing, and a staging canary. An
+  unconfigured `simverse_ref` adapter still fails closed at `start()`.
+- The buffered v1 loop described below is not an accepted v2 execution path. P3
+  must pause at intent and resume the same turn only from the real Broker result.
 
 ## The gate (framework — ready now)
 
@@ -144,6 +177,6 @@ that is exactly what the missing endpoints block.
 - Positive: the gate is executable and trusted (proven to score + eliminate on
   fakes); selection becomes a mechanical, evidence-backed step once endpoints
   exist. Reproduction is documented.
-- Negative / open: no real runtime is available yet, so the meta-game's real
-  sandbox path stays on Mock. This is a deliberate, honest hold — not a silent
-  default.
+- Negative / open: no P3-qualified Runtime result loop is available yet, so the
+  meta-game's real sandbox path stays disabled/Mock. This is a deliberate,
+  fail-closed hold rather than a production selection.

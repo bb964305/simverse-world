@@ -1,6 +1,7 @@
 # ADR: Lab protocol-v2 cutover and single-writer enforcement
 
-- Status: Accepted for D1a feasibility; P1 financial/DB subset verified; D1b and D1c pending
+- Status: Accepted for D1a feasibility; P1 and default-off P2 subsets verified;
+  D1b overall and D1c pending
 - Decision date: 2026-07-21
 - Plan authority: `lab-agent-blocker-resolution-plan.md`, Approved v10
 - Baseline: `feat/lab-agent-v1@77b64c2878a1adeba7a44c8844a19ed9fa642d26`
@@ -114,6 +115,63 @@ physical queue isolation, session durability, fleet-wide credential placement,
 or absence of old writers in a deployed fleet. D1b overall therefore remains
 pending, and all rollout flags remain false.
 
+## P2 protocol, state, and Runtime boundary evidence
+
+P2 is implemented default-off through additive revision
+`039_add_lab_protocol_v2_state`. Historical runs are backfilled to protocol v1;
+new rows must explicitly choose strict integer version 1 or 2. An ORM guard,
+database check, and PostgreSQL trigger make the version immutable after insert.
+The migration refuses malformed or preclaimed enqueue history, and its downgrade
+locks the affected tables and refuses any v2 run, Runtime, control, or enqueue
+history before changing schema.
+
+Protocol ownership is now physical rather than advisory:
+
+- v1 uses `sv:lab:v1:{queue,processing}` and v2 uses
+  `sv:lab:v2:{queue,processing}`; the two legacy unversioned lists must be empty
+  before a Runner starts;
+- enqueue outbox payloads bind `run_id` and `protocol_version`, and the dispatcher
+  rejects envelope/payload mismatches before publishing;
+- only a v1 consumer handler is registered in P2. A v2 Runner or run fails before
+  child tasks, holds, run state, outbox, Redis, or Mock/v1 execution until P3
+  installs the real result-loop handler;
+- v2 admission requires the exact `simverse_ref` adapter. Mock and every other
+  adapter fail closed rather than becoming a fallback.
+
+Revision 039 owns durable session, turn, intent, result, and control state. Its
+composite foreign keys bind each intent to one session/epoch and turn/session,
+and bind every result to the exact session, turn, intent, action, and epoch.
+Negative PostgreSQL probes reject every cross-binding variant. Provider session
+creation registers and commits `creating` before external I/O, uses a deterministic
+client id, and requires idempotent create plus reattach. The caller must hold the
+exact live run lease. Final ready/verify transitions lock lease then session,
+recheck PostgreSQL wall-clock expiry, retain a live-lease CAS predicate, and
+rollback before cleanup on every exception. Same-host process restart reattaches
+the durable session; host/volume loss or a divergent locator quarantines it.
+
+The protocol-v2 Runtime stores bounded model/session state and command receipts
+in a hardened SQLite file. Every `/runs/**` route authenticates a short-lived,
+run/session/epoch/action-scoped JWT before session lookup; current and next keys
+are accepted for the dedicated `lab-runtime` audience, while expired, malformed,
+wrong-audience, wrong-action, and cross-binding replay tokens are rejected. Exact
+valid retries return the original durable receipt. Importing `module:app` exposes
+no run route, and the supported standalone entrypoint requires an explicit
+protocol plus complete durable-store/keyring configuration. Production TLS,
+mTLS identity, service deployment, and volume operation remain P5/D0 work.
+
+Fresh disposable PostgreSQL evidence reached the single 039 head: three migration
+tests and ten Runtime durability/concurrency tests passed. The latter includes
+create-before-provider crash recovery, host-loss quarantine, owner/epoch takeover,
+lease-row and session-transition expiry waits, final-CAS fencing, and lock-release
+proofs. The current local protocol/auth/state suites and the P1-on-head compatibility
+group are green. External P2 command logs and hashes are stored under
+`/Volumes/data/dev/simverse-world-release-evidence/p2-protocol-session/`.
+
+This closes the P2 physical-queue/session-durability portion of D1b only.
+Fleet-wide credential placement and legacy-writer absence still require P5 after
+a valid D0. P3 result delivery, provider ACK/replay, Artifact provenance, and
+Runner ACK semantics are explicitly not claimed by this section.
+
 ## Comparative evidence
 
 Counts are derived from explicit file/symbol/table/backfill/service lists emitted
@@ -144,10 +202,11 @@ cross-claim is nonzero, or the declared session durability class fails.
 
 ## Remaining gates
 
-- D1b: P1 real-Postgres financial grants and the complete 1120-row cohort
-  matrix are verified. P2 must still prove immutable protocol version, physical
-  queue cross-claim zero, and measured session-affine durability; P5 must prove
-  fleet-wide role placement and legacy-writer absence after a valid D0.
+- D1b: P1 real-Postgres financial grants and the complete 1120-row cohort matrix,
+  plus P2 immutable protocol version, physical queue isolation, strict consumer
+  routing, scoped Runtime auth, and measured session-affine durability are
+  verified default-off. P5 must still prove fleet-wide role placement and
+  legacy-writer absence after a valid D0.
 - D1c-control/dispatcher subset: Runtime and Executor control receipts, nominal
   and fault global-kill drills, and per-owner outbox deny matrix.
 - D1c overall: P5 identity/topology evidence after a valid external D0 approval.

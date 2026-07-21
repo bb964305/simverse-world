@@ -6,6 +6,7 @@ from scripts.audit_lab_terminal_writers import (
     Finding,
     PLANNED_DB_ROLES,
     _parse_spike,
+    queue_constants,
     source_findings,
     audit,
 )
@@ -30,6 +31,16 @@ def test_d1a_comparison_preserves_one_financial_domain():
     assert a_prime["services"] <= option_b["services"]
     assert result["unknown_findings"] == []
     assert result["missing_findings"] == []
+
+
+def test_current_queue_constants_match_the_physical_split_contract():
+    assert queue_constants(REPO_ROOT) == {
+        "v1_pending": "sv:lab:v1:queue",
+        "v1_processing": "sv:lab:v1:processing",
+        "v2_pending": "sv:lab:v2:queue",
+        "v2_processing": "sv:lab:v2:processing",
+    }
+    assert audit(REPO_ROOT)["hard_oracles"]["current_physical_queue_split"] is True
 
 
 def test_terminalizer_consumer_and_submitter_role_are_in_inventory():

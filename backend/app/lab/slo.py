@@ -75,9 +75,16 @@ async def collect_snapshot(db, *, now: datetime | None = None) -> dict:
     now = now if now is not None else datetime.now(UTC)
 
     try:
-        from app.lab.queue import QUEUE_KEY
-        queue_depth = int(await get_redis().llen(QUEUE_KEY))
+        from app.lab.queue import queue_keys
+
+        redis = get_redis()
+        queue_depth_by_protocol = {
+            version: int(await redis.llen(queue_keys(version)[0]))
+            for version in (1, 2)
+        }
+        queue_depth = sum(queue_depth_by_protocol.values())
     except Exception:  # pragma: no cover — Redis optional in minimal envs
+        queue_depth_by_protocol = {1: 0, 2: 0}
         queue_depth = 0
 
     active = (await db.execute(
@@ -107,6 +114,8 @@ async def collect_snapshot(db, *, now: datetime | None = None) -> dict:
 
     snap = {
         "queue_depth": queue_depth,
+        "queue_depth_v1": queue_depth_by_protocol[1],
+        "queue_depth_v2": queue_depth_by_protocol[2],
         "active_runs": int(active),
         "oldest_unpublished_age_s": oldest_age,
         "dead_letter": int(dead),

@@ -86,14 +86,48 @@ async def test_process_run_refuses_when_cap_full(db_engine, monkeypatch):
     assert await concurrency.try_reserve(researcher_slug="y") is True
 
     # Cancelled run → skipped (never reserves).
-    assert await runner._process_run("rc") == "skipped"
+    assert await runner._process_run("rc", protocol_version=1) == "skipped"
     # Queued run with the cap full → full (caller requeues; no execution).
-    assert await runner._process_run("rq") == "full"
+    assert await runner._process_run("rq", protocol_version=1) == "full"
 
     # Free a slot and stub run_one: now it runs and releases.
     await concurrency.release(researcher_slug="x")
     with patch.object(runner, "run_one", new=AsyncMock()) as ran:
-        assert await runner._process_run("rq") == "ran"
+        assert await runner._process_run("rq", protocol_version=1) == "ran"
         ran.assert_awaited_once_with("rq")
     # The slot it took was released.
     assert await concurrency.try_reserve(researcher_slug="z") is True
+
+
+@pytest.mark.anyio
+async def test_process_run_refuses_cross_protocol_queue_claim(db_engine, monkeypatch):
+    """A misplaced v2 id cannot enter the v1 worker or reserve a slot."""
+    from app.lab import runner
+    import app.database as database
+
+    factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+    monkeypatch.setattr(database, "async_session", factory)
+    monkeypatch.setattr(runner, "async_session", factory)
+    async with factory() as db:
+        db.add(LabRun(
+            id="v2-on-v1", task_id="t-v2", researcher_slug="sage",
+            status="queued", protocol_version=2,
+        ))
+        await db.commit()
+
+    with patch.object(runner, "run_one", new=AsyncMock()) as ran:
+        assert await runner._process_run("v2-on-v1", protocol_version=1) == "skipped"
+        ran.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_legacy_runner_rejects_v2_before_dequeue(monkeypatch):
+    """An unsupported worker must fail before it can move a v2 id to processing."""
+    from app.lab import runner
+
+    dequeue = AsyncMock()
+    monkeypatch.setattr(runner.lab_queue, "dequeue_run", dequeue)
+
+    with pytest.raises(ValueError, match="only protocol_version 1"):
+        await runner.runner_loop(protocol_version=2)
+    dequeue.assert_not_awaited()

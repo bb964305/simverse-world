@@ -29,7 +29,7 @@ from app.models.lab_run import LabRun
 ISSUER = "simverse-gateway"
 AUDIENCE = "lab-runtime"
 KID = "runtime-current"
-KEY = "runtime-current-test-secret"
+KEY = "runtime-current-test-secret-at-least-32-bytes"
 
 
 def _canonical(value: object) -> str:
@@ -113,7 +113,10 @@ def _v2_app(tmp_path, completer: ScriptedCompleter):
             service_auth={
                 "issuer": ISSUER,
                 "audience": AUDIENCE,
-                "keys": {KID: KEY, "runtime-next": "runtime-next-test-secret"},
+                "keys": {
+                    KID: KEY,
+                    "runtime-next": "runtime-next-test-secret-at-least-32-bytes",
+                },
             },
         )
     except TypeError as exc:  # expected-red on the 77b64c2 baseline
@@ -203,6 +206,7 @@ async def test_protocol_version_is_creation_time_state_not_a_mutable_label(db_se
     )
     db_session.add(run)
     await db_session.commit()
+    run_id = run.id
 
     with pytest.raises(Exception) as rejected:
         run.protocol_version = 1
@@ -210,7 +214,7 @@ async def test_protocol_version_is_creation_time_state_not_a_mutable_label(db_se
     assert "protocol" in str(rejected.value).lower()
     await db_session.rollback()
     db_session.expire_all()
-    assert (await db_session.get(LabRun, run.id)).protocol_version == 2
+    assert (await db_session.get(LabRun, run_id)).protocol_version == 2
 
 
 @pytest.mark.anyio

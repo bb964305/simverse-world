@@ -39,6 +39,22 @@ class LabTaskError(Exception):
     """Publish/accept/reject/cancel conflicts (router maps to 400/402/403/409)."""
 
 
+def _require_execution_consumer(protocol_version: int | None = None) -> int:
+    """Freeze and validate the execution protocol before any domain mutation."""
+    from app.lab import runner
+
+    selected = (
+        runner.configured_protocol_version()
+        if protocol_version is None
+        else protocol_version
+    )
+    try:
+        runner.require_protocol_handler(selected)
+    except runner.ProtocolConsumerUnavailable as exc:
+        raise LabTaskError(str(exc)) from exc
+    return selected
+
+
 # ── serialization ─────────────────────────────────────────────────────
 
 def serialize(t: LabTask) -> dict:
@@ -162,6 +178,7 @@ async def create_task(
     Raises LabTaskError on bad input, daily cap, insufficient balance, or an
     invalid/unavailable researcher.
     """
+    protocol_version = _require_execution_consumer()
     if reward_sc <= 0:
         raise LabTaskError("reward must be positive")
     scopes = [s for s in (scopes or []) if s in ALLOWED_SCOPES]
@@ -245,15 +262,18 @@ async def create_task(
     await db.commit()  # task(funded) + hold + debit + ledger row, one transaction
     await db.refresh(task)
 
-    await _assign_and_start(db, task)
+    await _assign_and_start(db, task, protocol_version=protocol_version)
     await db.refresh(task)
     return task
 
 
-async def _assign_and_start(db, task: LabTask) -> None:
+async def _assign_and_start(
+    db, task: LabTask, *, protocol_version: int | None = None
+) -> None:
     """Assign a researcher (named or auto) and enqueue the first run. If open
     recruitment finds no idle researcher, the task stays ``funded`` for a later
     dispatch pass (dispatch_open_tasks)."""
+    protocol_version = _require_execution_consumer(protocol_version)
     if task.researcher_slug is None:
         picked = await _pick_researcher(db, task)
         if picked is None:
@@ -261,17 +281,21 @@ async def _assign_and_start(db, task: LabTask) -> None:
         task.researcher_slug = picked.slug
     task.status = "assigned"
     await db.commit()
-    await _start_run(db, task)
+    await _start_run(db, task, protocol_version=protocol_version)
 
 
-async def _start_run(db, task: LabTask) -> LabRun:
+async def _start_run(
+    db, task: LabTask, *, protocol_version: int | None = None
+) -> LabRun:
     from app.lab import queue as lab_queue
     from app.models.lab_event import OutboxEvent
 
+    protocol_version = _require_execution_consumer(protocol_version)
     budget_cents = int(round(settings.lab_default_budget_usd * 100))
     run = LabRun(
         task_id=task.id, researcher_slug=task.researcher_slug, adapter=settings.lab_adapter,
         status="queued", scopes_json=list(task.scopes_json or []), budget_usd_cents=budget_cents,
+        protocol_version=protocol_version,
     )
     db.add(run)
     await db.flush()  # populate run.id without committing
@@ -284,17 +308,19 @@ async def _start_run(db, task: LabTask) -> LabRun:
     # skip a run already picked up).
     db.add(OutboxEvent(
         event_id=str(uuid.uuid4()), tenant_id=task.issuer_user_id, run_id=run.id,
-        topic="lab.run.enqueue", payload_json={"run_id": run.id},
+        topic="lab.run.enqueue",
+        payload_json={"run_id": run.id, "protocol_version": protocol_version},
     ))
     await db.commit()  # run + accepted_run_id + enqueue outbox, one transaction
     await db.refresh(run)
-    await lab_queue.enqueue_run(run.id)
+    await lab_queue.enqueue_run(run.id, protocol_version=protocol_version)
     return run
 
 
 async def dispatch_open_tasks(db) -> int:
     """Assign + start any funded open-recruitment tasks that now have an idle
     researcher. Returns the number dispatched (cron/on-demand)."""
+    protocol_version = _require_execution_consumer()
     tasks = (await db.execute(
         select(LabTask).where(LabTask.status == "funded", LabTask.researcher_slug.is_(None))
     )).scalars().all()
@@ -306,7 +332,7 @@ async def dispatch_open_tasks(db) -> int:
         task.researcher_slug = picked.slug
         task.status = "assigned"
         await db.commit()
-        await _start_run(db, task)
+        await _start_run(db, task, protocol_version=protocol_version)
         n += 1
     return n
 

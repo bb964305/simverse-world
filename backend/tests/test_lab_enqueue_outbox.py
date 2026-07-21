@@ -55,7 +55,7 @@ async def test_start_run_writes_durable_enqueue_event(lab_env):
         ev = (await s.execute(
             select(OutboxEvent).where(OutboxEvent.topic == "lab.run.enqueue", OutboxEvent.run_id == run_id)
         )).scalar_one()
-        assert ev.payload_json == {"run_id": run_id}
+        assert ev.payload_json == {"run_id": run_id, "protocol_version": 1}
         assert ev.published_at is None  # durable, awaiting the dispatcher
 
 
@@ -63,8 +63,11 @@ async def test_start_run_writes_durable_enqueue_event(lab_env):
 async def test_dispatcher_replays_enqueue_onto_the_queue(db_engine):
     factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as db:
-        db.add(OutboxEvent(event_id="e-enq", tenant_id="t1", run_id="rX",
-                           topic="lab.run.enqueue", payload_json={"run_id": "rX"}))
+        db.add(OutboxEvent(
+            event_id="e-enq", tenant_id="t1", run_id="rX",
+            topic="lab.run.enqueue",
+            payload_json={"run_id": "rX", "protocol_version": 1},
+        ))
         await db.commit()
 
     async with factory() as db:
@@ -72,7 +75,23 @@ async def test_dispatcher_replays_enqueue_onto_the_queue(db_engine):
     assert stats["published"] == 1
 
     # The run is now on the work queue (crash-replayed) and the event is published.
-    assert await lab_queue.dequeue_run(timeout=1) == "rX"
+    assert await lab_queue.dequeue_run(protocol_version=1, timeout=1) == "rX"
     async with factory() as db:
         ev = (await db.execute(select(OutboxEvent).where(OutboxEvent.event_id == "e-enq"))).scalar_one()
         assert ev.dispatch_status == "published" and ev.published_at is not None
+
+
+@pytest.mark.anyio
+async def test_enqueue_publisher_rejects_cross_run_payload_before_queue_effect():
+    with patch.object(lab_queue, "enqueue_run", new_callable=AsyncMock) as enqueue:
+        with pytest.raises(ValueError, match="run binding mismatch"):
+            await disp._publish_run_enqueue(
+                {
+                    "run_id": "envelope-run",
+                    "payload": {
+                        "run_id": "different-run",
+                        "protocol_version": 2,
+                    },
+                }
+            )
+    enqueue.assert_not_awaited()

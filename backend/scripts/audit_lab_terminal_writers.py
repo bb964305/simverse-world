@@ -488,16 +488,30 @@ def source_findings(repo_root: Path) -> set[Finding]:
     return findings
 
 
+PLANNED_QUEUE_KEYS = {
+    "v1_pending": "sv:lab:v1:queue",
+    "v1_processing": "sv:lab:v1:processing",
+    "v2_pending": "sv:lab:v2:queue",
+    "v2_processing": "sv:lab:v2:processing",
+}
+
+
 def queue_constants(repo_root: Path) -> dict[str, str]:
     path = repo_root / "backend/app/lab/queue.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    names = {
+        "V1_QUEUE_KEY": "v1_pending",
+        "V1_PROCESSING_KEY": "v1_processing",
+        "V2_QUEUE_KEY": "v2_pending",
+        "V2_PROCESSING_KEY": "v2_processing",
+    }
     values: dict[str, str] = {}
     for node in tree.body:
         if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
             continue
         for target in node.targets:
-            if isinstance(target, ast.Name) and target.id in {"QUEUE_KEY", "PROCESSING_KEY"}:
-                values[target.id] = str(node.value.value)
+            if isinstance(target, ast.Name) and target.id in names:
+                values[names[target.id]] = str(node.value.value)
     return values
 
 
@@ -605,6 +619,7 @@ def audit(repo_root: Path, spike_evidence: Path | None = None) -> dict:
         "source_inventory_has_no_unknown": not unknown and not missing,
         "controlled_postgres_entrypoint_spike": bool(spike.get("postgres_role_guard_passed")),
         "physical_queue_split_spike": bool(spike.get("physical_queue_split_passed")),
+        "current_physical_queue_split": queues == PLANNED_QUEUE_KEYS,
         "a_prime_keeps_one_financial_domain": a_counts["financial_domains"] == 1,
     }
     return {
@@ -624,12 +639,7 @@ def audit(repo_root: Path, spike_evidence: Path | None = None) -> dict:
             ],
         },
         "current_queue_keys": queues,
-        "planned_queue_keys": {
-            "v1_pending": "sv:lab:v1:queue",
-            "v1_processing": "sv:lab:v1:processing",
-            "v2_pending": "sv:lab:v2:queue",
-            "v2_processing": "sv:lab:v2:processing",
-        },
+        "planned_queue_keys": PLANNED_QUEUE_KEYS,
         "planned_db_roles": PLANNED_DB_ROLES,
         "postgres_and_queue_spike": spike,
         "comparative_matrix": {

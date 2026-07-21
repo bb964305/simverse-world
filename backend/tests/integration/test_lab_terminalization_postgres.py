@@ -139,7 +139,7 @@ async def postgres_factory():
 async def kernel_factories():
     database_url, _ = _required_postgres()
     result = subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", "038_add_lab_terminalization_v2"],
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=BACKEND_ROOT,
         env={**os.environ, "DATABASE_URL": database_url, "DEBUG": "true"},
         text=True,

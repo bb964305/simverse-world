@@ -42,7 +42,7 @@ def migrated_database() -> tuple[str, str]:
     database_url, run_id = _required_database()
     env = {**os.environ, "DATABASE_URL": database_url, "DEBUG": "true"}
     result = subprocess.run(
-        [sys.executable, "-m", "alembic", "upgrade", "038_add_lab_terminalization_v2"],
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=BACKEND_ROOT,
         env=env,
         text=True,
@@ -450,8 +450,9 @@ async def test_writer_roles_and_controlled_entrypoint(migrated_database):
             )
             await connection.execute(
                 text(
-                    "INSERT INTO lab_runs(id,task_id,researcher_slug,status,created_at) "
-                    f"VALUES (:run,:task,:researcher,'succeeded',{now})"
+                        "INSERT INTO lab_runs(id,task_id,researcher_slug,status,"
+                        "protocol_version,created_at) "
+                        f"VALUES (:run,:task,:researcher,'succeeded',1,{now})"
                 ),
                 {"run": lab_run_id, "task": task_id, "researcher": researcher_slug},
             )

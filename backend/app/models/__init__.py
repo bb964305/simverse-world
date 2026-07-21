@@ -50,3 +50,6 @@ import app.models.lab_lease  # noqa: F401
 import app.models.lab_budget  # noqa: F401
 import app.models.lab_worker_attempt  # noqa: F401
 import app.models.world_revision  # noqa: F401
+# Lab Agent protocol v2 durable Gateway state (migration 039)
+import app.models.lab_runtime  # noqa: F401
+import app.models.lab_control  # noqa: F401
