@@ -1,6 +1,6 @@
 # ADR: Lab protocol-v2 cutover and single-writer enforcement
 
-- Status: Accepted for D1a feasibility; D1b and D1c pending
+- Status: Accepted for D1a feasibility; P1 financial/DB subset verified; D1b and D1c pending
 - Decision date: 2026-07-21
 - Plan authority: `lab-agent-blocker-resolution-plan.md`, Approved v10
 - Baseline: `feat/lab-agent-v1@77b64c2878a1adeba7a44c8844a19ed9fa642d26`
@@ -79,6 +79,41 @@ nonzero rather than skip. The immutable JUnit bundle and manifest are at
 `/Volumes/data/dev/simverse-world-release-evidence/p0-expected-red/`; its manifest
 SHA-256 is `c14b72af2ddb1bb0d8e4180d2deb7ad13356b8ae93286dfe6bfca357d865fc1e`.
 
+## P1 financial and database evidence
+
+P1 is implemented default-off through additive migration
+`038_add_lab_terminalization_v2`. The database kernel owns Task, Hold, journal,
+balance, treasury, receipt, and terminal outbox effects in one transaction. Its
+owner is the NOLOGIN `lab_financial_kernel_owner`; `lab_terminalizer_v2` has
+only controlled-entrypoint execution, and the NOLOGIN breakglass role has no
+standing execution grant. Breakglass activation uses a separate balanced
+compensation ledger and immutable audit/outbox records.
+
+The real-Postgres suite has 17 cases. It includes a 100-round SQL
+settle-versus-refund race, service-level exact retry and fencing, bounded retry,
+concurrent single-owner safety fencing, opposing lock order, SQL and Python
+fault matrices, failure-recorder row-lock convergence, role and direct-DML denial,
+breakglass activation/revocation and fault rollback, and downgrade refusal.
+Fresh-schema upgrade reached revision 038; a separate clean database downgraded
+to revision 037; any command, receipt, journal, v2-hold, or compensation history
+makes downgrade fail before schema mutation. Focused completion-worktree
+verification currently covers 110 local P1 cases plus the 17-case real-Postgres
+suite.
+
+Machine evidence is outside Git at
+`/Volumes/data/dev/simverse-world-release-evidence/p1-terminalization/`:
+
+| Evidence | Result | SHA-256 |
+|---|---|---|
+| `writer-inventory.json` | 45 findings; zero missing/unknown; all hard oracles pass and A' is retained | `ea41596c210b72911220c13e9a6a0c1ad81a3739822dec87e2e75308c230667e` |
+| `cohort-matrix.json` | 1120 unique tuples; every tuple has one rule/action; seven rows collected directly from a disposable migrated PostgreSQL database map with zero anomalies or unresolved rows | `5b2d293423d093c873fc99ae52b6843a19b93eb1a2ffa8ed6fe6d4c812d38fa3` |
+| `finance-reconciliation.json` | Fresh migrated disposable PostgreSQL database; two tasks, two holds, five journal entries, one completed v2 command/receipt; read-only reconciliation with zero anomalies | `7d92b49662b29aff42a155c92b9ccb2ab5ee46c721d6a4942866d61dadb22a96` |
+
+This evidence closes only the P1 financial/DB part of D1b. It does not prove
+physical queue isolation, session durability, fleet-wide credential placement,
+or absence of old writers in a deployed fleet. D1b overall therefore remains
+pending, and all rollout flags remain false.
+
 ## Comparative evidence
 
 Counts are derived from explicit file/symbol/table/backfill/service lists emitted
@@ -86,8 +121,8 @@ by the audit script, not from prose estimates:
 
 | Option | Files | Symbols | New tables | Backfills | New operated services | Financial domains |
 |---|---:|---:|---:|---:|---:|---:|
-| A' hybrid | 28 | 29 | 11 | 3 | 3 | 1 |
-| B isolated domain | 38 | 39 | 19 | 8 | 5 | 2 |
+| A' hybrid | 28 | 29 | 12 | 3 | 3 | 1 |
+| B isolated domain | 38 | 39 | 20 | 8 | 5 | 2 |
 
 A' meets every Approved-v10 comparison rule: it retains one financial kernel,
 duplicates zero core-domain tables, operates no more services than B, and has
@@ -109,9 +144,10 @@ cross-claim is nonzero, or the declared session durability class fails.
 
 ## Remaining gates
 
-- D1b: real Postgres grants/legacy probes, complete 1120-row cohort matrix,
-  immutable protocol version, physical queue cross-claim zero, and measured
-  session-affine durability.
+- D1b: P1 real-Postgres financial grants and the complete 1120-row cohort
+  matrix are verified. P2 must still prove immutable protocol version, physical
+  queue cross-claim zero, and measured session-affine durability; P5 must prove
+  fleet-wide role placement and legacy-writer absence after a valid D0.
 - D1c-control/dispatcher subset: Runtime and Executor control receipts, nominal
   and fault global-kill drills, and per-owner outbox deny matrix.
 - D1c overall: P5 identity/topology evidence after a valid external D0 approval.

@@ -169,7 +169,7 @@ async def revoke_grant(db, jti: str) -> None:
         await db.commit()
 
 
-async def revoke_run_grants(db, run_id: str) -> None:
+async def revoke_run_grants(db, run_id: str, *, commit: bool = True) -> None:
     result = await db.execute(
         select(LabCapabilityGrant).where(
             LabCapabilityGrant.run_id == run_id,
@@ -179,7 +179,10 @@ async def revoke_run_grants(db, run_id: str) -> None:
     now = datetime.now(UTC)
     for row in result.scalars():
         row.revoked_at = now
-    await db.commit()
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
 
 
 async def revoke_grants_before_epoch(db, *, run_id: str, epoch: int) -> int:

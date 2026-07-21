@@ -34,6 +34,9 @@ class LabTask(Base):
     scopes_json: Mapped[list] = mapped_column(JSON, default=list)  # ["web_search","browse","code",...]
     reward_sc: Mapped[int] = mapped_column(Integer, default=0)
     platform_fee_sc: Mapped[int] = mapped_column(Integer, default=0)
+    terminal_creator_share_bps: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
     deliverable_kind: Mapped[str] = mapped_column(String(20), default="report")  # report|file|link|dataset|world_change
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
     hold_id: Mapped[str | None] = mapped_column(String, nullable=True)

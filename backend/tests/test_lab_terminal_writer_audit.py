@@ -1,8 +1,10 @@
 from pathlib import Path
 
 from scripts.audit_lab_terminal_writers import (
+    CURRENT_RUNTIME_CALLERS,
     EXPECTED_FINDINGS,
     Finding,
+    PLANNED_DB_ROLES,
     _parse_spike,
     source_findings,
     audit,
@@ -30,6 +32,30 @@ def test_d1a_comparison_preserves_one_financial_domain():
     assert result["missing_findings"] == []
 
 
+def test_terminalizer_consumer_and_submitter_role_are_in_inventory():
+    runner = next(
+        caller for caller in CURRENT_RUNTIME_CALLERS if caller["process"] == "lab-runner"
+    )
+    assert "terminal_command_consumer" in runner["operations"]
+    assert "terminal_event_publisher" in runner["operations"]
+
+    submitter = next(
+        role
+        for role in PLANNED_DB_ROLES
+        if role["role"] == "lab_command_submitter_v2"
+    )
+    assert submitter["login"] is False
+    assert "submit_lab_terminalization_command" in submitter["capability"]
+
+    assert Finding(
+        "write",
+        "backend/app/lab/supervision.py",
+        "kill_switch_all",
+        "retry_run.status",
+        "<dynamic>",
+    ) not in EXPECTED_FINDINGS
+
+
 def test_d1a_strict_decision_requires_external_spike_evidence():
     result = audit(REPO_ROOT)
     assert result["decision"] == "STOP_AND_REASSESS"
@@ -42,9 +68,13 @@ def test_source_inventory_detects_indirect_and_dynamic_terminal_writes(tmp_path)
     source.parent.mkdir(parents=True)
     source.write_text(
         "from app.services.coin_service import refund as repay\n"
+        "from app.services.coin_service import reward, treasury_credit\n"
         "async def mutate(db, run, status):\n"
         "    alias = repay\n"
         "    await alias(db, 'hold', 'reason')\n"
+        "    await reward(db, 'user', 1, 'reason')\n"
+        "    await treasury_credit(db, 'slug', 1, 'reason')\n"
+        "    await service.finalize(db, 'command', 0)\n"
         "    run.status = status\n"
         "    setattr(run, 'status', 'failed')\n"
         "    await db.execute(update(Run).values(status='cancelled'))\n",
@@ -53,6 +83,13 @@ def test_source_inventory_detects_indirect_and_dynamic_terminal_writes(tmp_path)
 
     findings = source_findings(tmp_path)
     assert Finding("call", "backend/app/lab/indirect.py", "mutate", "refund") in findings
+    assert Finding("call", "backend/app/lab/indirect.py", "mutate", "reward") in findings
+    assert Finding(
+        "call", "backend/app/lab/indirect.py", "mutate", "treasury_credit"
+    ) in findings
+    assert Finding(
+        "call", "backend/app/lab/indirect.py", "mutate", "finalize"
+    ) in findings
     assert Finding("write", "backend/app/lab/indirect.py", "mutate", "run.status", "<dynamic>") in findings
     assert Finding(
         "write", "backend/app/lab/indirect.py", "mutate", "setattr(run.status)", "failed"

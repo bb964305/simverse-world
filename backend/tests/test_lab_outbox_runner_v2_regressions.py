@@ -37,6 +37,7 @@ def test_topic_registry_has_exactly_one_trust_plane_owner():
         "lab.run.enqueue": "lab_runner",
         "lab_control": "lab_runner",
         "lab_run_event": "realtime_relay",
+        "lab.task.terminalized": "lab_terminalizer",
         "world_changed": "world_relay",
         "artifact_cleanup": "artifact_cleanup",
     }
@@ -87,7 +88,12 @@ async def test_runner_claims_only_owned_topics_and_publisher_receives_full_envel
     published = {row.topic for row in rows if row.published_at is not None}
     pending = {row.topic for row in rows if row.dispatch_status == "pending"}
     assert published == {"lab.run.enqueue", "lab_control"}
-    assert pending == {"lab_run_event", "world_changed", "artifact_cleanup"}
+    assert pending == {
+        "lab_run_event",
+        "lab.task.terminalized",
+        "world_changed",
+        "artifact_cleanup",
+    }
 
 
 @pytest.mark.anyio

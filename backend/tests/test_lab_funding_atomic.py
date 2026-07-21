@@ -78,3 +78,34 @@ async def test_insufficient_balance_persists_no_task_and_no_hold(lab_env):
         n_holds = (await s.execute(select(func.count()).select_from(CoinHold))).scalar()
         assert n_tasks == 0 and n_holds == 0
         assert await coin_service.get_balance(s, "issuer") == 5  # untouched
+
+
+@pytest.mark.anyio
+async def test_v2_admission_requires_ready_terminalizer_before_any_write(
+    lab_env, monkeypatch
+):
+    from app.config import settings
+
+    factory = lab_env
+    await _seed(factory, 1000)
+    monkeypatch.setattr(settings, "lab_terminalizer_v2_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "lab_terminalizer_worker_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "lab_terminalizer_database_url", "", raising=False)
+
+    async with factory() as s:
+        with pytest.raises(svc.LabTaskError, match="consumer is not ready"):
+            await svc.create_task(
+                s,
+                issuer_id="issuer",
+                title="v2 admission",
+                brief="must have a consumer",
+                scopes=["web_search"],
+                reward_sc=100,
+                researcher_slug="sage",
+            )
+
+    async with factory() as s:
+        n_tasks = (await s.execute(select(func.count()).select_from(LabTask))).scalar()
+        n_holds = (await s.execute(select(func.count()).select_from(CoinHold))).scalar()
+        assert n_tasks == 0 and n_holds == 0
+        assert await coin_service.get_balance(s, "issuer") == 1000

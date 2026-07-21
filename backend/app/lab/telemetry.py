@@ -34,11 +34,12 @@ class LabAlert(str, Enum):
     WORLD_APPLY_FAILED = "world_apply_failed"    # a world proposal apply/revert failed
     CLEANUP_QUARANTINE = "cleanup_quarantine"    # a workspace/artifact could not be cleaned → quarantined
     TASK_MODERATION_REJECTED = "task_moderation_rejected"  # task title/brief failed the content gate (code only)
+    TERMINALIZATION_FAILED = "terminalization_failed"  # terminal command exhausted retries or became invalid
 
 
 # The ONLY fields an alert may carry — all structural, none content-bearing.
 _ALLOWED_FIELDS = frozenset({
-    "run_id", "tenant_id", "task_id", "proposal_id", "revision_id", "action_id",
+    "run_id", "tenant_id", "task_id", "command_id", "proposal_id", "revision_id", "action_id",
     "approval_id", "artifact_id", "grant_jti", "epoch", "dimension", "reason",
     "count", "host_hash", "seq",
 })

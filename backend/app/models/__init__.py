@@ -32,6 +32,8 @@ import app.models.goal_investment  # noqa: F401
 import app.models.debate  # noqa: F401
 # Lab (experiment building) core — P1
 import app.models.coin_hold  # noqa: F401
+import app.models.coin_hold_entry  # noqa: F401
+import app.models.lab_terminalization  # noqa: F401
 import app.models.resident_treasury  # noqa: F401
 import app.models.lab_task  # noqa: F401
 import app.models.lab_run  # noqa: F401

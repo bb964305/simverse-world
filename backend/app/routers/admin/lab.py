@@ -1,5 +1,6 @@
 """Admin Lab — run monitor + circuit breaker + runtime kill switch (spec §5.3, §8)."""
 from datetime import datetime, UTC
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -18,6 +19,10 @@ router = APIRouter(prefix="/lab", tags=["admin-lab"])
 
 class KillSwitchBody(BaseModel):
     enabled: bool
+
+
+class ArbitrationBody(BaseModel):
+    decision: Literal["settle", "refund"]
 
 
 @router.get("/status")
@@ -57,6 +62,26 @@ async def list_runs(status: str | None = None, admin: User = Depends(require_adm
     return {"runs": [svc.serialize_run(r) for r in rows]}
 
 
+@router.post("/tasks/{task_id}/arbitrate")
+async def arbitrate_task(
+    task_id: str,
+    body: ArbitrationBody,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Resolve a rejected result through the audited terminal command path."""
+    try:
+        task = await svc.arbitrate_result(
+            db,
+            task_id=task_id,
+            admin_id=admin.id,
+            decision=body.decision,
+        )
+    except svc.LabTaskError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"task": svc.serialize(task), "decision": body.decision}
+
+
 @router.post("/runs/{run_id}/cancel")
 async def cancel_run(run_id: str, admin: User = Depends(require_admin),
                      db: AsyncSession = Depends(get_db)):
@@ -67,9 +92,24 @@ async def cancel_run(run_id: str, admin: User = Depends(require_admin),
     run = await db.get(LabRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
+    task = await db.get(LabTask, run.task_id)
+    task_needs_terminalization = (
+        task is not None
+        and task.status not in ("completed", "cancelled", "expired", "failed")
+    )
+    if run.status == "cancelled" and task_needs_terminalization:
+        from app.lab import supervision
+        await supervision.reconcile_cancelled_run_event(db, run_id=run_id)
+        try:
+            await svc.fail_task(db, task, reason=f"admin_cancel_run:{run_id}")
+        except svc.LabTaskError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"run is cancelled; terminalization deferred: {exc}",
+            ) from exc
+        return {"ok": True, "run_id": run_id, "escalation": "already_cancelled"}
     if run.status in ("succeeded", "failed", "cancelled"):
         raise HTTPException(status_code=409, detail="run already terminal")
-
     from app.config import settings
     if settings.lab_agent_v1_enabled:
         from app.lab import supervision
@@ -78,15 +118,35 @@ async def cancel_run(run_id: str, admin: User = Depends(require_admin),
             db, run_id=run_id, adapter=get_adapter(run.adapter), handle=None,
             reason="admin_cancel",
         )
-        task = await db.get(LabTask, run.task_id)
-        if task is not None and task.status not in ("completed", "cancelled", "expired", "failed"):
-            await svc.fail_task(db, task, reason=f"admin_cancel_run:{run_id}")
+        if task_needs_terminalization:
+            await db.refresh(task)
+            task_needs_terminalization = task.status not in (
+                "completed", "cancelled", "expired", "failed"
+            )
+        if task_needs_terminalization:
+            try:
+                await svc.fail_task(db, task, reason=f"admin_cancel_run:{run_id}")
+            except svc.LabTaskError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"run cancelled; terminalization deferred: {exc}",
+                ) from exc
         return {"ok": True, "run_id": run_id, "escalation": tier}
 
     run.status = "cancelled"
     run.ended_at = datetime.now(UTC)
     await db.commit()
-    task = await db.get(LabTask, run.task_id)
-    if task is not None and task.status not in ("completed", "cancelled", "expired", "failed"):
-        await svc.fail_task(db, task, reason=f"admin_cancel_run:{run_id}")
+    if task_needs_terminalization:
+        await db.refresh(task)
+        task_needs_terminalization = task.status not in (
+            "completed", "cancelled", "expired", "failed"
+        )
+    if task_needs_terminalization:
+        try:
+            await svc.fail_task(db, task, reason=f"admin_cancel_run:{run_id}")
+        except svc.LabTaskError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"run cancelled; terminalization deferred: {exc}",
+            ) from exc
     return {"ok": True, "run_id": run_id}

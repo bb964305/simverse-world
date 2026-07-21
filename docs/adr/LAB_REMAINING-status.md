@@ -26,6 +26,17 @@ P0 state:
   physical-queue spikes pass; the 37-finding source writer inventory has no unknown sites; A'
   is 28 files/29 symbols/11 tables/3 backfills/3 services/one financial domain,
   versus B at 38/39/19/8/5/two domains.
+- P1 financial/DB subset: `PASS`, default-off. Revision 038 adds the controlled
+  transaction kernel, immutable settlement/refund and compensation journals,
+  durable command/receipt binding, and fail-closed downgrade. Seventeen real
+  Postgres cases pass, including 100 repeated SQL races and both fault matrices;
+  110 P1-focused local cases pass. The current 45-finding inventory
+  has zero missing/unknown sites. The exact cohort matrix contains 1120 unique
+  tuples, and seven rows collected directly from a disposable migrated database
+  map without anomalies or unresolved classifications.
+- Current comparison after P1: A' is 28 files/29 symbols/12 tables/3
+  backfills/3 services/one financial domain, versus B at 38/39/20/8/5/two.
+  Evidence and hashes are recorded in `docs/adr/ADR-lab-v2-cutover.md`.
 - Protocol-v2, terminalizer, outbox-v2, Runtime canary, and global admission
   rollout flags all remain default-off.
 - Asset release: still 16 concrete blocked files plus one resident-texture
@@ -36,7 +47,7 @@ P0 state:
   required-environment cases fail nonzero when their infrastructure is withheld.
   JUnit and hashes are sealed outside Git under `p0-expected-red/`.
 
-No wording below may be read as D1b, D1c, AC01-AC21, or release approval. The
+No wording below may be read as overall D1b, D1c, AC01-AC21, or release approval. The
 authoritative decision record is `docs/adr/ADR-lab-v2-cutover.md` and the only
 implementation/release authority is the Approved-v10 blocker-resolution plan.
 

@@ -235,9 +235,12 @@ class Settings(BaseSettings):
 
     # --- Lab Agent protocol v2 rollout (Approved v10, default-deny) ---
     # Each trust plane has an independent gate. A closed v2 gate never permits
-    # fallback to protocol v1 or Mock execution.
+    # fallback to protocol v1 or Mock execution. The Lab Runner always performs
+    # v1 command/event recovery; the worker gate admits its dedicated v2 consumer.
     lab_agent_v2_enabled: bool = False
     lab_terminalizer_v2_enabled: bool = False
+    lab_terminalizer_worker_enabled: bool = False
+    lab_terminalizer_database_url: str = ""
     lab_outbox_v2_enabled: bool = False
     lab_runtime_v2_canary_enabled: bool = False
     lab_global_admission_enabled: bool = False

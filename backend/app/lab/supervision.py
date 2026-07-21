@@ -71,11 +71,13 @@ from sqlalchemy import func, select, update
 from app.config import settings
 from app.lab import grants, leases, ledger, protocol
 from app.lab.protocol import HandshakeManifest, RunEventEnvelope
+from app.models.coin_hold import CoinHold
 from app.models.lab_event import LabRunEvent
 from app.models.lab_grant import LabCapabilityGrant
 from app.models.lab_lease import LabRunLease
 from app.models.lab_run import LabRun
 from app.models.lab_task import LabTask
+from app.models.lab_terminalization import LabTerminalizationCommand
 from app.services import lab_task_service
 
 logger = logging.getLogger(__name__)
@@ -374,7 +376,7 @@ async def _escalate_cancel(adapter, handle, *, grace_s: float, kill_s: float,
     return "kill"
 
 
-async def _bump_epoch(db, run_id: str) -> int:
+async def _bump_epoch(db, run_id: str, *, commit: bool = True) -> int:
     """Structurally fence the current owner: a direct ``fencing_epoch += 1`` on
     the lease (takeover semantics). The old owner's next heartbeat/emit carries
     the stale epoch → rejected. No lease row (never started) → epoch stays 0."""
@@ -384,11 +386,22 @@ async def _bump_epoch(db, run_id: str) -> int:
         .values(fencing_epoch=LabRunLease.fencing_epoch + 1)
         .execution_options(synchronize_session=False)
     )
-    await db.commit()
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
     return await leases.current_epoch(db, run_id)
 
 
-async def _emit_terminal(db, run_id: str, *, reason: str, extra: dict | None = None) -> None:
+async def _emit_terminal(
+    db,
+    run_id: str,
+    *,
+    reason: str,
+    extra: dict | None = None,
+    event_id: str | None = None,
+    commit: bool = True,
+) -> None:
     """Append a supervisor-authored ``run.failed`` for the run. No fencing gate
     (the supervisor is an out-of-band authority, not the lease holder); the
     envelope carries the run's current epoch."""
@@ -403,12 +416,135 @@ async def _emit_terminal(db, run_id: str, *, reason: str, extra: dict | None = N
     if extra:
         payload.update(extra)
     envelope = RunEventEnvelope(
-        event_id=str(uuid.uuid4()), tenant_id=tenant_id, run_id=run_id, task_id=run.task_id,
+        event_id=event_id or str(uuid.uuid4()), tenant_id=tenant_id, run_id=run_id, task_id=run.task_id,
         seq=seq, type="run.failed", actor="supervisor", fencing_epoch=epoch,
         policy_version=settings.lab_policy_version, occurred_at=datetime.now(UTC),
         payload=payload,
     )
-    await ledger.append_event(db, envelope=envelope, outbox_topic="lab_run_event")
+    await ledger.append_event(
+        db,
+        envelope=envelope,
+        outbox_topic="lab_run_event",
+        commit=commit,
+    )
+
+
+def _supervisor_terminal_event_id(run_id: str, reason: str) -> str:
+    return str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"simverse:lab:supervisor-terminal:{run_id}:{reason}",
+        )
+    )
+
+
+async def _ensure_supervisor_terminal_event(
+    db,
+    *,
+    run_id: str,
+    reason: str,
+    extra: dict | None = None,
+) -> bool:
+    """Converge the audit event after the safety fence is already durable."""
+    event_id = _supervisor_terminal_event_id(run_id, reason)
+    for attempt in range(3):
+        if await db.get(LabRunEvent, event_id) is not None:
+            return True
+        try:
+            await _emit_terminal(
+                db,
+                run_id,
+                reason=reason,
+                extra=extra,
+                event_id=event_id,
+            )
+            return True
+        except Exception:  # noqa: BLE001 - the durable fence must not roll back
+            await db.rollback()
+            if await db.get(LabRunEvent, event_id) is not None:
+                return True
+            if attempt == 2:
+                logger.error(
+                    "supervisor terminal event did not converge for run %s",
+                    run_id,
+                    exc_info=True,
+                )
+    return False
+
+
+async def _fence_run_once(
+    db,
+    *,
+    run_id: str,
+    ended_at: datetime,
+    reason: str,
+    extra: dict | None = None,
+) -> tuple[bool, int]:
+    """Atomically fence one active run; converge its audit event afterwards."""
+    run = (
+        await db.execute(
+            select(LabRun)
+            .where(LabRun.id == run_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if run is None or run.status not in _ACTIVE_RUN_STATES:
+        should_recover_event = (
+            run is not None and run.status == "cancelled" and run.error == reason
+        )
+        await db.commit()
+        if should_recover_event:
+            await _ensure_supervisor_terminal_event(
+                db,
+                run_id=run_id,
+                reason=reason,
+                extra=extra,
+            )
+        return False, 0
+
+    live_grants = (
+        await db.execute(
+            select(func.count()).select_from(LabCapabilityGrant).where(
+                LabCapabilityGrant.run_id == run_id,
+                LabCapabilityGrant.revoked_at.is_(None),
+            )
+        )
+    ).scalar_one()
+    await grants.revoke_run_grants(db, run_id, commit=False)
+    await _bump_epoch(db, run_id, commit=False)
+    run.status = "cancelled"
+    run.ended_at = ended_at
+    run.error = reason
+    await db.commit()
+    await _ensure_supervisor_terminal_event(
+        db,
+        run_id=run_id,
+        reason=reason,
+        extra=extra,
+    )
+    return True, int(live_grants)
+
+
+async def reconcile_cancelled_run_event(db, *, run_id: str) -> bool:
+    """Recover an audit event after a crash between fence commit and append."""
+    run = await db.get(LabRun, run_id)
+    if (
+        run is None
+        or run.status != "cancelled"
+        or not run.error
+        or not (run.error == "kill_switch" or run.error.startswith("cancelled:"))
+    ):
+        return False
+    extra = None
+    if run.error.startswith("cancelled:"):
+        extra = {"escalation": "unknown_after_recovery"}
+    return await _ensure_supervisor_terminal_event(
+        db,
+        run_id=run_id,
+        reason=run.error,
+        extra=extra,
+    )
 
 
 async def cancel_run(db, *, run_id: str, adapter, handle, reason: str,
@@ -435,15 +571,15 @@ async def cancel_run(db, *, run_id: str, adapter, handle, reason: str,
         tier = await _escalate_cancel(adapter, handle, grace_s=grace_s, kill_s=kill_s,
                                       now=clock, sleep=sleep, timeout_s=control_timeout_s)
     finally:
-        # Fencing must land under ANY escalation outcome or exception.
-        await grants.revoke_run_grants(db, run_id)
-        await _bump_epoch(db, run_id)
-        run = await db.get(LabRun, run_id)
-        if run is not None and run.status not in ("succeeded", "failed", "cancelled"):
-            run.status = "cancelled"
-            run.ended_at = datetime.now(UTC)
-            await db.commit()
-        await _emit_terminal(db, run_id, reason=f"cancelled:{reason}", extra={"escalation": tier})
+        # Fencing lands under any adapter outcome, and only one concurrent
+        # control request may advance the epoch or emit the terminal event.
+        await _fence_run_once(
+            db,
+            run_id=run_id,
+            ended_at=datetime.now(UTC),
+            reason=f"cancelled:{reason}",
+            extra={"escalation": tier},
+        )
     return tier
 
 
@@ -452,55 +588,127 @@ async def cancel_run(db, *, run_id: str, adapter, handle, reason: str,
 async def kill_switch_all(db, *, now: datetime | None = None) -> dict:
     """Terminate every active run (``queued`` / ``running`` / ``needs_approval``):
     flip it to ``cancelled``, revoke its grants, fence its lease, refund the task,
-    and write a ``run.failed(reason="kill_switch")``. Strictly idempotent — a
-    second call finds no active run and is a no-op. Per-run failures are isolated
-    (logged + rolled back) so one bad run cannot abort the drill.
+    and write a ``run.failed(reason="kill_switch")``. A cancelled run whose
+    escrow command was never persisted is retried without repeating the fence;
+    once a command exists, later calls are strict no-ops. Per-run failures are
+    isolated so one bad run cannot abort the drill.
 
     Follows ``expire_lab_tasks``'s single-session, commit-per-item idiom (the
     brief's ``db_factory`` sketch is superseded: a passed session is testable both
     directly and from the admin route's request scope, and keeps this module's
     "never opens its own session" contract)."""
     now = now if now is not None else datetime.now(UTC)
-    stats = {"runs_cancelled": 0, "grants_revoked": 0, "tasks_failed": 0}
+    failed_terminalizations = (
+        await db.execute(
+            select(func.count())
+            .select_from(LabTerminalizationCommand)
+            .join(LabTask, LabTask.id == LabTerminalizationCommand.task_id)
+            .join(CoinHold, CoinHold.id == LabTerminalizationCommand.hold_id)
+            .where(
+                LabTerminalizationCommand.operation == "fail",
+                LabTerminalizationCommand.status == "failed",
+                LabTask.status.not_in(_TERMINAL_TASK_STATES),
+                CoinHold.status == "held",
+            )
+        )
+    ).scalar_one()
+    stats = {
+        "runs_cancelled": 0,
+        "grants_revoked": 0,
+        "tasks_failed": 0,
+        "terminalization_failed": int(failed_terminalizations),
+    }
 
     active = (await db.execute(
         select(LabRun).where(LabRun.status.in_(_ACTIVE_RUN_STATES))
     )).scalars().all()
-
-    for run in active:
-        run_id = run.id
-        try:
-            live_grants = (await db.execute(
-                select(func.count()).select_from(LabCapabilityGrant).where(
-                    LabCapabilityGrant.run_id == run_id,
-                    LabCapabilityGrant.revoked_at.is_(None),
+    retryable = (
+        await db.execute(
+            select(LabRun)
+            .join(LabTask, LabTask.id == LabRun.task_id)
+            .join(CoinHold, CoinHold.id == LabTask.hold_id)
+            .where(
+                LabRun.status == "cancelled",
+                LabTask.status.not_in(_TERMINAL_TASK_STATES),
+                CoinHold.status == "held",
+                ~select(LabTerminalizationCommand.command_id)
+                .where(
+                    LabTerminalizationCommand.task_id == LabTask.id,
+                    LabTerminalizationCommand.hold_id == CoinHold.id,
+                    LabTerminalizationCommand.operation == "fail",
                 )
-            )).scalar_one()
+                .exists(),
+            )
+        )
+    ).scalars().all()
+    event_recovery: list[LabRun] = []
+    kill_marked = (
+        await db.execute(
+            select(LabRun).where(
+                LabRun.status == "cancelled",
+                LabRun.error == "kill_switch",
+            )
+        )
+    ).scalars().all()
+    for run in kill_marked:
+        event_id = _supervisor_terminal_event_id(run.id, "kill_switch")
+        if await db.get(LabRunEvent, event_id) is None:
+            event_recovery.append(run)
 
-            # Refund the escrow FIRST (and let ``fail_task`` commit it) BEFORE
-            # flipping the run to a terminal state. If the refund raises, the run
-            # stays active and this drill (or the next) retries it — committing
-            # ``run=cancelled`` ahead of a guaranteed refund would strand the hold
-            # forever, since a cancelled run is no longer in _ACTIVE_RUN_STATES to
-            # be re-swept. ``fail_task``'s task-terminal guard makes the retry
-            # idempotent (never a double refund).
-            task = await db.get(LabTask, run.task_id)
-            refunded = False
+    candidates: list[tuple[LabRun, bool]] = [(run, True) for run in active]
+    seen_run_ids = {run.id for run in active}
+    for run in retryable:
+        if run.id not in seen_run_ids:
+            candidates.append((run, False))
+            seen_run_ids.add(run.id)
+    for run in event_recovery:
+        if run.id not in seen_run_ids:
+            candidates.append((run, False))
+            seen_run_ids.add(run.id)
+
+    for run, needs_fence in candidates:
+        run_id = run.id
+        task_id = run.task_id
+        try:
+            terminalization_requested = False
+            if needs_fence:
+                fenced, live_grants = await _fence_run_once(
+                    db,
+                    run_id=run_id,
+                    ended_at=now,
+                    reason="kill_switch",
+                )
+                if fenced:
+                    stats["runs_cancelled"] += 1
+                    stats["grants_revoked"] += live_grants
+            else:
+                await reconcile_cancelled_run_event(db, run_id=run_id)
+
+            task = await db.get(LabTask, task_id)
             if task is not None and task.status not in _TERMINAL_TASK_STATES:
-                await lab_task_service.fail_task(db, task, reason="kill_switch")
-                refunded = True
+                existing_command = await db.scalar(
+                    select(LabTerminalizationCommand.command_id).where(
+                        LabTerminalizationCommand.task_id == task.id,
+                        LabTerminalizationCommand.hold_id == task.hold_id,
+                        LabTerminalizationCommand.operation == "fail",
+                    )
+                )
+                if existing_command is None:
+                    await lab_task_service.fail_task(db, task, reason="kill_switch")
+                    await db.refresh(task)
+                    terminalization_requested = (
+                        task.status in _TERMINAL_TASK_STATES
+                        or await db.scalar(
+                            select(LabTerminalizationCommand.command_id).where(
+                                LabTerminalizationCommand.task_id == task.id,
+                                LabTerminalizationCommand.hold_id == task.hold_id,
+                                LabTerminalizationCommand.operation == "fail",
+                            )
+                        )
+                        is not None
+                    )
 
-            await grants.revoke_run_grants(db, run_id)
-            await _bump_epoch(db, run_id)
-
-            run.status = "cancelled"
-            run.ended_at = now
-            await db.commit()
-            await _emit_terminal(db, run_id, reason="kill_switch")
-
-            stats["runs_cancelled"] += 1
-            stats["grants_revoked"] += int(live_grants)
-            if refunded:
+            if terminalization_requested:
                 stats["tasks_failed"] += 1
         except Exception:  # noqa: BLE001 — isolate one bad run; the drill goes on
             logger.warning("kill_switch teardown failed for run %s", run_id, exc_info=True)

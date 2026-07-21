@@ -1,34 +1,17 @@
-"""Durable outbox dispatcher (recovery plan Phase 2, gap #11).
+"""Durable outbox dispatcher with trust-plane topic ownership.
 
-``ledger.append_event`` / ``world_revision_service`` / ``lab_artifact_service``
-durably write ``OutboxEvent`` rows in the same transaction as the state they
-describe, but nothing drained them in production — a post-commit publish failure
-had no replay path. This module is that claimant/retry/topic router:
-
-* **claim** — a row is eligible when ``published_at IS NULL`` and
-  ``dispatch_status='pending'`` and its backoff (``next_attempt_at``) has elapsed
-  and it is not currently leased (``locked_until``). Claiming is a conditional
-  UPDATE + rowcount (the lease/broker CAS idiom), so two dispatchers never
-  double-claim one row.
-* **route** — the row's ``topic`` selects a publisher from the registry. An
-  UNKNOWN topic is quarantined to ``dispatch_status='dead'`` and NEVER marked
-  published (a misrouted event must not silently vanish as delivered).
-* **retry** — a publish failure bumps ``attempts`` and schedules an exponential
-  backoff; past ``max_attempts`` the row dead-letters. Success stamps
-  ``published_at`` (idempotent: the CAS only fires while it is still NULL).
-
-The caller owns the session/loop; ``dispatch_once`` commits per row so one bad
-publisher cannot block or roll back the others. Publishers are injected so the
-engine is testable with fakes; the default registry wires the real WS/Redis
-sinks but is only *activated* by the Lab Runner deployment (Phase 8), not here.
+The outbox is shared across multiple delivery planes, so a dispatcher instance
+must only claim the topics it owns. Known-but-not-owned topics stay pending for
+their proper owner; truly unknown topics are quarantined. Publishers receive the
+full outbox envelope so they can make idempotency decisions on ``event_id``.
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, UTC
+from datetime import UTC, datetime, timedelta
 from typing import Awaitable, Callable
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import not_, or_, select, update
 
 from app.models.lab_event import OutboxEvent
 
@@ -41,34 +24,53 @@ LEASE_S = 30
 BACKOFF_BASE_S = 2
 BACKOFF_CAP_S = 300
 
-# Topics the dispatcher knows how to route. A row whose topic is absent from the
-# active publisher registry is quarantined rather than dropped.
-KNOWN_TOPICS = ("lab.run.enqueue", "lab_run_event", "world_changed", "lab_control", "artifact_cleanup")
+TOPIC_OWNERS = {
+    "lab.run.enqueue": "lab_runner",
+    "lab_run_event": "realtime_relay",
+    "lab.task.terminalized": "lab_terminalizer",
+    "world_changed": "world_relay",
+    "lab_control": "lab_runner",
+    "artifact_cleanup": "artifact_cleanup",
+}
+KNOWN_TOPICS = tuple(TOPIC_OWNERS)
 
 
-async def _publish_run_enqueue(payload: dict) -> None:
-    """Durable-dispatch sink for ``lab.run.enqueue``: LPUSH the run onto the Redis
-    work queue. Idempotent at the consumer — the runner's queued-guard + run lease
-    skip a run already picked up, so a replayed enqueue cannot double-execute."""
+async def _publish_run_enqueue(envelope: dict) -> None:
     from app.lab import queue as lab_queue
-    run_id = (payload or {}).get("run_id")
+
+    run_id = (envelope.get("payload") or {}).get("run_id")
     if run_id:
         await lab_queue.enqueue_run(run_id)
 
 
-def default_publishers() -> "dict[str, Publisher]":
-    """The live publisher registry the Lab Runner activates (Phase 8 deployment).
+async def _publish_lab_control(_envelope: dict) -> None:
+    """Best-effort wakeup topic.
 
-    Only ``lab.run.enqueue`` is wired: it is the one topic with a purely durable
-    guarantee (re-deliver a lost enqueue) and an idempotent consumer. The
-    ``lab_run_event`` / ``world_changed`` topics are deliberately NOT wired here —
-    their live path is the inline WS broadcast; wiring the dispatcher to re-broadcast
-    them would double-deliver until the deployment owns that de-dup topology."""
-    return {"lab.run.enqueue": _publish_run_enqueue}
+    The control plane still polls durable DB state on every pass, so a lost
+    wakeup must not lose the underlying command. Until a dedicated wakeup bus is
+    restored in this worktree, publishing is intentionally a no-op.
+    """
+
+
+def owned_topics(owner: str) -> frozenset[str]:
+    return frozenset(topic for topic, topic_owner in TOPIC_OWNERS.items() if topic_owner == owner)
+
+
+def default_publishers(*, owner: str | None = None) -> dict[str, Publisher]:
+    registry: dict[str, Publisher] = {
+        "lab.run.enqueue": _publish_run_enqueue,
+        "lab_control": _publish_lab_control,
+    }
+    if owner is None:
+        return dict(registry)
+    return {
+        topic: publisher
+        for topic, publisher in registry.items()
+        if TOPIC_OWNERS.get(topic) == owner
+    }
 
 
 def backoff_seconds(attempts: int) -> float:
-    """Exponential backoff for the Nth failed attempt, capped."""
     return float(min(BACKOFF_CAP_S, BACKOFF_BASE_S ** max(1, attempts)))
 
 
@@ -76,14 +78,25 @@ def _now(now: datetime | None) -> datetime:
     return now if now is not None else datetime.now(UTC)
 
 
-def _as_utc(dt: datetime | None) -> datetime | None:
-    if dt is None:
-        return None
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+def _envelope(row: OutboxEvent) -> dict:
+    return {
+        "outbox_id": row.id,
+        "event_id": row.event_id,
+        "tenant_id": row.tenant_id,
+        "run_id": row.run_id,
+        "topic": row.topic,
+        "payload": row.payload_json or {},
+    }
 
 
-async def _eligible_ids(db, *, limit: int, now: datetime) -> list[int]:
-    rows = (await db.execute(
+async def _eligible_ids(
+    db,
+    *,
+    limit: int,
+    now: datetime,
+    owned: frozenset[str] | None,
+) -> list[int]:
+    statement = (
         select(OutboxEvent.id)
         .where(
             OutboxEvent.published_at.is_(None),
@@ -93,12 +106,19 @@ async def _eligible_ids(db, *, limit: int, now: datetime) -> list[int]:
         )
         .order_by(OutboxEvent.id)
         .limit(limit)
-    )).scalars().all()
+    )
+    if owned is not None:
+        statement = statement.where(
+            or_(
+                OutboxEvent.topic.in_(tuple(owned)),
+                not_(OutboxEvent.topic.in_(KNOWN_TOPICS)),
+            )
+        )
+    rows = (await db.execute(statement)).scalars().all()
     return list(rows)
 
 
 async def _claim(db, *, outbox_id: int, now: datetime, lease_s: int) -> bool:
-    """CAS-lease one row. Returns True iff this dispatcher won the claim."""
     result = await db.execute(
         update(OutboxEvent)
         .where(
@@ -115,29 +135,53 @@ async def _claim(db, *, outbox_id: int, now: datetime, lease_s: int) -> bool:
 
 
 async def dispatch_once(
-    db, *, publishers: dict[str, Publisher], limit: int = 100, lease_s: int = LEASE_S,
-    max_attempts: int = MAX_ATTEMPTS, now: datetime | None = None,
+    db,
+    *,
+    publishers: dict[str, Publisher],
+    owned_topics: frozenset[str] | None = None,
+    limit: int = 100,
+    lease_s: int = LEASE_S,
+    max_attempts: int = MAX_ATTEMPTS,
+    now: datetime | None = None,
 ) -> dict:
-    """Claim, route, and settle a batch of eligible outbox rows once. Returns
-    ``{"published", "retried", "dead", "quarantined", "claimed"}`` counts.
+    """Claim, route, and settle one eligible batch.
 
-    Commits per row so a single failing publisher isolates to its own row. A
-    publisher must be idempotent under a given ``event_id`` — the dispatcher's
-    at-least-once contract can redeliver a row whose lease lapsed mid-publish."""
+    ``owned_topics`` narrows claims to this dispatcher's trust plane, except that
+    unknown topics are still claimed and quarantined by whichever dispatcher sees
+    them first.
+    """
+
     now = _now(now)
-    stats = {"published": 0, "retried": 0, "dead": 0, "quarantined": 0, "claimed": 0}
+    stats = {
+        "published": 0,
+        "retried": 0,
+        "dead": 0,
+        "quarantined": 0,
+        "claimed": 0,
+        "skipped": 0,
+    }
 
-    for outbox_id in await _eligible_ids(db, limit=limit, now=now):
+    for outbox_id in await _eligible_ids(db, limit=limit, now=now, owned=owned_topics):
         if not await _claim(db, outbox_id=outbox_id, now=now, lease_s=lease_s):
-            continue  # another dispatcher won it
+            continue
         stats["claimed"] += 1
         row = await db.get(OutboxEvent, outbox_id)
-        if row is None:  # pragma: no cover - defensive
+        if row is None:
+            continue
+
+        if owned_topics is not None and row.topic in KNOWN_TOPICS and row.topic not in owned_topics:
+            row.locked_until = None
+            await db.commit()
+            stats["skipped"] += 1
             continue
 
         publisher = publishers.get(row.topic)
         if publisher is None:
-            # Unknown/unroutable topic — quarantine, never mark published.
+            if row.topic in KNOWN_TOPICS:
+                row.locked_until = None
+                await db.commit()
+                stats["skipped"] += 1
+                continue
             row.dispatch_status = "dead"
             row.last_error = "unknown_topic"
             row.locked_until = None
@@ -147,8 +191,12 @@ async def dispatch_once(
             continue
 
         try:
-            await publisher(row.payload_json or {})
-        except Exception as exc:  # noqa: BLE001 — an untrusted sink; retry/backoff
+            envelope = _envelope(row)
+            if owned_topics is None and publisher not in {_publish_run_enqueue, _publish_lab_control}:
+                await publisher(row.payload_json or {})
+            else:
+                await publisher(envelope)
+        except Exception as exc:  # noqa: BLE001
             row.attempts = (row.attempts or 0) + 1
             row.last_error = str(exc)[:200]
             row.locked_until = None
@@ -163,11 +211,15 @@ async def dispatch_once(
                 stats["retried"] += 1
             continue
 
-        # Success — idempotent mark (CAS keeps first-write-wins for published_at).
         marked = await db.execute(
             update(OutboxEvent)
             .where(OutboxEvent.id == outbox_id, OutboxEvent.published_at.is_(None))
-            .values(published_at=now, dispatch_status="published", locked_until=None)
+            .values(
+                published_at=now,
+                dispatch_status="published",
+                locked_until=None,
+                last_error=None,
+            )
             .execution_options(synchronize_session=False)
         )
         await db.commit()
@@ -177,17 +229,24 @@ async def dispatch_once(
     return stats
 
 
-async def run_dispatch_loop(session_factory, *, publishers: dict[str, Publisher],
-                            interval_s: float, stop_event) -> None:
-    """Long-lived drain loop for the Lab Runner (wired by Phase 8 deployment,
-    not started here). Each pass opens its own session, dispatches a batch, and
-    sleeps ``interval_s``. Resilient to transient DB errors."""
+async def run_dispatch_loop(
+    session_factory,
+    *,
+    publishers: dict[str, Publisher],
+    owned_topics: frozenset[str] | None = None,
+    interval_s: float = 1.0,
+    stop_event,
+) -> None:
     import asyncio
 
     while not stop_event.is_set():
         try:
             async with session_factory() as db:
-                await dispatch_once(db, publishers=publishers)
+                await dispatch_once(
+                    db,
+                    publishers=publishers,
+                    owned_topics=owned_topics,
+                )
         except Exception:  # noqa: BLE001
             logger.warning("outbox dispatch pass failed; retrying", exc_info=True)
         try:

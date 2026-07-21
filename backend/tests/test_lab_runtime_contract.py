@@ -537,6 +537,123 @@ def test_resume_decision_new_attempt_when_no_checkpoint():
 # ── kill switch drill ─────────────────────────────────────────────────
 
 @pytest.mark.anyio
+async def test_fence_noop_does_not_expire_caller_loaded_task(sup_env):
+    factory = sup_env
+    async with factory() as db:
+        db.add(
+            LabTask(
+                id="noop-task",
+                issuer_user_id="issuer",
+                title="noop",
+                status="running",
+                hold_id="noop-hold",
+            )
+        )
+        db.add(
+            LabRun(
+                id="noop-run",
+                task_id="noop-task",
+                researcher_slug="sage",
+                status="cancelled",
+                adapter="mock",
+            )
+        )
+        await db.commit()
+        task = await db.get(LabTask, "noop-task")
+        assert task is not None
+
+        fenced, grants_revoked = await supervision._fence_run_once(
+            db,
+            run_id="noop-run",
+            ended_at=datetime.now(UTC),
+            reason="kill_switch",
+        )
+
+        assert fenced is False and grants_revoked == 0
+        assert task.hold_id == "noop-hold"
+
+
+@pytest.mark.anyio
+async def test_terminal_event_failure_cannot_roll_back_safety_fence(
+    sup_env, monkeypatch
+):
+    factory = sup_env
+    async with factory() as db:
+        db.add(
+            LabTask(
+                id="event-failure-task",
+                issuer_user_id="issuer",
+                title="event failure",
+                status="running",
+            )
+        )
+        db.add(
+            LabRun(
+                id="event-failure-run",
+                task_id="event-failure-task",
+                researcher_slug="sage",
+                status="running",
+                adapter="mock",
+            )
+        )
+        await db.commit()
+        await leases.acquire_lease(
+            db, run_id="event-failure-run", owner_id="event-owner"
+        )
+        _, claims = await grants.issue_run_grant(
+            db,
+            tenant_id="issuer",
+            task_id="event-failure-task",
+            run_id="event-failure-run",
+            agent_id="event-agent",
+            capabilities=["web_search"],
+            fencing_epoch=0,
+        )
+
+    original_emit = supervision._emit_terminal
+
+    async def broken_event(*args, **kwargs):
+        raise RuntimeError("injected event failure")
+
+    monkeypatch.setattr(supervision, "_emit_terminal", broken_event)
+    async with factory() as db:
+        fenced, grants_revoked = await supervision._fence_run_once(
+            db,
+            run_id="event-failure-run",
+            ended_at=datetime.now(UTC),
+            reason="kill_switch",
+        )
+    assert fenced is True and grants_revoked == 1
+
+    async with factory() as db:
+        run = await db.get(LabRun, "event-failure-run")
+        lease = await db.get(LabRunLease, "event-failure-run")
+        grant = await db.get(LabCapabilityGrant, claims.jti)
+        assert run is not None and run.status == "cancelled"
+        assert run.error == "kill_switch"
+        assert lease is not None and lease.fencing_epoch == 1
+        assert grant is not None and grant.revoked_at is not None
+        assert await _event_count(
+            db, run_id="event-failure-run", type_="run.failed"
+        ) == 0
+
+    monkeypatch.setattr(supervision, "_emit_terminal", original_emit)
+    async with factory() as db:
+        stats = await supervision.kill_switch_all(db)
+        assert stats == {
+            "runs_cancelled": 0,
+            "grants_revoked": 0,
+            "tasks_failed": 0,
+            "terminalization_failed": 0,
+        }
+        assert await _event_count(
+            db, run_id="event-failure-run", type_="run.failed"
+        ) == 1
+        lease = await db.get(LabRunLease, "event-failure-run")
+        assert lease is not None and lease.fencing_epoch == 1
+
+
+@pytest.mark.anyio
 async def test_kill_switch_all_cancels_refunds_revokes_idempotently(sup_env):
     factory = sup_env
     # Two active runs under two tasks, each with a live grant + lease + escrow hold.
@@ -546,8 +663,15 @@ async def test_kill_switch_all_cancels_refunds_revokes_idempotently(sup_env):
     jtis = []
     for i in (1, 2):
         async with factory() as s:
-            task = LabTask(id=f"task{i}", issuer_user_id="issuer", title="t", reward_sc=10,
-                           platform_fee_sc=0, status="running")
+            task = LabTask(
+                id=f"task{i}",
+                issuer_user_id="issuer",
+                title="t",
+                reward_sc=10,
+                platform_fee_sc=0,
+                status="running",
+                accepted_run_id=f"run{i}",
+            )
             s.add(task)
             await s.flush()
             from app.services import coin_service
@@ -571,7 +695,8 @@ async def test_kill_switch_all_cancels_refunds_revokes_idempotently(sup_env):
         for i in (1, 2):
             assert (await db.get(LabRun, f"run{i}")).status == "cancelled"
             assert (await db.get(LabTask, f"task{i}")).status == "failed"
-            assert (await db.get(LabRunLease, f"run{i}")).fencing_epoch == 1
+            # Immediate kill fencing and the later refund owner each advance once.
+            assert (await db.get(LabRunLease, f"run{i}")).fencing_epoch == 2
             evs = (await db.execute(
                 select(LabRunEvent).where(LabRunEvent.run_id == f"run{i}", LabRunEvent.type == "run.failed")
             )).scalars().all()
@@ -596,9 +721,11 @@ async def test_kill_switch_all_cancels_refunds_revokes_idempotently(sup_env):
 
 @pytest.mark.anyio
 async def test_kill_switch_refund_retried_after_fail_task_error(sup_env, monkeypatch):
-    """Escrow-leak guard: if the refund raises, the run must NOT be committed as
-    cancelled (else it drops out of the active set and the hold is stranded). A
-    later drill retries and the issuer is made whole."""
+    """A financial failure never advertises a fenced run as active.
+
+    A later drill retries only the missing command and does not repeat fencing or
+    the supervisor terminal event.
+    """
     from app.services import coin_service
     from app.services import lab_task_service as _svc
 
@@ -607,8 +734,15 @@ async def test_kill_switch_refund_retried_after_fail_task_error(sup_env, monkeyp
         s.add(User(id="issuer", name="I", email="i@t.com", soul_coin_balance=1000))
         await s.commit()
     async with factory() as s:
-        task = LabTask(id="task1", issuer_user_id="issuer", title="t", reward_sc=10,
-                       platform_fee_sc=0, status="running")
+        task = LabTask(
+            id="task1",
+            issuer_user_id="issuer",
+            title="t",
+            reward_sc=10,
+            platform_fee_sc=0,
+            status="running",
+            accepted_run_id="run1",
+        )
         s.add(task)
         await s.flush()
         task.hold_id = await coin_service.hold(s, "issuer", 10, "lab_task:task1")
@@ -631,22 +765,470 @@ async def test_kill_switch_refund_retried_after_fail_task_error(sup_env, monkeyp
 
     monkeypatch.setattr(_svc, "fail_task", flaky_fail)
 
-    # First drill: refund throws → run stays active, hold NOT refunded (no leak).
+    # First drill: runtime safety lands even though the financial request fails.
     async with factory() as db:
         stats1 = await supervision.kill_switch_all(db)
-    assert stats1["runs_cancelled"] == 0
+    assert stats1 == {
+        "runs_cancelled": 1,
+        "grants_revoked": 0,
+        "tasks_failed": 0,
+        "terminalization_failed": 0,
+    }
     async with factory() as s:
-        assert (await s.get(LabRun, "run1")).status == "running"     # not stranded
-        assert await coin_service.get_balance(s, "issuer") == 990    # still escrowed
+        assert (await s.get(LabRun, "run1")).status == "cancelled"
+        assert (await s.get(LabRunLease, "run1")).fencing_epoch == 1
+        assert await coin_service.get_balance(s, "issuer") == 990
+        assert await _event_count(s, type_="run.failed") == 1
 
-    # Second drill: refund succeeds → escrow returned, run terminal.
+    # Second drill: only the missing terminal command is recovered.
     async with factory() as db:
         stats2 = await supervision.kill_switch_all(db)
-    assert stats2["runs_cancelled"] == 1
+    assert stats2 == {
+        "runs_cancelled": 0,
+        "grants_revoked": 0,
+        "tasks_failed": 1,
+        "terminalization_failed": 0,
+    }
     async with factory() as s:
         assert (await s.get(LabRun, "run1")).status == "cancelled"
         assert (await s.get(LabTask, "task1")).status == "failed"
-        assert await coin_service.get_balance(s, "issuer") == 1000   # fully refunded
+        assert (await s.get(LabRunLease, "run1")).fencing_epoch == 2
+        assert await coin_service.get_balance(s, "issuer") == 1000
+        assert await _event_count(s, type_="run.failed") == 1
+
+    async with factory() as db:
+        assert await supervision.kill_switch_all(db) == {
+            "runs_cancelled": 0,
+            "grants_revoked": 0,
+            "tasks_failed": 0,
+            "terminalization_failed": 0,
+        }
+
+
+@pytest.mark.anyio
+async def test_kill_switch_v2_command_uses_post_fence_epoch_and_remains_finalizable(
+    sup_env,
+    monkeypatch,
+):
+    from app.config import settings
+    from app.models.coin_hold import CoinHold
+    from app.models.lab_terminalization import LabTerminalizationCommand
+    from app.services import coin_service, lab_terminalization_service
+
+    factory = sup_env
+    monkeypatch.setattr(settings, "lab_terminalizer_v2_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "lab_terminalizer_worker_enabled", True, raising=False)
+    monkeypatch.setattr(
+        settings,
+        "lab_terminalizer_database_url",
+        "sqlite+aiosqlite:///dedicated-terminalizer.db",
+        raising=False,
+    )
+    async with factory() as db:
+        db.add(User(id="v2-issuer", name="I", email="v2@t.com", soul_coin_balance=100))
+        await db.commit()
+
+        task = LabTask(
+            id="v2-task",
+            issuer_user_id="v2-issuer",
+            title="v2 kill",
+            reward_sc=10,
+            platform_fee_sc=0,
+            status="running",
+            accepted_run_id="v2-run",
+        )
+        db.add(task)
+        await db.flush()
+        hold_id = await coin_service.hold(
+            db,
+            "v2-issuer",
+            10,
+            "lab_task:v2-task",
+            terminalization_version="v2",
+        )
+        assert hold_id is not None
+        task.hold_id = hold_id
+        db.add(
+            LabRun(
+                id="v2-run",
+                task_id="v2-task",
+                researcher_slug="sage",
+                status="running",
+                adapter="mock",
+            )
+        )
+        await db.commit()
+        await leases.acquire_lease(db, run_id="v2-run", owner_id="v2-owner")
+
+    async with factory() as db:
+        stats = await supervision.kill_switch_all(db)
+    assert stats["runs_cancelled"] == 1
+
+    async with factory() as db:
+        command = (
+            await db.execute(
+                select(LabTerminalizationCommand).where(
+                    LabTerminalizationCommand.task_id == "v2-task"
+                )
+            )
+        ).scalar_one()
+        command_id = command.command_id
+        assert command.status == "pending"
+        assert command.expected_epoch == 1
+
+    async with factory() as db:
+        assert await supervision.kill_switch_all(db) == {
+            "runs_cancelled": 0,
+            "grants_revoked": 0,
+            "tasks_failed": 0,
+            "terminalization_failed": 0,
+        }
+        assert await _event_count(db, run_id="v2-run", type_="run.failed") == 1
+
+    async with factory() as db:
+        command = await db.get(LabTerminalizationCommand, command_id)
+        assert command is not None
+        await lab_terminalization_service.finalize(
+            db,
+            command.command_id,
+            command.expected_epoch,
+            _allow_local_kernel=True,
+        )
+
+    async with factory() as db:
+        hold = await db.get(CoinHold, hold_id)
+        run = await db.get(LabRun, "v2-run")
+        lease = await db.get(LabRunLease, "v2-run")
+        command = await db.get(LabTerminalizationCommand, command_id)
+        assert hold is not None and hold.status == "refunded"
+        assert run is not None and run.status == "cancelled"
+        assert lease is not None and lease.fencing_epoch == 2
+        assert command is not None and command.status == "completed"
+        assert await coin_service.get_balance(db, "v2-issuer") == 100
+
+
+@pytest.mark.anyio
+async def test_kill_switch_v2_unready_fences_then_recovers_terminalization(
+    sup_env,
+    monkeypatch,
+):
+    from app.config import settings
+    from app.models.lab_terminalization import LabTerminalizationCommand
+    from app.services import coin_service
+
+    factory = sup_env
+    monkeypatch.setattr(settings, "lab_terminalizer_v2_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "lab_terminalizer_worker_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "lab_terminalizer_database_url", "", raising=False)
+
+    async with factory() as db:
+        admin = User(
+            id="v2-admin",
+            name="Admin",
+            email="v2-admin@t.com",
+            is_admin=True,
+            soul_coin_balance=100,
+        )
+        db.add(admin)
+        task = LabTask(
+            id="v2-admin-task",
+            issuer_user_id=admin.id,
+            title="admin cancel",
+            reward_sc=10,
+            platform_fee_sc=0,
+            status="running",
+            accepted_run_id="v2-admin-run",
+        )
+        db.add(task)
+        await db.flush()
+        task.hold_id = await coin_service.hold(
+            db,
+            admin.id,
+            10,
+            "lab_task:v2-admin-task",
+            terminalization_version="v2",
+        )
+        db.add(
+            LabRun(
+                id="v2-admin-run",
+                task_id=task.id,
+                researcher_slug="sage",
+                status="running",
+                adapter="mock",
+            )
+        )
+        await db.commit()
+        await leases.acquire_lease(
+            db, run_id="v2-admin-run", owner_id="v2-admin-owner"
+        )
+        _, claims = await grants.issue_run_grant(
+            db,
+            tenant_id=admin.id,
+            task_id=task.id,
+            run_id="v2-admin-run",
+            agent_id="kill-switch-check",
+            capabilities=["web_search"],
+            fencing_epoch=0,
+        )
+        grant_jti = claims.jti
+
+    async with factory() as db:
+        stats = await supervision.kill_switch_all(db)
+    assert stats == {
+        "runs_cancelled": 1,
+        "grants_revoked": 1,
+        "tasks_failed": 0,
+        "terminalization_failed": 0,
+    }
+
+    async with factory() as db:
+        run = await db.get(LabRun, "v2-admin-run")
+        lease = await db.get(LabRunLease, "v2-admin-run")
+        grant = await db.get(LabCapabilityGrant, grant_jti)
+        assert run is not None and run.status == "cancelled"
+        assert lease is not None and lease.fencing_epoch == 1
+        assert grant is not None and grant.revoked_at is not None
+        assert await _event_count(db, run_id="v2-admin-run", type_="run.failed") == 1
+        assert (
+            await db.scalar(select(func.count()).select_from(LabTerminalizationCommand))
+        ) == 0
+        assert await coin_service.get_balance(db, admin.id) == 90
+
+    monkeypatch.setattr(settings, "lab_terminalizer_worker_enabled", True, raising=False)
+    monkeypatch.setattr(
+        settings,
+        "lab_terminalizer_database_url",
+        "sqlite+aiosqlite:///dedicated-terminalizer.db",
+        raising=False,
+    )
+    async with factory() as db:
+        recovered = await supervision.kill_switch_all(db)
+    assert recovered == {
+        "runs_cancelled": 0,
+        "grants_revoked": 0,
+        "tasks_failed": 1,
+        "terminalization_failed": 0,
+    }
+
+    async with factory() as db:
+        command = (
+            await db.execute(
+                select(LabTerminalizationCommand).where(
+                    LabTerminalizationCommand.task_id == "v2-admin-task"
+                )
+            )
+        ).scalar_one()
+        lease = await db.get(LabRunLease, "v2-admin-run")
+        assert command.status == "pending"
+        assert command.expected_epoch == 1
+        assert lease is not None and lease.fencing_epoch == 1
+        assert await _event_count(db, run_id="v2-admin-run", type_="run.failed") == 1
+
+
+@pytest.mark.anyio
+async def test_admin_cancel_v2_unready_fences_then_recovers_terminalization(
+    sup_env,
+    monkeypatch,
+):
+    from fastapi import HTTPException
+
+    from app.config import settings
+    from app.models.lab_terminalization import LabTerminalizationCommand
+    from app.routers.admin.lab import cancel_run as admin_cancel_run
+    from app.services import coin_service
+
+    factory = sup_env
+    monkeypatch.setattr(settings, "lab_terminalizer_v2_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "lab_terminalizer_worker_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "lab_terminalizer_database_url", "", raising=False)
+
+    async with factory() as db:
+        admin = User(
+            id="v2-admin",
+            name="Admin",
+            email="v2-admin@t.com",
+            is_admin=True,
+            soul_coin_balance=100,
+        )
+        db.add(admin)
+        task = LabTask(
+            id="v2-admin-task",
+            issuer_user_id=admin.id,
+            title="admin cancel",
+            reward_sc=10,
+            platform_fee_sc=0,
+            status="running",
+            accepted_run_id="v2-admin-run",
+        )
+        db.add(task)
+        await db.flush()
+        task.hold_id = await coin_service.hold(
+            db,
+            admin.id,
+            10,
+            "lab_task:v2-admin-task",
+            terminalization_version="v2",
+        )
+        db.add(
+            LabRun(
+                id="v2-admin-run",
+                task_id=task.id,
+                researcher_slug="sage",
+                status="running",
+                adapter="mock",
+            )
+        )
+        await db.commit()
+        await leases.acquire_lease(
+            db, run_id="v2-admin-run", owner_id="v2-admin-owner"
+        )
+
+    async with factory() as db:
+        with pytest.raises(HTTPException) as exc_info:
+            await admin_cancel_run("v2-admin-run", admin=admin, db=db)
+    assert exc_info.value.status_code == 409
+    assert "run cancelled; terminalization deferred" in str(exc_info.value.detail)
+
+    async with factory() as db:
+        run = await db.get(LabRun, "v2-admin-run")
+        lease = await db.get(LabRunLease, "v2-admin-run")
+        assert run is not None and run.status == "cancelled"
+        assert lease is not None and lease.fencing_epoch == 1
+        assert await _event_count(
+            db, run_id="v2-admin-run", type_="run.failed"
+        ) == 1
+        assert (
+            await db.scalar(select(func.count()).select_from(LabTerminalizationCommand))
+        ) == 0
+
+    monkeypatch.setattr(settings, "lab_terminalizer_worker_enabled", True, raising=False)
+    monkeypatch.setattr(
+        settings,
+        "lab_terminalizer_database_url",
+        "sqlite+aiosqlite:///dedicated-terminalizer.db",
+        raising=False,
+    )
+    async with factory() as db:
+        response = await admin_cancel_run("v2-admin-run", admin=admin, db=db)
+    assert response["escalation"] == "already_cancelled"
+
+    async with factory() as db:
+        command = (
+            await db.execute(
+                select(LabTerminalizationCommand).where(
+                    LabTerminalizationCommand.task_id == "v2-admin-task"
+                )
+            )
+        ).scalar_one()
+        lease = await db.get(LabRunLease, "v2-admin-run")
+        assert command.status == "pending"
+        assert command.expected_epoch == 1
+        assert lease is not None and lease.fencing_epoch == 1
+        assert await _event_count(
+            db, run_id="v2-admin-run", type_="run.failed"
+        ) == 1
+
+
+@pytest.mark.anyio
+async def test_admin_cancel_recovers_already_cancelled_v2_without_refencing(
+    sup_env,
+    monkeypatch,
+):
+    from fastapi import HTTPException
+
+    from app.config import settings
+    from app.models.lab_terminalization import LabTerminalizationCommand
+    from app.routers.admin.lab import cancel_run as admin_cancel_run
+    from app.services import coin_service
+
+    factory = sup_env
+    monkeypatch.setattr(
+        settings,
+        "lab_terminalizer_database_url",
+        "sqlite+aiosqlite:///dedicated-terminalizer.db",
+        raising=False,
+    )
+    monkeypatch.setattr(settings, "lab_terminalizer_v2_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "lab_terminalizer_worker_enabled", True, raising=False)
+
+    async with factory() as db:
+        admin = User(
+            id="v2-admin",
+            name="Admin",
+            email="v2-admin@t.com",
+            is_admin=True,
+            soul_coin_balance=100,
+        )
+        db.add(admin)
+        task = LabTask(
+            id="v2-admin-task",
+            issuer_user_id=admin.id,
+            title="admin cancel",
+            reward_sc=10,
+            platform_fee_sc=0,
+            status="running",
+            accepted_run_id="v2-admin-run",
+        )
+        db.add(task)
+        await db.flush()
+        task.hold_id = await coin_service.hold(
+            db,
+            admin.id,
+            10,
+            "lab_task:v2-admin-task",
+            terminalization_version="v2",
+        )
+        db.add(
+            LabRun(
+                id="v2-admin-run",
+                task_id=task.id,
+                researcher_slug="sage",
+                status="cancelled",
+                adapter="mock",
+            )
+        )
+        await db.commit()
+        await leases.acquire_lease(
+            db, run_id="v2-admin-run", owner_id="v2-admin-owner"
+        )
+
+    async with factory() as db:
+        response = await admin_cancel_run("v2-admin-run", admin=admin, db=db)
+    assert response["escalation"] == "already_cancelled"
+
+    async with factory() as db:
+        command = (
+            await db.execute(
+                select(LabTerminalizationCommand).where(
+                    LabTerminalizationCommand.task_id == "v2-admin-task"
+                )
+            )
+        ).scalar_one()
+        lease = await db.get(LabRunLease, "v2-admin-run")
+        assert command.status == "pending"
+        assert command.expected_epoch == 0
+        assert lease is not None and lease.fencing_epoch == 0
+        assert await _event_count(
+            db, run_id="v2-admin-run", type_="run.failed"
+        ) == 0
+        command.status = "failed"
+        command.last_error = "injected_nonretryable_failure"
+        await db.commit()
+
+    async with factory() as db:
+        with pytest.raises(HTTPException, match="requires reconciliation"):
+            await admin_cancel_run("v2-admin-run", admin=admin, db=db)
+
+    async with factory() as db:
+        stats = await supervision.kill_switch_all(db)
+        lease = await db.get(LabRunLease, "v2-admin-run")
+        assert stats == {
+            "runs_cancelled": 0,
+            "grants_revoked": 0,
+            "tasks_failed": 0,
+            "terminalization_failed": 1,
+        }
+        assert lease is not None and lease.fencing_epoch == 0
 
 
 # ── admin REST kill-switch terminates active runs ─────────────────────

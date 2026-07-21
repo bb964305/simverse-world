@@ -1,25 +1,152 @@
-"""Standalone Lab Runner entrypoint (spec §5.1).
+"""Standalone Lab Runner entrypoint."""
+from __future__ import annotations
 
-Runs the queue consume loop in a process separate from the API / agent-worker,
-so a long-lived, isolation-heavy, possibly-crashing real sandbox never blocks
-request handling or resident ticks.
-
-Start with: python -m app.lab.main
-"""
 import asyncio
 import logging
 import signal
+from collections.abc import Awaitable, Callable
 
-import app.models  # noqa: F401 — full mapper registry so cross-table FKs resolve
+import app.models  # noqa: F401
+from app.config import settings
+from app.database import async_session
+from app.lab import outbox_dispatcher, terminalizer
 from app.lab.runner import runner_loop
 from app.observability import init_sentry
 from app.redis_client import close_redis
 
 logger = logging.getLogger(__name__)
 
+RunnerLoop = Callable[[], Awaitable[None]]
+DispatcherLoop = Callable[..., Awaitable[None]]
+TerminalizerLoop = Callable[..., Awaitable[None]]
+
+
+class RunnerService:
+    def __init__(
+        self,
+        *,
+        session_factory=async_session,
+        runner_loop: RunnerLoop = runner_loop,
+        world_reload_loop: RunnerLoop | None = None,
+        dispatcher_loop: DispatcherLoop | None = None,
+        terminalizer_loop: TerminalizerLoop | None = None,
+        terminalizer_session_factory=None,
+        terminalizer_engine=None,
+    ) -> None:
+        from app.lab.apply import world_reload_subscriber
+
+        self.session_factory = session_factory
+        self.runner_loop = runner_loop
+        self.world_reload_loop = world_reload_loop or world_reload_subscriber
+        self.dispatcher_loop = dispatcher_loop
+        self.terminalizer_loop = terminalizer_loop
+        self.terminalizer_session_factory = terminalizer_session_factory
+        self.terminalizer_engine = terminalizer_engine
+        self.ready = False
+        self.failure: str | None = None
+        self._ready_event = asyncio.Event()
+
+    async def wait_ready(self, timeout: float | None = None) -> None:
+        if timeout is None:
+            await self._ready_event.wait()
+            return
+        await asyncio.wait_for(self._ready_event.wait(), timeout=timeout)
+
+    async def aclose(self) -> None:
+        if self.terminalizer_engine is not None:
+            await self.terminalizer_engine.dispose()
+
+    async def run(self, *, stop_event: asyncio.Event) -> None:
+        tasks: dict[str, asyncio.Task] = {
+            "runner": asyncio.create_task(self.runner_loop(), name="runner"),
+            "world_reload": asyncio.create_task(
+                self.world_reload_loop(), name="world_reload"
+            ),
+        }
+        if self.dispatcher_loop is not None:
+            tasks["outbox_dispatcher"] = asyncio.create_task(
+                self.dispatcher_loop(
+                    self.session_factory,
+                    publishers=outbox_dispatcher.default_publishers(owner="lab_runner"),
+                    owned_topics=outbox_dispatcher.owned_topics("lab_runner"),
+                    stop_event=stop_event,
+                ),
+                name="outbox_dispatcher",
+            )
+        if self.terminalizer_loop is not None:
+            tasks["terminalizer"] = asyncio.create_task(
+                self.terminalizer_loop(
+                    self.session_factory,
+                    terminalizer_session_factory=self.terminalizer_session_factory,
+                    stop_event=stop_event,
+                ),
+                name="terminalizer",
+            )
+
+        stop_task = asyncio.create_task(stop_event.wait(), name="stop_signal")
+        self.failure = None
+        self.ready = True
+        self._ready_event.set()
+
+        try:
+            done, _ = await asyncio.wait(
+                {stop_task, *tasks.values()},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for finished in done:
+                if finished is stop_task:
+                    continue
+                exc = finished.exception()
+                if exc is not None:
+                    self.failure = f"{finished.get_name()}: {exc}"
+                    raise exc
+        finally:
+            stop_task.cancel()
+            for task in tasks.values():
+                task.cancel()
+            await asyncio.gather(stop_task, *tasks.values(), return_exceptions=True)
+            self.ready = False
+            await self.aclose()
+
+
+def build_runner_service() -> RunnerService:
+    terminalizer_factory = None
+    terminalizer_engine = None
+    # Legacy command/event recovery is part of the default Lab Runner lifecycle.
+    # The rollout gates below only admit the dedicated v2 financial consumer.
+    terminalizer_loop = terminalizer.run_terminalizer_loop
+
+    terminalizer_url = (settings.lab_terminalizer_database_url or "").strip()
+    if settings.lab_terminalizer_v2_enabled:
+        if not settings.lab_terminalizer_worker_enabled:
+            raise RuntimeError(
+                "lab_terminalizer_v2_enabled requires lab_terminalizer_worker_enabled"
+            )
+        if not terminalizer_url:
+            raise RuntimeError(
+                "lab_terminalizer_v2_enabled requires lab_terminalizer_database_url"
+            )
+
+    if settings.lab_terminalizer_worker_enabled and terminalizer_url:
+        dedicated = terminalizer.build_session_factory(terminalizer_url)
+        terminalizer_engine = dedicated.engine
+        terminalizer_factory = dedicated.session_factory
+
+    return RunnerService(
+        session_factory=async_session,
+        dispatcher_loop=(
+            outbox_dispatcher.run_dispatch_loop
+            if settings.lab_outbox_v2_enabled
+            else None
+        ),
+        terminalizer_loop=terminalizer_loop,
+        terminalizer_session_factory=terminalizer_factory,
+        terminalizer_engine=terminalizer_engine,
+    )
+
 
 async def main() -> None:
-    init_sentry("lab-runner")  # no-op without SENTRY_DSN
+    init_sentry("lab-runner")
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -32,17 +159,13 @@ async def main() -> None:
         try:
             loop.add_signal_handler(sig, _request_stop, sig)
             registered.append(sig)
-        except NotImplementedError:  # pragma: no cover — non-Unix platforms
+        except NotImplementedError:  # pragma: no cover
             pass
 
-    # Deploy-level kill switch (distinct from the Redis runtime flag the runner
-    # loop already honors per-iteration): when the feature is disabled at deploy
-    # time, the service stays up but DORMANT — it consumes no queue work — until
-    # SIGTERM. This lets an operator scale the runner without draining the queue
-    # and complements the runtime kill switch (is_lab_runtime_enabled).
-    from app.config import settings
     if not getattr(settings, "lab_enabled", True):
-        logger.warning("lab-runner: lab_enabled=false at deploy — staying dormant (no queue consume)")
+        logger.warning(
+            "lab-runner: lab_enabled=false at deploy — staying dormant (no queue consume)"
+        )
         try:
             await stop_event.wait()
         finally:
@@ -52,35 +175,19 @@ async def main() -> None:
             logger.info("lab-runner stopped (dormant)")
         return
 
-    logger.info("lab-runner starting: runner_loop")
+    from app.lab.apply import reload_world
 
-    # P3: the runner may emit proposals + apply them via the shared engine; keep
-    # its LOCATIONS in sync by subscribing to reload signals too.
-    from app.lab.apply import reload_world, world_reload_subscriber
     try:
         await reload_world()
     except Exception:
         logger.warning("initial world overlay load skipped", exc_info=True)
 
-    runner_task = asyncio.create_task(runner_loop(), name="lab-runner-loop")
-    world_reload_task = asyncio.create_task(world_reload_subscriber(), name="world-reload")
-    stop_task = asyncio.create_task(stop_event.wait(), name="stop-signal")
+    service = build_runner_service()
+    logger.info("lab-runner starting")
 
     try:
-        done, _ = await asyncio.wait(
-            {runner_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
-        )
-        for finished in done:
-            if finished is runner_task:
-                exc = finished.exception()
-                if exc is not None:
-                    logger.error("lab-runner loop crashed", exc_info=exc)
-                    raise exc
+        await service.run(stop_event=stop_event)
     finally:
-        stop_task.cancel()
-        runner_task.cancel()
-        world_reload_task.cancel()
-        await asyncio.gather(stop_task, runner_task, world_reload_task, return_exceptions=True)
         for sig in registered:
             loop.remove_signal_handler(sig)
         await close_redis()

@@ -25,7 +25,9 @@ from app.models.lab_artifact import LabArtifact
 from app.models.lab_run import LabRun
 from app.models.lab_task import LabTask
 from app.models.resident import Resident
+from app.models.user import User
 from app.services import coin_service
+from app.services import lab_terminalization_service
 
 logger = logging.getLogger(__name__)
 
@@ -203,12 +205,22 @@ async def create_task(
         if res is None or not _is_researcher(res):
             raise LabTaskError("researcher not found or not authorized")
 
+    terminalization_version = (
+        "v2" if settings.lab_terminalizer_v2_enabled else "v1"
+    )
+    if terminalization_version == "v2":
+        try:
+            lab_terminalization_service.require_v2_consumer_ready()
+        except lab_terminalization_service.LabTerminalizationError as exc:
+            raise LabTaskError(str(exc)) from exc
+
     fee = math.ceil(reward_sc * settings.lab_platform_fee_rate)
     deadline_at = datetime.now(UTC) + timedelta(hours=deadline_hours or settings.lab_task_deadline_hours)
 
     task = LabTask(
         issuer_user_id=issuer_id, researcher_slug=researcher_slug, title=title[:200],
         brief_md=brief or "", scopes_json=scopes, reward_sc=reward_sc, platform_fee_sc=fee,
+        terminal_creator_share_bps=int(round(settings.lab_creator_share * 10_000)),
         deliverable_kind=deliverable_kind, status="funded", deadline_at=deadline_at,
     )
     db.add(task)
@@ -219,7 +231,13 @@ async def create_task(
     # leave a funded task without a hold or a hold without its task link. On
     # insufficient balance nothing persists — the whole funding transaction is
     # abandoned before any charge.
-    hold = await coin_service.hold_pending(db, issuer_id, reward_sc + fee, f"lab_task:{task.id}")
+    hold = await coin_service.hold_pending(
+        db,
+        issuer_id,
+        reward_sc + fee,
+        f"lab_task:{task.id}",
+        terminalization_version=terminalization_version,
+    )
     if hold is None:
         await db.rollback()
         raise LabTaskError("insufficient balance")
@@ -320,58 +338,46 @@ async def mark_review(db, task: LabTask, run: LabRun, result_summary: str = "") 
 
 
 async def fail_task(db, task: LabTask, reason: str = "") -> None:
-    """Terminal failure: refund the escrow in full and mark failed."""
-    if task.hold_id:
-        try:
-            await coin_service.refund(db, task.hold_id, f"lab_refund:{task.id}:{reason}")
-        except coin_service.CoinError:
-            logger.warning("refund skipped for task %s (hold not held)", task.id)
-    task.status = "failed"
-    task.updated_at = datetime.now(UTC)
-    await db.commit()
+    """Runner caller: durably request failure/refund; terminalizer owns effects."""
+    if not task.hold_id:
+        # Legacy/inconsistent cohorts are frozen for reconciliation. The caller may
+        # still fence the run, but there is no escrow mutation to authorize here.
+        logger.warning("terminal failure frozen for task %s without a hold", task.id)
+        return
+    if not task.accepted_run_id:
+        raise LabTaskError("failure task has no accepted run binding")
+    actor = f"runner:{task.accepted_run_id}"
+    try:
+        await lab_terminalization_service.submit_for_caller(
+            db, task=task, operation="fail", actor=actor
+        )
+    except lab_terminalization_service.LabTerminalizationError as exc:
+        raise LabTaskError(str(exc)) from exc
 
 
 async def _settle_and_complete(db, task: LabTask) -> None:
-    """Distribute the escrow: researcher creator share + treasury + platform sink,
-    then mark the task completed and emit the domain event."""
-    researcher = (await db.execute(
-        select(Resident).where(Resident.slug == task.researcher_slug)
-    )).scalar_one_or_none()
-
-    reward = task.reward_sc
-    fee = task.platform_fee_sc
-    splits: list[tuple[str, int, str]] = []
-
-    creator_id = researcher.creator_id if researcher else None
-    creator_amount = int(reward * settings.lab_creator_share)
-    treasury_amount = reward - creator_amount
-    if creator_id and creator_id != "system" and creator_amount > 0:
-        splits.append((creator_id, creator_amount, f"lab_reward:{task.id}"))
-    else:
-        # No real creator (or share rounds to 0) — whole reward to the treasury.
-        treasury_amount = reward
-    if task.researcher_slug and treasury_amount > 0:
-        splits.append((f"treasury:{task.researcher_slug}", treasury_amount, f"lab_treasury:{task.id}"))
-    if fee > 0:
-        splits.append(("sink", fee, f"lab_fee:{task.id}"))
-
-    if task.hold_id:
-        await coin_service.settle(db, task.hold_id, splits)
-
-    task.status = "completed"
-    task.completed_at = datetime.now(UTC)
-    task.updated_at = datetime.now(UTC)
-    await db.commit()
-    await emit(db, "lab_task_completed", task_id=task.id, issuer_user_id=task.issuer_user_id,
-               researcher_slug=task.researcher_slug)
+    """Scheduler caller: enqueue auto-release without performing financial DML."""
+    try:
+        await lab_terminalization_service.submit_for_caller(
+            db,
+            task=task,
+            operation="auto_release",
+            actor="scheduler:auto-release",
+        )
+    except lab_terminalization_service.LabTerminalizationError as exc:
+        raise LabTaskError(str(exc)) from exc
 
 
 async def accept_result(db, task_id: str, user_id: str) -> LabTask:
     task = await _require_own_task(db, task_id, user_id)
     if task.status != "review":
         raise LabTaskError("task is not awaiting acceptance")
-    await _settle_and_complete(db, task)
-    await db.refresh(task)
+    try:
+        await lab_terminalization_service.submit_for_caller(
+            db, task=task, operation="accept", actor=user_id
+        )
+    except lab_terminalization_service.LabTerminalizationError as exc:
+        raise LabTaskError(str(exc)) from exc
     return task
 
 
@@ -394,47 +400,40 @@ async def cancel_task(db, task_id: str, user_id: str) -> LabTask:
     if task.status in ("completed", "cancelled", "failed", "expired"):
         raise LabTaskError("task already finalized")
 
-    # Fence every active run BEFORE the task is finalized and the money returned,
-    # so a live orchestrator can no longer settle or mark_review after the refund
-    # (recovery plan Phase 2: refund is final only once execution can no longer
-    # write). Bumping the lease epoch trips the orchestrator's assert_epoch /
-    # heartbeat / emit; CASing the run to cancelled makes a still-queued run be
-    # skipped by run_one_v1's queued-guard. The API process holds no in-process
-    # adapter handle, so cancel->TERM->KILL of a real runtime is the durable
-    # cancel control-request's job; the Mock path has no live process, so the
-    # epoch fence + status flip fully stop it here.
-    active_runs = (await db.execute(
-        select(LabRun).where(
-            LabRun.task_id == task.id, LabRun.status.in_(ACTIVE_RUN_STATES)
+    try:
+        await lab_terminalization_service.submit_for_caller(
+            db, task=task, operation="cancel", actor=user_id
         )
-    )).scalars().all()
-    for run in active_runs:
-        await transitions.bump_run_epoch(db, run.id)
-        await transitions.cas_run_status(
-            db, run_id=run.id, expected=ACTIVE_RUN_STATES, new="cancelled",
-            ended_at=datetime.now(UTC),
+    except lab_terminalization_service.LabTerminalizationError as exc:
+        raise LabTaskError(str(exc)) from exc
+    return task
+
+
+async def arbitrate_result(
+    db,
+    *,
+    task_id: str,
+    admin_id: str,
+    decision: str,
+) -> LabTask:
+    """Submit the only terminal decisions allowed for a rejected task."""
+    if decision not in {"settle", "refund"}:
+        raise LabTaskError("arbitration decision must be settle or refund")
+    task = await db.get(LabTask, task_id)
+    if task is None:
+        raise LabTaskError("task not found")
+    if task.status != "rejected":
+        raise LabTaskError("task is not awaiting arbitration")
+    admin = await db.get(User, admin_id)
+    if admin is None or admin.is_admin is not True:
+        raise LabTaskError("arbitration actor is not an admin")
+    operation = f"arbitrate_{decision}"
+    try:
+        await lab_terminalization_service.submit_for_caller(
+            db, task=task, operation=operation, actor=admin_id
         )
-
-    # CAS the task to cancelled from a non-terminal state. Losing the race (a
-    # concurrent settle/fail/expire finalized it first) means we must not refund.
-    moved = await transitions.cas_task_status(
-        db, task_id=task.id,
-        expected=("draft", "funded", "assigned", "running", "review", "rejected"),
-        new="cancelled",
-    )
-    await db.commit()
-    if not moved:
-        await db.refresh(task)
-        raise LabTaskError("task already finalized")
-
-    # Refund exactly once. coin_service's hold ``status=='held'`` guard makes a
-    # duplicate cancel or a raced refund a safe no-op (never a double refund).
-    if task.hold_id:
-        try:
-            await coin_service.refund(db, task.hold_id, f"lab_cancel:{task.id}")
-        except coin_service.CoinError:
-            logger.warning("cancel refund skipped for task %s (hold not held)", task.id)
-    await db.refresh(task)
+    except lab_terminalization_service.LabTerminalizationError as exc:
+        raise LabTaskError(str(exc)) from exc
     return task
 
 
@@ -462,15 +461,16 @@ async def expire_lab_tasks(db) -> int:
         )
     )).scalars().all()
     for task in stale:
-        if task.hold_id:
-            try:
-                await coin_service.refund(db, task.hold_id, f"lab_expire:{task.id}")
-            except coin_service.CoinError:
-                pass
-        task.status = "expired"
-        task.updated_at = now
-        await db.commit()
-        n += 1
+        try:
+            await lab_terminalization_service.submit_for_caller(
+                db,
+                task=task,
+                operation="expire",
+                actor="scheduler:expire",
+            )
+            n += 1
+        except lab_terminalization_service.LabTerminalizationError:
+            logger.warning("expiry command rejected for task %s", task.id, exc_info=True)
 
     due = (await db.execute(
         select(LabTask).where(

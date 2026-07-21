@@ -27,8 +27,16 @@ TERMINAL_STATUSES = {
     "succeeded",
 }
 TERMINAL_CALLS = {
+    "reward",
+    "treasury_credit",
     "settle",
     "refund",
+    "settle_pending",
+    "refund_pending",
+    "submit_command",
+    "submit_for_caller",
+    "finalize",
+    "finalize_legacy",
     "fail_task",
     "_settle_and_complete",
     "cancel_task",
@@ -39,6 +47,7 @@ TERMINAL_CALLS = {
 AUDITED_PATHS = (
     "backend/app/lab",
     "backend/app/services/lab_task_service.py",
+    "backend/app/services/lab_terminalization_service.py",
     "backend/app/services/coin_service.py",
     "backend/app/routers/lab.py",
     "backend/app/routers/admin/lab.py",
@@ -73,9 +82,20 @@ EXPECTED_FINDINGS = {
     Finding("write", "backend/app/lab/runner.py", "run_one", "run.status", "failed"),
     Finding("write", "backend/app/lab/runner.py", "run_one", "run.status", "succeeded"),
     Finding("call", "backend/app/lab/runner.py", "run_one", "fail_task"),
-    Finding("write", "backend/app/lab/supervision.py", "cancel_run", "run.status", "cancelled"),
+    Finding(
+        "write", "backend/app/lab/terminalizer.py", "_record_failure",
+        "command.status", "failed",
+    ),
+    Finding(
+        "call", "backend/app/lab/terminalizer.py", "process_pending_commands",
+        "finalize",
+    ),
+    Finding(
+        "call", "backend/app/lab/terminalizer.py", "process_pending_commands",
+        "finalize_legacy",
+    ),
     Finding("call", "backend/app/lab/supervision.py", "kill_switch_all", "fail_task"),
-    Finding("write", "backend/app/lab/supervision.py", "kill_switch_all", "run.status", "cancelled"),
+    Finding("write", "backend/app/lab/supervision.py", "_fence_run_once", "run.status", "cancelled"),
     Finding(
         "write", "backend/app/lab/transitions.py", "cas_proposal_status",
         "values.status", "<dynamic>",
@@ -95,19 +115,70 @@ EXPECTED_FINDINGS = {
     Finding("call", "backend/app/routers/admin/lab.py", "cancel_run", "fail_task"),
     Finding("write", "backend/app/routers/admin/lab.py", "cancel_run", "run.status", "cancelled"),
     Finding("call", "backend/app/routers/lab.py", "cancel_task", "cancel_task"),
-    Finding("write", "backend/app/services/coin_service.py", "refund", "h.status", "refunded"),
-    Finding("write", "backend/app/services/coin_service.py", "settle", "h.status", "settled"),
-    Finding("call", "backend/app/services/lab_task_service.py", "_settle_and_complete", "settle"),
-    Finding("write", "backend/app/services/lab_task_service.py", "_settle_and_complete", "task.status", "completed"),
-    Finding("call", "backend/app/services/lab_task_service.py", "accept_result", "_settle_and_complete"),
-    Finding("call", "backend/app/services/lab_task_service.py", "cancel_task", "cas_task_status"),
-    Finding("call", "backend/app/services/lab_task_service.py", "cancel_task", "refund"),
+    Finding("call", "backend/app/services/coin_service.py", "refund", "refund_pending"),
+    Finding("call", "backend/app/services/coin_service.py", "settle", "settle_pending"),
+    Finding(
+        "write", "backend/app/services/coin_service.py", "refund_pending",
+        "values.status", "refunded",
+    ),
+    Finding(
+        "write", "backend/app/services/coin_service.py", "settle_pending",
+        "values.status", "settled",
+    ),
+    Finding(
+        "call", "backend/app/services/lab_task_service.py", "_settle_and_complete",
+        "submit_for_caller",
+    ),
+    Finding(
+        "call", "backend/app/services/lab_task_service.py", "accept_result",
+        "submit_for_caller",
+    ),
+    Finding(
+        "call", "backend/app/services/lab_task_service.py", "cancel_task",
+        "submit_for_caller",
+    ),
+    Finding(
+        "call", "backend/app/services/lab_task_service.py", "arbitrate_result",
+        "submit_for_caller",
+    ),
     Finding("call", "backend/app/services/lab_task_service.py", "expire_lab_tasks", "_settle_and_complete"),
-    Finding("call", "backend/app/services/lab_task_service.py", "expire_lab_tasks", "refund"),
-    Finding("call", "backend/app/services/lab_task_service.py", "fail_task", "refund"),
-    Finding("write", "backend/app/services/lab_task_service.py", "fail_task", "task.status", "failed"),
+    Finding(
+        "call", "backend/app/services/lab_task_service.py", "expire_lab_tasks",
+        "submit_for_caller",
+    ),
+    Finding(
+        "call", "backend/app/services/lab_task_service.py", "fail_task",
+        "submit_for_caller",
+    ),
     Finding("call", "backend/app/services/lab_task_service.py", "mark_review", "cas_task_status"),
-    Finding("write", "backend/app/services/lab_task_service.py", "expire_lab_tasks", "task.status", "expired"),
+    Finding(
+        "call", "backend/app/services/lab_terminalization_service.py",
+        "_finalize_orm_attempt", "refund_pending",
+    ),
+    Finding(
+        "call", "backend/app/services/lab_terminalization_service.py",
+        "_finalize_orm_attempt", "settle_pending",
+    ),
+    Finding(
+        "call", "backend/app/services/lab_terminalization_service.py",
+        "submit_for_caller", "finalize_legacy",
+    ),
+    Finding(
+        "call", "backend/app/services/lab_terminalization_service.py",
+        "submit_for_caller", "submit_command",
+    ),
+    Finding(
+        "write", "backend/app/services/lab_terminalization_service.py",
+        "_finalize_orm_attempt", "command.status", "completed",
+    ),
+    Finding(
+        "write", "backend/app/services/lab_terminalization_service.py",
+        "_finalize_orm_attempt", "values.status", "<dynamic>",
+    ),
+    Finding(
+        "write", "backend/app/services/lab_terminalization_service.py",
+        "_prepare_task_runs", "run.status", "cancelled",
+    ),
     Finding("call", "backend/app/tasks/nightly_cron.py", "run_nightly_jobs", "expire_lab_tasks"),
     Finding("call", "backend/app/tasks/nightly_cron.py", "sweep_orphan_lab_runs", "fail_task"),
     Finding("write", "backend/app/tasks/nightly_cron.py", "sweep_orphan_lab_runs", "run.status", "failed"),
@@ -126,8 +197,14 @@ CURRENT_RUNTIME_CALLERS = (
     },
     {
         "process": "lab-runner",
-        "mount": "app.lab.main runner_loop",
-        "operations": ["run_success", "run_failure", "kill_switch"],
+        "mount": "app.lab.main RunnerService",
+        "operations": [
+            "run_success",
+            "run_failure",
+            "kill_switch",
+            "terminal_command_consumer",
+            "terminal_event_publisher",
+        ],
     },
 )
 
@@ -137,6 +214,12 @@ PLANNED_DB_ROLES = (
         "login": False,
         "mount": "none",
         "capability": "own controlled entrypoint and required kernel objects",
+    },
+    {
+        "role": "lab_command_submitter_v2",
+        "login": False,
+        "mount": "API role membership after D0/D1b only",
+        "capability": "EXECUTE submit_lab_terminalization_command(operation, task, actor, epoch)",
     },
     {
         "role": "lab_terminalizer_v2",
@@ -218,6 +301,7 @@ A_PRIME = {
         "coin_hold_entries",
         "lab_terminalization_commands",
         "lab_breakglass_audits",
+        "lab_compensation_entries",
         "lab_runtime_sessions",
         "lab_runtime_turns",
         "lab_runtime_intents",
@@ -458,6 +542,39 @@ def _parse_spike(raw: bytes) -> dict[str, object]:
     }
 
 
+def _spike_metadata(raw: bytes) -> dict[str, object]:
+    """Accept either the original spike log or a prior rendered inventory JSON."""
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return _parse_spike(raw)
+
+    if isinstance(parsed, dict):
+        nested = parsed.get("postgres_and_queue_spike")
+        if isinstance(nested, dict):
+            return {
+                "failure_count": nested.get("failure_count"),
+                "postgres_role_guard_passed": bool(
+                    nested.get("postgres_role_guard_passed")
+                ),
+                "physical_queue_split_passed": bool(
+                    nested.get("physical_queue_split_passed")
+                ),
+            }
+        hard_oracles = parsed.get("hard_oracles")
+        if isinstance(hard_oracles, dict):
+            return {
+                "failure_count": None,
+                "postgres_role_guard_passed": bool(
+                    hard_oracles.get("controlled_postgres_entrypoint_spike")
+                ),
+                "physical_queue_split_passed": bool(
+                    hard_oracles.get("physical_queue_split_spike")
+                ),
+            }
+    return _parse_spike(raw)
+
+
 def audit(repo_root: Path, spike_evidence: Path | None = None) -> dict:
     actual = source_findings(repo_root)
     unknown = sorted(actual - EXPECTED_FINDINGS)
@@ -471,7 +588,7 @@ def audit(repo_root: Path, spike_evidence: Path | None = None) -> dict:
             "provided": True,
             "path": str(spike_evidence.resolve()),
             "sha256": hashlib.sha256(raw).hexdigest(),
-            **_parse_spike(raw),
+            **_spike_metadata(raw),
         }
 
     a_counts = _counts(A_PRIME)
@@ -502,6 +619,7 @@ def audit(repo_root: Path, spike_evidence: Path | None = None) -> dict:
                 "API optional nightly_cron_loop",
                 "agent-worker nightly_cron_loop",
                 "Lab Runner runner_loop",
+                "Lab Runner terminalizer command/event loop",
                 "player/admin Lab routes",
             ],
         },
