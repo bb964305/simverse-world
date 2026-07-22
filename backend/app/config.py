@@ -244,6 +244,10 @@ class Settings(BaseSettings):
     lab_outbox_v2_enabled: bool = False
     lab_runtime_v2_canary_enabled: bool = False
     lab_global_admission_enabled: bool = False
+    lab_service_sha: str = ""
+    lab_d0_release_receipt_path: str = ""
+    lab_d0_release_receipt_sha256: str = ""
+    lab_d0_request_hash: str = ""
     # Gateway-only Runtime audience signing material. These never fall back to
     # the legacy adapter API key or the application JWT secret.
     lab_runtime_auth_issuer: str = ""
@@ -253,6 +257,100 @@ class Settings(BaseSettings):
     lab_runtime_auth_next_kid: str = ""
     lab_runtime_auth_next_key: str = ""
     lab_runtime_auth_token_ttl_s: int = 300
+    lab_runtime_v2_canary_tenants: list[str] = []
+
+    # Remote Executor. The Runner never receives an OCI socket; it submits one
+    # fenced job to this independently deployed service.
+    lab_executor_enabled: bool = False
+    lab_executor_base_url: str = ""
+    lab_executor_image_digest: str = ""
+    lab_executor_auth_issuer: str = ""
+    lab_executor_auth_audience: str = "lab-executor"
+    lab_executor_auth_current_kid: str = ""
+    lab_executor_auth_current_key: str = ""
+    lab_executor_auth_next_kid: str = ""
+    lab_executor_auth_next_key: str = ""
+    lab_executor_auth_token_ttl_s: int = 300
+    lab_executor_receipt_issuer: str = ""
+    lab_executor_receipt_audience: str = "lab-executor-receipt"
+    lab_executor_receipt_current_kid: str = ""
+    lab_executor_receipt_current_key: str = ""
+    lab_executor_receipt_next_kid: str = ""
+    lab_executor_receipt_next_key: str = ""
+    lab_executor_request_timeout_s: float = 30.0
+    lab_executor_poll_interval_s: float = 0.5
+    lab_executor_job_timeout_s: int = 120
+    lab_executor_job_cpu_millis: int = 2_000
+    lab_executor_job_memory_bytes: int = 1_073_741_824
+    lab_executor_job_pids: int = 512
+    lab_executor_job_stdout_bytes: int = 65_536
+    lab_executor_job_stderr_bytes: int = 65_536
+    lab_executor_job_scratch_bytes: int = 536_870_912
+
+    # Production Artifact pipeline. These are independent trust planes and
+    # intentionally do not fall back to DB blobs or arbitrary Runtime URIs.
+    lab_artifact_pipeline_enabled: bool = False
+    lab_artifact_ingest_base_url: str = ""
+    lab_artifact_scanner_base_url: str = ""
+    lab_artifact_cleanup_base_url: str = ""
+    lab_artifact_upload_lease_ttl_s: int = 300
+    lab_artifact_upload_max_attempts: int = 5
+    lab_artifact_pending_ttl_hours: int = 24
+    lab_artifact_quarantine_ttl_days: int = 7
+    lab_artifact_service_timeout_s: float = 30.0
+    lab_artifact_scan_poll_interval_s: float = 1.0
+    lab_artifact_scan_deadline_s: int = 900
+    lab_artifact_scan_policy_version: str = "lab-artifact-scan-v1"
+    lab_artifact_scan_max_attempts: int = 5
+    lab_artifact_cleanup_max_attempts: int = 10
+    lab_artifact_inline_max_bytes: int = 1_048_576
+    # API-side released-object reader. These credentials/mounts must be
+    # read-only and must not grant access to the quarantine bucket.
+    lab_artifact_download_backend: str = ""
+    lab_artifact_download_storage_root: str = ""
+    lab_artifact_download_released_bucket: str = ""
+    lab_artifact_download_s3_endpoint_url: str = ""
+    lab_artifact_download_s3_region: str = ""
+    lab_artifact_download_s3_access_key: str = ""
+    lab_artifact_download_s3_secret_key: str = ""
+    lab_artifact_download_s3_session_token: str = ""
+    lab_artifact_download_timeout_s: float = 30.0
+    lab_artifact_download_max_bytes: int = 104_857_600
+    lab_artifact_allowed_mime_types: list[str] = [
+        "application/json",
+        "application/pdf",
+        "application/zip",
+        "image/jpeg",
+        "image/png",
+        "text/csv",
+        "text/markdown",
+        "text/plain",
+    ]
+    lab_artifact_ingest_auth_issuer: str = ""
+    lab_artifact_ingest_auth_audience: str = "lab-artifact-ingest"
+    lab_artifact_ingest_auth_current_kid: str = ""
+    lab_artifact_ingest_auth_current_key: str = ""
+    lab_artifact_ingest_auth_next_kid: str = ""
+    lab_artifact_ingest_auth_next_key: str = ""
+    lab_artifact_scanner_auth_issuer: str = ""
+    lab_artifact_scanner_auth_audience: str = "lab-artifact-scanner"
+    lab_artifact_scanner_auth_current_kid: str = ""
+    lab_artifact_scanner_auth_current_key: str = ""
+    lab_artifact_scanner_auth_next_kid: str = ""
+    lab_artifact_scanner_auth_next_key: str = ""
+    lab_artifact_cleanup_auth_issuer: str = ""
+    lab_artifact_cleanup_auth_audience: str = "lab-artifact-cleanup"
+    lab_artifact_cleanup_auth_current_kid: str = ""
+    lab_artifact_cleanup_auth_current_key: str = ""
+    lab_artifact_cleanup_auth_next_kid: str = ""
+    lab_artifact_cleanup_auth_next_key: str = ""
+    # JSON object of receipt issuer -> {kid: verification key}. Production
+    # values are mounted from the approved trust root, never from JWT_SECRET.
+    lab_artifact_ingest_receipt_issuer: str = ""
+    lab_artifact_scanner_receipt_issuer: str = ""
+    lab_artifact_cleanup_receipt_issuer: str = ""
+    lab_artifact_receipt_algorithm: str = "EdDSA"
+    lab_artifact_receipt_keys_json: str = "{}"
 
     model_config = {"env_file": ".env"}
 

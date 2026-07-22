@@ -6,7 +6,7 @@ import { useGameStore } from '../stores/gameStore'
 import {
   listLabResearchers, createLabTask, getLabTasks, getLabTask, getLabRun,
   cancelLabTask, acceptLabResult, rejectLabResult, getLabRunSteps, respondLabApproval,
-  getWorldLocations, getMe,
+  getWorldLocations, getMe, downloadLabArtifact,
   type LabResearcher, type LabTask, type LabRun, type LabRunStep, type LabArtifact,
   type LabApproval, type WorldLocation,
 } from '../services/api'
@@ -212,6 +212,7 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
   const [selected, setSelected] = useState<string | null>(null)
   const [run, setRun] = useState<LabRun | null>(null)
   const [steps, setSteps] = useState<LabRunStep[]>([])
+  const [runArtifacts, setRunArtifacts] = useState<LabArtifact[]>([])
   const lastSeq = useRef(0)
   const runRef = useRef<LabRun | null>(null)
 
@@ -226,8 +227,10 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
     let cancelled = false
     const pull = async () => {
       try {
-        let r = (await getLabTask(selected)).run
+        const detail = await getLabTask(selected)
+        let r = detail.run
         if (cancelled) return
+        setRunArtifacts(detail.artifacts)
         if (r) {
           // Load the server-authoritative run projection so approval controls
           // reflect allowed_actions/can_decide, not the legacy approvals blob.
@@ -279,6 +282,7 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
     runRef.current = null
     setRun(null)
     setSteps([])
+    setRunArtifacts([])
     setSelected(id)
   }
 
@@ -358,7 +362,17 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
               ))}
               {steps.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>暂无步骤</div>}
             </div>
-            <TaskActions task={selectedTask} onSettle={settle} onCancel={cancel} />
+            {runArtifacts.length > 0 && (
+              <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {runArtifacts.map((artifact) => (
+                  <div key={artifact.id} style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    <span>{artifactKindBadge(artifact.kind).icon} {artifact.title}</span>
+                    {artifactStatusBadges(artifact).map((badge) => <span key={badge.key}>{badge.label}</span>)}
+                  </div>
+                ))}
+              </div>
+            )}
+            <TaskActions task={selectedTask} artifacts={runArtifacts} onSettle={settle} onCancel={cancel} />
           </div>
         )}
       </div>
@@ -366,17 +380,26 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
   )
 }
 
-function TaskActions({ task, onSettle, onCancel }: {
+function TaskActions({ task, artifacts, onSettle, onCancel }: {
   task: LabTask | undefined
+  artifacts: LabArtifact[]
   onSettle: (id: string, accept: boolean) => void
   onCancel: (id: string) => void
 }) {
   if (!task) return null
+  const productionArtifacts = artifacts.filter((artifact) => artifact.storage_status !== 'legacy')
+  const artifactsReady = productionArtifacts.length === 0 || productionArtifacts
+    .filter((artifact) => artifact.required !== false)
+    .every((artifact) => artifact.storage_status === 'released'
+      && artifact.scan_status === 'clean'
+      && artifact.verification_status === 'verified')
   return (
     <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
       {task.status === 'review' && (
         <>
-          <button onClick={() => onSettle(task.id, true)} style={btn(ACCENT)}>满意，放款</button>
+          <button onClick={() => onSettle(task.id, true)} style={btn(ACCENT)} disabled={!artifactsReady}>
+            {artifactsReady ? '满意，放款' : '产物处理中'}
+          </button>
           <button onClick={() => onSettle(task.id, false)} style={btn('#ef4444')} disabled={task.reject_count >= 1}>拒收</button>
         </>
       )}
@@ -451,19 +474,77 @@ function ArtifactsTab() {
                   <span key={b.key} style={{ fontSize: 10, border: '1px solid var(--border)', borderRadius: 4, padding: '0 4px' }}>{b.label}</span>
                 ))}
               </div>
-              {a.unlocked && a.text_md && (
-                <div style={{ fontSize: 12, lineHeight: 1.6 }}><ReactMarkdown components={INERT_MD_COMPONENTS}>{a.text_md}</ReactMarkdown></div>
-              )}
-              {a.unlocked && a.uri && (
-                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                  外链（请谨慎，勿直接点击不明来源）：<span style={{ wordBreak: 'break-all' }}>{a.uri}</span>
-                </div>
-              )}
-              {!a.unlocked && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>放款后解锁</div>}
+              <ArtifactContent artifact={a} />
             </div>
           ))}
         </div>
       ))}
     </div>
   )
+}
+
+function ArtifactContent({ artifact }: { artifact: LabArtifact }) {
+  const [preview, setPreview] = useState<string | null>(null)
+  const [busy, setBusy] = useState<'preview' | 'download' | null>(null)
+  const [error, setError] = useState(false)
+  const canPreview = Boolean(
+    artifact.content_type?.startsWith('text/')
+    || artifact.content_type === 'application/json',
+  )
+
+  const loadPreview = async () => {
+    setBusy('preview'); setError(false)
+    try {
+      const { blob } = await downloadLabArtifact(artifact.id, 'inline')
+      setPreview(await blob.text())
+    } catch {
+      setError(true)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const download = async () => {
+    setBusy('download'); setError(false)
+    try {
+      const { blob, filename } = await downloadLabArtifact(artifact.id)
+      const href = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = href
+      link.download = filename
+      link.click()
+      URL.revokeObjectURL(href)
+    } catch {
+      setError(true)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  if (!artifact.unlocked) {
+    const pending = ['pending_upload', 'quarantined'].includes(artifact.storage_status || '')
+      || ['pending', 'scanning'].includes(artifact.scan_status || '')
+    return <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+      {pending ? '产物处理中' : artifact.storage_status === 'deleted' ? '产物已过期' : '放款后解锁'}
+    </div>
+  }
+
+  return <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+    <div style={{ display: 'flex', gap: 8 }}>
+      {canPreview && (
+        <button onClick={() => void loadPreview()} disabled={busy !== null} style={btn(ACCENT)}>
+          {busy === 'preview' ? '加载中' : '预览'}
+        </button>
+      )}
+      <button onClick={() => void download()} disabled={busy !== null} style={btn(ACCENT)}>
+        {busy === 'download' ? '下载中' : '下载'}
+      </button>
+    </div>
+    {error && <div style={{ fontSize: 11, color: '#ef4444' }}>产物读取失败</div>}
+    {preview !== null && (
+      <div style={{ fontSize: 12, lineHeight: 1.6 }}>
+        <ReactMarkdown components={INERT_MD_COMPONENTS}>{preview}</ReactMarkdown>
+      </div>
+    )}
+  </div>
 }

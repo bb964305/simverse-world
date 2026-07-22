@@ -237,6 +237,7 @@ async def stage_action_settlement(
     run_id: str,
     succeeded: bool,
     is_egress: bool,
+    egress_requests: int | None = None,
     egress_bytes: int = 0,
 ) -> str | None:
     """Stage one tool action's budget settlement without committing.
@@ -244,11 +245,18 @@ async def stage_action_settlement(
     The Broker composes this with the action's terminal status so a crash can
     never leave a reusable terminal result whose reservations or egress bytes
     were not accounted. The locked budget row serializes concurrent actions.
-    Returns the exhausted dimension, if the completed effect exceeded the byte
-    limit; the caller commits the truth before raising ``BudgetExhausted``.
+    Trusted egress handlers supply actual HTTP request and received-byte counts,
+    including failed effects and redirects. Returns the first exhausted egress
+    dimension; the caller commits actual usage before raising ``BudgetExhausted``.
     """
+    if egress_requests is None:
+        egress_requests = 1 if is_egress and succeeded else 0
+    if type(egress_requests) is not int or egress_requests < 0:
+        raise BudgetError("egress request settlement must be a non-negative integer")
     if type(egress_bytes) is not int or egress_bytes < 0:
         raise BudgetError("egress_bytes settlement must be a non-negative integer")
+    if not is_egress and (egress_requests or egress_bytes):
+        raise BudgetError("non-egress action cannot settle egress usage")
     row = await db.scalar(
         select(LabRunBudget)
         .where(LabRunBudget.run_id == run_id)
@@ -259,33 +267,33 @@ async def stage_action_settlement(
         return None
 
     row.reserved_tool_calls = max(0, row.reserved_tool_calls - 1)
-    if not succeeded:
-        if is_egress:
-            row.reserved_egress_requests = max(
-                0, row.reserved_egress_requests - 1
-            )
-        await db.flush()
-        return None
-
-    row.used_tool_calls += 1
+    if succeeded:
+        row.used_tool_calls += 1
+    exhausted: str | None = None
     if is_egress:
         row.reserved_egress_requests = max(
             0, row.reserved_egress_requests - 1
         )
-        row.used_egress_requests += 1
+        row.used_egress_requests += egress_requests
+        row.used_egress_bytes += egress_bytes
+        if (
+            row.limit_egress_requests
+            and row.used_egress_requests
+            + row.reserved_egress_requests
+            > row.limit_egress_requests
+        ):
+            exhausted = "egress_requests"
         if (
             row.limit_egress_bytes
             and row.used_egress_bytes
             + row.reserved_egress_bytes
-            + egress_bytes
             > row.limit_egress_bytes
         ):
-            row.exhausted_dimension = "egress_bytes"
-            await db.flush()
-            return "egress_bytes"
-        row.used_egress_bytes += egress_bytes
+            exhausted = exhausted or "egress_bytes"
+        if exhausted is not None:
+            row.exhausted_dimension = exhausted
     await db.flush()
-    return None
+    return exhausted
 
 
 async def spend(db, *, run_id: str, dimension: str, amount: int) -> None:

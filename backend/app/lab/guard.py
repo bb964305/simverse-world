@@ -17,7 +17,7 @@ SCOPE_TOOL_PREFIXES: dict[str, tuple[str, ...]] = {
     "web_search": ("web.search",),
     "browse": ("browser.", "web.open", "page."),
     "code": ("code.", "python.", "shell.", "fs."),
-    "http": ("http.",),
+    "http": ("http.", "web.fetch"),
 }
 
 # Sensitive actions: pause the run for human approval (spec §5.3).

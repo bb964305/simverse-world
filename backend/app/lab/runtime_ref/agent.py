@@ -26,15 +26,19 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Literal
 
+from pydantic import ValidationError
+
+from app.lab.protocol import executor_output_declarations
 from app.lab.sandbox.base import ArtifactSpec, StepEvent
 
-# scope -> the tool the runtime may INTEND for it (mirrors the Broker's registry
-# so an intent under a granted scope maps to a real, brokerable tool).
-_SCOPE_TOOL = {
-    "web_search": "web.search",
-    "browse": "browser.navigate",
-    "http": "http.get",
-    "code": "code.run",
+# Scope -> production-v2 tool intents. Network tools are filtered again through
+# deployment availability so importing this Runtime cannot advertise a handler
+# that the operator did not explicitly enable.
+_SCOPE_TOOLS = {
+    "code": ("code.run",),
+    "web_search": ("web.search",),
+    "http": ("web.fetch",),
+    "browse": ("browser.navigate",),
 }
 
 Completer = Callable[[list[dict]], Awaitable[tuple[str, int]]]
@@ -44,7 +48,14 @@ _SYSTEM = (
     "calls; a Broker executes them. Given a research brief and the tools you are "
     "granted, respond with a STRICT JSON object and nothing else:\n"
     '{"plan": "<one short line>", "tool": "<one granted tool or null>", '
-    '"query": "<the tool argument, short>", "conclusion": "<one short line, or empty>"}\n'
+    '"args": {"<argument>": "<value>"}, "conclusion": "<one short line, or empty>"}\n'
+    "Use args={\"query\": ...} for web.search, args={\"url\": ...} for "
+    "web.fetch/browser.navigate. For code.run use args={\"code\": ..., "
+    "\"outputs\": [...]}; omit outputs when no file should be exported. Each "
+    "output is written under /scratch and has exactly relative_path, kind "
+    "(file/image/dataset), expected_use (deliverable/evidence), title, "
+    "content_type, optional original_filename, required, max_bytes, and optional "
+    "expected_sha256. The code must write every required declared path. "
     "Choose a tool ONLY from the granted list. If the research is done, set tool to "
     "null and give a conclusion."
 )
@@ -78,7 +89,56 @@ CHECKPOINT_VERSION = 1
 
 
 def _granted_tools(scopes: list[str]) -> list[str]:
-    return [_SCOPE_TOOL[s] for s in scopes if s in _SCOPE_TOOL]
+    try:
+        from app.lab.egress_service.config import configured_runtime_tools
+
+        available = {"code.run", *configured_runtime_tools()}
+    except ValueError:
+        available = {"code.run"}
+    granted: list[str] = []
+    for scope in scopes:
+        for tool in _SCOPE_TOOLS.get(scope, ()):
+            if tool in available and tool not in granted:
+                granted.append(tool)
+    return granted
+
+
+def _tool_args(action: dict, tool: str) -> dict | None:
+    raw_args = action.get("args")
+    if isinstance(raw_args, dict):
+        args = raw_args
+    else:
+        # Checkpoint/model compatibility with the previous one-string schema.
+        query = action.get("query")
+        if not isinstance(query, str) or not query.strip():
+            return None
+        key = {
+            "web.search": "query",
+            "web.fetch": "url",
+            "browser.navigate": "url",
+            "code.run": "code",
+        }.get(tool)
+        if key is None:
+            return None
+        args = {key: query.strip()}
+    if any(not isinstance(key, str) or not key for key in args):
+        return None
+    if tool == "code.run":
+        try:
+            executor_output_declarations(args)
+        except (TypeError, ValueError, ValidationError):
+            return None
+    try:
+        encoded = json.dumps(
+            args,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    return copy.deepcopy(args) if len(encoded) <= 8_192 else None
 
 
 def _extract_json(text: str) -> dict:
@@ -232,7 +292,6 @@ class RefAgent:
         action = _extract_json(text)
         plan = str(action.get("plan") or "").strip()
         tool = action.get("tool")
-        query = str(action.get("query") or "").strip()
         conclusion = str(action.get("conclusion") or "").strip()
         think = StepEvent(
             phase="think",
@@ -252,7 +311,16 @@ class RefAgent:
                     steps=(think, failed),
                     checkpoint=restored,
                 )
-            args = {"query": query} if query else {}
+            args = _tool_args(action, tool)
+            if args is None:
+                failed = StepEvent(
+                    phase="message", summary="model returned invalid tool arguments"
+                )
+                return AgentTurn(
+                    state="failed",
+                    steps=(think, failed),
+                    checkpoint=restored,
+                )
             intent = StepEvent(
                 phase="tool_call",
                 tool=tool,
@@ -312,13 +380,20 @@ class RefAgent:
             action = _extract_json(text)
             plan = str(action.get("plan") or "").strip()
             tool = action.get("tool")
-            query = str(action.get("query") or "").strip()
             conclusion = str(action.get("conclusion") or "").strip() or conclusion
 
             _emit(StepEvent(phase="think", summary=plan or "planning", model_tokens=int(toks or 0)))
 
             if tool and tool in granted:
-                args = {"query": query} if query else {}
+                args = _tool_args(action, tool)
+                if args is None:
+                    _emit(
+                        StepEvent(
+                            phase="message",
+                            summary="model returned invalid tool arguments",
+                        )
+                    )
+                    break
                 intents.append((tool, args))
                 # INTENT only — the Broker executes; the runtime records a neutral
                 # observation and asks the LLM to continue from it.

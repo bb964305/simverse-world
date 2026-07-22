@@ -1,20 +1,29 @@
 {
   "schema_version": 1,
   "status": "BLOCKED_PENDING_EXTERNAL_ATTESTATION",
-  "status_reason": "No protected external attestation, trust root, approver policy, service/image digests, or executable production network-policy evidence is available.",
+  "status_reason": "No protected external attestation, trust root, approver policy, service/image digests, object-storage IAM evidence, scanner supply-chain evidence, rootless OCI host attestation, or executable production network-policy evidence is available.",
   "request_hash_algorithm": "sha256-jcs-like-jq-cS-v1",
-  "request_hash": "e8cbab7eeaf38c91b24dc80da137b6164ebec098e6b55978de366f1cf6732660",
+  "request_hash": "ab77df055874ccf670b26b2e84f19822a869902a2cb8af78fcd3c3d1be2d9d5a",
   "request": {
-    "plan": "lab-agent-blocker-resolution-plan Approved v10",
+    "plan": "lab-agent-blocker-resolution-plan Approved v10; lab-runtime-executor-artifact-production-design draft 2026-07-22",
     "approval_eligible": false,
     "approval_scope": [
       "deploy:lab-runtime",
       "deploy:lab-executor",
+      "deploy:artifact-ingest",
+      "deploy:artifact-scanner",
       "deploy:artifact-cleanup",
       "identity:lab-runtime",
       "identity:lab-executor",
+      "identity:artifact-ingest",
+      "identity:artifact-scanner",
       "identity:artifact-cleanup",
+      "identity:api-artifact-reader",
       "network:lab-v2-trust-planes",
+      "storage:artifact-quarantine-versioned",
+      "storage:artifact-released-versioned",
+      "storage:artifact-released-exact-read",
+      "trust:artifact-receipt-signers",
       "db-role:lab-terminalizer-v2"
     ],
     "services": [
@@ -25,7 +34,8 @@
         "allowed_capabilities": [
           "model-provider-egress",
           "runtime-local-checkpoint-volume",
-          "scoped-inbound-runtime-api"
+          "scoped-inbound-runtime-api",
+          "scoped-artifact-upload-to-ingest"
         ],
         "denied_capabilities": [
           "simverse-db",
@@ -50,13 +60,59 @@
         ]
       },
       {
+        "name": "artifact-ingest",
+        "image_digest": "UNRESOLVED",
+        "identity": "artifact-ingest-only",
+        "allowed_capabilities": [
+          "scoped-inbound-lease-and-upload-api",
+          "artifact-quarantine-version-create",
+          "ingest-local-operation-and-spool-volumes"
+        ],
+        "denied_capabilities": [
+          "artifact-released-read-write",
+          "artifact-object-delete",
+          "artifact-bucket-list",
+          "simverse-db",
+          "redis",
+          "model-provider",
+          "world-write",
+          "oci-host"
+        ]
+      },
+      {
+        "name": "artifact-scanner",
+        "image_digest": "UNRESOLVED",
+        "scanner_engine_digest": "UNRESOLVED",
+        "identity": "artifact-scanner-only",
+        "allowed_capabilities": [
+          "scoped-inbound-scan-api",
+          "artifact-quarantine-exact-version-read",
+          "artifact-released-version-create",
+          "scanner-local-operation-and-work-volumes"
+        ],
+        "denied_capabilities": [
+          "artifact-quarantine-write-delete",
+          "artifact-released-delete",
+          "artifact-bucket-list",
+          "simverse-db",
+          "redis",
+          "model-provider",
+          "world-write",
+          "oci-host"
+        ]
+      },
+      {
         "name": "artifact-cleanup",
         "image_digest": "UNRESOLVED",
         "identity": "cleanup-only",
         "allowed_capabilities": [
-          "artifact-delete-by-scoped-command"
+          "scoped-inbound-delete-api",
+          "artifact-exact-version-delete",
+          "cleanup-local-operation-volume"
         ],
         "denied_capabilities": [
+          "artifact-object-create",
+          "artifact-bucket-list",
           "simverse-db-direct-dml",
           "redis",
           "model-provider",
@@ -68,23 +124,63 @@
     "existing_process_changes": [
       {
         "name": "lab-runner",
-        "change": "mount a dedicated lab_terminalizer_v2 DSN in one isolated component; no Docker socket or model key"
+        "change": "mount a dedicated lab_terminalizer_v2 DSN in one isolated component and scoped client credentials for each internal audience; no OCI endpoint, model key, or object-store credential"
+      },
+      {
+        "name": "api",
+        "change": "mount a released-only exact-version reader identity; deny quarantine access, object create/delete, bucket listing, and public or durable download URLs"
       }
     ],
+    "network_edges": [
+      "lab-runner->lab-runtime:scoped-runtime-api",
+      "lab-runner->lab-executor:scoped-executor-api",
+      "lab-runner->artifact-ingest:scoped-lease-api",
+      "lab-runner->artifact-scanner:scoped-scan-api",
+      "lab-runner->artifact-cleanup:scoped-delete-api",
+      "lab-runtime->artifact-ingest:one-object-upload",
+      "lab-runtime->model-provider:allowlisted-egress",
+      "artifact-ingest->quarantine-storage:version-create-only",
+      "artifact-scanner->quarantine-storage:exact-version-read-only",
+      "artifact-scanner->released-storage:version-create-only",
+      "artifact-cleanup->quarantine-storage:exact-version-delete-only",
+      "artifact-cleanup->released-storage:exact-version-delete-only",
+      "api->released-storage:exact-version-read-only"
+    ],
+    "artifact_storage": {
+      "provider": "UNRESOLVED",
+      "quarantine_bucket": "UNRESOLVED",
+      "released_bucket": "UNRESOLVED",
+      "versioning_required": true,
+      "private_acl_required": true,
+      "iam_policy_hash": "UNRESOLVED"
+    },
     "network_policy_hash": "UNRESOLVED",
     "topology_hash": "UNRESOLVED",
-    "required_service_identity": "TLS plus production mTLS with per-audience identities",
+    "mtls_trust_bundle_hash": "UNRESOLVED",
+    "receipt_trust_root_hash": "UNRESOLVED",
+    "rootless_oci_host_attestation_hash": "UNRESOLVED",
+    "required_service_identity": "TLS plus production mTLS with per-workload and per-audience identities",
     "default_flags": {
       "lab_agent_v2_enabled": false,
       "lab_terminalizer_v2_enabled": false,
       "lab_outbox_v2_enabled": false,
       "lab_runtime_v2_canary_enabled": false,
-      "lab_global_admission_enabled": false
+      "lab_global_admission_enabled": false,
+      "lab_executor_enabled": false,
+      "lab_artifact_pipeline_enabled": false
     },
     "unresolved_fields": [
       "services[*].image_digest",
+      "services[artifact-scanner].scanner_engine_digest",
+      "artifact_storage.provider",
+      "artifact_storage.quarantine_bucket",
+      "artifact_storage.released_bucket",
+      "artifact_storage.iam_policy_hash",
       "network_policy_hash",
-      "topology_hash"
+      "topology_hash",
+      "mtls_trust_bundle_hash",
+      "receipt_trust_root_hash",
+      "rootless_oci_host_attestation_hash"
     ]
   },
   "external_attestation": null,

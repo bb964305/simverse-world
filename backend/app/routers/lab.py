@@ -6,10 +6,14 @@ stay available even when the Lab is paused (so nobody's escrow gets stuck).
 """
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.background import BackgroundTask
+from starlette.responses import FileResponse
 
 from app.config import settings
 from app.database import get_db
@@ -256,46 +260,25 @@ async def run_approval(run_id: str, body: ApprovalBody, request: Request, db: As
 @router.get("/artifacts/{artifact_id}")
 async def get_artifact(artifact_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     user = await _require_user(request, db)
-    if settings.lab_agent_v1_enabled:
-        # v1: digest-verified read (V12) — a tampered row is blocked (409)
-        # instead of silently served. ACL denial still reads as 404 (never
-        # 403), same anti-probing rule as the legacy path below.
-        try:
-            art = await lab_artifact_service.verify_and_get(
-                db, artifact_id=artifact_id, user_id=user.id, is_admin=user.is_admin,
-            )
-        except acl.AclDenied:
-            raise HTTPException(status_code=404, detail="artifact not found")
-        except lab_artifact_service.DigestMismatch:
-            raise HTTPException(status_code=409, detail="artifact digest mismatch")
-        except lab_artifact_service.ArtifactQuarantined:
-            # Not scan-clean + verified — never hand back the body/URI (gap #10).
-            raise HTTPException(status_code=409, detail="artifact quarantined (pending scan/verification)")
-        task = await db.get(LabTask, art.task_id)
-        unlocked = task is not None and task.status == "completed"
-        return svc.serialize_artifact(art, unlocked)
-
-    art = await db.get(LabArtifact, artifact_id)
-    if art is None:
+    try:
+        art = await lab_artifact_service.get_manifest_for_user(
+            db, artifact_id=artifact_id, user_id=user.id, is_admin=user.is_admin,
+        )
+    except acl.AclDenied:
         raise HTTPException(status_code=404, detail="artifact not found")
     task = await db.get(LabTask, art.task_id)
-    if task is None or not acl.can_read_task(task, user_id=user.id, is_admin=user.is_admin):
-        raise HTTPException(status_code=404, detail="artifact not found")
-    # Anti-freeload: content unlocks only after the task is released (completed).
     unlocked = task.status == "completed"
     return svc.serialize_artifact(art, unlocked)
 
 
 @router.get("/artifacts/{artifact_id}/download")
-async def download_artifact(artifact_id: str, request: Request, db: AsyncSession = Depends(get_db)):
-    """Authenticated, digest-checking download boundary (recovery plan Phase 5).
-    Content is served ONLY through this seam and ONLY for an artifact that is
-    ACL-owned, digest-intact, scan-clean+verified, AND whose task is released:
-    - ACL denial -> 404 (anti-probing), digest mismatch / quarantine -> 409,
-      not-yet-released -> 423 Locked.
-    - A text artifact streams as an attachment with its sha256 in a header.
-    - A remote-URI artifact is NEVER proxied server-side (SSRF surface); its
-      verified URI is returned as metadata for the owner to fetch explicitly."""
+async def download_artifact(
+    artifact_id: str,
+    request: Request,
+    disposition: Literal["attachment", "inline"] = "attachment",
+    db: AsyncSession = Depends(get_db),
+):
+    """Serve only ACL-authorized, released, byte-verified Artifact content."""
     user = await _require_user(request, db)
     try:
         art = await lab_artifact_service.verify_and_get(
@@ -312,18 +295,81 @@ async def download_artifact(artifact_id: str, request: Request, db: AsyncSession
     if task is None or task.status != "completed":
         raise HTTPException(status_code=423, detail="artifact locked until the task is released")
 
-    if art.kind == "text" and art.text_md is not None:
-        return Response(
-            content=art.text_md, media_type="text/markdown; charset=utf-8",
+    if art.storage_status != "legacy":
+        from app.lab.artifact_download import (
+            ArtifactDownloadError,
+            ArtifactDownloadConfigurationError,
+            ArtifactDownloadIntegrityError,
+            prepare_released_artifact,
+        )
+
+        try:
+            prepared = await prepare_released_artifact(art)
+        except ArtifactDownloadConfigurationError:
+            raise HTTPException(
+                status_code=503,
+                detail="released artifact reader is unavailable",
+            )
+        except ArtifactDownloadIntegrityError:
+            raise HTTPException(
+                status_code=409,
+                detail="released artifact failed exact-version verification",
+            )
+        except ArtifactDownloadError:
+            raise HTTPException(
+                status_code=503,
+                detail="released artifact reader is temporarily unavailable",
+            )
+        if (
+            disposition == "inline"
+            and (
+                not prepared.content_type.startswith("text/")
+                and prepared.content_type != "application/json"
+            )
+        ):
+            prepared.path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=415,
+                detail="artifact content type cannot be rendered inline",
+            )
+        if (
+            disposition == "inline"
+            and prepared.byte_size > settings.lab_artifact_inline_max_bytes
+        ):
+            prepared.path.unlink(missing_ok=True)
+            raise HTTPException(status_code=413, detail="artifact is too large for inline display")
+        return FileResponse(
+            prepared.path,
+            media_type=prepared.content_type,
+            filename=prepared.filename,
+            content_disposition_type=disposition,
             headers={
-                "Content-Disposition": f'attachment; filename="artifact-{art.id}.md"',
+                "X-Content-SHA256": prepared.sha256,
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "private, no-store",
+            },
+            background=BackgroundTask(prepared.path.unlink, missing_ok=True),
+        )
+
+    if art.kind == "text" and art.text_md is not None:
+        body = art.text_md.encode("utf-8")
+        if disposition == "inline" and len(body) > settings.lab_artifact_inline_max_bytes:
+            raise HTTPException(status_code=413, detail="artifact is too large for inline display")
+        return Response(
+            content=body,
+            media_type="text/markdown; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    f'{disposition}; filename="artifact-{art.id}.md"'
+                ),
                 "X-Content-SHA256": art.sha256 or "",
                 "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "private, no-store",
             },
         )
     if art.uri:
-        # Verified metadata only — the client fetches the external resource itself;
-        # the API does not become an SSRF proxy for it.
-        return {"kind": art.kind, "uri": art.uri, "sha256": art.sha256,
-                "download": "external", "verified": True}
+        raise HTTPException(
+            status_code=410,
+            detail="legacy external artifacts are not available through the secure download boundary",
+        )
     raise HTTPException(status_code=404, detail="no downloadable content")

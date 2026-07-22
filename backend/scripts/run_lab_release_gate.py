@@ -154,7 +154,9 @@ RUN_ALL_STEPS: tuple[Step, ...] = (
             "LAB_STAGING_REQUIRED",
             "LAB_RUNTIME_BASE_URL",
             "LAB_EXECUTOR_BASE_URL",
-            "LAB_CLEANUP_BASE_URL",
+            "LAB_ARTIFACT_INGEST_BASE_URL",
+            "LAB_ARTIFACT_SCANNER_BASE_URL",
+            "LAB_ARTIFACT_CLEANUP_BASE_URL",
         ),
         1200,
     ),
@@ -252,9 +254,15 @@ COMMON_REQUIRED_ENV = {
     "LAB_RELEASE_GATE",
     "LAB_RELEASE_RUN_ID",
     "LAB_REDIS_DISPOSABLE_TOKEN",
-    "LAB_RUNTIME_IMAGE_DIGEST",
-    "LAB_EXECUTOR_IMAGE_DIGEST",
-    "LAB_CLEANUP_IMAGE_DIGEST",
+    "LAB_RUNTIME_SERVICE_IMAGE_DIGEST",
+    "LAB_EXECUTOR_SERVICE_IMAGE_DIGEST",
+    "LAB_ARTIFACT_INGEST_IMAGE_DIGEST",
+    "LAB_ARTIFACT_SCANNER_IMAGE_DIGEST",
+    "LAB_ARTIFACT_CLEANUP_IMAGE_DIGEST",
+    "LAB_ARTIFACT_RECEIPT_ALGORITHM",
+    "LAB_ARTIFACT_INGEST_RECEIPT_ALGORITHM",
+    "LAB_ARTIFACT_SCANNER_RECEIPT_ALGORITHM",
+    "LAB_ARTIFACT_CLEANUP_RECEIPT_ALGORITHM",
 }
 APPROVED_DIRTY_MANIFEST_SHA256 = (
     "342ef37e2125c39cf96e0752047b37d73b3302f0d074a7cbf0bce877594b7b82"
@@ -356,6 +364,14 @@ def validate_required_env(steps: Sequence[Step], env: dict[str, str]) -> list[st
     ]
     if false_required:
         raise GateError(f"required release switches are not true: {', '.join(false_required)}")
+    receipt_algorithms = {
+        env["LAB_ARTIFACT_RECEIPT_ALGORITHM"],
+        env["LAB_ARTIFACT_INGEST_RECEIPT_ALGORITHM"],
+        env["LAB_ARTIFACT_SCANNER_RECEIPT_ALGORITHM"],
+        env["LAB_ARTIFACT_CLEANUP_RECEIPT_ALGORITHM"],
+    }
+    if receipt_algorithms != {"EdDSA"}:
+        raise GateError("production release requires EdDSA Artifact receipts")
     return required
 
 
@@ -432,27 +448,71 @@ def validate_service_health(env: dict[str, str]) -> dict[str, dict]:
     except ImportError as exc:  # pragma: no cover - release environment contract
         raise GateError("httpx is required for service health preflight") from exc
 
+    service_specs = (
+        ("lab-runtime", "LAB_RUNTIME_BASE_URL", "LAB_RUNTIME_SERVICE_IMAGE_DIGEST"),
+        ("lab-executor", "LAB_EXECUTOR_BASE_URL", "LAB_EXECUTOR_SERVICE_IMAGE_DIGEST"),
+        (
+            "artifact-ingest",
+            "LAB_ARTIFACT_INGEST_BASE_URL",
+            "LAB_ARTIFACT_INGEST_IMAGE_DIGEST",
+        ),
+        (
+            "artifact-scanner",
+            "LAB_ARTIFACT_SCANNER_BASE_URL",
+            "LAB_ARTIFACT_SCANNER_IMAGE_DIGEST",
+        ),
+        (
+            "artifact-cleanup",
+            "LAB_ARTIFACT_CLEANUP_BASE_URL",
+            "LAB_ARTIFACT_CLEANUP_IMAGE_DIGEST",
+        ),
+    )
     services: dict[str, dict] = {}
-    for prefix in ("RUNTIME", "EXECUTOR", "CLEANUP"):
-        base_url = env.get(f"LAB_{prefix}_BASE_URL")
-        expected_digest = env.get(f"LAB_{prefix}_IMAGE_DIGEST")
+    for service_name, base_url_name, image_digest_name in service_specs:
+        base_url = env.get(base_url_name)
+        expected_digest = env.get(image_digest_name)
         if not base_url or not expected_digest:
-            raise GateError(f"missing LAB_{prefix}_BASE_URL or LAB_{prefix}_IMAGE_DIGEST")
+            raise GateError(f"missing {base_url_name} or {image_digest_name}")
         parsed = urlparse(base_url)
         if parsed.scheme != "https":
-            raise GateError(f"{prefix.lower()} endpoint must use HTTPS for release evidence")
+            raise GateError(
+                f"{service_name} endpoint must use HTTPS for release evidence"
+            )
         response = httpx.get(base_url.rstrip("/") + "/livez", timeout=10.0)
         if response.status_code != 200:
-            raise GateError(f"{prefix.lower()} /livez returned {response.status_code}")
+            raise GateError(f"{service_name} /livez returned {response.status_code}")
         body = response.json()
+        if body.get("alive") is not True or body.get("service") != service_name:
+            raise GateError(f"{service_name} /livez identity is invalid")
+        if (
+            service_name.startswith("artifact-")
+            and body.get("receipt_algorithm") != "EdDSA"
+        ):
+            raise GateError(
+                f"{service_name} live receipt algorithm is not EdDSA"
+            )
         if body.get("image_digest") != expected_digest:
-            raise GateError(f"{prefix.lower()} image digest does not match live service")
+            raise GateError(f"{service_name} image digest does not match live service")
         if body.get("sha") != env.get("LAB_SHA"):
-            raise GateError(f"{prefix.lower()} service SHA does not match tested SHA")
-        services[prefix.lower()] = {
+            raise GateError(f"{service_name} service SHA does not match tested SHA")
+        ready_response = httpx.get(
+            base_url.rstrip("/") + "/readyz", timeout=10.0
+        )
+        if ready_response.status_code != 200:
+            raise GateError(
+                f"{service_name} /readyz returned {ready_response.status_code}"
+            )
+        ready_body = ready_response.json()
+        if (
+            ready_body.get("ready") is not True
+            or ready_body.get("service") != service_name
+        ):
+            raise GateError(f"{service_name} /readyz identity is invalid")
+        services[service_name] = {
             "base_url": base_url,
             "image_digest": expected_digest,
             "service_sha": body.get("sha"),
+            "ready": True,
         }
     return services
 
@@ -666,6 +726,11 @@ def preflight(repo_root: Path, evidence_root: Path, sha: str, env: dict[str, str
     redis = asyncio.run(_redis_preflight(env["LAB_TEST_REDIS_URL"], run_id, env.get("LAB_REDIS_DISPOSABLE_TOKEN", "")))
     services = validate_service_health(env)
     d0 = validate_d0(repo_root, d0_request, env)
+    live_digests = {
+        name: service["image_digest"] for name, service in services.items()
+    }
+    if live_digests != d0["services"]:
+        raise GateError("live service image digests do not match the D0 request")
     return {
         "at": utc_now(),
         "manifest": manifest,
@@ -685,9 +750,7 @@ def preflight(repo_root: Path, evidence_root: Path, sha: str, env: dict[str, str
             "machine": platform.machine(),
             "postgres_url_sha256": sha256_bytes(env["LAB_TEST_DATABASE_URL"].encode()),
             "redis_url_sha256": sha256_bytes(env["LAB_TEST_REDIS_URL"].encode()),
-            "runtime_image_digest": env["LAB_RUNTIME_IMAGE_DIGEST"],
-            "executor_image_digest": env["LAB_EXECUTOR_IMAGE_DIGEST"],
-            "cleanup_image_digest": env["LAB_CLEANUP_IMAGE_DIGEST"],
+            "service_image_digests": live_digests,
         },
     }
 

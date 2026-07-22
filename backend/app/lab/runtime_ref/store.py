@@ -28,9 +28,10 @@ from app.lab.protocol import (
     RuntimeEvent,
 )
 from app.lab.runtime_ref.service_auth import MAX_REQUEST_BYTES, canonical_json_bytes
+from app.lab.runtime_ref.spool import ArtifactSpool, ArtifactSpoolError, SpooledArtifact
 
 
-STORE_VERSION = 2
+STORE_VERSION = 3
 SESSION_STATES = frozenset({
     "created", "running", "intent_pending", "resuming", "completed", "failed",
     "cancelled", "fenced", "quarantined",
@@ -118,6 +119,24 @@ class StoredArtifact:
     uri: str | None
     text_md: str | None
     meta: Any
+    artifact_digest: str
+    content_type: str
+    original_filename: str | None
+    declared_byte_size: int | None
+    expected_sha256: str | None
+    required: bool
+    producer_action_id: str | None
+    spool_locator: str | None
+    upload_state: str
+    upload_command: Any | None
+    upload_command_digest: str | None
+    upload_id: str | None
+    upload_receipt: Any | None
+    upload_receipt_digest: str | None
+    upload_attempts: int
+    last_upload_error: str | None
+    upload_acked_at: datetime | None
+    spool_deleted_at: datetime | None
 
 
 @dataclass(frozen=True)
@@ -225,6 +244,34 @@ _SCHEMA_STATEMENTS = (
         text_md TEXT,
         meta_json TEXT NOT NULL,
         artifact_digest TEXT NOT NULL,
+        content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+        original_filename TEXT,
+        declared_byte_size INTEGER CHECK (
+            declared_byte_size IS NULL OR declared_byte_size >= 0
+        ),
+        expected_sha256 TEXT CHECK (
+            expected_sha256 IS NULL OR length(expected_sha256) = 64
+        ),
+        required INTEGER NOT NULL DEFAULT 1 CHECK (required IN (0, 1)),
+        producer_action_id TEXT,
+        spool_locator TEXT,
+        upload_state TEXT NOT NULL DEFAULT 'legacy_inline' CHECK (upload_state IN (
+            'legacy_inline', 'pending', 'uploading', 'uploaded',
+            'acknowledged', 'failed'
+        )),
+        upload_command_json TEXT,
+        upload_command_digest TEXT CHECK (
+            upload_command_digest IS NULL OR length(upload_command_digest) = 64
+        ),
+        upload_id TEXT,
+        upload_receipt_json TEXT,
+        upload_receipt_digest TEXT CHECK (
+            upload_receipt_digest IS NULL OR length(upload_receipt_digest) = 64
+        ),
+        upload_attempts INTEGER NOT NULL DEFAULT 0 CHECK (upload_attempts >= 0),
+        last_upload_error TEXT,
+        upload_acked_at TEXT,
+        spool_deleted_at TEXT,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (session_id, artifact_id)
     )
@@ -251,6 +298,12 @@ _SCHEMA_STATEMENTS = (
         )
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS runtime_health (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        checked_at TEXT NOT NULL
+    )
+    """,
 )
 
 
@@ -263,6 +316,36 @@ _V1_TO_V2_STATEMENTS = (
     "ALTER TABLE runtime_events ADD COLUMN event_bytes INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE runtime_intents ADD COLUMN result_command_id TEXT",
     "ALTER TABLE runtime_intents ADD COLUMN result_action_id TEXT",
+)
+
+
+_V2_TO_V3_STATEMENTS = (
+    "ALTER TABLE runtime_artifacts ADD COLUMN content_type "
+    "TEXT NOT NULL DEFAULT 'application/octet-stream'",
+    "ALTER TABLE runtime_artifacts ADD COLUMN original_filename TEXT",
+    "ALTER TABLE runtime_artifacts ADD COLUMN declared_byte_size INTEGER "
+    "CHECK (declared_byte_size IS NULL OR declared_byte_size >= 0)",
+    "ALTER TABLE runtime_artifacts ADD COLUMN expected_sha256 TEXT "
+    "CHECK (expected_sha256 IS NULL OR length(expected_sha256) = 64)",
+    "ALTER TABLE runtime_artifacts ADD COLUMN required INTEGER NOT NULL DEFAULT 1 "
+    "CHECK (required IN (0, 1))",
+    "ALTER TABLE runtime_artifacts ADD COLUMN producer_action_id TEXT",
+    "ALTER TABLE runtime_artifacts ADD COLUMN spool_locator TEXT",
+    "ALTER TABLE runtime_artifacts ADD COLUMN upload_state TEXT NOT NULL "
+    "DEFAULT 'legacy_inline' CHECK (upload_state IN "
+    "('legacy_inline', 'pending', 'uploading', 'uploaded', 'acknowledged', 'failed'))",
+    "ALTER TABLE runtime_artifacts ADD COLUMN upload_command_json TEXT",
+    "ALTER TABLE runtime_artifacts ADD COLUMN upload_command_digest TEXT "
+    "CHECK (upload_command_digest IS NULL OR length(upload_command_digest) = 64)",
+    "ALTER TABLE runtime_artifacts ADD COLUMN upload_id TEXT",
+    "ALTER TABLE runtime_artifacts ADD COLUMN upload_receipt_json TEXT",
+    "ALTER TABLE runtime_artifacts ADD COLUMN upload_receipt_digest TEXT "
+    "CHECK (upload_receipt_digest IS NULL OR length(upload_receipt_digest) = 64)",
+    "ALTER TABLE runtime_artifacts ADD COLUMN upload_attempts INTEGER NOT NULL DEFAULT 0 "
+    "CHECK (upload_attempts >= 0)",
+    "ALTER TABLE runtime_artifacts ADD COLUMN last_upload_error TEXT",
+    "ALTER TABLE runtime_artifacts ADD COLUMN upload_acked_at TEXT",
+    "ALTER TABLE runtime_artifacts ADD COLUMN spool_deleted_at TEXT",
 )
 
 
@@ -314,13 +397,31 @@ def _require_text(name: str, value: str) -> None:
 class RuntimeStore:
     """Small transaction-oriented store intended for one session-affine Runtime."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        artifact_spool_path: str | Path | None = None,
+        max_spool_bytes: int = 1024 * 1024 * 1024,
+        max_artifact_bytes: int = 64 * 1024 * 1024,
+    ) -> None:
         raw_path = str(path)
         if not raw_path or raw_path == ":memory:" or "mode=memory" in raw_path:
             raise ValueError("protocol-v2 runtime_store_path must be a durable file")
         self.path = str(Path(raw_path).expanduser().resolve())
+        spool_path = (
+            artifact_spool_path
+            if artifact_spool_path is not None
+            else f"{self.path}.artifacts"
+        )
+        self.artifact_spool = ArtifactSpool(
+            spool_path,
+            max_bytes=max_spool_bytes,
+            max_artifact_bytes=max_artifact_bytes,
+        )
         self._initialized = False
         self._initialize_lock = asyncio.Lock()
+        self._artifact_lock = asyncio.Lock()
 
     def _harden_files(self) -> None:
         if os.name != "posix":
@@ -354,10 +455,10 @@ class RuntimeStore:
                 await db.execute("PRAGMA busy_timeout = 5000")
                 await db.execute("BEGIN IMMEDIATE")
                 version = (await (await db.execute("PRAGMA user_version")).fetchone())[0]
-                if version not in {0, 1, STORE_VERSION}:
+                if version not in {0, 1, 2, STORE_VERSION}:
                     raise RuntimeStoreError(
-                        f"unsupported runtime store version {version}; expected 1 or "
-                        f"{STORE_VERSION}"
+                        f"unsupported runtime store version {version}; expected 1, 2, "
+                        f"or {STORE_VERSION}"
                     )
                 if version == 1:
                     for statement in _V1_TO_V2_STATEMENTS:
@@ -381,6 +482,10 @@ class RuntimeStore:
                                 event["cursor"],
                             ),
                         )
+                    version = 2
+                if version == 2:
+                    for statement in _V2_TO_V3_STATEMENTS:
+                        await db.execute(statement)
                 for statement in _SCHEMA_STATEMENTS:
                     await db.execute(statement)
                 await db.execute(f"PRAGMA user_version = {STORE_VERSION}")
@@ -391,6 +496,7 @@ class RuntimeStore:
             finally:
                 await db.close()
                 self._harden_files()
+            await self.artifact_spool.initialize()
             self._initialized = True
 
     async def _connect(self) -> aiosqlite.Connection:
@@ -440,6 +546,7 @@ class RuntimeStore:
         budget_usd: float = 0.5,
         egress_allowlist: Iterable[str] = (),
         session_id: str | None = None,
+        max_active_sessions: int | None = None,
     ) -> StoredSession:
         _require_text("run_id", run_id)
         _require_text("client_run_id", client_run_id)
@@ -485,6 +592,18 @@ class RuntimeStore:
                 ):
                     raise RuntimeStoreConflict("session binding mismatch")
                 return existing
+
+            if max_active_sessions is not None:
+                if type(max_active_sessions) is not int or max_active_sessions <= 0:
+                    raise ValueError("max_active_sessions must be positive")
+                active = await (
+                    await db.execute(
+                        "SELECT COUNT(*) AS count FROM runtime_sessions WHERE state NOT IN "
+                        "('completed', 'failed', 'cancelled', 'fenced', 'quarantined')"
+                    )
+                ).fetchone()
+                if int(active["count"]) >= max_active_sessions:
+                    raise RuntimeStoreBackpressure("runtime session capacity reached")
 
             new_session_id = session_id or f"ref-{uuid.uuid4().hex[:16]}"
             _require_text("session_id", new_session_id)
@@ -899,6 +1018,32 @@ class RuntimeStore:
             session_id=row["session_id"], artifact_id=row["artifact_id"],
             kind=row["kind"], title=row["title"], uri=row["uri"],
             text_md=row["text_md"], meta=_load(row["meta_json"]),
+            artifact_digest=row["artifact_digest"],
+            content_type=row["content_type"],
+            original_filename=row["original_filename"],
+            declared_byte_size=row["declared_byte_size"],
+            expected_sha256=row["expected_sha256"],
+            required=bool(row["required"]),
+            producer_action_id=row["producer_action_id"],
+            spool_locator=row["spool_locator"],
+            upload_state=row["upload_state"],
+            upload_command=_load(row["upload_command_json"]),
+            upload_command_digest=row["upload_command_digest"],
+            upload_id=row["upload_id"],
+            upload_receipt=_load(row["upload_receipt_json"]),
+            upload_receipt_digest=row["upload_receipt_digest"],
+            upload_attempts=row["upload_attempts"],
+            last_upload_error=row["last_upload_error"],
+            upload_acked_at=(
+                None
+                if row["upload_acked_at"] is None
+                else _stored_datetime(row["upload_acked_at"])
+            ),
+            spool_deleted_at=(
+                None
+                if row["spool_deleted_at"] is None
+                else _stored_datetime(row["spool_deleted_at"])
+            ),
         )
 
     async def put_artifact(
@@ -911,43 +1056,291 @@ class RuntimeStore:
         uri: str | None = None,
         text_md: str | None = None,
         meta: Any | None = None,
+        content_type: str | None = None,
+        original_filename: str | None = None,
+        required: bool = True,
+        producer_action_id: str | None = None,
     ) -> StoredArtifact:
-        for name, value in (("artifact_id", artifact_id), ("kind", kind), ("title", title)):
+        if uri is not None:
+            raise ValueError("protocol-v2 runtime artifacts cannot retain external URIs")
+        if not isinstance(text_md, str):
+            raise ValueError("protocol-v2 runtime artifact bytes are required")
+        content = text_md.encode("utf-8")
+        return await self.put_artifact_bytes(
+            session_id,
+            artifact_id=artifact_id,
+            kind=kind,
+            title=title,
+            content=content,
+            meta=meta,
+            content_type=content_type or (
+                "text/markdown; charset=utf-8"
+                if kind == "text"
+                else "text/plain; charset=utf-8"
+            ),
+            original_filename=original_filename,
+            declared_byte_size=len(content),
+            expected_sha256=hashlib.sha256(content).hexdigest(),
+            required=required,
+            producer_action_id=producer_action_id,
+        )
+
+    @staticmethod
+    def artifact_declaration(
+        *,
+        artifact_id: str,
+        kind: str,
+        title: str,
+        content_type: str,
+        original_filename: str | None,
+        declared_byte_size: int,
+        expected_sha256: str,
+        required: bool,
+        producer_action_id: str | None,
+        meta: Any,
+    ) -> tuple[dict[str, Any], str]:
+        for name, value, maximum in (
+            ("artifact_id", artifact_id, 200),
+            ("title", title, 200),
+            ("content_type", content_type, 200),
+        ):
             _require_text(name, value)
+            if len(value) > maximum or value != value.strip() or any(
+                ord(char) < 32 for char in value
+            ):
+                raise ValueError(f"{name} is not canonical")
+        if kind not in {"file", "link", "text", "image", "dataset"}:
+            raise ValueError("unknown artifact kind")
+        if kind == "link" and required:
+            raise ValueError("required runtime artifacts must contain snapshotted bytes")
+        if type(required) is not bool:
+            raise ValueError("artifact required must be boolean")
+        if (
+            type(declared_byte_size) is not int
+            or declared_byte_size < 0
+        ):
+            raise ValueError("declared_byte_size must be non-negative")
+        if not _DIGEST_RE.fullmatch(expected_sha256):
+            raise ValueError("expected_sha256 must be lowercase sha256")
+        if producer_action_id is not None:
+            _require_text("producer_action_id", producer_action_id)
+            if len(producer_action_id) > 200:
+                raise ValueError("producer_action_id is too long")
+        if original_filename is not None:
+            _require_text("original_filename", original_filename)
+            if (
+                len(original_filename) > 255
+                or original_filename in {".", ".."}
+                or "/" in original_filename
+                or "\\" in original_filename
+                or original_filename != original_filename.strip()
+                or any(ord(char) < 32 for char in original_filename)
+            ):
+                raise ValueError("original_filename must not contain a path")
+        elif kind != "text":
+            raise ValueError("binary artifact original_filename is required")
         meta_value = {} if meta is None else meta
-        meta_json = _canonical_text(meta_value)
-        content = {
-            "kind": kind, "title": title, "uri": uri, "text_md": text_md,
+        _canonical_text(meta_value)
+        declaration = {
+            "kind": kind,
+            "title": title,
+            "content_type": content_type,
+            "original_filename": original_filename,
+            "declared_byte_size": declared_byte_size,
+            "expected_sha256": expected_sha256,
+            "required": required,
+            "producer_action_id": producer_action_id,
             "meta": meta_value,
         }
-        artifact_digest = _digest(content)
-        async with self._transaction() as db:
-            existing = await (
-                await db.execute(
-                    "SELECT * FROM runtime_artifacts WHERE session_id = ? AND artifact_id = ?",
-                    (session_id, artifact_id),
-                )
-            ).fetchone()
-            if existing is not None:
-                if existing["artifact_digest"] != artifact_digest:
-                    raise RuntimeStoreConflict("artifact id payload mismatch")
-                return self._artifact(existing)
-            await db.execute(
-                "INSERT INTO runtime_artifacts "
-                "(session_id, artifact_id, kind, title, uri, text_md, meta_json, artifact_digest) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    session_id, artifact_id, kind, title, uri, text_md, meta_json,
-                    artifact_digest,
-                ),
+        return declaration, _digest(declaration)
+
+    async def stage_artifact_bytes(
+        self,
+        session_id: str,
+        artifact_id: str,
+        *,
+        content: bytes,
+        declared_byte_size: int,
+        expected_sha256: str,
+    ) -> SpooledArtifact:
+        _require_text("session_id", session_id)
+        _require_text("artifact_id", artifact_id)
+        if not isinstance(content, bytes):
+            raise TypeError("runtime artifact content must be bytes")
+        actual_size = len(content)
+        actual_sha256 = hashlib.sha256(content).hexdigest()
+        if (
+            type(declared_byte_size) is not int
+            or declared_byte_size != actual_size
+            or expected_sha256 != actual_sha256
+        ):
+            raise RuntimeStoreConflict("artifact byte declaration mismatch")
+        if await self.get_session(session_id) is None:
+            raise RuntimeStoreNotFound("session not found")
+        try:
+            return await self.artifact_spool.put(
+                session_id, artifact_id, content
             )
+        except ArtifactSpoolError as exc:
+            raise RuntimeStoreBackpressure(
+                "runtime artifact spool unavailable"
+            ) from exc
+
+    async def put_artifact_bytes(
+        self,
+        session_id: str,
+        *,
+        artifact_id: str,
+        kind: str,
+        title: str,
+        content: bytes,
+        content_type: str,
+        original_filename: str | None,
+        declared_byte_size: int,
+        expected_sha256: str,
+        meta: Any | None = None,
+        required: bool = True,
+        producer_action_id: str | None = None,
+    ) -> StoredArtifact:
+        if not isinstance(content, bytes):
+            raise TypeError("runtime artifact content must be bytes")
+        declaration, artifact_digest = self.artifact_declaration(
+            artifact_id=artifact_id,
+            kind=kind,
+            title=title,
+            content_type=content_type,
+            original_filename=original_filename,
+            declared_byte_size=declared_byte_size,
+            expected_sha256=expected_sha256,
+            required=required,
+            producer_action_id=producer_action_id,
+            meta=meta,
+        )
+        if (
+            len(content) != declared_byte_size
+            or hashlib.sha256(content).hexdigest() != expected_sha256
+        ):
+            raise RuntimeStoreConflict("artifact byte declaration mismatch")
+        existing = await self.get_artifact(session_id, artifact_id)
+        if existing is not None:
+            if existing.artifact_digest != artifact_digest:
+                raise RuntimeStoreConflict("artifact id payload mismatch")
+            return existing
+        spooled = await self.stage_artifact_bytes(
+            session_id,
+            artifact_id,
+            content=content,
+            declared_byte_size=declared_byte_size,
+            expected_sha256=expected_sha256,
+        )
+        return await self.put_artifact_from_spool(
+            session_id,
+            artifact_id=artifact_id,
+            kind=kind,
+            title=title,
+            spool_locator=spooled.locator,
+            content_type=content_type,
+            original_filename=original_filename,
+            declared_byte_size=declared_byte_size,
+            expected_sha256=expected_sha256,
+            meta=meta,
+            required=required,
+            producer_action_id=producer_action_id,
+        )
+
+    async def put_artifact_from_spool(
+        self,
+        session_id: str,
+        *,
+        artifact_id: str,
+        kind: str,
+        title: str,
+        spool_locator: str,
+        content_type: str,
+        original_filename: str | None,
+        declared_byte_size: int,
+        expected_sha256: str,
+        meta: Any | None = None,
+        required: bool = True,
+        producer_action_id: str | None = None,
+    ) -> StoredArtifact:
+        declaration, artifact_digest = self.artifact_declaration(
+            artifact_id=artifact_id,
+            kind=kind,
+            title=title,
+            content_type=content_type,
+            original_filename=original_filename,
+            declared_byte_size=declared_byte_size,
+            expected_sha256=expected_sha256,
+            required=required,
+            producer_action_id=producer_action_id,
+            meta=meta,
+        )
+        if spool_locator != self.artifact_spool.locator_for(
+            session_id, artifact_id
+        ):
+            raise RuntimeStoreConflict("artifact spool binding mismatch")
+        async with self._artifact_lock:
+            existing = await self.get_artifact(session_id, artifact_id)
+            if existing is not None:
+                if existing.artifact_digest != artifact_digest:
+                    raise RuntimeStoreConflict("artifact id payload mismatch")
+                return existing
+            try:
+                spooled = await self.artifact_spool.digest(spool_locator)
+            except ArtifactSpoolError as exc:
+                raise RuntimeStoreConflict("artifact spool entry is unavailable") from exc
+            if (
+                spooled.byte_size != declared_byte_size
+                or spooled.sha256 != expected_sha256
+            ):
+                raise RuntimeStoreConflict("artifact spool declaration mismatch")
+            meta_json = _canonical_text(declaration["meta"])
+            async with self._transaction() as db:
+                await db.execute(
+                    "INSERT INTO runtime_artifacts "
+                    "(session_id, artifact_id, kind, title, uri, text_md, meta_json, "
+                    "artifact_digest, content_type, original_filename, declared_byte_size, "
+                    "expected_sha256, required, producer_action_id, spool_locator, upload_state) "
+                    "VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+                    (
+                        session_id,
+                        artifact_id,
+                        kind,
+                        title,
+                        meta_json,
+                        artifact_digest,
+                        content_type,
+                        original_filename,
+                        spooled.byte_size,
+                        spooled.sha256,
+                        int(required),
+                        producer_action_id,
+                        spooled.locator,
+                    ),
+                )
+                row = await (
+                    await db.execute(
+                        "SELECT * FROM runtime_artifacts WHERE session_id = ? AND artifact_id = ?",
+                        (session_id, artifact_id),
+                    )
+                ).fetchone()
+                return self._artifact(row)
+
+    async def get_artifact(
+        self, session_id: str, artifact_id: str
+    ) -> StoredArtifact | None:
+        db = await self._connect()
+        try:
             row = await (
                 await db.execute(
                     "SELECT * FROM runtime_artifacts WHERE session_id = ? AND artifact_id = ?",
                     (session_id, artifact_id),
                 )
             ).fetchone()
-            return self._artifact(row)
+            return None if row is None else self._artifact(row)
+        finally:
+            await db.close()
 
     async def list_artifacts(self, session_id: str) -> list[StoredArtifact]:
         db = await self._connect()
@@ -962,6 +1355,273 @@ class RuntimeStore:
             return [self._artifact(row) for row in rows]
         finally:
             await db.close()
+
+    async def claim_artifact_upload(
+        self,
+        session_id: str,
+        artifact_id: str,
+        *,
+        upload_id: str,
+        command: Any,
+        command_digest: str,
+    ) -> StoredArtifact:
+        _require_text("upload_id", upload_id)
+        if not _DIGEST_RE.fullmatch(command_digest):
+            raise ValueError("upload command digest must be lowercase sha256")
+        command_json = _canonical_text(command)
+        async with self._transaction() as db:
+            row = await (
+                await db.execute(
+                    "SELECT * FROM runtime_artifacts WHERE session_id = ? AND artifact_id = ?",
+                    (session_id, artifact_id),
+                )
+            ).fetchone()
+            if row is None:
+                raise RuntimeStoreNotFound("artifact not found")
+            artifact = self._artifact(row)
+            if artifact.upload_state in {"legacy_inline", "acknowledged"}:
+                raise RuntimeStoreConflict("artifact does not accept upload commands")
+            if artifact.upload_receipt_digest is not None:
+                if (
+                    artifact.upload_id != upload_id
+                    or artifact.upload_command_digest != command_digest
+                ):
+                    raise RuntimeStoreConflict("artifact upload already completed")
+                return artifact
+            if artifact.upload_command_digest is not None:
+                if artifact.upload_command_digest == command_digest:
+                    if artifact.upload_id != upload_id:
+                        raise RuntimeStoreConflict("artifact upload id changed")
+                elif artifact.upload_id == upload_id:
+                    raise RuntimeStoreConflict("artifact upload command payload changed")
+            await db.execute(
+                "UPDATE runtime_artifacts SET upload_state = 'uploading', "
+                "upload_command_json = ?, upload_command_digest = ?, upload_id = ?, "
+                "upload_attempts = upload_attempts + 1, last_upload_error = NULL "
+                "WHERE session_id = ? AND artifact_id = ?",
+                (
+                    command_json,
+                    command_digest,
+                    upload_id,
+                    session_id,
+                    artifact_id,
+                ),
+            )
+            updated = await (
+                await db.execute(
+                    "SELECT * FROM runtime_artifacts WHERE session_id = ? AND artifact_id = ?",
+                    (session_id, artifact_id),
+                )
+            ).fetchone()
+            return self._artifact(updated)
+
+    async def record_artifact_upload(
+        self,
+        session_id: str,
+        artifact_id: str,
+        *,
+        upload_id: str,
+        command_digest: str,
+        receipt: Any,
+        receipt_digest: str,
+        succeeded: bool,
+        error_code: str | None,
+    ) -> StoredArtifact:
+        if not _DIGEST_RE.fullmatch(receipt_digest):
+            raise ValueError("upload receipt digest must be lowercase sha256")
+        if succeeded == bool(error_code):
+            raise ValueError("upload receipt outcome is inconsistent")
+        receipt_json = _canonical_text(receipt)
+        async with self._transaction() as db:
+            row = await (
+                await db.execute(
+                    "SELECT * FROM runtime_artifacts WHERE session_id = ? AND artifact_id = ?",
+                    (session_id, artifact_id),
+                )
+            ).fetchone()
+            if row is None:
+                raise RuntimeStoreNotFound("artifact not found")
+            artifact = self._artifact(row)
+            if (
+                artifact.upload_id != upload_id
+                or artifact.upload_command_digest != command_digest
+            ):
+                raise RuntimeStoreConflict("artifact upload binding changed")
+            if artifact.upload_receipt_digest is not None:
+                if (
+                    artifact.upload_receipt_digest != receipt_digest
+                    or artifact.upload_receipt != receipt
+                ):
+                    raise RuntimeStoreConflict("artifact upload receipt changed")
+                return artifact
+            await db.execute(
+                "UPDATE runtime_artifacts SET upload_state = ?, "
+                "upload_receipt_json = ?, upload_receipt_digest = ?, "
+                "last_upload_error = ? WHERE session_id = ? AND artifact_id = ?",
+                (
+                    "uploaded" if succeeded else "failed",
+                    receipt_json,
+                    receipt_digest,
+                    None if succeeded else error_code[:100],
+                    session_id,
+                    artifact_id,
+                ),
+            )
+            updated = await (
+                await db.execute(
+                    "SELECT * FROM runtime_artifacts WHERE session_id = ? AND artifact_id = ?",
+                    (session_id, artifact_id),
+                )
+            ).fetchone()
+            return self._artifact(updated)
+
+    async def record_artifact_upload_failure(
+        self, session_id: str, artifact_id: str, *, error_code: str
+    ) -> StoredArtifact:
+        _require_text("error_code", error_code)
+        async with self._transaction() as db:
+            row = await (
+                await db.execute(
+                    "SELECT * FROM runtime_artifacts WHERE session_id = ? AND artifact_id = ?",
+                    (session_id, artifact_id),
+                )
+            ).fetchone()
+            if row is None:
+                raise RuntimeStoreNotFound("artifact not found")
+            if row["upload_receipt_digest"] is None:
+                await db.execute(
+                    "UPDATE runtime_artifacts SET upload_state = 'failed', "
+                    "last_upload_error = ? WHERE session_id = ? AND artifact_id = ?",
+                    (error_code[:100], session_id, artifact_id),
+                )
+            updated = await (
+                await db.execute(
+                    "SELECT * FROM runtime_artifacts WHERE session_id = ? AND artifact_id = ?",
+                    (session_id, artifact_id),
+                )
+            ).fetchone()
+            return self._artifact(updated)
+
+    async def acknowledge_artifact_upload(
+        self,
+        session_id: str,
+        artifact_id: str,
+        *,
+        receipt_digest: str,
+    ) -> StoredArtifact:
+        if not _DIGEST_RE.fullmatch(receipt_digest):
+            raise ValueError("upload receipt digest must be lowercase sha256")
+        async with self._transaction() as db:
+            row = await (
+                await db.execute(
+                    "SELECT * FROM runtime_artifacts WHERE session_id = ? AND artifact_id = ?",
+                    (session_id, artifact_id),
+                )
+            ).fetchone()
+            if row is None:
+                raise RuntimeStoreNotFound("artifact not found")
+            artifact = self._artifact(row)
+            if artifact.upload_receipt_digest != receipt_digest:
+                raise RuntimeStoreConflict("artifact upload ACK receipt mismatch")
+            if artifact.upload_state not in {"uploaded", "acknowledged", "failed"}:
+                raise RuntimeStoreConflict("artifact upload is not ready for ACK")
+            if artifact.upload_state == "uploaded":
+                await db.execute(
+                    "UPDATE runtime_artifacts SET upload_state = 'acknowledged', "
+                    "upload_acked_at = CURRENT_TIMESTAMP "
+                    "WHERE session_id = ? AND artifact_id = ?",
+                    (session_id, artifact_id),
+                )
+            elif artifact.upload_acked_at is None:
+                await db.execute(
+                    "UPDATE runtime_artifacts SET upload_acked_at = CURRENT_TIMESTAMP "
+                    "WHERE session_id = ? AND artifact_id = ?",
+                    (session_id, artifact_id),
+                )
+            updated = await (
+                await db.execute(
+                    "SELECT * FROM runtime_artifacts WHERE session_id = ? AND artifact_id = ?",
+                    (session_id, artifact_id),
+                )
+            ).fetchone()
+            return self._artifact(updated)
+
+    async def mark_artifact_spool_deleted(
+        self, session_id: str, artifact_id: str
+    ) -> StoredArtifact:
+        async with self._transaction() as db:
+            row = await (
+                await db.execute(
+                    "SELECT * FROM runtime_artifacts WHERE session_id = ? AND artifact_id = ?",
+                    (session_id, artifact_id),
+                )
+            ).fetchone()
+            if row is None:
+                raise RuntimeStoreNotFound("artifact not found")
+            if row["upload_acked_at"] is None:
+                raise RuntimeStoreConflict("artifact spool cannot be deleted before ACK")
+            await db.execute(
+                "UPDATE runtime_artifacts SET spool_deleted_at = COALESCE("
+                "spool_deleted_at, CURRENT_TIMESTAMP) "
+                "WHERE session_id = ? AND artifact_id = ?",
+                (session_id, artifact_id),
+            )
+            updated = await (
+                await db.execute(
+                    "SELECT * FROM runtime_artifacts WHERE session_id = ? AND artifact_id = ?",
+                    (session_id, artifact_id),
+                )
+            ).fetchone()
+            return self._artifact(updated)
+
+    async def list_recoverable_artifact_uploads(self) -> list[StoredArtifact]:
+        db = await self._connect()
+        try:
+            rows = await (
+                await db.execute(
+                    "SELECT * FROM runtime_artifacts WHERE (upload_state = 'uploading' "
+                    "OR (upload_state = 'failed' AND last_upload_error IN "
+                    "('upload_transport_failed', 'upload_ingest_unavailable'))) "
+                    "AND upload_command_json IS NOT NULL "
+                    "ORDER BY created_at, artifact_id"
+                )
+            ).fetchall()
+            return [self._artifact(row) for row in rows]
+        finally:
+            await db.close()
+
+    async def list_acked_artifact_spools(self) -> list[StoredArtifact]:
+        db = await self._connect()
+        try:
+            rows = await (
+                await db.execute(
+                    "SELECT * FROM runtime_artifacts WHERE upload_acked_at IS NOT NULL "
+                    "AND upload_receipt_digest IS NOT NULL "
+                    "AND spool_locator IS NOT NULL AND spool_deleted_at IS NULL "
+                    "ORDER BY created_at, artifact_id"
+                )
+            ).fetchall()
+            return [self._artifact(row) for row in rows]
+        finally:
+            await db.close()
+
+    async def readiness(self) -> dict[str, int]:
+        async with self._transaction() as db:
+            await db.execute(
+                "INSERT INTO runtime_health(singleton, checked_at) VALUES (1, ?) "
+                "ON CONFLICT(singleton) DO UPDATE SET checked_at = excluded.checked_at",
+                (datetime.now(UTC).isoformat(),),
+            )
+            row = await (
+                await db.execute(
+                    "SELECT COUNT(*) AS active_sessions FROM runtime_sessions "
+                    "WHERE state NOT IN ('completed', 'failed', 'cancelled', 'fenced', 'quarantined')"
+                )
+            ).fetchone()
+        return {
+            "active_sessions": int(row["active_sessions"]),
+            "spool_bytes": await self.artifact_spool.size(),
+        }
 
     @staticmethod
     def _command(row: aiosqlite.Row) -> StoredCommandReceipt:

@@ -16,12 +16,6 @@ import uuid
 
 
 _MAX_RUNTIME_JSON_DEPTH = 32
-_RUNTIME_V2_ARTIFACT_FIELDS = frozenset({
-    "artifact_id", "kind", "title", "uri", "text_md", "meta",
-})
-_RUNTIME_V2_ARTIFACT_KINDS = frozenset({
-    "file", "link", "text", "image", "dataset",
-})
 _RUNTIME_V2_SAFE_FAILURE_DETAILS = {
     "response_byte_cap": "protocol response exceeds byte cap",
     "response_depth_cap": "protocol response exceeds JSON depth cap",
@@ -70,6 +64,18 @@ class ArtifactSpec:
     text_md: str | None = None
     meta: dict[str, Any] = field(default_factory=dict)
     provider_artifact_id: str | None = None
+    content_type: str | None = None
+    original_filename: str | None = None
+    declared_byte_size: int | None = None
+    expected_sha256: str | None = None
+    required: bool = True
+    producer_action_id: str | None = None
+    upload_state: str | None = None
+    upload_receipt: dict[str, Any] | None = None
+    # Runtime-producer inputs only. HTTP manifest decoding never populates these;
+    # they are staged into the Runtime's path-confined spool before checkpointing.
+    content_bytes: bytes | None = field(default=None, repr=False)
+    content_base64: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -348,43 +354,24 @@ class HttpAgentAdapter:
 
     @staticmethod
     def _artifact_from_v2_wire(value: Any) -> ArtifactSpec:
-        if not isinstance(value, dict):
-            raise RuntimeV2NonRetryableError("artifacts.read")
-        if set(value) != _RUNTIME_V2_ARTIFACT_FIELDS:
-            raise RuntimeV2NonRetryableError("artifacts.read")
+        from app.lab.protocol import RuntimeArtifactManifest
 
-        artifact_id = value["artifact_id"]
-        kind = value["kind"]
-        title = value["title"]
-        uri = value["uri"]
-        text_md = value["text_md"]
-        meta = value["meta"]
-        if not isinstance(artifact_id, str) or not artifact_id:
-            raise RuntimeV2NonRetryableError("artifacts.read")
-        if type(kind) is not str or kind not in _RUNTIME_V2_ARTIFACT_KINDS:
-            raise RuntimeV2NonRetryableError("artifacts.read")
-        if type(title) is not str or not title:
-            raise RuntimeV2NonRetryableError("artifacts.read")
-        if uri is not None and type(uri) is not str:
-            raise RuntimeV2NonRetryableError("artifacts.read")
-        if text_md is not None and type(text_md) is not str:
-            raise RuntimeV2NonRetryableError("artifacts.read")
-        if not (
-            isinstance(uri, str)
-            and uri.strip()
-            or isinstance(text_md, str)
-            and text_md.strip()
-        ):
-            raise RuntimeV2NonRetryableError("artifacts.read")
-        if type(meta) is not dict:
-            raise RuntimeV2NonRetryableError("artifacts.read")
+        try:
+            manifest = RuntimeArtifactManifest.model_validate(value, strict=True)
+        except (ValueError, TypeError, RecursionError):
+            raise RuntimeV2NonRetryableError("artifacts.read") from None
         return ArtifactSpec(
-            kind=kind,
-            title=title,
-            uri=uri,
-            text_md=text_md,
-            meta=meta,
-            provider_artifact_id=artifact_id,
+            kind=manifest.kind,
+            title=manifest.title,
+            provider_artifact_id=manifest.provider_artifact_id,
+            content_type=manifest.content_type,
+            original_filename=manifest.original_filename,
+            declared_byte_size=manifest.declared_byte_size,
+            expected_sha256=manifest.expected_sha256,
+            required=manifest.required,
+            producer_action_id=manifest.producer_action_id,
+            upload_state=manifest.upload_state,
+            upload_receipt=manifest.upload_receipt,
         )
 
     @staticmethod
@@ -838,8 +825,7 @@ class HttpAgentAdapter:
         )
         body = self._response_object(
             response,
-            max_bytes=max(1, int(settings.lab_budget_artifact_bytes))
-            + protocol.MAX_COMMAND_BYTES,
+            max_bytes=protocol.MAX_COMMAND_BYTES,
             operation="artifacts.read",
         )
         if set(body) != {"artifacts"}:
@@ -847,7 +833,118 @@ class HttpAgentAdapter:
         raw = body["artifacts"]
         if not isinstance(raw, list) or not raw:
             raise RuntimeV2NonRetryableError("artifacts.read")
+        if len(raw) > max(1, int(settings.lab_budget_artifact_count)):
+            raise RuntimeV2NonRetryableError("artifacts.read")
         return [self._artifact_from_v2_wire(value) for value in raw]
+
+    async def upload_artifact_v2(self, command) -> dict:
+        """Tell the Runtime to stream one spooled artifact to its bounded lease."""
+        from app.http import get_client
+        from app.lab import protocol
+
+        try:
+            body = protocol.RuntimeArtifactUploadCommand.model_validate(command)
+        except (TypeError, ValueError):
+            raise RuntimeV2NonRetryableError("artifacts.upload") from None
+        spec, epoch, _ = self._require_v2_context()
+        if (
+            body.run_id != spec.run_id
+            or body.epoch != epoch
+            or body.lease.run_id != spec.run_id
+        ):
+            raise RuntimeV2NonRetryableError("artifacts.upload")
+        response = await self._request_v2(
+            lambda: get_client().post(
+                f"{self.base_url}/runs/{body.session_id}/artifacts/"
+                f"{body.provider_artifact_id}/upload",
+                headers=self._v2_headers(
+                    action="artifacts.upload",
+                    session_id=body.session_id,
+                    command_id=body.command_id,
+                ),
+                timeout=max(self.timeout, 300.0),
+                json=body.model_dump(mode="json"),
+            ),
+            operation="artifacts.upload",
+        )
+        receipt = self._response_object(
+            response,
+            max_bytes=protocol.MAX_COMMAND_BYTES,
+            operation="artifacts.upload",
+        )
+        upload_receipt = receipt.get("upload_receipt")
+        upload_receipt_digest = receipt.get("upload_receipt_digest")
+        expected = {
+            "request_digest": protocol.content_digest(body.model_dump(mode="json")),
+            "session_id": body.session_id,
+            "provider_artifact_id": body.provider_artifact_id,
+            "upload_id": body.lease.upload_id,
+        }
+        state = receipt.get("state")
+        if (
+            not isinstance(receipt.get("receipt_id"), str)
+            or not receipt["receipt_id"]
+            or not isinstance(receipt.get("runtime_shard_id"), str)
+            or not receipt["runtime_shard_id"]
+            or any(receipt.get(name) != value for name, value in expected.items())
+            or state not in {"uploaded", "failed"}
+            or type(upload_receipt) is not dict
+            or upload_receipt.get("status")
+            != ("completed" if state == "uploaded" else "failed")
+            or not isinstance(upload_receipt_digest, str)
+            or upload_receipt_digest != protocol.content_digest(upload_receipt)
+        ):
+            raise RuntimeV2NonRetryableError("artifacts.upload")
+        return receipt
+
+    async def ack_artifact_upload_v2(self, command) -> dict:
+        """ACK a persisted Ingest receipt so Runtime may delete local bytes."""
+        from app.http import get_client
+        from app.lab import protocol
+
+        try:
+            body = protocol.RuntimeArtifactUploadAck.model_validate(command)
+        except (TypeError, ValueError):
+            raise RuntimeV2NonRetryableError("artifacts.upload.ack") from None
+        spec, epoch, _ = self._require_v2_context()
+        if body.run_id != spec.run_id or body.epoch != epoch:
+            raise RuntimeV2NonRetryableError("artifacts.upload.ack")
+        response = await self._request_v2(
+            lambda: get_client().post(
+                f"{self.base_url}/runs/{body.session_id}/artifacts/"
+                f"{body.provider_artifact_id}/upload/ack",
+                headers=self._v2_headers(
+                    action="artifacts.upload.ack",
+                    session_id=body.session_id,
+                    command_id=body.command_id,
+                ),
+                timeout=self.timeout,
+                json=body.model_dump(mode="json"),
+            ),
+            operation="artifacts.upload.ack",
+        )
+        receipt = self._response_object(
+            response,
+            max_bytes=protocol.MAX_COMMAND_BYTES,
+            operation="artifacts.upload.ack",
+        )
+        expected = {
+            "request_digest": protocol.content_digest(body.model_dump(mode="json")),
+            "session_id": body.session_id,
+            "provider_artifact_id": body.provider_artifact_id,
+            "state": "acknowledged",
+            "upload_receipt_digest": body.upload_receipt_digest,
+        }
+        if (
+            not isinstance(receipt.get("receipt_id"), str)
+            or not receipt["receipt_id"]
+            or not isinstance(receipt.get("runtime_shard_id"), str)
+            or not receipt["runtime_shard_id"]
+            or type(receipt.get("spool_deleted")) is not bool
+            or any(receipt.get(name) != value for name, value in expected.items())
+        ):
+            raise RuntimeV2NonRetryableError("artifacts.upload.ack")
+        return receipt
 
     async def start(self, spec: RunSpec) -> "HttpHandle":
         self._require_configured()

@@ -1,4 +1,4 @@
-import { apiFetch } from './core'
+import { apiFetch, apiFetchResponse } from './core'
 
 // Lab (experiment building) player API — mirrors backend routers/lab.py (§8).
 
@@ -81,9 +81,6 @@ export interface LabArtifact {
   kind: string
   title: string
   unlocked: boolean
-  uri?: string | null
-  text_md?: string | null
-  meta?: Record<string, unknown>
   created_at: string | null
   // Manifest metadata (always present, read-only; P3/T5).
   sha256?: string | null
@@ -93,6 +90,16 @@ export interface LabArtifact {
   scan_status?: string | null
   verification_status?: string | null
   retention_hold?: boolean
+  provider_artifact_id?: string | null
+  required?: boolean
+  content_type?: string | null
+  original_filename?: string | null
+  expected_sha256?: string | null
+  declared_byte_size?: number | null
+  storage_status?: string | null
+  scanned_at?: string | null
+  released_at?: string | null
+  expires_at?: string | null
 }
 
 export interface CreateLabTaskInput {
@@ -143,6 +150,22 @@ export function getLabRunSteps(id: string, after = 0): Promise<{ steps: LabRunSt
 
 export function getLabArtifact(id: string): Promise<LabArtifact> {
   return apiFetch(`/lab/artifacts/${encodeURIComponent(id)}`)
+}
+
+export async function downloadLabArtifact(
+  id: string,
+  disposition: 'attachment' | 'inline' = 'attachment',
+): Promise<{ blob: Blob; filename: string }> {
+  const resp = await apiFetchResponse(
+    `/lab/artifacts/${encodeURIComponent(id)}/download?disposition=${disposition}`,
+  )
+  const header = resp.headers.get('Content-Disposition') || ''
+  const encoded = header.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+  const quoted = header.match(/filename="([^"]+)"/i)?.[1]
+  const filename = encoded
+    ? decodeURIComponent(encoded)
+    : quoted || `artifact-${id}`
+  return { blob: await resp.blob(), filename }
 }
 
 export function respondLabApproval(runId: string, approvalId: string, decision: boolean): Promise<{ ok: boolean }> {

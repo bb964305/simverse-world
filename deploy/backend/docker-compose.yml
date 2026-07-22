@@ -51,6 +51,16 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-changeme}@db:5432/skills_world
       REDIS_URL: redis://redis:6379/0
+      # The API receives only released-object read credentials. Production IAM
+      # must deny quarantine, object writes/deletes, and bucket listing.
+      LAB_ARTIFACT_DOWNLOAD_BACKEND: "${LAB_ARTIFACT_DOWNLOAD_BACKEND:-filesystem}"
+      LAB_ARTIFACT_DOWNLOAD_STORAGE_ROOT: /var/lib/simverse/artifacts
+      LAB_ARTIFACT_DOWNLOAD_RELEASED_BUCKET: ${LAB_ARTIFACT_RELEASED_BUCKET:-lab-artifact-released}
+      LAB_ARTIFACT_DOWNLOAD_S3_ENDPOINT_URL: "${LAB_ARTIFACT_DOWNLOAD_S3_ENDPOINT_URL:-}"
+      LAB_ARTIFACT_DOWNLOAD_S3_REGION: "${LAB_ARTIFACT_DOWNLOAD_S3_REGION:-}"
+      LAB_ARTIFACT_DOWNLOAD_S3_ACCESS_KEY: "${LAB_ARTIFACT_DOWNLOAD_S3_ACCESS_KEY:-}"
+      LAB_ARTIFACT_DOWNLOAD_S3_SECRET_KEY: "${LAB_ARTIFACT_DOWNLOAD_S3_SECRET_KEY:-}"
+      LAB_ARTIFACT_DOWNLOAD_S3_SESSION_TOKEN: "${LAB_ARTIFACT_DOWNLOAD_S3_SESSION_TOKEN:-}"
       # P0-3b landed the cross-process WS bus (Redis pub/sub), so the API no
       # longer owns the agent loops and can safely run multiple workers:
       # background loops live in the agent-worker service below, and each API
@@ -58,6 +68,15 @@ services:
       RUN_BACKGROUND_TASKS: "false"
       # Number of uvicorn workers; scale to CPU. Read by the Dockerfile CMD.
       UVICORN_WORKERS: "${UVICORN_WORKERS:-2}"
+    volumes:
+      - lab_artifact_released:/var/lib/simverse/artifacts/lab-artifact-released:ro
+      - type: bind
+        source: ${LAB_ARTIFACT_RECEIPT_TRUST_HOST_DIR:-/dev/null}
+        target: /run/secrets/lab-artifact-receipt-trust
+        read_only: true
+    networks:
+      - default
+      - lab-api-storage-egress
 
   # Standalone agent-worker: owns agent_loop + heat_cron + embedding_backfill.
   # Enabled by default now that P0-3b's Redis pub/sub delivers its WS
@@ -87,11 +106,10 @@ services:
   # opt-in `lab` profile. Two further kill switches are deploy-level
   # (LAB_ENABLED=false → main.py stays dormant) and runtime (the Redis
   # sv:lab:enabled flag the loop checks each iteration). Least-privilege: it needs
-  # DB + Redis only; keep any
-  # real-runtime/OCI credentials out of the API/agent-worker env and scoped here
-  # once a real Adapter is selected (Phase 7). NOTE: real OCI execution requires a
-  # dedicated rootless-Linux host (Phase 8 blocked) — this service runs the Mock
-  # adapter until then.
+  # DB + Redis plus scoped internal client credentials only. Protocol v2 routes
+  # supported code tools to the remote Executor and never falls back to Mock.
+  # The production path remains default-off until the external D0 identities,
+  # rootless OCI host, role images, and network policy are attested.
   lab-runner:
     profiles: ["lab"]
     build:
@@ -108,6 +126,40 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-changeme}@db:5432/skills_world
       REDIS_URL: redis://redis:6379/0
+      LAB_SIMVERSE_REF_BASE_URL: ${LAB_SIMVERSE_REF_BASE_URL:-http://lab-runtime:8900}
+      LAB_RUNTIME_BASE_URL: ${LAB_RUNTIME_BASE_URL:-http://lab-runtime:8900}
+      LAB_EXECUTOR_BASE_URL: ${LAB_EXECUTOR_BASE_URL:-http://lab-executor:8910}
+      LAB_EGRESS_ENABLED: "${LAB_EGRESS_ENABLED:-false}"
+      LAB_EGRESS_BASE_URL: ${LAB_EGRESS_BASE_URL:-http://lab-egress:8094}
+      LAB_EGRESS_API_KEY: "${LAB_EGRESS_API_KEY:-}"
+      LAB_EGRESS_SEARCH_ENDPOINT: "${LAB_EGRESS_SEARCH_ENDPOINT:-}"
+      LAB_ARTIFACT_INGEST_BASE_URL: ${LAB_ARTIFACT_INGEST_BASE_URL:-http://artifact-ingest:8920}
+      LAB_ARTIFACT_SCANNER_BASE_URL: ${LAB_ARTIFACT_SCANNER_BASE_URL:-http://artifact-scanner:8930}
+      LAB_ARTIFACT_CLEANUP_BASE_URL: ${LAB_ARTIFACT_CLEANUP_BASE_URL:-http://artifact-cleanup:8940}
+      LAB_ARTIFACT_UPLOAD_MAX_ATTEMPTS: "${LAB_ARTIFACT_UPLOAD_MAX_ATTEMPTS:-5}"
+      LAB_ARTIFACT_PENDING_TTL_HOURS: "${LAB_ARTIFACT_PENDING_TTL_HOURS:-24}"
+      LAB_ARTIFACT_QUARANTINE_TTL_DAYS: "${LAB_ARTIFACT_QUARANTINE_TTL_DAYS:-7}"
+      LAB_SERVICE_SHA: "${LAB_SERVICE_SHA:-}"
+      LAB_D0_RELEASE_RECEIPT_PATH: /run/attestations/lab-d0-release-receipt.json
+      LAB_D0_RELEASE_RECEIPT_SHA256: "${LAB_D0_RELEASE_RECEIPT_SHA256:-}"
+      LAB_D0_REQUEST_HASH: "${LAB_D0_REQUEST_HASH:-}"
+    volumes:
+      - type: bind
+        source: ${LAB_D0_RELEASE_RECEIPT_HOST_PATH:-/dev/null}
+        target: /run/attestations/lab-d0-release-receipt.json
+        read_only: true
+      - type: bind
+        source: ${LAB_ARTIFACT_RECEIPT_TRUST_HOST_DIR:-/dev/null}
+        target: /run/secrets/lab-artifact-receipt-trust
+        read_only: true
+    networks:
+      - default
+      - lab-runtime-control
+      - lab-executor-control
+      - lab-egress-control
+      - lab-ingest-control
+      - lab-scanner-control
+      - lab-cleanup-control
     deploy:
       replicas: ${LAB_RUNNER_REPLICAS:-1}
     healthcheck:
@@ -118,5 +170,350 @@ services:
       timeout: 5s
       retries: 5
 
+  # Reference topology only. The whole plane is absent from the default graph;
+  # production also requires the externally attested D0 identities, images,
+  # network policies, rootless OCI host, scanner engine, and receipt trust root.
+  lab-runtime:
+    profiles: ["lab-production"]
+    build:
+      context: ../backend
+      dockerfile: ../deploy/Dockerfile
+    command: python -m app.lab.runtime_ref.main
+    restart: unless-stopped
+    depends_on:
+      artifact-ingest:
+        condition: service_healthy
+    environment:
+      LAB_RUNTIME_PROTOCOL_VERSION: "2"
+      LAB_SERVICE_SHA: "${LAB_SERVICE_SHA:-}"
+      LAB_RUNTIME_SERVICE_IMAGE_DIGEST: "${LAB_RUNTIME_SERVICE_IMAGE_DIGEST:-}"
+      LAB_RUNTIME_BIND_HOST: 0.0.0.0
+      LAB_RUNTIME_BIND_PORT: "8900"
+      LAB_RUNTIME_SHARD_ID: ${LAB_RUNTIME_SHARD_ID:-runtime-shard-0}
+      LAB_RUNTIME_STORE_PATH: /var/lib/simverse/runtime/state/runtime.sqlite3
+      LAB_RUNTIME_SPOOL_PATH: /var/lib/simverse/runtime/spool
+      LAB_RUNTIME_AUTH_ISSUER: "${LAB_RUNTIME_AUTH_ISSUER:-}"
+      LAB_RUNTIME_AUTH_AUDIENCE: lab-runtime
+      LAB_RUNTIME_AUTH_KEYS_JSON: "${LAB_RUNTIME_AUTH_KEYS_JSON:-}"
+      LAB_RUNTIME_ARTIFACT_INGEST_BASE_URL: http://artifact-ingest:8920
+      LAB_RUNTIME_MODEL_API_KEY: "${LAB_RUNTIME_MODEL_API_KEY:-}"
+      LAB_RUNTIME_MODEL_BASE_URL: "${LAB_RUNTIME_MODEL_BASE_URL:-}"
+      LAB_RUNTIME_MODEL_NAME: "${LAB_RUNTIME_MODEL_NAME:-}"
+      LAB_EGRESS_ENABLED: "${LAB_EGRESS_ENABLED:-false}"
+      LAB_EGRESS_SEARCH_ENDPOINT: "${LAB_EGRESS_SEARCH_ENDPOINT:-}"
+      LAB_RUNTIME_MAX_ACTIVE_SESSIONS: "${LAB_RUNTIME_MAX_ACTIVE_SESSIONS:-100}"
+      LAB_RUNTIME_MAX_CONCURRENT_TURNS: "${LAB_RUNTIME_MAX_CONCURRENT_TURNS:-4}"
+      LAB_RUNTIME_MAX_QUEUE_DEPTH: "${LAB_RUNTIME_MAX_QUEUE_DEPTH:-32}"
+      LAB_RUNTIME_MAX_SPOOL_BYTES: "${LAB_RUNTIME_MAX_SPOOL_BYTES:-1073741824}"
+      LAB_RUNTIME_MAX_ARTIFACT_BYTES: "${LAB_RUNTIME_MAX_ARTIFACT_BYTES:-104857600}"
+    volumes:
+      - lab_runtime_state:/var/lib/simverse/runtime/state
+      - lab_runtime_spool:/var/lib/simverse/runtime/spool
+    networks:
+      - lab-runtime-control
+      - lab-runtime-upload
+      - lab-runtime-model-egress
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8900/readyz', timeout=2).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # Authenticated, read-only HTTP egress boundary for protocol-v2 network tools.
+  # It has no DB/Redis/Runtime/Executor/storage credentials. Runner reaches it on
+  # one internal control network; only this service joins the public egress
+  # network. The service stays fail-closed until explicitly enabled and supplied
+  # with a private bearer key plus an optional public SearXNG JSON endpoint.
+  lab-egress:
+    profiles: ["lab-production"]
+    build:
+      context: ../backend
+      dockerfile: ../deploy/Dockerfile
+    command: python -m app.lab.egress_service.main
+    restart: unless-stopped
+    environment:
+      LAB_EGRESS_ENABLED: "${LAB_EGRESS_ENABLED:-false}"
+      LAB_EGRESS_LISTEN_HOST: 0.0.0.0
+      LAB_EGRESS_LISTEN_PORT: "8094"
+      LAB_EGRESS_API_KEY: "${LAB_EGRESS_API_KEY:-}"
+      LAB_EGRESS_DATABASE_PATH: /var/lib/simverse/egress/actions.sqlite3
+      LAB_EGRESS_SEARCH_ENDPOINT: "${LAB_EGRESS_SEARCH_ENDPOINT:-}"
+      LAB_EGRESS_SEARCH_PROVIDER: "${LAB_EGRESS_SEARCH_PROVIDER:-searxng_json}"
+      LAB_EGRESS_ALLOWED_PORTS: "${LAB_EGRESS_ALLOWED_PORTS:-80,443}"
+      LAB_EGRESS_CONNECT_TIMEOUT_S: "${LAB_EGRESS_CONNECT_TIMEOUT_S:-5}"
+      LAB_EGRESS_READ_TIMEOUT_S: "${LAB_EGRESS_READ_TIMEOUT_S:-10}"
+      LAB_EGRESS_TOTAL_TIMEOUT_S: "${LAB_EGRESS_TOTAL_TIMEOUT_S:-20}"
+      LAB_EGRESS_ACTION_LEASE_S: "${LAB_EGRESS_ACTION_LEASE_S:-45}"
+      LAB_EGRESS_MAX_ATTEMPTS: "${LAB_EGRESS_MAX_ATTEMPTS:-3}"
+      LAB_EGRESS_MAX_REDIRECTS: "${LAB_EGRESS_MAX_REDIRECTS:-3}"
+      LAB_EGRESS_MAX_RESPONSE_BYTES: "${LAB_EGRESS_MAX_RESPONSE_BYTES:-1048576}"
+      LAB_EGRESS_MAX_HEADER_BYTES: "${LAB_EGRESS_MAX_HEADER_BYTES:-65536}"
+      LAB_EGRESS_MAX_TEXT_CHARS: "${LAB_EGRESS_MAX_TEXT_CHARS:-32768}"
+      LAB_EGRESS_MAX_LINKS: "${LAB_EGRESS_MAX_LINKS:-50}"
+      LAB_EGRESS_MAX_SEARCH_RESULTS: "${LAB_EGRESS_MAX_SEARCH_RESULTS:-10}"
+      LAB_EGRESS_MAX_QUERY_CHARS: "${LAB_EGRESS_MAX_QUERY_CHARS:-512}"
+      LAB_EGRESS_MAX_URL_CHARS: "${LAB_EGRESS_MAX_URL_CHARS:-2048}"
+      LAB_EGRESS_USER_AGENT: "${LAB_EGRESS_USER_AGENT:-SimverseLabEgress/1.0}"
+    volumes:
+      - lab_egress_state:/var/lib/simverse/egress
+    networks:
+      - lab-egress-control
+      - lab-egress-public
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8094/readyz', timeout=2).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  lab-executor:
+    profiles: ["lab-production"]
+    build:
+      context: ../backend
+      dockerfile: ../deploy/Dockerfile
+    command: python -m app.lab.executor_service.main
+    restart: unless-stopped
+    environment:
+      LAB_EXECUTOR_BIND_HOST: 0.0.0.0
+      LAB_EXECUTOR_BIND_PORT: "8910"
+      LAB_SERVICE_SHA: "${LAB_SERVICE_SHA:-}"
+      LAB_EXECUTOR_SERVICE_IMAGE_DIGEST: "${LAB_EXECUTOR_SERVICE_IMAGE_DIGEST:-}"
+      LAB_EXECUTOR_INSTANCE_ID: ${LAB_EXECUTOR_INSTANCE_ID:-executor-0}
+      LAB_EXECUTOR_STORE_PATH: /var/lib/simverse/executor/executor.sqlite3
+      LAB_EXECUTOR_IMAGE: "${LAB_EXECUTOR_IMAGE:-}"
+      LAB_EXECUTOR_OCI_RUNNER: "${LAB_EXECUTOR_OCI_RUNNER:-docker}"
+      LAB_EXECUTOR_OCI_USER: "${LAB_EXECUTOR_OCI_USER:-65534:65534}"
+      LAB_EXECUTOR_INGEST_BASE_URL: http://artifact-ingest:8920
+      LAB_EXECUTOR_ARTIFACT_SPOOL_PATH: /var/lib/simverse/executor/artifacts
+      LAB_EXECUTOR_ARTIFACT_UPLOAD_TIMEOUT_SECONDS: "${LAB_EXECUTOR_ARTIFACT_UPLOAD_TIMEOUT_SECONDS:-30}"
+      LAB_EXECUTOR_AUTH_ISSUER: "${LAB_EXECUTOR_AUTH_ISSUER:-}"
+      LAB_EXECUTOR_AUTH_AUDIENCE: lab-executor
+      LAB_EXECUTOR_AUTH_KEYS_JSON: "${LAB_EXECUTOR_AUTH_KEYS_JSON:-}"
+      LAB_EXECUTOR_RECEIPT_ISSUER: "${LAB_EXECUTOR_RECEIPT_ISSUER:-}"
+      LAB_EXECUTOR_RECEIPT_AUDIENCE: lab-executor-receipt
+      LAB_EXECUTOR_RECEIPT_CURRENT_KID: "${LAB_EXECUTOR_RECEIPT_CURRENT_KID:-}"
+      LAB_EXECUTOR_RECEIPT_KEYS_JSON: "${LAB_EXECUTOR_RECEIPT_KEYS_JSON:-}"
+      DOCKER_HOST: "${LAB_EXECUTOR_DOCKER_HOST:-}"
+    volumes:
+      - lab_executor_state:/var/lib/simverse/executor
+    networks:
+      - lab-executor-control
+      - lab-executor-upload
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8910/readyz', timeout=2).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  artifact-ingest:
+    profiles: ["lab-production"]
+    build:
+      context: ../backend
+      dockerfile: ../deploy/Dockerfile
+    command: python -m app.lab.artifact_services.ingest.main
+    restart: unless-stopped
+    environment:
+      LAB_ARTIFACT_INGEST_BIND_HOST: 0.0.0.0
+      LAB_ARTIFACT_INGEST_BIND_PORT: "8920"
+      LAB_SERVICE_SHA: "${LAB_SERVICE_SHA:-}"
+      LAB_ARTIFACT_INGEST_IMAGE_DIGEST: "${LAB_ARTIFACT_INGEST_IMAGE_DIGEST:-}"
+      LAB_ARTIFACT_INGEST_INSTANCE_ID: ${LAB_ARTIFACT_INGEST_INSTANCE_ID:-artifact-ingest-0}
+      LAB_ARTIFACT_INGEST_STORE_PATH: /var/lib/simverse/artifact-ingest/state/operations.sqlite3
+      LAB_ARTIFACT_INGEST_SPOOL_PATH: /var/lib/simverse/artifact-ingest/spool
+      LAB_ARTIFACT_INGEST_MAX_UPLOAD_BYTES: "${LAB_ARTIFACT_INGEST_MAX_UPLOAD_BYTES:-104857600}"
+      LAB_ARTIFACT_INGEST_STORAGE_BACKEND: "${LAB_ARTIFACT_INGEST_STORAGE_BACKEND:-filesystem}"
+      LAB_ARTIFACT_INGEST_STORAGE_ROOT: /var/lib/simverse/artifacts
+      LAB_ARTIFACT_INGEST_QUARANTINE_BUCKET: ${LAB_ARTIFACT_QUARANTINE_BUCKET:-lab-artifact-quarantine}
+      LAB_ARTIFACT_INGEST_S3_ENDPOINT_URL: "${LAB_ARTIFACT_INGEST_S3_ENDPOINT_URL:-}"
+      LAB_ARTIFACT_INGEST_S3_REGION: "${LAB_ARTIFACT_INGEST_S3_REGION:-}"
+      LAB_ARTIFACT_INGEST_S3_ACCESS_KEY: "${LAB_ARTIFACT_INGEST_S3_ACCESS_KEY:-}"
+      LAB_ARTIFACT_INGEST_S3_SECRET_KEY: "${LAB_ARTIFACT_INGEST_S3_SECRET_KEY:-}"
+      LAB_ARTIFACT_INGEST_S3_SESSION_TOKEN: "${LAB_ARTIFACT_INGEST_S3_SESSION_TOKEN:-}"
+      LAB_ARTIFACT_INGEST_AUTH_ISSUER: "${LAB_ARTIFACT_INGEST_AUTH_ISSUER:-}"
+      LAB_ARTIFACT_INGEST_AUTH_AUDIENCE: lab-artifact-ingest
+      LAB_ARTIFACT_INGEST_AUTH_KEYS_JSON: "${LAB_ARTIFACT_INGEST_AUTH_KEYS_JSON:-}"
+      LAB_ARTIFACT_INGEST_UPLOAD_ISSUER: "${LAB_ARTIFACT_INGEST_UPLOAD_ISSUER:-}"
+      LAB_ARTIFACT_INGEST_UPLOAD_AUDIENCE: lab-artifact-upload
+      LAB_ARTIFACT_INGEST_UPLOAD_CURRENT_KID: "${LAB_ARTIFACT_INGEST_UPLOAD_CURRENT_KID:-}"
+      LAB_ARTIFACT_INGEST_UPLOAD_KEYS_JSON: "${LAB_ARTIFACT_INGEST_UPLOAD_KEYS_JSON:-}"
+      LAB_ARTIFACT_INGEST_RECEIPT_ISSUER: "${LAB_ARTIFACT_INGEST_RECEIPT_ISSUER:-}"
+      LAB_ARTIFACT_INGEST_RECEIPT_ALGORITHM: "${LAB_ARTIFACT_INGEST_RECEIPT_ALGORITHM:-EdDSA}"
+      LAB_ARTIFACT_INGEST_RECEIPT_CURRENT_KID: "${LAB_ARTIFACT_INGEST_RECEIPT_CURRENT_KID:-}"
+      LAB_ARTIFACT_INGEST_RECEIPT_PRIVATE_KEY_PATH: /run/secrets/artifact-ingest-receipt-private.pem
+      LAB_ARTIFACT_INGEST_RECEIPT_KEYS_JSON: "${LAB_ARTIFACT_INGEST_RECEIPT_KEYS_JSON:-}"
+    volumes:
+      - lab_artifact_ingest_state:/var/lib/simverse/artifact-ingest/state
+      - lab_artifact_ingest_spool:/var/lib/simverse/artifact-ingest/spool
+      - lab_artifact_quarantine:/var/lib/simverse/artifacts/lab-artifact-quarantine
+      - type: bind
+        source: ${LAB_ARTIFACT_INGEST_RECEIPT_PRIVATE_KEY_HOST_PATH:-/dev/null}
+        target: /run/secrets/artifact-ingest-receipt-private.pem
+        read_only: true
+    networks:
+      - lab-ingest-control
+      - lab-runtime-upload
+      - lab-executor-upload
+      - lab-ingest-storage-egress
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8920/readyz', timeout=2).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  artifact-scanner:
+    profiles: ["lab-production"]
+    build:
+      context: ../backend
+      dockerfile: ../deploy/Dockerfile
+    command: python -m app.lab.artifact_services.scanner.main
+    restart: unless-stopped
+    environment:
+      LAB_ARTIFACT_SCANNER_BIND_HOST: 0.0.0.0
+      LAB_ARTIFACT_SCANNER_BIND_PORT: "8930"
+      LAB_SERVICE_SHA: "${LAB_SERVICE_SHA:-}"
+      LAB_ARTIFACT_SCANNER_IMAGE_DIGEST: "${LAB_ARTIFACT_SCANNER_IMAGE_DIGEST:-}"
+      LAB_ARTIFACT_SCANNER_INSTANCE_ID: ${LAB_ARTIFACT_SCANNER_INSTANCE_ID:-artifact-scanner-0}
+      LAB_ARTIFACT_SCANNER_STORE_PATH: /var/lib/simverse/artifact-scanner/state/operations.sqlite3
+      LAB_ARTIFACT_SCANNER_WORK_PATH: /var/lib/simverse/artifact-scanner/work
+      LAB_ARTIFACT_SCANNER_STORAGE_BACKEND: "${LAB_ARTIFACT_SCANNER_STORAGE_BACKEND:-filesystem}"
+      LAB_ARTIFACT_SCANNER_STORAGE_ROOT: /var/lib/simverse/artifacts
+      LAB_ARTIFACT_SCANNER_QUARANTINE_BUCKET: ${LAB_ARTIFACT_QUARANTINE_BUCKET:-lab-artifact-quarantine}
+      LAB_ARTIFACT_SCANNER_RELEASED_BUCKET: ${LAB_ARTIFACT_RELEASED_BUCKET:-lab-artifact-released}
+      LAB_ARTIFACT_SCANNER_S3_ENDPOINT_URL: "${LAB_ARTIFACT_SCANNER_S3_ENDPOINT_URL:-}"
+      LAB_ARTIFACT_SCANNER_S3_REGION: "${LAB_ARTIFACT_SCANNER_S3_REGION:-}"
+      LAB_ARTIFACT_SCANNER_S3_ACCESS_KEY: "${LAB_ARTIFACT_SCANNER_S3_ACCESS_KEY:-}"
+      LAB_ARTIFACT_SCANNER_S3_SECRET_KEY: "${LAB_ARTIFACT_SCANNER_S3_SECRET_KEY:-}"
+      LAB_ARTIFACT_SCANNER_S3_SESSION_TOKEN: "${LAB_ARTIFACT_SCANNER_S3_SESSION_TOKEN:-}"
+      LAB_ARTIFACT_SCANNER_POLICY_VERSION: ${LAB_ARTIFACT_SCANNER_POLICY_VERSION:-lab-artifact-scan-v1}
+      LAB_ARTIFACT_SCANNER_ENGINE_VERSION: "${LAB_ARTIFACT_SCANNER_ENGINE_VERSION:-}"
+      LAB_ARTIFACT_SCANNER_CLAIM_SECONDS: "${LAB_ARTIFACT_SCANNER_CLAIM_SECONDS:-300}"
+      LAB_ARTIFACT_SCANNER_POLICY_TIMEOUT_SECONDS: "${LAB_ARTIFACT_SCANNER_POLICY_TIMEOUT_SECONDS:-120}"
+      LAB_ARTIFACT_SCANNER_PARSER_TIMEOUT_SECONDS: "${LAB_ARTIFACT_SCANNER_PARSER_TIMEOUT_SECONDS:-30}"
+      LAB_ARTIFACT_SCANNER_PARSER_MAX_MEMORY_BYTES: "${LAB_ARTIFACT_SCANNER_PARSER_MAX_MEMORY_BYTES:-536870912}"
+      LAB_ARTIFACT_SCANNER_MAX_ARCHIVE_DEPTH: "${LAB_ARTIFACT_SCANNER_MAX_ARCHIVE_DEPTH:-3}"
+      LAB_ARTIFACT_SCANNER_MAX_ARCHIVE_FILES: "${LAB_ARTIFACT_SCANNER_MAX_ARCHIVE_FILES:-1000}"
+      LAB_ARTIFACT_SCANNER_MAX_ARCHIVE_EXPANDED_BYTES: "${LAB_ARTIFACT_SCANNER_MAX_ARCHIVE_EXPANDED_BYTES:-524288000}"
+      LAB_ARTIFACT_SCANNER_MAX_NESTED_ARCHIVE_BYTES: "${LAB_ARTIFACT_SCANNER_MAX_NESTED_ARCHIVE_BYTES:-33554432}"
+      LAB_ARTIFACT_SCANNER_MAX_ARCHIVE_RATIO: "${LAB_ARTIFACT_SCANNER_MAX_ARCHIVE_RATIO:-100}"
+      LAB_ARTIFACT_SCANNER_MAX_IMAGE_PIXELS: "${LAB_ARTIFACT_SCANNER_MAX_IMAGE_PIXELS:-100000000}"
+      LAB_ARTIFACT_SCANNER_MAX_IMAGE_DECODED_BYTES: "${LAB_ARTIFACT_SCANNER_MAX_IMAGE_DECODED_BYTES:-536870912}"
+      LAB_ARTIFACT_SCANNER_MAX_TEXT_FIELD_BYTES: "${LAB_ARTIFACT_SCANNER_MAX_TEXT_FIELD_BYTES:-1048576}"
+      LAB_ARTIFACT_SCANNER_MAX_CSV_COLUMNS: "${LAB_ARTIFACT_SCANNER_MAX_CSV_COLUMNS:-4096}"
+      LAB_ARTIFACT_SCANNER_ALLOWED_CONTENT_TYPES_JSON: '${LAB_ARTIFACT_SCANNER_ALLOWED_CONTENT_TYPES_JSON:-["application/json","application/pdf","application/zip","image/jpeg","image/png","text/csv","text/markdown","text/plain"]}'
+      LAB_ARTIFACT_SCANNER_MALWARE_COMMAND_JSON: '${LAB_ARTIFACT_SCANNER_MALWARE_COMMAND_JSON:-[]}'
+      LAB_ARTIFACT_SCANNER_AUTH_ISSUER: "${LAB_ARTIFACT_SCANNER_AUTH_ISSUER:-}"
+      LAB_ARTIFACT_SCANNER_AUTH_AUDIENCE: lab-artifact-scanner
+      LAB_ARTIFACT_SCANNER_AUTH_KEYS_JSON: "${LAB_ARTIFACT_SCANNER_AUTH_KEYS_JSON:-}"
+      LAB_ARTIFACT_SCANNER_RECEIPT_ISSUER: "${LAB_ARTIFACT_SCANNER_RECEIPT_ISSUER:-}"
+      LAB_ARTIFACT_SCANNER_RECEIPT_ALGORITHM: "${LAB_ARTIFACT_SCANNER_RECEIPT_ALGORITHM:-EdDSA}"
+      LAB_ARTIFACT_SCANNER_RECEIPT_CURRENT_KID: "${LAB_ARTIFACT_SCANNER_RECEIPT_CURRENT_KID:-}"
+      LAB_ARTIFACT_SCANNER_RECEIPT_PRIVATE_KEY_PATH: /run/secrets/artifact-scanner-receipt-private.pem
+      LAB_ARTIFACT_SCANNER_RECEIPT_KEYS_JSON: "${LAB_ARTIFACT_SCANNER_RECEIPT_KEYS_JSON:-}"
+    volumes:
+      - lab_artifact_scanner_state:/var/lib/simverse/artifact-scanner/state
+      - lab_artifact_scanner_work:/var/lib/simverse/artifact-scanner/work
+      - lab_artifact_quarantine:/var/lib/simverse/artifacts/lab-artifact-quarantine:ro
+      - lab_artifact_released:/var/lib/simverse/artifacts/lab-artifact-released
+      - type: bind
+        source: ${LAB_ARTIFACT_SCANNER_RECEIPT_PRIVATE_KEY_HOST_PATH:-/dev/null}
+        target: /run/secrets/artifact-scanner-receipt-private.pem
+        read_only: true
+    networks:
+      - lab-scanner-control
+      - lab-scanner-storage-egress
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8930/readyz', timeout=2).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  artifact-cleanup:
+    profiles: ["lab-production"]
+    build:
+      context: ../backend
+      dockerfile: ../deploy/Dockerfile
+    command: python -m app.lab.artifact_services.cleanup.main
+    restart: unless-stopped
+    environment:
+      LAB_ARTIFACT_CLEANUP_BIND_HOST: 0.0.0.0
+      LAB_ARTIFACT_CLEANUP_BIND_PORT: "8940"
+      LAB_SERVICE_SHA: "${LAB_SERVICE_SHA:-}"
+      LAB_ARTIFACT_CLEANUP_IMAGE_DIGEST: "${LAB_ARTIFACT_CLEANUP_IMAGE_DIGEST:-}"
+      LAB_ARTIFACT_CLEANUP_INSTANCE_ID: ${LAB_ARTIFACT_CLEANUP_INSTANCE_ID:-artifact-cleanup-0}
+      LAB_ARTIFACT_CLEANUP_STORE_PATH: /var/lib/simverse/artifact-cleanup/state/operations.sqlite3
+      LAB_ARTIFACT_CLEANUP_STORAGE_BACKEND: "${LAB_ARTIFACT_CLEANUP_STORAGE_BACKEND:-filesystem}"
+      LAB_ARTIFACT_CLEANUP_STORAGE_ROOT: /var/lib/simverse/artifacts
+      LAB_ARTIFACT_CLEANUP_QUARANTINE_BUCKET: ${LAB_ARTIFACT_QUARANTINE_BUCKET:-lab-artifact-quarantine}
+      LAB_ARTIFACT_CLEANUP_RELEASED_BUCKET: ${LAB_ARTIFACT_RELEASED_BUCKET:-lab-artifact-released}
+      LAB_ARTIFACT_CLEANUP_S3_ENDPOINT_URL: "${LAB_ARTIFACT_CLEANUP_S3_ENDPOINT_URL:-}"
+      LAB_ARTIFACT_CLEANUP_S3_REGION: "${LAB_ARTIFACT_CLEANUP_S3_REGION:-}"
+      LAB_ARTIFACT_CLEANUP_S3_ACCESS_KEY: "${LAB_ARTIFACT_CLEANUP_S3_ACCESS_KEY:-}"
+      LAB_ARTIFACT_CLEANUP_S3_SECRET_KEY: "${LAB_ARTIFACT_CLEANUP_S3_SECRET_KEY:-}"
+      LAB_ARTIFACT_CLEANUP_S3_SESSION_TOKEN: "${LAB_ARTIFACT_CLEANUP_S3_SESSION_TOKEN:-}"
+      LAB_ARTIFACT_CLEANUP_AUTH_ISSUER: "${LAB_ARTIFACT_CLEANUP_AUTH_ISSUER:-}"
+      LAB_ARTIFACT_CLEANUP_AUTH_AUDIENCE: lab-artifact-cleanup
+      LAB_ARTIFACT_CLEANUP_AUTH_KEYS_JSON: "${LAB_ARTIFACT_CLEANUP_AUTH_KEYS_JSON:-}"
+      LAB_ARTIFACT_CLEANUP_RECEIPT_ISSUER: "${LAB_ARTIFACT_CLEANUP_RECEIPT_ISSUER:-}"
+      LAB_ARTIFACT_CLEANUP_RECEIPT_ALGORITHM: "${LAB_ARTIFACT_CLEANUP_RECEIPT_ALGORITHM:-EdDSA}"
+      LAB_ARTIFACT_CLEANUP_RECEIPT_CURRENT_KID: "${LAB_ARTIFACT_CLEANUP_RECEIPT_CURRENT_KID:-}"
+      LAB_ARTIFACT_CLEANUP_RECEIPT_PRIVATE_KEY_PATH: /run/secrets/artifact-cleanup-receipt-private.pem
+      LAB_ARTIFACT_CLEANUP_RECEIPT_KEYS_JSON: "${LAB_ARTIFACT_CLEANUP_RECEIPT_KEYS_JSON:-}"
+    volumes:
+      - lab_artifact_cleanup_state:/var/lib/simverse/artifact-cleanup/state
+      - lab_artifact_quarantine:/var/lib/simverse/artifacts/lab-artifact-quarantine
+      - lab_artifact_released:/var/lib/simverse/artifacts/lab-artifact-released
+      - type: bind
+        source: ${LAB_ARTIFACT_CLEANUP_RECEIPT_PRIVATE_KEY_HOST_PATH:-/dev/null}
+        target: /run/secrets/artifact-cleanup-receipt-private.pem
+        read_only: true
+    networks:
+      - lab-cleanup-control
+      - lab-cleanup-storage-egress
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8940/readyz', timeout=2).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
 volumes:
   pgdata:
+  lab_runtime_state:
+  lab_runtime_spool:
+  lab_egress_state:
+  lab_executor_state:
+  lab_artifact_ingest_state:
+  lab_artifact_ingest_spool:
+  lab_artifact_scanner_state:
+  lab_artifact_scanner_work:
+  lab_artifact_cleanup_state:
+  lab_artifact_quarantine:
+  lab_artifact_released:
+
+networks:
+  lab-runtime-control:
+    internal: true
+  lab-executor-control:
+    internal: true
+  lab-egress-control:
+    internal: true
+  lab-ingest-control:
+    internal: true
+  lab-scanner-control:
+    internal: true
+  lab-cleanup-control:
+    internal: true
+  lab-runtime-upload:
+    internal: true
+  lab-executor-upload:
+    internal: true
+  lab-runtime-model-egress:
+  lab-egress-public:
+  lab-ingest-storage-egress:
+  lab-scanner-storage-egress:
+  lab-cleanup-storage-egress:
+  lab-api-storage-egress:

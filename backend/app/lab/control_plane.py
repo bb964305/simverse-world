@@ -348,6 +348,101 @@ async def register_executor_target(
     return row
 
 
+async def record_executor_submit_receipt(
+    db,
+    *,
+    action_id: str,
+    epoch: int,
+    submit_receipt: Mapping,
+) -> LabToolExecution:
+    """CAS the verified submit receipt without changing the persisted locator."""
+    receipt_json = dict(submit_receipt)
+    if not receipt_json:
+        raise ValueError("executor submit receipt is required")
+    row = await db.scalar(
+        select(LabToolExecution)
+        .where(
+            LabToolExecution.action_id == action_id,
+            LabToolExecution.executor_epoch == epoch,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if row is None:
+        raise ControlPlaneError("executor target is missing before submit receipt")
+    if row.submit_receipt_json is not None:
+        if row.submit_receipt_json != receipt_json:
+            raise ControlPlaneError("executor submit receipt changed across replay")
+        return row
+    row.submit_receipt_json = receipt_json
+    await db.flush()
+    return row
+
+
+async def settle_executor_target(
+    db,
+    *,
+    action_id: str,
+    epoch: int,
+    teardown_proof: Mapping,
+    stopped_at: datetime | None = None,
+) -> LabToolExecution:
+    """Mark a terminal Executor job as no longer requiring control fanout."""
+    if (
+        not isinstance(teardown_proof, Mapping)
+        or teardown_proof.get("removed") is not True
+    ):
+        raise ControlPlaneError("executor target teardown is not verified")
+    row = await db.scalar(
+        select(LabToolExecution)
+        .where(
+            LabToolExecution.action_id == action_id,
+            LabToolExecution.executor_epoch == epoch,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if row is None:
+        raise ControlPlaneError("executor target is missing at settlement")
+    if row.status == "quarantined":
+        raise ControlPlaneError("quarantined executor target cannot be settled")
+    row.status = "confirmed_stopped"
+    row.stopped_at = row.stopped_at or _now(stopped_at)
+    await db.flush()
+    return row
+
+
+async def record_executor_result_receipt(
+    db,
+    *,
+    action_id: str,
+    epoch: int,
+    result_receipt: Mapping,
+) -> LabToolExecution:
+    """CAS the verified terminal/reconciliation receipt for crash recovery."""
+    receipt_json = dict(result_receipt)
+    if not receipt_json:
+        raise ValueError("executor result receipt is required")
+    row = await db.scalar(
+        select(LabToolExecution)
+        .where(
+            LabToolExecution.action_id == action_id,
+            LabToolExecution.executor_epoch == epoch,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if row is None:
+        raise ControlPlaneError("executor target is missing before result receipt")
+    if row.result_receipt_json is not None:
+        if row.result_receipt_json != receipt_json:
+            raise ControlPlaneError("executor result receipt changed across replay")
+        return row
+    row.result_receipt_json = receipt_json
+    await db.flush()
+    return row
+
+
 async def ensure_global_control(db) -> LabGlobalControl:
     """Return the locked singleton, creating its default-open row if absent."""
     state = await db.scalar(
@@ -555,6 +650,13 @@ async def _executor_inventory(db, *, run_ids: list[str]) -> list[tuple[str, str,
     ]
 
 
+def _executor_job_epoch(locator: Mapping) -> int:
+    epoch = locator.get("epoch")
+    if type(epoch) is not int or epoch < 0:
+        raise ControlPlaneError("executor locator has no canonical job epoch")
+    return epoch
+
+
 async def _runs_requiring_runtime_target(db, *, run_ids: list[str]) -> set[str]:
     if not run_ids:
         return set()
@@ -650,7 +752,9 @@ async def _materialize_request_targets(
                 target_id=target_id,
                 locator_json=locator,
                 action=request.action,
-                epoch=request.fencing_epoch,
+                # The parent request carries the new authority fence. Executor
+                # control remains bound to the immutable epoch of the exact job.
+                epoch=_executor_job_epoch(locator),
                 deadline_at=request.deadline_at,
             )
         )
@@ -879,6 +983,7 @@ async def _settle_target(
                 select(LabToolExecution).where(
                     LabToolExecution.run_id == target.run_id,
                     LabToolExecution.action_id == target.target_id,
+                    LabToolExecution.executor_epoch == target.epoch,
                 )
             )
             if execution is not None:
@@ -913,6 +1018,7 @@ async def _settle_target(
                 select(LabToolExecution).where(
                     LabToolExecution.run_id == target.run_id,
                     LabToolExecution.action_id == target.target_id,
+                    LabToolExecution.executor_epoch == target.epoch,
                 )
             )
             if execution is not None:
@@ -1133,7 +1239,7 @@ async def _materialize_global_kill_targets(
                 target_id=target_id,
                 locator_json=locator,
                 action="kill",
-                epoch=kill.fencing_epoch,
+                epoch=_executor_job_epoch(locator),
                 deadline_at=kill.deadline_at,
             )
         )

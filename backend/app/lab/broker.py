@@ -28,6 +28,7 @@ This module owns the action lifecycle only. It never opens its own session
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, UTC
 from urllib.parse import urlparse
 
@@ -52,6 +53,7 @@ from app.models.lab_runtime import (
 # in-flight action is guarded by the atomic approved->executing claim below, so
 # a lost race raises rather than silently returning a half-finished action.
 _NO_REEXEC = ("succeeded", "failed", "reconciliation_required")
+EGRESS_COMMAND_KEY = "_simverse_egress_command"
 
 
 class BrokerError(Exception):
@@ -94,6 +96,48 @@ class UncertainOutcome(Exception):
     than retried."""
 
 
+class TerminalExecutionFailure(Exception):
+    """A verified, stopped remote execution that failed with durable evidence."""
+
+    def __init__(
+        self,
+        result: dict,
+        *,
+        egress_requests: int = 0,
+        egress_bytes: int = 0,
+    ):
+        if type(egress_requests) is not int or not 0 <= egress_requests <= 100:
+            raise ValueError("invalid terminal egress request count")
+        if type(egress_bytes) is not int or not 0 <= egress_bytes <= 100_000_000:
+            raise ValueError("invalid terminal egress byte count")
+        self.result = result
+        self.egress_requests = egress_requests
+        self.egress_bytes = egress_bytes
+        super().__init__(str(result.get("state") or "terminal_execution_failed"))
+
+
+@dataclass(frozen=True)
+class TrustedEgressResult:
+    """Usage envelope produced by the authenticated egress service client.
+
+    Runtime arguments and tool payloads are never inspected for accounting
+    fields.  Only an executor inside the trusted Runner process can construct
+    this envelope for Broker settlement.
+    """
+
+    payload: dict
+    requests: int
+    bytes: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.payload, dict):
+            raise TypeError("egress payload must be an object")
+        if type(self.requests) is not int or not 0 <= self.requests <= 100:
+            raise ValueError("invalid trusted egress request count")
+        if type(self.bytes) is not int or not 0 <= self.bytes <= 100_000_000:
+            raise ValueError("invalid trusted egress byte count")
+
+
 class RuntimeResultConflict(BrokerError):
     """A Broker outcome cannot be bound to the requested Runtime intent."""
 
@@ -106,12 +150,12 @@ def _runtime_outcome(action: LabToolAction) -> tuple[str, dict]:
         return "succeeded", value
     if action.status == "denied":
         return "denied", value
-    if action.status in {
-        "failed",
-        "cancelled",
-        "reconciliation_required",
-    }:
+    if action.status in {"failed", "cancelled"}:
         return "failed", value
+    if action.status == "reconciliation_required":
+        raise RuntimeResultConflict(
+            "an uncertain Broker action cannot be delivered as a Runtime result"
+        )
     raise RuntimeResultConflict(
         f"Broker action {action.id} has no terminal outcome: {action.status}"
     )
@@ -357,12 +401,21 @@ def _reason_of(action: LabToolAction) -> str:
 
 
 def _is_egress_action(tool, args: dict) -> bool:
-    """True if executing this call reaches the network — an http/browse-capability
-    tool carrying a ``url``/``target``. The egress budgets (``egress_requests`` /
-    ``egress_bytes``) accrue only for these; a web.search (no network target) or a
-    local tool never touches them. Keyed on capability + target so it matches the
-    same actions ``_validate_egress`` screens for the allowlist."""
-    if tool is None or getattr(tool, "capability", None) not in ("http", "browse"):
+    """True when the selected handler performs external network I/O.
+
+    The three production egress tools always count, including ``web.search``
+    whose target comes from trusted provider configuration rather than Runtime
+    args. Other http/browse tools retain the legacy target-bearing behavior.
+    """
+    if tool is None:
+        return False
+    if getattr(tool, "name", None) in {
+        "web.search",
+        "web.fetch",
+        "browser.navigate",
+    }:
+        return True
+    if getattr(tool, "capability", None) not in ("http", "browse"):
         return False
     return bool(args.get("url") or args.get("target"))
 
@@ -375,25 +428,60 @@ def is_egress_action(tool_name: str, args: dict) -> bool:
     return _is_egress_action(policy.TOOL_REGISTRY.get(tool_name), args)
 
 
-def _validate_egress(tool, args: dict, claims) -> tuple[str, bool] | None:
+def _validate_egress(
+    tool,
+    args: dict,
+    claims,
+    *,
+    require_remote_handler: bool = False,
+) -> tuple[str, bool] | None:
     """Screen a tool call's egress target. Returns ``(reason, hard)`` to deny,
     or ``None`` to allow. Reuses ``sandbox.isolation`` — no rewritten matching.
 
     * A literal internal/metadata IP is blocked outright (anti-SSRF), even under
       a wildcard grant.
-    * A network tool (http/browse) carrying a url may only reach a host inside
-      ``claims.egress``; an empty egress list is fail-closed (default no net).
+    * Every production egress tool requires an available handler and a target
+      inside ``claims.egress``; an empty list is fail-closed (default no net).
+    * ``web.search`` validates the configured provider URL, never a Runtime-
+      supplied substitute. The service repeats this check on every redirect.
     """
     if tool is None:
         return None
+    if require_remote_handler and getattr(tool, "name", None) in {
+        "web.search",
+        "web.fetch",
+        "browser.navigate",
+    }:
+        try:
+            from app.lab.egress_service.config import configured_runner_tools
+
+            if tool.name not in configured_runner_tools():
+                return ("egress_handler_unavailable", False)
+        except ValueError:
+            return ("egress_handler_unavailable", False)
     raw = args.get("url") or args.get("target")
+    if require_remote_handler and getattr(tool, "name", None) == "web.search":
+        try:
+            from app.lab.egress_service.config import configured_search_target
+
+            raw = configured_search_target()
+        except ValueError:
+            raw = ""
+        if not raw:
+            return ("egress_handler_unavailable", False)
     if not raw:
         return None
     url = str(raw)
-    host = (urlparse(url).hostname or "").lower()
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+    except ValueError:
+        return ("egress_blocked_target", True)
+    if parsed.scheme not in {"http", "https"} or not host:
+        return ("egress_blocked_target", True)
     if host and isolation.is_host_blocked(host):
         return ("egress_blocked_host", True)
-    if tool.capability in ("http", "browse"):
+    if _is_egress_action(tool, args):
         if not claims.egress:
             return ("egress_not_granted", False)
         if not isolation.is_egress_allowed(url, claims.egress):
@@ -450,8 +538,18 @@ async def _persist(db, action: LabToolAction, approval: LabApproval | None = Non
         raise
 
 
-async def request_action(db, *, claims, token, tool_name, args, idempotency_key=None,
-                         expected_epoch=None, on_event=None) -> LabToolAction:
+async def request_action(
+    db,
+    *,
+    claims,
+    token,
+    tool_name,
+    args,
+    idempotency_key=None,
+    expected_epoch=None,
+    on_event=None,
+    require_remote_egress: bool = False,
+) -> LabToolAction:
     """Request → policy → (approval) → persisted action, all audited.
 
     Returns the action in ``approved`` (allow passthrough) or
@@ -497,7 +595,12 @@ async def request_action(db, *, claims, token, tool_name, args, idempotency_key=
         if reason == "stale_epoch":
             telemetry.emit_alert(telemetry.LabAlert.STALE_EPOCH, run_id=claims.run_id,
                                  tenant_id=claims.tenant_id, epoch=claims.fencing_epoch)
-        elif reason in ("egress_not_granted", "egress_blocked_host"):
+        elif reason in (
+            "egress_not_granted",
+            "egress_blocked_host",
+            "egress_blocked_target",
+            "egress_handler_unavailable",
+        ):
             telemetry.emit_alert(telemetry.LabAlert.BLOCKED_EGRESS, run_id=claims.run_id,
                                  tenant_id=claims.tenant_id, reason=reason)
         raise ActionDenied(reason, decision=decision, action=stored, hard=hard)
@@ -536,7 +639,12 @@ async def request_action(db, *, claims, token, tool_name, args, idempotency_key=
         await _deny(decision.risk_class, "governance_route", hard=False, decision=decision)
 
     # 3b. Egress target screening (allow/ask only).
-    egress = _validate_egress(decision.tool, args, claims)
+    egress = _validate_egress(
+        decision.tool,
+        args,
+        claims,
+        require_remote_handler=require_remote_egress,
+    )
     if egress is not None:
         reason, hard = egress
         await _deny(decision.risk_class, reason, hard=hard, decision=decision)
@@ -843,8 +951,18 @@ async def expire_pending_approval(
         raise
 
 
-async def execute_action(db, *, action_id, claims, executor, args, expected_epoch=None,
-                         on_event=None) -> LabToolAction:
+async def execute_action(
+    db,
+    *,
+    action_id,
+    claims,
+    executor,
+    args,
+    expected_epoch=None,
+    on_event=None,
+    prepare_executor=None,
+    require_remote_egress: bool = False,
+) -> LabToolAction:
     """Execute a previously-requested action through ``executor(tool_name, args)``.
 
     Gates, in order: idempotent short-circuit on terminal states; digest binding;
@@ -916,7 +1034,12 @@ async def execute_action(db, *, action_id, claims, executor, args, expected_epoc
     if decision.effect == "govern":
         await _deny_now("governance_route", decision=decision)
 
-    egress = _validate_egress(decision.tool, args, claims)
+    egress = _validate_egress(
+        decision.tool,
+        args,
+        claims,
+        require_remote_handler=require_remote_egress,
+    )
     if egress is not None:
         reason, hard = egress
         await _deny_now(reason, decision=decision, hard=hard)
@@ -1040,15 +1163,100 @@ async def execute_action(db, *, action_id, claims, executor, args, expected_epoc
             raise ApprovalRequired(action_id=fresh.id, approval_id=fresh.approval_id)
         raise ApprovalInvalid(f"not_executable:{fresh.status}")
 
-    await db.commit()
+    try:
+        if prepare_executor is not None:
+            await prepare_executor()
+        await db.commit()
+    except BaseException:
+        await db.rollback()
+        raise
     await db.refresh(action)  # sync the ORM object to the claimed DB state
     await _emit(on_event, action)
 
     try:
         result = await executor(action.tool_name, args)
+        if require_remote_egress and _is_egress_action(
+            decision.tool, args
+        ) and not isinstance(
+            result, TrustedEgressResult
+        ):
+            raise TerminalExecutionFailure(
+                {
+                    "tool": action.tool_name,
+                    "ok": False,
+                    "state": "failed",
+                    "error": "trusted_egress_usage_missing",
+                }
+            )
+    except TerminalExecutionFailure as exc:
+        is_egress = _is_egress_action(decision.tool, args)
+        try:
+            action.status = "failed"
+            action.result_json = guard.redact_payload(exc.result)
+            exhausted = await budgets.stage_action_settlement(
+                db,
+                run_id=claims.run_id,
+                succeeded=False,
+                is_egress=is_egress,
+                egress_requests=exc.egress_requests,
+                egress_bytes=exc.egress_bytes,
+            )
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
+        await _emit(on_event, action)
+        if exhausted is not None:
+            telemetry.emit_alert(
+                telemetry.LabAlert.BUDGET_EXHAUSTED,
+                run_id=claims.run_id,
+                tenant_id=claims.tenant_id,
+                dimension=exhausted,
+                reason="limit",
+            )
+            raise budgets.BudgetExhausted(exhausted)
+        return action
+    except budgets.BudgetExhausted as exc:
+        is_egress = _is_egress_action(decision.tool, args)
+        try:
+            action.status = "failed"
+            action.result_json = {
+                "error": f"budget_exhausted:{exc.dimension}",
+                "dimension": exc.dimension,
+            }
+            await budgets.stage_action_settlement(
+                db,
+                run_id=claims.run_id,
+                succeeded=False,
+                is_egress=is_egress,
+            )
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
+        await _emit(on_event, action)
+        raise
     except UncertainOutcome as exc:
+        await db.rollback()
+        action = await db.get(LabToolAction, action_id, populate_existing=True)
+        if action is None:
+            raise BrokerError(f"unknown action {action_id}") from exc
+        if action.status not in {"executing", "reconciliation_required"}:
+            raise RuntimeResultConflict(
+                f"Broker action {action.id} cannot be parked from {action.status}"
+            ) from exc
+        command = (
+            action.result_json.get(EGRESS_COMMAND_KEY)
+            if isinstance(action.result_json, dict)
+            else None
+        )
         action.status = "reconciliation_required"
-        action.result_json = {"error": guard.redact_text(str(exc)), "uncertain": True}
+        action.result_json = {
+            "error": guard.redact_text(str(exc)),
+            "uncertain": True,
+        }
+        if isinstance(command, dict):
+            action.result_json[EGRESS_COMMAND_KEY] = command
         await db.commit()
         await _emit(on_event, action)
         return action
@@ -1071,20 +1279,26 @@ async def execute_action(db, *, action_id, claims, executor, args, expected_epoc
         return action
 
     is_egress = _is_egress_action(decision.tool, args)
-    egress_bytes = (
-        len(protocol.canonical_json(result).encode("utf-8")) if is_egress else 0
-    )
+    if isinstance(result, TrustedEgressResult):
+        stored_result = result.payload
+        egress_requests = result.requests
+        egress_bytes = result.bytes
+    else:
+        stored_result = result
+        egress_requests = 0
+        egress_bytes = 0
     try:
         action.status = "succeeded"
-        if isinstance(result, (dict, list)):
-            action.result_json = guard.redact_payload(result)
+        if isinstance(stored_result, (dict, list)):
+            action.result_json = guard.redact_payload(stored_result)
         else:
-            action.result_json = {"result": guard.redact_payload(result)}
+            action.result_json = {"result": guard.redact_payload(stored_result)}
         exhausted = await budgets.stage_action_settlement(
             db,
             run_id=claims.run_id,
             succeeded=True,
             is_egress=is_egress,
+            egress_requests=egress_requests,
             egress_bytes=egress_bytes,
         )
         await db.commit()
@@ -1101,4 +1315,96 @@ async def execute_action(db, *, action_id, claims, executor, args, expected_epoc
             reason="limit",
         )
         raise budgets.BudgetExhausted(exhausted)
+    return action
+
+
+async def settle_reconciled_action(
+    db,
+    *,
+    action_id: str,
+    result: dict | TrustedEgressResult,
+    succeeded: bool,
+) -> LabToolAction:
+    """Settle a previously submitted remote effect without executing it again."""
+    action = await db.scalar(
+        select(LabToolAction)
+        .where(LabToolAction.id == action_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if action is None:
+        raise BrokerError(f"unknown action {action_id}")
+    target_status = "succeeded" if succeeded else "failed"
+    if isinstance(result, TrustedEgressResult):
+        redacted = guard.redact_payload(result.payload)
+        egress_requests = result.requests
+        egress_bytes = result.bytes
+    else:
+        redacted = guard.redact_payload(result)
+        egress_requests = 0
+        egress_bytes = 0
+    if action.status in {"succeeded", "failed"}:
+        if action.status != target_status or action.result_json != redacted:
+            raise RuntimeResultConflict(
+                "reconciled Executor result changed a terminal Broker action"
+            )
+        await db.commit()
+        return action
+    if action.status not in {"executing", "reconciliation_required"}:
+        raise RuntimeResultConflict(
+            f"Broker action {action.id} cannot reconcile from {action.status}"
+        )
+    action.status = target_status
+    action.result_json = redacted
+    exhausted = await budgets.stage_action_settlement(
+        db,
+        run_id=action.run_id,
+        succeeded=succeeded,
+        is_egress=is_egress_action(
+            action.tool_name, dict(action.args_redacted_json or {})
+        ),
+        egress_requests=egress_requests,
+        egress_bytes=egress_bytes,
+    )
+    await db.commit()
+    if exhausted is not None:
+        raise budgets.BudgetExhausted(exhausted)
+    return action
+
+
+async def park_reconciled_action(
+    db,
+    *,
+    action_id: str,
+    result: dict,
+) -> LabToolAction:
+    """Persist an Executor outcome whose teardown/effect state is still unknown."""
+    action = await db.scalar(
+        select(LabToolAction)
+        .where(LabToolAction.id == action_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if action is None:
+        raise BrokerError(f"unknown action {action_id}")
+    redacted = guard.redact_payload(result)
+    command = (
+        action.result_json.get(EGRESS_COMMAND_KEY)
+        if isinstance(action.result_json, dict)
+        else None
+    )
+    if isinstance(command, dict):
+        redacted[EGRESS_COMMAND_KEY] = command
+    if action.status == "reconciliation_required":
+        if action.result_json != redacted:
+            action.result_json = redacted
+            await db.commit()
+        return action
+    if action.status != "executing":
+        raise RuntimeResultConflict(
+            f"Broker action {action.id} cannot be parked from {action.status}"
+        )
+    action.status = "reconciliation_required"
+    action.result_json = redacted
+    await db.commit()
     return action

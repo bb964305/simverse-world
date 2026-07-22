@@ -29,10 +29,9 @@ Design resolutions (landed interfaces win over the brief sketch):
 * **Approval is out-of-band from the adapter** (v1): the pause polls the
   ``lab_approvals`` row a REST decision flips (``broker.decide_approval``), not
   the adapter's ``approve`` hook nor ``run.approvals_json``.
-* **Execute-time settlement of the tool_calls reservation** (T5 handoff): the
-  Broker settles the reservation on a clean success/failure, but an approval
-  denial or an execute-time refusal leaves it reserved — the orchestrator
-  releases it on those paths.
+* **Action-bound budget settlement**: the Broker owns every reservation from
+  request through denial, timeout, execution, and reconciliation. The
+  orchestrator never mutates a run-level reservation on an action's behalf.
 * **Fencing** (T4 handoff): a ``StaleEpoch`` from a heartbeat or an event append
   means a takeover fenced this owner; the orchestrator writes no terminal state
   and revokes nothing, leaving the run to the new owner.
@@ -46,7 +45,7 @@ import os
 import time
 import uuid
 import weakref
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -57,6 +56,7 @@ from app.lab import (
     broker,
     budgets,
     compiler,
+    control_plane,
     grants,
     guard,
     leases,
@@ -73,11 +73,12 @@ from app.lab.sandbox.base import (
     RunSpec,
     RuntimeV2NonRetryableError,
 )
-from app.models.lab_action import LabApproval
-from app.models.lab_artifact import LabArtifact
+from app.models.lab_action import LabApproval, LabToolAction
+from app.models.lab_artifact import LabArtifact, LabArtifactOperation
 from app.models.lab_budget import LabRunBudget
 from app.models.lab_event import LabRunEvent
 from app.models.lab_lease import LabRunLease
+from app.models.lab_control import LabToolExecution
 from app.models.lab_run import LabRun, LabRunStep
 from app.models.lab_runtime import (
     LabRuntimeIntent,
@@ -98,6 +99,7 @@ _V2_IDLE_TIMEOUT_S = leases.HEARTBEAT_INTERVAL_S * 3
 _WORLD_LOCATION_ID = "experiment_building"
 _SUMMARY_FALLBACK = "研究完成"
 _V2_ARTIFACT_FINALIZATION_KEY = "_simverse_runtime_v2_finalization"
+_EXECUTOR_OUTPUT_META_KEY = "_simverse_executor_output"
 _V2_PROCESS_NAMESPACE = uuid.uuid4()
 _V2_RUN_LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = (
     weakref.WeakValueDictionary()
@@ -145,6 +147,7 @@ async def _mock_executor(tool_name: str, args: dict) -> dict:
 # always succeeds). OCI executor v1 only routes tools that carry an executable
 # command; fs.write joins once scratch-file materialisation lands.
 _OCI_TOOLS = frozenset({"code.run", "shell.exec"})
+_EGRESS_TOOLS = frozenset({"web.search", "web.fetch", "browser.navigate"})
 
 
 async def run_one_v1(run_id: str) -> None:
@@ -419,37 +422,1333 @@ class _Orchestrator:
             await self._terminate_budget(exc.dimension)
         self._worker_reserved = True
 
-    async def _release_reservations(self, is_egress: bool) -> None:
-        """Refund the reservations a tool step took at request time when it does
-        not execute (approval denied / execute-time refusal): tool_calls always,
-        egress_requests too for a network-target action — the mirror of the
-        Broker's own confirm/release on the executed path."""
-        await budgets.release(self.db, run_id=self.run_id, dimension="tool_calls")
-        if is_egress:
-            await budgets.release(self.db, run_id=self.run_id, dimension="egress_requests")
-
     # ── executor selection ───────────────────────────────────────────
 
-    def _select_executor(self, tool_name: str):
-        """The executor the Broker runs for this tool intent. Default — and
-        every non-code tool — is the Mock echo, so the flag-off path is
-        byte-for-byte unchanged. Only when ``lab_oci_enabled`` AND an image is
-        configured do code/shell tools route through ``OciExecutor``. The
-        ``OciExecutor`` instance is created ONCE per run and cached on
-        ``self._oci_executor`` (not a fresh instance per action): a teardown
-        failure marks that instance broken, and reusing it is what makes the
-        quarantine actually block the run's later actions. Imported lazily so
-        neither the executor module nor docker is touched on the default path
-        (P2-E: default path zero change; Executor exposed only via the Broker
-        slot)."""
+    def _executor_output_id(
+        self, *, action_id: str, epoch: int, relative_path: str
+    ) -> str:
+        return str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            "simverse:executor-output:"
+            f"{self.run_id}:{action_id}:{epoch}:{relative_path}",
+        ))
+
+    def _executor_provider_artifact_id(
+        self, *, action_id: str, epoch: int, relative_path: str
+    ) -> str:
+        return str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            "simverse:executor-provider-artifact:"
+            f"{self.run_id}:{action_id}:{epoch}:{relative_path}",
+        ))
+
+    @staticmethod
+    def _executor_contract_deadline(contract: dict) -> datetime:
+        raw = contract.get("deadline_at")
+        if not isinstance(raw, str):
+            raise ValueError("Executor output contract has no deadline")
+        try:
+            deadline = datetime.fromisoformat(
+                raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+            )
+        except ValueError as exc:
+            raise ValueError("Executor output contract deadline is invalid") from exc
+        if deadline.tzinfo is None or deadline.utcoffset() is None:
+            raise ValueError("Executor output contract deadline must be aware")
+        return deadline.astimezone(UTC)
+
+    def _validate_executor_contract(
+        self,
+        contract: dict,
+        *,
+        action_id: str,
+        epoch: int,
+        tool_name: str,
+        args: dict,
+    ):
+        from app.lab import protocol
+
+        expected_keys = {
+            "schema_version",
+            "run_id",
+            "session_id",
+            "action_id",
+            "epoch",
+            "tool_name",
+            "args_digest",
+            "base_url",
+            "image_digest",
+            "limits",
+            "deadline_at",
+        }
+        if not isinstance(contract, dict) or set(contract) != expected_keys:
+            raise ValueError("Executor output contract shape is invalid")
+        if (
+            contract["schema_version"] != 1
+            or contract["run_id"] != self.run_id
+            or contract["action_id"] != action_id
+            or contract["epoch"] != epoch
+            or contract["tool_name"] != tool_name
+            or contract["args_digest"] != protocol.args_digest(args)
+            or not isinstance(contract["session_id"], str)
+            or not contract["session_id"]
+            or not isinstance(contract["base_url"], str)
+            or not contract["base_url"]
+            or not isinstance(contract["image_digest"], str)
+        ):
+            raise ValueError("Executor output contract binding changed")
+        limits = protocol.ExecutorResourceLimits.model_validate(
+            contract["limits"], strict=True
+        )
+        deadline_at = self._executor_contract_deadline(contract)
+        return limits, deadline_at
+
+    async def _prepare_executor_output_specs(
+        self,
+        *,
+        action_id: str,
+        epoch: int,
+        tool_name: str,
+        args: dict,
+        executor_base_url: str,
+    ):
+        """Persist output declarations, then create/replay only attempt-1 leases."""
+        from app.lab import protocol
+        from app.lab.artifact_pipeline import (
+            ArtifactPipelineClient,
+            ArtifactPipelineError,
+            ArtifactReceiptError,
+        )
+        from app.lab.artifact_services.canonical import canonical_digest
+        from app.lab.artifact_services.schemas import UploadLeaseCommand
+
+        declarations = protocol.executor_output_declarations(args)
+        if not declarations:
+            return [], None
+        if not settings.lab_artifact_pipeline_enabled:
+            raise ArtifactPipelineError(
+                "Executor outputs require the production artifact pipeline"
+            )
+
+        await self._lock_current_authority()
+        action = await self.db.scalar(
+            select(LabToolAction)
+            .where(LabToolAction.id == action_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if (
+            action is None
+            or action.run_id != self.run_id
+            or action.task_id != self.task_id
+            or action.tenant_id != self.tenant_id
+            or action.tool_name != tool_name
+            or action.args_hash != protocol.args_digest(args)
+            or action.fencing_epoch != epoch
+            or action.status not in {"executing", "reconciliation_required"}
+        ):
+            raise supervision.RuntimeProtocolConflict(
+                "Executor output action binding changed"
+            )
+
+        rows = (
+            await self.db.execute(
+                select(LabArtifact).where(
+                    LabArtifact.run_id == self.run_id,
+                    LabArtifact.producer_action_id == action_id,
+                )
+            )
+        ).scalars().all()
+        output_rows = [
+            row for row in rows
+            if isinstance((row.meta_json or {}).get(_EXECUTOR_OUTPUT_META_KEY), dict)
+        ]
+        persisted_contract: dict | None = None
+        if output_rows:
+            persisted_contract = dict(
+                (output_rows[0].meta_json or {})[_EXECUTOR_OUTPUT_META_KEY].get(
+                    "command", {}
+                )
+            )
+            self._validate_executor_contract(
+                persisted_contract,
+                action_id=action_id,
+                epoch=epoch,
+                tool_name=tool_name,
+                args=args,
+            )
+
+        if persisted_contract is None:
+            if not self.runtime_session_id:
+                raise supervision.RuntimeProtocolConflict(
+                    "Executor output has no durable Runtime session"
+                )
+            deadline_at = datetime.now(UTC) + timedelta(
+                seconds=settings.lab_executor_job_timeout_s
+            )
+            limits = protocol.ExecutorResourceLimits(
+                wall_clock_ms=settings.lab_executor_job_timeout_s * 1000,
+                cpu_millis=settings.lab_executor_job_cpu_millis,
+                memory_bytes=settings.lab_executor_job_memory_bytes,
+                pids=settings.lab_executor_job_pids,
+                stdout_bytes=settings.lab_executor_job_stdout_bytes,
+                stderr_bytes=settings.lab_executor_job_stderr_bytes,
+                scratch_bytes=settings.lab_executor_job_scratch_bytes,
+            )
+            persisted_contract = {
+                "schema_version": 1,
+                "run_id": self.run_id,
+                "session_id": self.runtime_session_id,
+                "action_id": action_id,
+                "epoch": epoch,
+                "tool_name": tool_name,
+                "args_digest": protocol.args_digest(args),
+                "base_url": executor_base_url,
+                "image_digest": settings.lab_executor_image_digest,
+                "limits": limits.model_dump(mode="json"),
+                "deadline_at": deadline_at.isoformat().replace("+00:00", "Z"),
+            }
+        limits, deadline_at = self._validate_executor_contract(
+            persisted_contract,
+            action_id=action_id,
+            epoch=epoch,
+            tool_name=tool_name,
+            args=args,
+        )
+        if sum(item.max_bytes for item in declarations) > limits.scratch_bytes:
+            raise supervision.RuntimeProtocolConflict(
+                "Executor output declarations exceed scratch capacity"
+            )
+        if action.deadline_at is not None:
+            action_deadline = action.deadline_at
+            if action_deadline.tzinfo is None:
+                action_deadline = action_deadline.replace(tzinfo=UTC)
+            if action_deadline.astimezone(UTC) != deadline_at:
+                raise supervision.RuntimeProtocolConflict(
+                    "Executor action deadline changed across replay"
+                )
+        else:
+            action.deadline_at = deadline_at
+
+        expected_ids = {
+            self._executor_output_id(
+                action_id=action_id,
+                epoch=epoch,
+                relative_path=item.relative_path,
+            )
+            for item in declarations
+        }
+        if any(row.id not in expected_ids for row in output_rows):
+            raise supervision.RuntimeProtocolConflict(
+                "Executor output declaration set changed across replay"
+            )
+        by_id = {row.id: row for row in output_rows}
+        missing: list[LabArtifact] = []
+        persisted: list[LabArtifact] = []
+        for index, declaration in enumerate(declarations):
+            artifact_id = self._executor_output_id(
+                action_id=action_id,
+                epoch=epoch,
+                relative_path=declaration.relative_path,
+            )
+            provider_artifact_id = self._executor_provider_artifact_id(
+                action_id=action_id,
+                epoch=epoch,
+                relative_path=declaration.relative_path,
+            )
+            declaration_json = declaration.model_dump(mode="json")
+            marker = {
+                "schema_version": 1,
+                "output_index": index,
+                "output_count": len(declarations),
+                "declaration": declaration_json,
+                "declaration_digest": protocol.content_digest(declaration_json),
+                "command": persisted_contract,
+            }
+            artifact = by_id.get(artifact_id)
+            if artifact is None:
+                occupied = await self.db.get(LabArtifact, artifact_id)
+                if occupied is not None:
+                    raise supervision.RuntimeProtocolConflict(
+                        "Executor output artifact id is already occupied"
+                    )
+                artifact = LabArtifact(
+                    id=artifact_id,
+                    run_id=self.run_id,
+                    task_id=self.task_id,
+                    kind=declaration.kind,
+                    title=declaration.title,
+                    uri=None,
+                    text_md=None,
+                    meta_json={_EXECUTOR_OUTPUT_META_KEY: marker},
+                    provider_artifact_id=provider_artifact_id,
+                    runtime_session_id=persisted_contract["session_id"],
+                    provider_session_id=persisted_contract["session_id"],
+                    producer_epoch=epoch,
+                    required=declaration.required,
+                    declared_content_type=declaration.content_type,
+                    content_type=declaration.content_type,
+                    original_filename=declaration.original_filename,
+                    expected_sha256=declaration.expected_sha256,
+                    declared_byte_size=None,
+                    storage_status="pending_upload",
+                    provenance="runtime",
+                )
+                await lab_artifact_service.finalize_artifact(
+                    self.db,
+                    artifact=artifact,
+                    tenant_id=self.tenant_id,
+                    producer_action_id=action_id,
+                    scanned_clean=False,
+                )
+                missing.append(artifact)
+            elif any((
+                artifact.run_id != self.run_id,
+                artifact.task_id != self.task_id,
+                artifact.kind != declaration.kind,
+                artifact.title != declaration.title,
+                artifact.uri is not None,
+                artifact.text_md is not None,
+                artifact.meta_json != {_EXECUTOR_OUTPUT_META_KEY: marker},
+                artifact.tenant_id != self.tenant_id,
+                artifact.provider_artifact_id != provider_artifact_id,
+                artifact.runtime_session_id != persisted_contract["session_id"],
+                artifact.provider_session_id != persisted_contract["session_id"],
+                artifact.producer_epoch != epoch,
+                artifact.required is not declaration.required,
+                artifact.declared_content_type != declaration.content_type,
+                artifact.original_filename != declaration.original_filename,
+                artifact.expected_sha256 != declaration.expected_sha256,
+                artifact.declared_byte_size is not None,
+                artifact.producer_action_id != action_id,
+                artifact.provenance != "runtime",
+            )):
+                raise supervision.RuntimeProtocolConflict(
+                    "Executor output artifact changed across replay"
+                )
+            persisted.append(artifact)
+
+        if missing:
+            budget = await self.db.scalar(
+                select(LabRunBudget)
+                .where(LabRunBudget.run_id == self.run_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if budget is not None:
+                if (
+                    budget.limit_artifact_count
+                    and budget.used_artifact_count
+                    + budget.reserved_artifact_count
+                    + len(missing)
+                    > budget.limit_artifact_count
+                ):
+                    budget.exhausted_dimension = "artifact_count"
+                    await self.db.commit()
+                    raise budgets.BudgetExhausted("artifact_count")
+                budget.used_artifact_count += len(missing)
+            self.db.add_all(missing)
+        try:
+            await self.db.commit()
+        except IntegrityError as exc:
+            await self.db.rollback()
+            raise supervision.RuntimeProtocolConflict(
+                "Executor output artifact persistence raced"
+            ) from exc
+
+        pipeline = ArtifactPipelineClient.from_settings()
+        specs: list[protocol.ExecutorOutputSpec] = []
+        try:
+            for artifact, declaration in zip(persisted, declarations, strict=True):
+                latest = await self.db.scalar(
+                    select(LabArtifactOperation)
+                    .where(
+                        LabArtifactOperation.artifact_id == artifact.id,
+                        LabArtifactOperation.operation_type == "upload",
+                    )
+                    .order_by(
+                        LabArtifactOperation.attempt.desc(),
+                        LabArtifactOperation.created_at.desc(),
+                    )
+                    .limit(1)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                if latest is not None:
+                    try:
+                        lease_command = UploadLeaseCommand.model_validate(
+                            latest.command_json, strict=True
+                        )
+                    except ValueError as exc:
+                        raise ArtifactReceiptError(
+                            "durable Executor upload command is invalid"
+                        ) from exc
+                    if (
+                        latest.attempt != 1
+                        or latest.operation_id != lease_command.upload_id
+                        or latest.command_digest != canonical_digest(lease_command)
+                        or lease_command.max_bytes != declaration.max_bytes
+                        or lease_command.expected_sha256
+                        != declaration.expected_sha256
+                        or lease_command.expires_at < deadline_at
+                        or latest.state not in {"pending", "processing"}
+                        or (
+                            latest.state == "pending"
+                            and lease_command.expires_at <= datetime.now(UTC)
+                        )
+                    ):
+                        raise ArtifactPipelineError(
+                            "Executor output lease cannot be rebound or retried"
+                        )
+                lease, operation = await pipeline.create_upload_lease(
+                    self.db,
+                    artifact=artifact,
+                    max_bytes=declaration.max_bytes,
+                )
+                if (
+                    operation.attempt != 1
+                    or operation.artifact_id != artifact.id
+                    or operation.epoch != epoch
+                    or lease.expires_at < deadline_at
+                ):
+                    raise ArtifactReceiptError(
+                        "Executor output lease changed across replay"
+                    )
+                specs.append(protocol.ExecutorOutputSpec(
+                    **declaration.model_dump(mode="python"),
+                    artifact_id=artifact.id,
+                    lease=lease,
+                ))
+        finally:
+            await pipeline.aclose()
+        return specs, persisted_contract
+
+    @staticmethod
+    def _executor_result_payload(tool_name: str, envelope) -> dict:
+        result = envelope.result
+        summary = result.stdout.strip() or result.stderr.strip()
+        return {
+            "tool": tool_name,
+            "ok": result.state == "succeeded",
+            "state": result.state,
+            "exit_code": result.exit_code,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "summary": summary[:1000] or f"executor {result.state}",
+            "teardown": result.teardown_proof,
+            "artifact_receipts": result.artifact_receipts,
+            "result_digest": result.result_digest,
+            "executor_receipt": envelope.receipt.model_dump(mode="json"),
+        }
+
+    async def _persist_executor_envelope(self, *, action_id: str, epoch: int, envelope) -> None:
+        await control_plane.record_executor_result_receipt(
+            self.db,
+            action_id=action_id,
+            epoch=epoch,
+            result_receipt=envelope.receipt.model_dump(mode="json"),
+        )
+        if envelope.result.state != "reconciliation_required":
+            await control_plane.settle_executor_target(
+                self.db,
+                action_id=action_id,
+                epoch=epoch,
+                teardown_proof=envelope.result.teardown_proof,
+            )
+        await self.db.commit()
+
+    async def _apply_executor_outputs(self, *, command, envelope) -> str | None:
+        from app.lab import protocol
+        from app.lab.artifact_pipeline import (
+            ArtifactPipelineClient,
+            ArtifactPipelineError,
+            ArtifactReceiptError,
+        )
+        from app.lab.remote_executor import (
+            RemoteExecutorClient,
+            RemoteExecutorProtocolError,
+        )
+
+        returned = RemoteExecutorClient.validate_declared_outputs(
+            envelope.result, command
+        )
+        if not command.outputs:
+            return None
+        pipeline = ArtifactPipelineClient.from_settings()
+        errors: list[str] = []
+        artifact_budget_exhausted = False
+        try:
+            for spec in command.outputs:
+                artifact_envelope = returned.get(spec.artifact_id)
+                if artifact_envelope is None:
+                    if spec.required:
+                        errors.append(
+                            f"required_executor_output_missing:{spec.artifact_id}"
+                        )
+                    continue
+                await self._lock_current_authority()
+                artifact = await self.db.scalar(
+                    select(LabArtifact)
+                    .where(LabArtifact.id == spec.artifact_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                declaration = protocol.RuntimeExecutorOutputDeclaration(
+                    relative_path=spec.relative_path,
+                    kind=spec.kind,
+                    expected_use=spec.expected_use,
+                    title=spec.title,
+                    content_type=spec.content_type,
+                    original_filename=spec.original_filename,
+                    required=spec.required,
+                    max_bytes=spec.max_bytes,
+                    expected_sha256=spec.expected_sha256,
+                )
+                marker = (
+                    (artifact.meta_json or {}).get(_EXECUTOR_OUTPUT_META_KEY)
+                    if artifact is not None
+                    else None
+                )
+                contract = (
+                    marker.get("command") if isinstance(marker, dict) else None
+                )
+                try:
+                    limits, deadline_at = self._validate_executor_contract(
+                        contract,
+                        action_id=command.action_id,
+                        epoch=command.epoch,
+                        tool_name=command.tool_name,
+                        args=command.args,
+                    )
+                except (TypeError, ValueError) as exc:
+                    await self.db.rollback()
+                    raise RemoteExecutorProtocolError(
+                        "Executor output metadata contract is invalid"
+                    ) from exc
+                if (
+                    artifact is None
+                    or artifact.run_id != command.run_id
+                    or artifact.task_id != self.task_id
+                    or artifact.tenant_id != self.tenant_id
+                    or artifact.provider_session_id != command.session_id
+                    or artifact.producer_action_id != command.action_id
+                    or artifact.producer_epoch != command.epoch
+                    or artifact.kind != spec.kind
+                    or artifact.title != spec.title
+                    or artifact.required is not spec.required
+                    or artifact.declared_content_type != spec.content_type
+                    or artifact.original_filename != spec.original_filename
+                    or artifact.expected_sha256 != spec.expected_sha256
+                    or not isinstance(marker, dict)
+                    or marker.get("declaration")
+                    != declaration.model_dump(mode="json")
+                    or marker.get("declaration_digest")
+                    != protocol.content_digest(marker.get("declaration"))
+                    or limits != command.limits
+                    or deadline_at != command.deadline_at.astimezone(UTC)
+                    or contract.get("session_id") != command.session_id
+                    or contract.get("image_digest") != command.image_digest
+                ):
+                    await self.db.rollback()
+                    raise RemoteExecutorProtocolError(
+                        "Executor output artifact binding changed"
+                    )
+
+                apply_error: str | None = None
+                try:
+                    artifact = await pipeline.apply_upload_receipt(
+                        self.db,
+                        receipt_value=artifact_envelope.upload_receipt.model_dump(
+                            mode="json"
+                        ),
+                        commit=False,
+                    )
+                except ArtifactReceiptError as exc:
+                    await self.db.rollback()
+                    raise RemoteExecutorProtocolError(
+                        "Executor output receipt failed verification"
+                    ) from exc
+                except ArtifactPipelineError as exc:
+                    apply_error = str(exc)
+
+                operation = await self.db.scalar(
+                    select(LabArtifactOperation)
+                    .where(
+                        LabArtifactOperation.operation_id
+                        == spec.lease.upload_id
+                    )
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                if (
+                    operation is None
+                    or operation.artifact_id != artifact.id
+                    or operation.operation_type != "upload"
+                    or operation.epoch != command.epoch
+                    or operation.receipt_digest
+                    != artifact_envelope.upload_receipt_digest
+                    or artifact.byte_size
+                    != artifact_envelope.manifest.byte_size
+                    or artifact.sha256 != artifact_envelope.manifest.sha256
+                ):
+                    await self.db.rollback()
+                    raise RemoteExecutorProtocolError(
+                        "Executor output durable receipt binding changed"
+                    )
+                if operation.accounted_at is None:
+                    budget = await self.db.scalar(
+                        select(LabRunBudget)
+                        .where(LabRunBudget.run_id == self.run_id)
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
+                    )
+                    if budget is not None:
+                        if (
+                            budget.limit_artifact_bytes
+                            and budget.used_artifact_bytes
+                            + budget.reserved_artifact_bytes
+                            + artifact.byte_size
+                            > budget.limit_artifact_bytes
+                        ):
+                            budget.exhausted_dimension = "artifact_bytes"
+                            artifact_budget_exhausted = True
+                        budget.used_artifact_bytes += artifact.byte_size
+                    operation.accounted_at = datetime.now(UTC)
+                if operation.state != "succeeded":
+                    apply_error = (
+                        operation.error_code
+                        or apply_error
+                        or "artifact_upload_failed"
+                    )
+                await self.db.commit()
+
+                if operation.state == "succeeded" and artifact.scan_status == "pending":
+                    await pipeline.submit_scan(self.db, artifact=artifact)
+                if spec.required and apply_error:
+                    errors.append(
+                        f"required_executor_output_rejected:{apply_error}"
+                    )
+                if spec.required and artifact.scan_status in {"flagged", "failed"}:
+                    errors.append(
+                        "required_executor_output_scan:"
+                        f"{artifact.scan_error_code or artifact.scan_status}"
+                    )
+        finally:
+            await pipeline.aclose()
+        if artifact_budget_exhausted:
+            raise budgets.BudgetExhausted("artifact_bytes")
+        return errors[0] if errors else None
+
+    async def _wait_executor_result(
+        self, *, client, command, binding, deadline_at
+    ):
+        from app.lab.executor_service.schemas import EXECUTOR_TERMINAL_STATES
+        from app.lab.remote_executor import (
+            RemoteExecutorError,
+            RemoteExecutorProtocolError,
+        )
+
+        while True:
+            try:
+                status = await client.get_status(binding)
+            except RemoteExecutorProtocolError:
+                raise
+            except RemoteExecutorError:
+                if datetime.now(UTC) >= deadline_at:
+                    raise broker.UncertainOutcome(
+                        "remote Executor status remained uncertain"
+                    ) from None
+                await asyncio.sleep(settings.lab_executor_poll_interval_s)
+                continue
+            if status.state in EXECUTOR_TERMINAL_STATES:
+                break
+            if datetime.now(UTC) >= deadline_at:
+                raise broker.UncertainOutcome(
+                    "remote Executor job exceeded its durable deadline"
+                )
+            await asyncio.sleep(settings.lab_executor_poll_interval_s)
+        while True:
+            try:
+                envelope = await client.get_result(binding)
+                client.validate_declared_outputs(envelope.result, command)
+                return envelope
+            except RemoteExecutorProtocolError:
+                raise
+            except RemoteExecutorError:
+                if datetime.now(UTC) >= deadline_at:
+                    raise broker.UncertainOutcome(
+                        "remote Executor result remained uncertain"
+                    ) from None
+                await asyncio.sleep(settings.lab_executor_poll_interval_s)
+
+    @staticmethod
+    def _executor_client_for_url(base_url: str):
+        from app.lab.remote_executor import (
+            RemoteExecutorClient,
+            configured_executor_auth,
+        )
+
+        issuer, verifier = configured_executor_auth()
+        return RemoteExecutorClient(
+            base_url=base_url,
+            token_issuer=issuer,
+            receipt_verifier=verifier,
+            timeout=settings.lab_executor_request_timeout_s,
+            poll_interval=settings.lab_executor_poll_interval_s,
+        )
+
+    async def _prepare_executor_command(
+        self,
+        *,
+        client,
+        action_id: str,
+        epoch: int,
+        tool_name: str,
+        args: dict,
+    ):
+        from app.lab import protocol
+
+        outputs, contract = await self._prepare_executor_output_specs(
+            action_id=action_id,
+            epoch=epoch,
+            tool_name=tool_name,
+            args=args,
+            executor_base_url=client.base_url,
+        )
+        if contract is None:
+            deadline_at = datetime.now(UTC) + timedelta(
+                seconds=settings.lab_executor_job_timeout_s
+            )
+            limits = protocol.ExecutorResourceLimits(
+                wall_clock_ms=settings.lab_executor_job_timeout_s * 1000,
+                cpu_millis=settings.lab_executor_job_cpu_millis,
+                memory_bytes=settings.lab_executor_job_memory_bytes,
+                pids=settings.lab_executor_job_pids,
+                stdout_bytes=settings.lab_executor_job_stdout_bytes,
+                stderr_bytes=settings.lab_executor_job_stderr_bytes,
+                scratch_bytes=settings.lab_executor_job_scratch_bytes,
+            )
+            session_id = self.runtime_session_id
+            image_digest = settings.lab_executor_image_digest
+        else:
+            limits, deadline_at = self._validate_executor_contract(
+                contract,
+                action_id=action_id,
+                epoch=epoch,
+                tool_name=tool_name,
+                args=args,
+            )
+            session_id = contract["session_id"]
+            image_digest = contract["image_digest"]
+            if client.base_url != contract["base_url"]:
+                client = self._executor_client_for_url(contract["base_url"])
+        if not session_id:
+            raise supervision.RuntimeProtocolConflict(
+                "remote Executor requires a durable Runtime session"
+            )
+        command = client.build_command(
+            run_id=self.run_id,
+            session_id=session_id,
+            action_id=action_id,
+            epoch=epoch,
+            tool_name=tool_name,
+            args=args,
+            image_digest=image_digest,
+            limits=limits,
+            deadline_at=deadline_at,
+            outputs=outputs,
+        )
+        return client, command
+
+    def _remote_executor(
+        self,
+        *,
+        action_id: str,
+        intended_tool_name: str,
+        intended_args: dict,
+    ):
+        from app.lab import protocol
+        from app.lab.remote_executor import (
+            ExecutorJobBinding,
+            RemoteExecutorProtocolError,
+            configured_remote_executor,
+            executor_job_locator,
+        )
+
+        if not self.runtime_session_id:
+            raise RuntimeError("remote Executor requires a durable Runtime session")
+        client = configured_remote_executor()
+        prepared: dict = {}
+
+        async def prepare() -> None:
+            prepared_client, command = await self._prepare_executor_command(
+                client=client,
+                action_id=action_id,
+                epoch=self.epoch,
+                tool_name=intended_tool_name,
+                args=intended_args,
+            )
+            locator = executor_job_locator(
+                base_url=prepared_client.base_url,
+                command=command,
+            )
+            await self._lock_current_authority()
+            await control_plane.register_executor_target(
+                self.db,
+                run_id=self.run_id,
+                action_id=action_id,
+                job_locator=locator,
+                epoch=command.epoch,
+                session_id=command.session_id,
+            )
+            prepared["client"] = prepared_client
+            prepared["command"] = command
+            prepared["deadline_at"] = command.deadline_at
+
+        async def execute(tool_name: str, args: dict) -> dict:
+            command = prepared.get("command")
+            deadline_at = prepared.get("deadline_at")
+            prepared_client = prepared.get("client")
+            if command is None or deadline_at is None or prepared_client is None:
+                raise broker.UncertainOutcome(
+                    "Executor command was not durably prepared"
+                )
+            if (
+                tool_name != command.tool_name
+                or protocol.args_digest(args) != protocol.args_digest(command.args)
+            ):
+                raise broker.UncertainOutcome(
+                    "Executor invocation diverged from its durable command"
+                )
+            try:
+                status = await prepared_client.submit(command)
+                await control_plane.record_executor_submit_receipt(
+                    self.db,
+                    action_id=action_id,
+                    epoch=command.epoch,
+                    submit_receipt=status.submit_receipt.model_dump(mode="json"),
+                )
+                await self.db.commit()
+                binding = ExecutorJobBinding.from_command(command)
+                envelope = await self._wait_executor_result(
+                    client=prepared_client,
+                    command=command,
+                    binding=binding,
+                    deadline_at=deadline_at,
+                )
+                await self._persist_executor_envelope(
+                    action_id=action_id,
+                    epoch=command.epoch,
+                    envelope=envelope,
+                )
+            except broker.UncertainOutcome:
+                raise
+            except Exception as exc:
+                raise broker.UncertainOutcome(
+                    "remote Executor outcome requires reconciliation"
+                ) from exc
+            payload = self._executor_result_payload(tool_name, envelope)
+            try:
+                artifact_error = await self._apply_executor_outputs(
+                    command=command, envelope=envelope
+                )
+            except budgets.BudgetExhausted:
+                raise
+            except RemoteExecutorProtocolError as exc:
+                payload["artifact_error"] = guard.redact_text(str(exc))
+                raise broker.TerminalExecutionFailure(payload) from exc
+            except Exception as exc:
+                raise broker.UncertainOutcome(
+                    "Executor artifact settlement requires reconciliation"
+                ) from exc
+            if artifact_error is not None:
+                payload["artifact_error"] = artifact_error
+            if envelope.result.state == "reconciliation_required":
+                raise broker.UncertainOutcome("Executor requires reconciliation")
+            if envelope.result.state != "succeeded" or artifact_error is not None:
+                raise broker.TerminalExecutionFailure(payload)
+            return payload
+
+        return execute, prepare
+
+    def _remote_egress_executor(
+        self,
+        *,
+        action_id: str,
+        intended_tool_name: str,
+        intended_args: dict,
+    ):
+        """Build one action-bound client for the independent egress service."""
+
+        from app.lab.egress_service.client import (
+            RemoteEgressClient,
+            RemoteEgressError,
+        )
+        from app.lab.egress_service.models import EgressActionCommand
+        from app.lab import protocol
+
+        client = RemoteEgressClient.configured()
+        command = EgressActionCommand(
+            action_id=action_id,
+            run_id=self.run_id,
+            tool_name=intended_tool_name,
+            args=dict(intended_args),
+            args_digest=protocol.args_digest(intended_args),
+            egress_allowlist=sorted(set(self.claims.egress)),
+        )
+        command_snapshot = {
+            "schema_version": 1,
+            "base_url": client.base_url,
+            "command": command.model_dump(mode="json"),
+        }
+
+        async def prepare() -> None:
+            await self._lock_current_authority()
+            action = await self.db.scalar(
+                select(LabToolAction)
+                .where(LabToolAction.id == action_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if (
+                action is None
+                or action.run_id != self.run_id
+                or action.task_id != self.task_id
+                or action.tenant_id != self.tenant_id
+                or action.fencing_epoch != self.epoch
+                or action.status != "executing"
+                or action.tool_name != intended_tool_name
+                or action.args_hash != command.args_digest
+            ):
+                raise supervision.RuntimeProtocolConflict(
+                    "egress action binding changed before submission"
+                )
+            existing = (
+                action.result_json.get(broker.EGRESS_COMMAND_KEY)
+                if isinstance(action.result_json, dict)
+                else None
+            )
+            if existing is not None and existing != command_snapshot:
+                raise supervision.RuntimeProtocolConflict(
+                    "egress command changed across replay"
+                )
+            action.result_json = {
+                broker.EGRESS_COMMAND_KEY: command_snapshot,
+            }
+
+        async def execute(tool_name: str, args: dict):
+            if (
+                tool_name != command.tool_name
+                or protocol.args_digest(args) != command.args_digest
+            ):
+                raise broker.UncertainOutcome(
+                    "egress invocation diverged from its durable command"
+                )
+            try:
+                status = await client.execute(command)
+            except RemoteEgressError as exc:
+                raise broker.UncertainOutcome(
+                    "remote egress outcome requires reconciliation"
+                ) from exc
+            if status.state == "failed":
+                raise broker.TerminalExecutionFailure(
+                    {
+                        "tool": tool_name,
+                        "ok": False,
+                        "state": "failed",
+                        "error": status.error_code or "egress_failed",
+                    },
+                    egress_requests=status.usage.requests,
+                    egress_bytes=status.usage.bytes,
+                )
+            if status.state != "succeeded" or status.result is None:
+                raise broker.UncertainOutcome("egress action is not terminal")
+            return broker.TrustedEgressResult(
+                payload=status.result,
+                requests=status.usage.requests,
+                bytes=status.usage.bytes,
+            )
+
+        return execute, prepare
+
+    async def _reconcile_remote_egress_action(self, action, args: dict):
+        from app.lab import protocol
+        from app.lab.egress_service.client import (
+            RemoteEgressClient,
+            RemoteEgressError,
+            RemoteEgressProtocolError,
+        )
+        from app.lab.egress_service.models import EgressActionCommand
+
+        try:
+            snapshot = (
+                action.result_json.get(broker.EGRESS_COMMAND_KEY)
+                if isinstance(action.result_json, dict)
+                else None
+            )
+            if (
+                not isinstance(snapshot, dict)
+                or set(snapshot) != {"schema_version", "base_url", "command"}
+                or snapshot.get("schema_version") != 1
+                or not isinstance(snapshot.get("base_url"), str)
+            ):
+                raise ValueError("durable egress command is missing")
+            command = EgressActionCommand.model_validate(
+                snapshot["command"], strict=True
+            )
+            if (
+                command.action_id != action.id
+                or command.run_id != self.run_id
+                or command.tool_name != action.tool_name
+                or command.args_digest != action.args_hash
+                or command.args_digest != protocol.args_digest(args)
+            ):
+                raise ValueError("durable egress command binding changed")
+            configured = RemoteEgressClient.configured()
+            client = RemoteEgressClient(
+                base_url=snapshot["base_url"],
+                api_key=configured.api_key,
+                request_timeout_s=configured.request_timeout_s,
+                action_timeout_s=configured.action_timeout_s,
+                poll_interval_s=configured.poll_interval_s,
+            )
+            status = await client.get(action.id)
+            if status is not None and status.request_digest != command.request_digest:
+                raise RemoteEgressProtocolError(
+                    "egress request digest changed during reconciliation"
+                )
+            if status is None or status.state not in {"succeeded", "failed"}:
+                status = await client.execute(command)
+            if status.state == "failed":
+                raise broker.TerminalExecutionFailure(
+                    {
+                        "tool": action.tool_name,
+                        "ok": False,
+                        "state": "failed",
+                        "error": status.error_code or "egress_failed",
+                    },
+                    egress_requests=status.usage.requests,
+                    egress_bytes=status.usage.bytes,
+                )
+            if status.state != "succeeded" or status.result is None:
+                raise broker.UncertainOutcome("egress action is not terminal")
+            result = broker.TrustedEgressResult(
+                payload=status.result,
+                requests=status.usage.requests,
+                bytes=status.usage.bytes,
+            )
+        except broker.TerminalExecutionFailure as exc:
+            return await broker.settle_reconciled_action(
+                self.db,
+                action_id=action.id,
+                result=broker.TrustedEgressResult(
+                    payload=exc.result,
+                    requests=exc.egress_requests,
+                    bytes=exc.egress_bytes,
+                ),
+                succeeded=False,
+            )
+        except (broker.UncertainOutcome, RemoteEgressError, ValueError) as exc:
+            return await broker.park_reconciled_action(
+                self.db,
+                action_id=action.id,
+                result={
+                    "error": guard.redact_text(str(exc)),
+                    "uncertain": True,
+                },
+            )
+        return await broker.settle_reconciled_action(
+            self.db,
+            action_id=action.id,
+            result=result,
+            succeeded=True,
+        )
+
+    async def _reconcile_remote_executor_action(self, action, args: dict | None = None):
+        """Resume the exact persisted Executor job after an uncertain/crashed call."""
+        from app.lab import protocol
+        from app.lab.remote_executor import (
+            ExecutorJobBinding,
+            RemoteExecutorClient,
+            RemoteExecutorError,
+            RemoteExecutorProtocolError,
+            configured_executor_auth,
+            configured_remote_executor,
+            executor_job_locator,
+        )
+
+        if action.tool_name in _EGRESS_TOOLS:
+            if args is None or protocol.args_digest(args) != action.args_hash:
+                return await broker.park_reconciled_action(
+                    self.db,
+                    action_id=action.id,
+                    result={
+                        "error": "durable egress arguments are missing",
+                        "uncertain": True,
+                    },
+                )
+            return await self._reconcile_remote_egress_action(action, args)
+
+        # Unsupported protocol-v2 tools never have an Executor locator.  The
+        # normal Broker path rejects them immediately after its durable
+        # ``approved -> executing`` claim; a crash in that narrow window must
+        # converge to the same deterministic failure instead of being parked as
+        # an unknown remote effect.
+        if action.tool_name not in _OCI_TOOLS:
+            return await broker.settle_reconciled_action(
+                self.db,
+                action_id=action.id,
+                result={"error": f"unsupported_tool:{action.tool_name}"},
+                succeeded=False,
+            )
+
+        if args is None or protocol.args_digest(args) != action.args_hash:
+            return await broker.park_reconciled_action(
+                self.db,
+                action_id=action.id,
+                result={
+                    "error": "durable Executor arguments are missing",
+                    "uncertain": True,
+                },
+            )
+        try:
+            declarations = protocol.executor_output_declarations(args)
+        except ValueError as exc:
+            return await broker.park_reconciled_action(
+                self.db,
+                action_id=action.id,
+                result={
+                    "error": guard.redact_text(str(exc)),
+                    "uncertain": True,
+                },
+            )
+
+        target = await self.db.scalar(
+            select(LabToolExecution).where(
+                LabToolExecution.run_id == self.run_id,
+                LabToolExecution.action_id == action.id,
+                LabToolExecution.executor_epoch == action.fencing_epoch,
+            )
+        )
+        if target is None:
+            if not declarations:
+                return await broker.park_reconciled_action(
+                    self.db,
+                    action_id=action.id,
+                    result={
+                        "error": "durable Executor locator is missing",
+                        "uncertain": True,
+                    },
+                )
+            try:
+                recovery_client, recovery_command = (
+                    await self._prepare_executor_command(
+                        client=configured_remote_executor(),
+                        action_id=action.id,
+                        epoch=action.fencing_epoch,
+                        tool_name=action.tool_name,
+                        args=args,
+                    )
+                )
+                recovered_locator = executor_job_locator(
+                    base_url=recovery_client.base_url,
+                    command=recovery_command,
+                )
+                await self._lock_current_authority()
+                target = await control_plane.register_executor_target(
+                    self.db,
+                    run_id=self.run_id,
+                    action_id=action.id,
+                    job_locator=recovered_locator,
+                    epoch=recovery_command.epoch,
+                    session_id=recovery_command.session_id,
+                )
+                await self.db.commit()
+            except budgets.BudgetExhausted:
+                raise
+            except Exception as exc:
+                return await broker.park_reconciled_action(
+                    self.db,
+                    action_id=action.id,
+                    result={
+                        "error": guard.redact_text(str(exc)),
+                        "uncertain": True,
+                    },
+                )
+        locator = dict(target.job_locator_json or {})
+        try:
+            binding = ExecutorJobBinding.from_locator(locator)
+            command = protocol.ExecutorJobCommand.model_validate(
+                locator.get("command")
+            )
+            if ExecutorJobBinding.from_command(command) != binding:
+                raise ValueError("Executor command diverges from locator")
+            if (
+                command.run_id != self.run_id
+                or command.action_id != action.id
+                or command.tool_name != action.tool_name
+                or protocol.args_digest(command.args) != action.args_hash
+                or protocol.args_digest(command.args) != protocol.args_digest(args)
+            ):
+                raise ValueError("Executor command diverges from its Broker action")
+            deadline_at = command.deadline_at
+            issuer, verifier = configured_executor_auth()
+            client = RemoteExecutorClient(
+                base_url=str(locator.get("base_url") or ""),
+                token_issuer=issuer,
+                receipt_verifier=verifier,
+                timeout=settings.lab_executor_request_timeout_s,
+                poll_interval=settings.lab_executor_poll_interval_s,
+            )
+        except Exception as exc:
+            return await broker.park_reconciled_action(
+                self.db,
+                action_id=action.id,
+                result={
+                    "error": guard.redact_text(str(exc)),
+                    "uncertain": True,
+                    "executor_job_id": str(locator.get("job_id") or ""),
+                },
+            )
+        try:
+            try:
+                status = await client.get_status(binding)
+            except RemoteExecutorProtocolError as exc:
+                if (
+                    str(exc) != "executor_http_404"
+                    or target.submit_receipt_json is not None
+                ):
+                    raise
+                # No accepted receipt plus a durable canonical command is the
+                # only state in which the same deterministic job may be
+                # submitted again after a pre-POST crash.
+                status = await client.submit(command)
+            await control_plane.record_executor_submit_receipt(
+                self.db,
+                action_id=action.id,
+                epoch=command.epoch,
+                submit_receipt=status.submit_receipt.model_dump(mode="json"),
+            )
+            await self.db.commit()
+            envelope = await self._wait_executor_result(
+                client=client,
+                command=command,
+                binding=binding,
+                deadline_at=deadline_at,
+            )
+            await self._persist_executor_envelope(
+                action_id=action.id,
+                epoch=command.epoch,
+                envelope=envelope,
+            )
+        except (RemoteExecutorError, broker.UncertainOutcome) as exc:
+            return await broker.park_reconciled_action(
+                self.db,
+                action_id=action.id,
+                result={
+                    "error": guard.redact_text(str(exc)),
+                    "uncertain": True,
+                    "executor_job_id": binding.job_id,
+                },
+            )
+        except Exception as exc:
+            return await broker.park_reconciled_action(
+                self.db,
+                action_id=action.id,
+                result={
+                    "error": guard.redact_text(str(exc)),
+                    "uncertain": True,
+                    "executor_job_id": binding.job_id,
+                },
+            )
+        payload = self._executor_result_payload(action.tool_name, envelope)
+        try:
+            artifact_error = await self._apply_executor_outputs(
+                command=command, envelope=envelope
+            )
+        except budgets.BudgetExhausted:
+            raise
+        except RemoteExecutorProtocolError as exc:
+            payload["artifact_error"] = guard.redact_text(str(exc))
+            return await broker.settle_reconciled_action(
+                self.db,
+                action_id=action.id,
+                result=payload,
+                succeeded=False,
+            )
+        except Exception as exc:
+            return await broker.park_reconciled_action(
+                self.db,
+                action_id=action.id,
+                result={
+                    "error": guard.redact_text(str(exc)),
+                    "uncertain": True,
+                    "executor_job_id": binding.job_id,
+                },
+            )
+        if artifact_error is not None:
+            payload["artifact_error"] = artifact_error
+        if envelope.result.state == "reconciliation_required":
+            return await broker.park_reconciled_action(
+                self.db,
+                action_id=action.id,
+                result=payload,
+            )
+        return await broker.settle_reconciled_action(
+            self.db,
+            action_id=action.id,
+            result=payload,
+            succeeded=(
+                envelope.result.state == "succeeded"
+                and artifact_error is None
+            ),
+        )
+
+    def _select_executor(
+        self,
+        tool_name: str,
+        *,
+        action_id: str | None = None,
+        args: dict | None = None,
+    ):
+        """Select the Broker executor without weakening the protocol boundary.
+
+        Protocol v2 always uses the independent remote Executor for supported
+        tools. Unsupported tools fail inside the Broker state machine and can
+        never reach Mock. Protocol v1 retains its explicit local OCI/Mock
+        rollback behavior.
+        """
+        if settings.lab_agent_v2_enabled:
+            if action_id is None:
+                raise RuntimeError("protocol-v2 Executor requires an action id")
+            if args is None:
+                raise RuntimeError("protocol-v2 Executor requires bound arguments")
+            if tool_name in _EGRESS_TOOLS:
+                return self._remote_egress_executor(
+                    action_id=action_id,
+                    intended_tool_name=tool_name,
+                    intended_args=dict(args),
+                )
+            if tool_name not in _OCI_TOOLS:
+                async def reject_unsupported_tool(
+                    _tool_name: str, _args: dict
+                ) -> dict:
+                    raise RuntimeError(f"unsupported_tool:{_tool_name}")
+
+                return reject_unsupported_tool, None
+            return self._remote_executor(
+                action_id=action_id,
+                intended_tool_name=tool_name,
+                intended_args=dict(args),
+            )
         if settings.lab_oci_enabled and settings.lab_oci_image and tool_name in _OCI_TOOLS:
             if self._oci_executor is None:
                 from app.lab.sandbox.oci_executor import OciExecutor, SandboxLimits
                 self._oci_executor = OciExecutor(
                     image=settings.lab_oci_image, limits=SandboxLimits(),
                 )
-            return self._oci_executor.as_broker_executor()
-        return _mock_executor
+            return self._oci_executor.as_broker_executor(), None
+        return _mock_executor, None
 
     # ── tool intents through the Broker ───────────────────────────────
 
@@ -458,8 +1757,6 @@ class _Orchestrator:
         tool = ev.tool
         args = dict(ev.payload or {})
         summary = guard.redact_text(ev.summary) or ""
-        is_egress = broker.is_egress_action(tool, args)
-
         try:
             action = await broker.request_action(
                 db, claims=self.claims, token=self.token, tool_name=tool,
@@ -482,10 +1779,8 @@ class _Orchestrator:
         if action.status == "waiting_approval":
             approved = await self._await_approval(action, summary)
             if not approved:
-                # Owner denied (or timed out): the reservations the request took
-                # are neither confirmed nor released by the Broker — release them
-                # here (T5 handoff). The run survives a denied sensitive action.
-                await self._release_reservations(is_egress)
+                # The Broker has already settled this action's reservation. The
+                # run survives a denied sensitive action.
                 return
 
         action_id = action.id  # capture before expiring (avoids a sync lazy-load)
@@ -498,19 +1793,21 @@ class _Orchestrator:
         # strongly across the poll, so execute_action's own db.get re-reads it.)
         db.expire(action)
         try:
+            executor, prepare_executor = self._select_executor(
+                tool, action_id=action_id, args=args
+            )
             result = await broker.execute_action(
-                db, action_id=action_id, claims=self.claims, executor=self._select_executor(tool),
+                db, action_id=action_id, claims=self.claims,
+                executor=executor,
                 args=args, expected_epoch=self.epoch,
+                prepare_executor=prepare_executor,
             )
         except broker.ActionDenied as exc:
-            # Execute-time refusal (grant revoked / policy re-eval / approval
-            # denied): the Broker did not settle the reservations — release them.
-            await self._release_reservations(is_egress)
+            # Execute-time refusal is already settled by the Broker.
             await self._emit(type="policy.decided", action_id=action.id,
                              payload={"tool": tool, "decision": "deny", "reason": exc.reason})
             return
         except broker.ApprovalRequired:
-            await self._release_reservations(is_egress)
             return
         except budgets.BudgetExhausted as exc:
             # egress_bytes over-limit inside execute_action: the action already
@@ -1208,12 +2505,24 @@ class _V2Orchestrator(_Orchestrator):
         session = await self.db.get(LabRuntimeSession, self.runtime_session_id)
         committed = session.provider_cursor_committed
         acked = session.provider_cursor_acked
+        blocked = await self.db.scalar(
+            select(LabRuntimeIntent.provider_cursor)
+            .where(
+                LabRuntimeIntent.session_id == self.runtime_session_id,
+                LabRuntimeIntent.status == "pending",
+            )
+            .order_by(LabRuntimeIntent.provider_cursor)
+            .limit(1)
+        )
+        recoverable_through = (
+            committed if blocked is None else min(committed, blocked - 1)
+        )
         await self.db.commit()
-        if committed <= acked:
+        if recoverable_through <= acked:
             return
         await self.adapter.ack_runtime_events(
             provider_session_id=self.provider_session_id,
-            cursor=committed,
+            cursor=recoverable_through,
         )
         assert self.runtime_epoch is not None
         await supervision.record_provider_ack(
@@ -1222,7 +2531,7 @@ class _V2Orchestrator(_Orchestrator):
             session_id=self.provider_session_id,
             epoch=self.runtime_epoch,
             owner_id=self.owner_id,
-            acked_through=committed,
+            acked_through=recoverable_through,
         )
 
     async def _deliver_pending_results(self) -> None:
@@ -1345,6 +2654,7 @@ class _V2Orchestrator(_Orchestrator):
                 args=args,
                 idempotency_key=idem,
                 expected_epoch=self.epoch,
+                require_remote_egress=True,
             )
         except broker.ActionDenied as exc:
             action = exc.action
@@ -1354,6 +2664,21 @@ class _V2Orchestrator(_Orchestrator):
             raise supervision.RuntimeProtocolConflict(
                 "Broker denial did not persist an action"
             )
+        if action.status in {"executing", "reconciliation_required"}:
+            while action.status in {"executing", "reconciliation_required"}:
+                try:
+                    action = await self._reconcile_remote_executor_action(action, args)
+                except budgets.BudgetExhausted as exc:
+                    await self._terminate_budget(exc.dimension)
+                if action.status in {"executing", "reconciliation_required"}:
+                    if self.fenced:
+                        raise leases.StaleEpoch(
+                            "protocol-v2 owner lost its lease during reconciliation"
+                        )
+                    await self._charge_wall_clock()
+                    await asyncio.sleep(
+                        min(settings.lab_executor_poll_interval_s, 0.5)
+                    )
         if action.fencing_epoch != self.epoch:
             action = await broker.recover_action_authority(
                 self.db,
@@ -1365,7 +2690,6 @@ class _V2Orchestrator(_Orchestrator):
                 expected_epoch=self.epoch,
             )
 
-        is_egress = broker.is_egress_action(event.tool_name, args)
         if action.status == "waiting_approval":
             approved = await self._await_approval(
                 action,
@@ -1379,22 +2703,25 @@ class _V2Orchestrator(_Orchestrator):
                     action_id=action.id,
                     expected_epoch=self.epoch,
                 )
-            if action.status == "denied":
-                await self._release_reservations(is_egress)
-
         if action.status == "approved":
             try:
+                executor, prepare_executor = self._select_executor(
+                    event.tool_name,
+                    action_id=action.id,
+                    args=args,
+                )
                 action = await broker.execute_action(
                     self.db,
                     action_id=action.id,
                     claims=self.claims,
-                    executor=self._select_executor(event.tool_name),
+                    executor=executor,
                     args=args,
                     expected_epoch=self.epoch,
+                    prepare_executor=prepare_executor,
+                    require_remote_egress=True,
                 )
             except broker.ActionDenied as exc:
                 action = exc.action
-                await self._release_reservations(is_egress)
             except budgets.BudgetExhausted as exc:
                 await self._terminate_budget(exc.dimension)
             except (broker.ApprovalInvalid, broker.ApprovalRequired) as exc:
@@ -1449,7 +2776,8 @@ class _V2Orchestrator(_Orchestrator):
             if (
                 isinstance(sentinel, str)
                 and sentinel
-                and sentinel not in (artifact.text_md or "")
+                and artifact.text_md is not None
+                and sentinel not in artifact.text_md
             ):
                 raise supervision.RuntimeProtocolConflict(
                     "Runtime artifact omitted the Broker sentinel"
@@ -1540,8 +2868,15 @@ class _V2Orchestrator(_Orchestrator):
                 "text_md",
                 "meta_json",
                 "tenant_id",
-                "sha256",
-                "byte_size",
+                "provider_artifact_id",
+                "runtime_session_id",
+                "provider_session_id",
+                "producer_epoch",
+                "required",
+                "declared_content_type",
+                "original_filename",
+                "expected_sha256",
+                "declared_byte_size",
                 "producer_action_id",
                 "provenance",
             )
@@ -1550,6 +2885,20 @@ class _V2Orchestrator(_Orchestrator):
     async def _persist_v2_artifacts(
         self, artifacts: list[ArtifactSpec]
     ) -> list[LabArtifact]:
+        from app.lab import protocol
+        from app.lab.artifact_pipeline import (
+            ArtifactPipelineClient,
+            ArtifactPipelineError,
+            ArtifactReceiptError,
+        )
+
+        if not settings.lab_artifact_pipeline_enabled:
+            raise supervision.RuntimeProtocolConflict(
+                "protocol-v2 cannot persist artifacts without the production pipeline"
+            )
+        assert self.runtime_session_id
+        assert self.provider_session_id
+        assert self.runtime_epoch is not None
         artifacts = sorted(
             artifacts,
             key=lambda artifact: artifact.provider_artifact_id or "",
@@ -1562,6 +2911,10 @@ class _V2Orchestrator(_Orchestrator):
         ) or len(set(provider_ids)) != count:
             raise supervision.RuntimeProtocolConflict(
                 "Runtime artifact ids are missing or duplicated"
+            )
+        if not any(artifact.required for artifact in artifacts):
+            raise supervision.RuntimeProtocolConflict(
+                "Runtime completed without a required byte-backed artifact"
             )
         built: list[LabArtifact] = []
         for index, artifact_spec in enumerate(artifacts):
@@ -1580,15 +2933,26 @@ class _V2Orchestrator(_Orchestrator):
                 task_id=self.task_id,
                 kind=artifact_spec.kind,
                 title=artifact_spec.title,
-                uri=artifact_spec.uri,
-                text_md=artifact_spec.text_md,
+                uri=None,
+                text_md=None,
                 meta_json=meta,
+                provider_artifact_id=provider_artifact_id,
+                runtime_session_id=self.runtime_session_id,
+                provider_session_id=self.provider_session_id,
+                producer_epoch=self.runtime_epoch,
+                required=artifact_spec.required,
+                declared_content_type=artifact_spec.content_type,
+                content_type=artifact_spec.content_type,
+                original_filename=artifact_spec.original_filename,
+                expected_sha256=artifact_spec.expected_sha256,
+                declared_byte_size=artifact_spec.declared_byte_size,
+                storage_status="pending_upload",
             )
             await lab_artifact_service.finalize_artifact(
                 self.db,
                 artifact=artifact,
                 tenant_id=self.tenant_id,
-                producer_action_id=None,
+                producer_action_id=artifact_spec.producer_action_id,
                 scanned_clean=False,
             )
             built.append(artifact)
@@ -1602,50 +2966,218 @@ class _V2Orchestrator(_Orchestrator):
                 raise supervision.RuntimeProtocolConflict(
                     "Runtime artifact replay changed the committed batch"
                 )
-            return existing
-
-        await self._lock_current_authority()
-        budget = await self.db.scalar(
-            select(LabRunBudget)
-            .where(LabRunBudget.run_id == self.run_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        )
-        byte_count = sum(artifact.byte_size or 0 for artifact in built)
-        if budget is not None:
-            charges = (
-                ("artifact_count", count),
-                ("artifact_bytes", byte_count),
+            persisted = existing
+        else:
+            await self._lock_current_authority()
+            budget = await self.db.scalar(
+                select(LabRunBudget)
+                .where(LabRunBudget.run_id == self.run_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
             )
-            for dimension, amount in charges:
-                limit = getattr(budget, f"limit_{dimension}")
-                used = getattr(budget, f"used_{dimension}")
-                reserved = getattr(budget, f"reserved_{dimension}")
-                if limit and used + reserved + amount > limit:
-                    budget.exhausted_dimension = dimension
+            if budget is not None:
+                if (
+                    budget.limit_artifact_count
+                    and budget.used_artifact_count
+                    + budget.reserved_artifact_count
+                    + count
+                    > budget.limit_artifact_count
+                ):
+                    budget.exhausted_dimension = "artifact_count"
                     await self.db.commit()
-                    await self._terminate_budget(dimension)
-            budget.used_artifact_count += count
-            budget.used_artifact_bytes += byte_count
-        self.db.add_all(built)
+                    await self._terminate_budget("artifact_count")
+                budget.used_artifact_count += count
+            self.db.add_all(built)
+            try:
+                await self.db.commit()
+                persisted = built
+            except IntegrityError:
+                await self.db.rollback()
+                existing = await self._load_persisted_v2_artifacts()
+                if (
+                    existing is None
+                    or len(existing) != count
+                    or any(
+                        not self._v2_artifact_matches(actual, expected)
+                        for actual, expected in zip(existing, built, strict=True)
+                    )
+                ):
+                    raise supervision.RuntimeProtocolConflict(
+                        "Runtime artifact finalization raced with divergent data"
+                    ) from None
+                persisted = existing
+
+        client = ArtifactPipelineClient.from_settings()
         try:
-            await self.db.commit()
-        except IntegrityError:
-            await self.db.rollback()
-            existing = await self._load_persisted_v2_artifacts()
-            if (
-                existing is None
-                or len(existing) != count
-                or any(
-                    not self._v2_artifact_matches(actual, expected)
-                    for actual, expected in zip(existing, built, strict=True)
+            async def acknowledge_upload(
+                artifact: LabArtifact, operation: LabArtifactOperation
+            ) -> None:
+                if not operation.receipt_digest:
+                    raise supervision.RuntimeProtocolConflict(
+                        "Artifact upload is missing a receipt digest"
+                    )
+                ack_command = protocol.RuntimeArtifactUploadAck(
+                    command_id=str(uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        "simverse:runtime-artifact-upload-ack:"
+                        f"{artifact.id}:{operation.receipt_digest}",
+                    )),
+                    run_id=self.run_id,
+                    session_id=self.provider_session_id,
+                    provider_artifact_id=artifact.provider_artifact_id,
+                    epoch=self.runtime_epoch,
+                    upload_receipt_digest=operation.receipt_digest,
                 )
-            ):
-                raise supervision.RuntimeProtocolConflict(
-                    "Runtime artifact finalization raced with divergent data"
-                ) from None
-            return existing
-        return built
+                await self.adapter.ack_artifact_upload_v2(ack_command)
+
+            for artifact, artifact_spec in zip(persisted, artifacts, strict=True):
+                if artifact.kind == "link":
+                    if artifact.required:
+                        raise supervision.RuntimeProtocolConflict(
+                            "required Runtime link was not snapshotted to bytes"
+                        )
+                    artifact.scan_status = "failed"
+                    artifact.verification_status = "rejected"
+                    artifact.scan_error_code = "external_links_not_supported"
+                    await self.db.commit()
+                    continue
+
+                upload_operation = await self.db.scalar(
+                    select(LabArtifactOperation)
+                    .where(
+                        LabArtifactOperation.artifact_id == artifact.id,
+                        LabArtifactOperation.operation_type == "upload",
+                    )
+                    .order_by(LabArtifactOperation.created_at.desc())
+                    .limit(1)
+                )
+                terminal_upload_receipt = bool(
+                    upload_operation is not None
+                    and upload_operation.state in {"failed", "quarantined"}
+                    and isinstance(upload_operation.receipt_json, dict)
+                    and upload_operation.receipt_json.get("receipt_type")
+                    == "artifact.upload"
+                    and upload_operation.receipt_digest
+                )
+                while (
+                    artifact.storage_status == "pending_upload"
+                    and not terminal_upload_receipt
+                ):
+                    lease, upload_operation = await client.create_upload_lease(
+                        self.db,
+                        artifact=artifact,
+                        max_bytes=max(1, settings.lab_budget_artifact_bytes),
+                    )
+                    upload_command = protocol.RuntimeArtifactUploadCommand(
+                        command_id=str(uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"simverse:runtime-artifact-upload:{lease.upload_id}",
+                        )),
+                        run_id=self.run_id,
+                        session_id=self.provider_session_id,
+                        provider_artifact_id=artifact.provider_artifact_id,
+                        epoch=self.runtime_epoch,
+                        lease=lease,
+                    )
+                    try:
+                        runtime_receipt = await self.adapter.upload_artifact_v2(
+                            upload_command
+                        )
+                    except RuntimeV2NonRetryableError as exc:
+                        if exc.status_code != 409:
+                            raise
+                        await self._lock_current_authority()
+                        await client.fail_upload_attempt(
+                            self.db,
+                            operation=upload_operation,
+                            error_code="runtime_upload_lease_rejected",
+                        )
+                        if upload_operation.attempt >= client.upload_max_attempts:
+                            raise _RunFailed(
+                                "artifact_upload_retry_limit_exhausted"
+                            ) from exc
+                        continue
+                    await self._lock_current_authority()
+                    try:
+                        artifact = await client.apply_upload_receipt(
+                            self.db,
+                            receipt_value=runtime_receipt["upload_receipt"],
+                            commit=False,
+                        )
+                    except ArtifactReceiptError as exc:
+                        await self.db.rollback()
+                        raise supervision.RuntimeProtocolConflict(str(exc)) from exc
+                    except ArtifactPipelineError:
+                        await self.db.commit()
+                        terminal_upload_receipt = True
+                        break
+                    break
+
+                if upload_operation is None:
+                    raise supervision.RuntimeProtocolConflict(
+                        "persisted Artifact has no durable upload operation"
+                    )
+                if terminal_upload_receipt:
+                    await acknowledge_upload(artifact, upload_operation)
+                    if artifact.required:
+                        raise _RunFailed(
+                            "artifact_upload:"
+                            f"{upload_operation.error_code or 'upload_failed'}"
+                        )
+                    continue
+                await self._lock_current_authority()
+                upload_operation = await self.db.scalar(
+                    select(LabArtifactOperation)
+                    .where(LabArtifactOperation.id == upload_operation.id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+                if (
+                    upload_operation is None
+                    or upload_operation.state != "succeeded"
+                    or not upload_operation.receipt_digest
+                ):
+                    raise supervision.RuntimeProtocolConflict(
+                        "Artifact upload is missing a verified receipt"
+                    )
+                if upload_operation.accounted_at is None:
+                    budget = await self.db.scalar(
+                        select(LabRunBudget)
+                        .where(LabRunBudget.run_id == self.run_id)
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
+                    )
+                    if budget is not None:
+                        if (
+                            budget.limit_artifact_bytes
+                            and budget.used_artifact_bytes
+                            + budget.reserved_artifact_bytes
+                            + artifact.byte_size
+                            > budget.limit_artifact_bytes
+                        ):
+                            budget.exhausted_dimension = "artifact_bytes"
+                            await self.db.commit()
+                            await self._terminate_budget("artifact_bytes")
+                        budget.used_artifact_bytes += artifact.byte_size
+                    upload_operation.accounted_at = datetime.now(UTC)
+                await self.db.commit()
+
+                await acknowledge_upload(artifact, upload_operation)
+
+                if artifact.scan_status == "pending":
+                    await client.submit_scan(self.db, artifact=artifact)
+                elif artifact.scan_status == "flagged" and artifact.required:
+                    raise _RunFailed("artifact_scan_flagged")
+                elif (
+                    artifact.scan_status == "failed"
+                    and artifact.required
+                    and artifact.scan_attempts
+                    >= settings.lab_artifact_scan_max_attempts
+                ):
+                    raise _RunFailed("artifact_scan_failed")
+            return persisted
+        finally:
+            await client.aclose()
 
     def _v2_finalization_event_id(self, type: str) -> str:
         return str(
@@ -1823,11 +3355,9 @@ class _V2Orchestrator(_Orchestrator):
             self.fenced = True
             return
 
-        persisted = await self._load_persisted_v2_artifacts()
-        if persisted is None:
-            artifacts = await self._collect_success_artifacts()
-            await self._charge_wall_clock()
-            persisted = await self._persist_v2_artifacts(artifacts)
+        artifacts = await self._collect_success_artifacts()
+        await self._charge_wall_clock()
+        persisted = await self._persist_v2_artifacts(artifacts)
         await self._stop_after_success()
 
         summary = (

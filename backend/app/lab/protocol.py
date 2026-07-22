@@ -14,6 +14,7 @@ import hashlib
 import json
 import math
 from datetime import datetime
+from pathlib import PurePosixPath
 from typing import Any, Literal
 
 from pydantic import (
@@ -21,6 +22,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StrictInt,
     field_validator,
     model_validator,
@@ -252,6 +254,308 @@ class ControlCommand(_StrictV2Model):
     action: Literal["cancel", "terminate", "kill"]
     epoch: StrictInt = Field(ge=0)
     deadline_at: AwareDatetime
+
+
+class RuntimeArtifactManifest(_StrictV2Model):
+    """Small Runtime-owned declaration; artifact bytes never cross this API."""
+
+    schema_version: StrictInt = Field(default=1, ge=1, le=1)
+    provider_artifact_id: str = Field(min_length=1, max_length=200)
+    kind: Literal["file", "link", "text", "image", "dataset"]
+    title: str = Field(min_length=1, max_length=200)
+    content_type: str = Field(min_length=1, max_length=200)
+    original_filename: str | None = Field(default=None, max_length=255)
+    declared_byte_size: StrictInt | None = Field(default=None, ge=0)
+    expected_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    required: StrictBool = True
+    producer_action_id: str | None = Field(default=None, max_length=200)
+    upload_state: Literal[
+        "pending", "uploading", "uploaded", "acknowledged", "failed"
+    ] = "pending"
+    upload_receipt: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _validate_production_link(self) -> "RuntimeArtifactManifest":
+        if self.kind == "link" and self.required:
+            raise ValueError("required runtime artifacts must contain snapshotted bytes")
+        if self.upload_state in {"uploaded", "acknowledged", "failed"}:
+            if self.upload_receipt is None:
+                if self.upload_state != "failed":
+                    raise ValueError("uploaded artifact requires upload_receipt")
+        elif self.upload_receipt is not None:
+            raise ValueError("upload_receipt is only valid after upload")
+        return self
+
+
+class ArtifactUploadLease(_StrictV2Model):
+    """One-time, bounded capability used instead of object-store credentials."""
+
+    schema_version: StrictInt = Field(default=1, ge=1, le=1)
+    upload_id: str = Field(min_length=1, max_length=200)
+    artifact_id: str = Field(min_length=1, max_length=200)
+    tenant_id: str = Field(min_length=1, max_length=200)
+    run_id: str = Field(min_length=1, max_length=200)
+    session_id: str = Field(min_length=1, max_length=200)
+    producer_action_id: str | None = Field(default=None, max_length=200)
+    epoch: StrictInt = Field(ge=0)
+    upload_url: str = Field(min_length=1, max_length=2048)
+    bearer_token: str = Field(min_length=1, max_length=16384)
+    max_bytes: StrictInt = Field(gt=0)
+    content_type: str = Field(min_length=1, max_length=200)
+    expected_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    expires_at: AwareDatetime
+
+
+class RuntimeArtifactUploadCommand(_StrictV2Model):
+    schema_version: StrictInt = Field(default=1, ge=1, le=1)
+    command_id: str = Field(min_length=1, max_length=200)
+    run_id: str = Field(min_length=1, max_length=200)
+    session_id: str = Field(min_length=1, max_length=200)
+    provider_artifact_id: str = Field(min_length=1, max_length=200)
+    epoch: StrictInt = Field(ge=0)
+    lease: ArtifactUploadLease
+
+    @model_validator(mode="after")
+    def _validate_lease_binding(self) -> "RuntimeArtifactUploadCommand":
+        if (
+            self.run_id != self.lease.run_id
+            or self.session_id != self.lease.session_id
+            or self.epoch != self.lease.epoch
+        ):
+            raise ValueError("artifact upload lease binding mismatch")
+        return self
+
+
+class RuntimeArtifactUploadAck(_StrictV2Model):
+    schema_version: StrictInt = Field(default=1, ge=1, le=1)
+    command_id: str = Field(min_length=1, max_length=200)
+    run_id: str = Field(min_length=1, max_length=200)
+    session_id: str = Field(min_length=1, max_length=200)
+    provider_artifact_id: str = Field(min_length=1, max_length=200)
+    epoch: StrictInt = Field(ge=0)
+    upload_receipt_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ExecutorResourceLimits(_StrictV2Model):
+    wall_clock_ms: StrictInt = Field(gt=0)
+    cpu_millis: StrictInt = Field(gt=0)
+    memory_bytes: StrictInt = Field(gt=0)
+    pids: StrictInt = Field(gt=0)
+    stdout_bytes: StrictInt = Field(gt=0)
+    stderr_bytes: StrictInt = Field(gt=0)
+    scratch_bytes: StrictInt = Field(gt=0)
+
+
+class RuntimeExecutorOutputDeclaration(_StrictV2Model):
+    """Runtime intent for one file the Executor may export from ``/scratch``."""
+
+    relative_path: str = Field(min_length=1, max_length=500)
+    kind: Literal["file", "image", "dataset"]
+    expected_use: Literal["deliverable", "evidence"]
+    title: str = Field(min_length=1, max_length=200)
+    content_type: str = Field(min_length=1, max_length=200)
+    original_filename: str | None = Field(default=None, max_length=255)
+    required: StrictBool = True
+    max_bytes: StrictInt = Field(gt=0)
+    expected_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+
+    @field_validator("relative_path")
+    @classmethod
+    def _validate_relative_path(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if (
+            value != value.strip()
+            or "\\" in value
+            or value.startswith("/")
+            or any(part in {"", ".", ".."} for part in value.split("/"))
+            or str(path) != value
+            or path.parts[0] == ".simverse-executor-exit"
+            or any(ord(char) < 32 for char in value)
+        ):
+            raise ValueError("executor output path must stay inside scratch")
+        return value
+
+    @field_validator("title", "content_type")
+    @classmethod
+    def _validate_canonical_text(cls, value: str) -> str:
+        if value != value.strip() or any(ord(char) < 32 for char in value):
+            raise ValueError("executor output text must be canonical")
+        return value
+
+    @field_validator("original_filename")
+    @classmethod
+    def _validate_original_filename(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if (
+            value != value.strip()
+            or value in {".", ".."}
+            or "/" in value
+            or "\\" in value
+            or any(ord(char) < 32 for char in value)
+        ):
+            raise ValueError("executor output filename must be a basename")
+        return value
+
+
+class ExecutorOutputSpec(RuntimeExecutorOutputDeclaration):
+    artifact_id: str = Field(min_length=1, max_length=200)
+    lease: ArtifactUploadLease
+
+
+def executor_output_declarations(
+    args: dict[str, Any],
+) -> list[RuntimeExecutorOutputDeclaration]:
+    """Parse the untrusted Runtime ``outputs`` argument as a strict contract."""
+    if "outputs" not in args:
+        return []
+    raw = args["outputs"]
+    if not isinstance(raw, list) or len(raw) > 20:
+        raise ValueError("executor outputs must be a list of at most 20 declarations")
+    declarations = [
+        RuntimeExecutorOutputDeclaration.model_validate(item, strict=True)
+        for item in raw
+    ]
+    paths = [declaration.relative_path for declaration in declarations]
+    if len(paths) != len(set(paths)):
+        raise ValueError("executor output paths must be unique")
+    return declarations
+
+
+class ExecutorArtifactManifest(_StrictV2Model):
+    """Actual-byte manifest paired with one terminal Ingest receipt."""
+
+    schema_version: StrictInt = Field(default=1, ge=1, le=1)
+    artifact_id: str = Field(min_length=1, max_length=200)
+    producer_action_id: str = Field(min_length=1, max_length=200)
+    kind: Literal["file", "image", "dataset"]
+    expected_use: Literal["deliverable", "evidence"]
+    title: str = Field(min_length=1, max_length=200)
+    content_type: str = Field(min_length=1, max_length=200)
+    original_filename: str | None = Field(default=None, max_length=255)
+    required: StrictBool
+    byte_size: StrictInt = Field(ge=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    upload_id: str = Field(min_length=1, max_length=200)
+
+
+class ExecutorJobCommand(_StrictV2Model):
+    schema_version: StrictInt = Field(default=1, ge=1, le=1)
+    job_id: str = Field(min_length=1, max_length=200)
+    run_id: str = Field(min_length=1, max_length=200)
+    session_id: str = Field(min_length=1, max_length=200)
+    action_id: str = Field(min_length=1, max_length=200)
+    epoch: StrictInt = Field(ge=0)
+    tool_name: Literal["code.run", "shell.exec"]
+    args: dict[str, Any]
+    image_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    limits: ExecutorResourceLimits
+    outputs: list[ExecutorOutputSpec] = Field(default_factory=list, max_length=20)
+    deadline_at: AwareDatetime
+    command_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _validate_command_digest(self) -> "ExecutorJobCommand":
+        artifact_ids: set[str] = set()
+        upload_ids: set[str] = set()
+        output_paths: set[str] = set()
+        total_output_bytes = 0
+        for output in self.outputs:
+            lease = output.lease
+            if (
+                output.artifact_id in artifact_ids
+                or output.relative_path in output_paths
+                or lease.upload_id in upload_ids
+            ):
+                raise ValueError("executor outputs must have unique bindings")
+            artifact_ids.add(output.artifact_id)
+            output_paths.add(output.relative_path)
+            upload_ids.add(lease.upload_id)
+            if (
+                lease.artifact_id != output.artifact_id
+                or lease.run_id != self.run_id
+                or lease.session_id != self.session_id
+                or lease.producer_action_id != self.action_id
+                or lease.epoch != self.epoch
+                or lease.content_type != output.content_type
+                or lease.max_bytes != output.max_bytes
+                or lease.expected_sha256 != output.expected_sha256
+                or lease.expires_at < self.deadline_at
+            ):
+                raise ValueError("executor output lease binding mismatch")
+            total_output_bytes += output.max_bytes
+        if total_output_bytes > self.limits.scratch_bytes:
+            raise ValueError("executor output limits exceed scratch capacity")
+        canonical = self.model_dump(mode="json", exclude={"command_digest"})
+        if self.command_digest != content_digest(canonical):
+            raise ValueError("executor command_digest does not match command")
+        return self
+
+
+class ExecutorJobResult(_StrictV2Model):
+    schema_version: StrictInt = Field(default=1, ge=1, le=1)
+    job_id: str = Field(min_length=1, max_length=200)
+    action_id: str = Field(min_length=1, max_length=200)
+    epoch: StrictInt = Field(ge=0)
+    state: Literal[
+        "succeeded",
+        "failed",
+        "cancelled",
+        "terminated",
+        "killed",
+        "reconciliation_required",
+    ]
+    exit_code: StrictInt | None = None
+    stdout: str = ""
+    stderr: str = ""
+    artifact_receipts: list[dict[str, Any]] = Field(default_factory=list)
+    teardown_proof: dict[str, Any]
+    result_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def _validate_result_digest(self) -> "ExecutorJobResult":
+        canonical = self.model_dump(mode="json", exclude={"result_digest"})
+        if self.result_digest != content_digest(canonical):
+            raise ValueError("executor result_digest does not match result")
+        if (
+            self.state != "reconciliation_required"
+            and self.teardown_proof.get("removed") is not True
+        ):
+            raise ValueError("terminal executor result requires verified teardown")
+        return self
+
+
+class ServiceReceipt(_StrictV2Model):
+    """Canonical signed receipt envelope shared by production trust planes."""
+
+    schema_version: StrictInt = Field(default=1, ge=1, le=1)
+    receipt_id: str = Field(min_length=1, max_length=200)
+    issuer: str = Field(min_length=1, max_length=100)
+    kid: str = Field(min_length=1, max_length=100)
+    operation_id: str = Field(min_length=1, max_length=200)
+    request_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    run_id: str | None = Field(default=None, max_length=200)
+    session_id: str | None = Field(default=None, max_length=200)
+    action_id: str | None = Field(default=None, max_length=200)
+    artifact_id: str | None = Field(default=None, max_length=200)
+    epoch: StrictInt = Field(ge=0)
+    status: str = Field(min_length=1, max_length=50)
+    payload: dict[str, Any]
+    payload_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    issued_at: AwareDatetime
+    signature: str = Field(min_length=1, max_length=8192)
+
+    @model_validator(mode="after")
+    def _validate_payload_digest(self) -> "ServiceReceipt":
+        if self.payload_digest != content_digest(self.payload):
+            raise ValueError("receipt payload_digest does not match payload")
+        return self
 
 
 class RuntimeV2Handshake(_StrictV2Model):
