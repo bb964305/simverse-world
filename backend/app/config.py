@@ -333,6 +333,11 @@ class Settings(BaseSettings):
     realism_rel_gossip_fam_floor: float = 0.1    # gossip candidate weight = floor + familiarity(subject)
     # P2 Task 4 — circle detection (connected components over strong ties).
     realism_circle_threshold: float = 0.3        # familiarity ≥ this = a "strong" edge
+    # P2 Task 5 — information gradient (differentiated event awareness).
+    realism_info_geo_radius: int = 15            # tiles: residents within this of the event location
+    realism_info_sample_frac: float = 0.2        # random "well-informed" first-hand sample of the rest
+    realism_info_geo_importance: float = 0.6     # first-hand importance for geo-related residents
+    realism_info_sample_importance: float = 0.5  # first-hand importance for the random sample
 
     model_config = {"env_file": ".env"}
 

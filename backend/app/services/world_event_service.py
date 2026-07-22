@@ -113,22 +113,83 @@ async def flip_active_events(db: AsyncSession) -> list[tuple[dict, str]]:
     return changes
 
 
-async def write_collective_memories(db: AsyncSession, event: dict) -> int:
-    """A2: on a world event start, give every active resident a shared memory
-    (batch, no LLM). 'active' = not sleeping. Returns count written."""
+def _geo_relevant_residents(event: dict, rows) -> set[str]:
+    """Resident ids currently within ``realism_info_geo_radius`` tiles of the
+    event's location. The event's location comes from ``payload_json.location_id``
+    (Manhattan distance to the location center). Empty when the event names no
+    location. NOTE: location_visits is player-scoped, so the plan's "7-day
+    visitors" signal is not available for residents — current position within
+    radius is the resident geo-relevance signal (see PROGRESS P2-5 deviation)."""
+    from app.config import settings
+    from app.agent.map_data import get_location_by_id
+    loc_id = (event.get("payload_json") or {}).get("location_id")
+    if not loc_id:
+        return set()
+    loc = get_location_by_id(loc_id)
+    if not loc:
+        return set()
+    center = loc.get("center")
+    if not center:
+        b = loc.get("bounds")
+        if b:
+            center = ((b[0] + b[2]) // 2, (b[1] + b[3]) // 2)
+    if not center:
+        return set()
+    radius = settings.realism_info_geo_radius
+    cx, cy = center
+    return {rid for rid, tx, ty in rows if abs((tx or 0) - cx) + abs((ty or 0) - cy) <= radius}
+
+
+async def write_collective_memories(db: AsyncSession, event: dict, rng=None) -> int:
+    """On a world event start, write first-hand event memories (batch, no LLM).
+
+    Pre-P2 / gate off: every active (non-sleeping) resident gets one — the old
+    all-knowing broadcast. With ``REALISM_INFO_GRADIENT_ENABLED`` on, non-weather
+    events instead inform only (a) residents geographically near the event
+    (importance 0.6) and (b) a random ``sample_frac`` "well-informed" sample of
+    the rest (importance 0.5); everyone else learns it second-hand via gossip
+    (§8.1). Weather stays all-broadcast ("抬头可见"). First-hand memories carry
+    ``event_id`` in metadata so the diffusion probe + gossip can follow them.
+    Returns the number of first-hand memories written."""
+    import random as _random
+    from app.config import settings
     from app.models.resident import Resident
     from app.models.memory import Memory
 
-    residents = (await db.execute(
-        select(Resident.id).where(Resident.status != "sleeping")
-    )).scalars().all()
+    rng = rng or _random
+    rows = (await db.execute(
+        select(Resident.id, Resident.tile_x, Resident.tile_y).where(Resident.status != "sleeping")
+    )).all()
     content = (event.get("description") or event.get("title") or "")[:200]
-    if not content or not residents:
+    if not content or not rows:
         return 0
-    for rid in residents:
-        db.add(Memory(
-            resident_id=rid, type="event", content=content,
-            importance=0.5, source="world_event",
-        ))
+    event_id = event.get("id")
+    is_weather = event.get("type") == "weather"
+
+    def _meta():
+        m = {"first_hand": True}
+        if event_id:
+            m["event_id"] = event_id
+        return m
+
+    if not settings.realism_info_gradient_enabled or is_weather:
+        # All-knowing broadcast (pre-P2 path; weather keeps it — sky is visible).
+        for rid, _, _ in rows:
+            db.add(Memory(resident_id=rid, type="event", content=content,
+                          importance=0.5, source="world_event", metadata_json=_meta()))
+        await db.commit()
+        return len(rows)
+
+    # Information gradient: geo-related + a random well-informed sample.
+    geo_ids = _geo_relevant_residents(event, rows)
+    informed: dict[str, float] = {rid: settings.realism_info_geo_importance for rid in geo_ids}
+    others = [rid for rid, _, _ in rows if rid not in geo_ids]
+    k = round(settings.realism_info_sample_frac * len(others))
+    for rid in rng.sample(others, min(k, len(others))):
+        informed.setdefault(rid, settings.realism_info_sample_importance)
+
+    for rid, imp in informed.items():
+        db.add(Memory(resident_id=rid, type="event", content=content,
+                      importance=imp, source="world_event", metadata_json=_meta()))
     await db.commit()
-    return len(residents)
+    return len(informed)
