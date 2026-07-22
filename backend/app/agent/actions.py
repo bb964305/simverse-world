@@ -24,12 +24,13 @@ class ActionType(str, Enum):
     # Rest
     IDLE           = "IDLE"
     NAP            = "NAP"
-    # Needs (realism P1-10): eat at a dining-category location (pure state change).
-    EAT            = "EAT"
     # Lab (元游戏入口): narrative-only tick action, gated to researchers inside
     # the experiment building. It never runs the real sandbox (that is the Lab
     # Runner's job); it only flips status→researching + writes a memory.
     RESEARCH       = "RESEARCH"
+    # Needs (realism P1-10): eat at a dining-category location (pure state change).
+    # Append-only 16th action — RESEARCH stays the 15th.
+    EAT            = "EAT"
 
 
 @dataclass

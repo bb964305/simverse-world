@@ -78,7 +78,11 @@ async def test_load_dynamic_locations_empty_is_zero():
 
 def test_research_is_15th_action():
     assert ActionType.RESEARCH.value == "RESEARCH"
-    assert len(list(ActionType)) == 15
+    # RESEARCH stays the 15th; EAT (realism P1-10 needs layer) is the 16th,
+    # appended after — RESEARCH's name/order/semantics are unchanged.
+    actions = list(ActionType)
+    assert actions[14] == ActionType.RESEARCH
+    assert len(actions) == 16
 
 
 def test_research_available_to_researcher_in_building():
