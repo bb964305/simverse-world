@@ -74,6 +74,9 @@ class Memory(Base):
     metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     last_accessed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    # Realism P0-2: soft-archive marker. Non-null = evicted from active retrieval
+    # (importance<floor AND idle>90d event memories); row is kept for provenance.
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         Index("ix_memories_resident_type", "resident_id", "type"),

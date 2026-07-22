@@ -1,5 +1,6 @@
 import logging
-from datetime import datetime, UTC
+import math
+from datetime import datetime, timedelta, UTC
 from sqlalchemy import select, func, delete, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.memory import Memory
@@ -26,6 +27,22 @@ logger = logging.getLogger(__name__)
 # E-28: cap event-memory content length on store (they're re-injected into every
 # later retrieval; an unbounded entry is paid for repeatedly).
 EVENT_MEMORY_MAX_CHARS = 80
+
+
+def _cosine(a: list[float] | None, b: list[float] | None) -> float:
+    """Cosine similarity of two equal-length vectors; 0.0 if either is missing."""
+    if not a or not b:
+        return 0.0
+    n = min(len(a), len(b))
+    dot = num_a = num_b = 0.0
+    for i in range(n):
+        av = float(a[i]); bv = float(b[i])
+        dot += av * bv
+        num_a += av * av
+        num_b += bv * bv
+    if num_a == 0.0 or num_b == 0.0:
+        return 0.0
+    return dot / (math.sqrt(num_a) * math.sqrt(num_b))
 
 
 class MemoryService:
@@ -181,34 +198,39 @@ class MemoryService:
         result = await self.db.execute(count_stmt)
         return result.scalar_one()
 
-    async def evict_memories(self, resident_id: str, max_events: int = 500) -> int:
-        """Evict oldest, least important event memories beyond the cap."""
-        count_result = await self.db.execute(
-            select(func.count()).select_from(Memory).where(
-                Memory.resident_id == resident_id, Memory.type == "event",
-            )
-        )
-        total = count_result.scalar_one()
-        if total <= max_events:
-            return 0
+    async def evict_memories(
+        self,
+        resident_id: str,
+        *,
+        importance_floor: float | None = None,
+        idle_days: int | None = None,
+    ) -> int:
+        """Soft-archive stale, low-importance *event* memories (realism P0-2).
 
-        to_evict = total - max_events
-        stmt = (
-            select(Memory.id)
-            .where(Memory.resident_id == resident_id, Memory.type == "event")
-            .order_by(Memory.importance.asc(), Memory.last_accessed_at.asc())
-            .limit(to_evict)
+        Score-floor semantics (replaces the old hard 500-count cap): an event
+        memory with ``importance < floor`` that hasn't been accessed in
+        ``idle_days`` is marked ``archived_at`` (kept for provenance, excluded
+        from active retrieval). relationship/reflection/dream memories are never
+        archived (only ``type == "event"`` is considered).
+        """
+        from app.config import settings
+        floor = settings.realism_evict_importance_floor if importance_floor is None else importance_floor
+        days = settings.realism_evict_idle_days if idle_days is None else idle_days
+        cutoff = datetime.now(UTC) - timedelta(days=days)
+        stmt = select(Memory).where(
+            Memory.resident_id == resident_id,
+            Memory.type == "event",
+            Memory.importance < floor,
+            Memory.last_accessed_at < cutoff,
+            Memory.archived_at.is_(None),
         )
-        result = await self.db.execute(stmt)
-        ids_to_delete = [row[0] for row in result.all()]
-
-        if ids_to_delete:
-            await self.db.execute(
-                delete(Memory).where(Memory.id.in_(ids_to_delete))
-            )
+        rows = list((await self.db.execute(stmt)).scalars().all())
+        if rows:
+            now = datetime.now(UTC)
+            for m in rows:
+                m.archived_at = now
             await self.db.commit()
-
-        return len(ids_to_delete)
+        return len(rows)
 
     async def retrieve_context(
         self,
@@ -232,8 +254,8 @@ class MemoryService:
         # 2. Structured: top reflections by importance
         reflections = await self.get_recent_reflections(resident_id, limit=max_reflections)
 
-        # 3. Events: try vector search, fall back to recency+importance
-        events = await self._search_events(resident_id, query_text, limit=max_events)
+        # 3. Events: realism scored vector retrieval, else recency+importance
+        events = await self._retrieve_events(resident_id, query_text, max_events)
 
         # Update last_accessed_at for all retrieved memories
         now = datetime.now(UTC)
@@ -249,6 +271,21 @@ class MemoryService:
             "events": events,
         }
 
+    async def _fetch_event_candidates(self, resident_id: str, cap: int) -> list[Memory]:
+        """Top-`cap` non-archived event memories by static importance/recency."""
+        stmt = (
+            select(Memory)
+            .where(
+                Memory.resident_id == resident_id,
+                Memory.type == "event",
+                Memory.archived_at.is_(None),
+            )
+            .order_by(Memory.importance.desc(), Memory.created_at.desc())
+            .limit(cap)
+        )
+        result = await self.db.execute(stmt)
+        return list(result.scalars().all())
+
     async def _search_events(
         self,
         resident_id: str,
@@ -256,14 +293,59 @@ class MemoryService:
         limit: int = 10,
     ) -> list[Memory]:
         """Search event memories. Falls back to recency+importance ranking."""
-        stmt = (
-            select(Memory)
-            .where(Memory.resident_id == resident_id, Memory.type == "event")
-            .order_by(Memory.importance.desc(), Memory.created_at.desc())
-            .limit(limit)
-        )
-        result = await self.db.execute(stmt)
-        return list(result.scalars().all())
+        return await self._fetch_event_candidates(resident_id, limit)
+
+    async def _retrieve_events(
+        self,
+        resident_id: str,
+        query_text: str,
+        limit: int,
+    ) -> list[Memory]:
+        """Realism P0-2: scored vector retrieval when enabled + query + embedding
+        available; else static importance/recency (fail-open)."""
+        from app.config import settings
+        if settings.realism_enabled and query_text:
+            try:
+                emb = await generate_embedding(query_text)
+                if emb:
+                    return await self._search_events_scored(resident_id, emb, limit)
+            except Exception as e:
+                logger.debug("scored retrieval fell back: %s", e)
+        return await self._search_events(resident_id, "", limit)
+
+    async def _search_events_scored(
+        self,
+        resident_id: str,
+        query_embedding: list[float],
+        limit: int = 10,
+    ) -> list[Memory]:
+        """Rank candidates by Generative-Agents weighting:
+        ``0.45×relevance + 0.30×recency + 0.25×importance`` where
+        ``recency = exp(-Δt_hours / τ)``, ``τ = 72h × (1 + importance)``.
+
+        Cosine relevance is computed in Python over the top-K static candidates
+        (works identically on sqlite tests and pgvector prod; no dead-code path).
+        """
+        from app.config import settings
+        candidates = await self._fetch_event_candidates(resident_id, cap=max(limit * 3, 30))
+        if not candidates:
+            return []
+        now = datetime.now(UTC)
+        wr = settings.realism_retrieval_relevance_weight
+        wc = settings.realism_retrieval_recency_weight
+        wi = settings.realism_retrieval_importance_weight
+        tau_base = settings.realism_recency_tau_hours
+        scored: list[tuple[float, Memory]] = []
+        for m in candidates:
+            imp = m.importance or 0.0
+            rel = _cosine(query_embedding, m.embedding)
+            created = m.created_at if m.created_at.tzinfo else m.created_at.replace(tzinfo=UTC)
+            dt_h = max((now - created).total_seconds() / 3600.0, 0.0)
+            tau = tau_base * (1.0 + imp)
+            recency = math.exp(-dt_h / tau) if tau > 0 else 0.0
+            scored.append((wr * rel + wc * recency + wi * imp, m))
+        scored.sort(key=lambda t: t[0], reverse=True)
+        return [m for _, m in scored[:limit]]
 
     async def search_events_vector(
         self,
@@ -283,6 +365,7 @@ class MemoryService:
                        1 - (embedding <=> :query_vec) AS similarity
                 FROM memories
                 WHERE resident_id = :rid AND type = 'event' AND embedding IS NOT NULL
+                      AND archived_at IS NULL
                 ORDER BY embedding <=> :query_vec
                 LIMIT :lim
             """)

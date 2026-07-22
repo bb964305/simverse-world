@@ -203,6 +203,20 @@ async def handle_chat_msg(ctx: ConnectionContext, data: dict) -> None:
             recent_dream = await get_recent_dream(db, ctx.resident.id)
         except Exception:
             recent_dream = None
+
+        # Realism P0-2: refresh this resident's event memories via scored vector
+        # retrieval keyed on the recent conversation (last 3 messages incl. the
+        # one just sent). Off → keep the start-time static context (no change).
+        if settings.realism_enabled:
+            try:
+                recent = [m.get("content", "") for m in ctx.chat_messages[-2:]]
+                query_text = " ".join([*recent, text]).strip()[-500:]
+                ctx.memory_context = await MemoryService(db).retrieve_context(
+                    resident_id=ctx.resident.id, user_id=ctx.user_id,
+                    query_text=query_text,
+                )
+            except Exception:
+                logger.debug("realism memory refresh failed", exc_info=True)
     # Session closed — no DB connection held during LLM streaming below.
 
     await manager.send(ctx.user_id, {

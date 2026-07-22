@@ -121,7 +121,32 @@ async def run_nightly_jobs() -> None:
             await run_weekly_goal_eval()
         except Exception:
             logger.error("Weekly goal eval failed", exc_info=True)
+
+    # Realism P0-2: soft-archive stale, low-importance event memories so the
+    # world forgets old small talk (score-floor eviction). Gated on realism.
+    from app.config import settings
+    if settings.realism_enabled:
+        try:
+            await run_memory_eviction()
+        except Exception:
+            logger.error("Realism memory eviction failed", exc_info=True)
     # Future: E2 dreams, E7 capsule delivery — each own try/except.
+
+
+async def run_memory_eviction() -> int:
+    """Realism P0-2: per-resident soft-archive of stale low-importance events."""
+    from sqlalchemy import select
+    from app.memory.service import MemoryService
+    from app.models.resident import Resident
+    total = 0
+    async with async_session() as db:
+        rids = (await db.execute(select(Resident.id))).scalars().all()
+        svc = MemoryService(db)
+        for rid in rids:
+            total += await svc.evict_memories(rid)
+    if total:
+        logger.info("Realism: archived %d stale event memories", total)
+    return total
 
 
 async def sweep_orphan_lab_runs() -> int:
