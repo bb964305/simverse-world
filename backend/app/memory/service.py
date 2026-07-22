@@ -70,6 +70,14 @@ class MemoryService:
         # bounded-count types (relationship/reflection) keep their full text.
         if type == "event" and content and len(content) > EVENT_MEMORY_MAX_CHARS:
             content = content[:EVENT_MEMORY_MAX_CHARS].rstrip() + "…"
+        # Realism P1-12: calibrate event importance by per-resident quantile so a
+        # model's score inflation is absorbed (raw preserved in metadata for
+        # traceability). Skipped without enough history / for non-event types.
+        from app.config import settings
+        if settings.realism_enabled and type == "event":
+            raw = importance
+            importance = await self._normalize_importance(resident_id, raw)
+            metadata_json = {**(metadata_json or {}), "raw_importance": round(float(raw), 4)}
         mem = Memory(
             resident_id=resident_id,
             type=type,
@@ -231,6 +239,32 @@ class MemoryService:
                 m.archived_at = now
             await self.db.commit()
         return len(rows)
+
+    async def _normalize_importance(self, resident_id: str, raw: float) -> float:
+        """Realism P1-12: map ``raw`` to its mid-rank quantile within the
+        resident's recent event importances (raw values, from metadata so the
+        mapping doesn't compound on itself). Returns raw when history < 10."""
+        from app.config import settings
+        window = settings.realism_importance_window
+        rows = (await self.db.execute(
+            select(Memory.importance, Memory.metadata_json)
+            .where(
+                Memory.resident_id == resident_id,
+                Memory.type == "event",
+                Memory.archived_at.is_(None),
+            )
+            .order_by(Memory.created_at.desc())
+            .limit(window)
+        )).all()
+        vals: list[float] = []
+        for imp, meta in rows:
+            rv = (meta or {}).get("raw_importance") if isinstance(meta, dict) else None
+            vals.append(float(rv if rv is not None else (imp if imp is not None else 0.0)))
+        if len(vals) < 10:
+            return round(float(raw), 4)
+        below = sum(1 for v in vals if v < raw)
+        equal = sum(1 for v in vals if v == raw)
+        return round((below + 0.5 * equal) / len(vals), 4)
 
     async def retrieve_context(
         self,
@@ -458,11 +492,21 @@ class MemoryService:
             return
         evo = EvolutionService(self.db)
 
-        # Check for shift on any high-importance memory
-        high_importance = [m for m in memories if m.importance >= 0.9]
-        if high_importance:
+        # Realism P1-12: shift gate is now a double condition — normalized
+        # importance percentile ≥ P95 AND |valence| > 0.5 — so a model's score
+        # inflation alone can't chain-trigger personality shifts (diagnosis
+        # "no-calibration single point"). Off = legacy raw importance≥0.9.
+        from app.config import settings
+        if settings.realism_enabled:
+            valence = abs(float((resident.mood_json or {}).get("valence", 0.0)))
+            candidates = [m for m in memories if (m.importance or 0.0) >= settings.realism_shift_percentile]
+            trigger = candidates[0] if (candidates and valence > settings.realism_shift_valence_gate) else None
+        else:
+            high_importance = [m for m in memories if m.importance >= 0.9]
+            trigger = high_importance[0] if high_importance else None
+        if trigger is not None:
             try:
-                await evo.evaluate_shift(resident, high_importance[0])
+                await evo.evaluate_shift(resident, trigger)
             except Exception as e:
                 logger.warning("Shift evaluation error (non-fatal): %s", e)
 
