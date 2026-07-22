@@ -30,6 +30,10 @@ class WorldChangeProposal(Base):
     risk_level: Mapped[str] = mapped_column(String(10), default="low")  # low|medium|high
     reviewer_id: Mapped[str | None] = mapped_column(String, nullable=True)
     review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Realism P0-5b: set atomically with the pending→approved commit so a
+    # reclaim sweep can detect proposals stuck in `approved` (crash before the
+    # applied commit) by age.
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reverted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))

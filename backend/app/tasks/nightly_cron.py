@@ -130,6 +130,24 @@ async def run_nightly_jobs() -> None:
             await run_memory_eviction()
         except Exception:
             logger.error("Realism memory eviction failed", exc_info=True)
+
+        # Realism P0-5b: reclaim proposals stuck in `approved` (crash between the
+        # approve-commit and the applied-commit) and orphaned Lab budget
+        # reservations left by runs that reached a terminal state.
+        try:
+            from app.services.proposal_service import reclaim_stuck_proposals
+            async with async_session() as db:
+                n = await reclaim_stuck_proposals(db)
+            if n:
+                logger.info("Realism: reclaimed %d stuck approved proposals", n)
+        except Exception:
+            logger.error("Realism proposal reclaim failed", exc_info=True)
+        try:
+            n = await sweep_orphan_lab_reservations()
+            if n:
+                logger.info("Realism: released %d orphan lab reservations", n)
+        except Exception:
+            logger.error("Realism lab reservation sweep failed", exc_info=True)
     # Future: E2 dreams, E7 capsule delivery — each own try/except.
 
 
@@ -147,6 +165,42 @@ async def run_memory_eviction() -> int:
     if total:
         logger.info("Realism: archived %d stale event memories", total)
     return total
+
+
+_RESERVED_BUDGET_COLS = (
+    "reserved_model_tokens", "reserved_tool_calls", "reserved_wall_clock_ms",
+    "reserved_egress_requests", "reserved_egress_bytes", "reserved_artifact_count",
+    "reserved_artifact_bytes", "reserved_active_workers",
+)
+
+
+async def sweep_orphan_lab_reservations() -> int:
+    """Realism P0-5b: release budget reservations left non-zero on runs that
+    already reached a terminal state (the docstring-acknowledged orphan in
+    app/lab/budgets.py). Read of the Lab models from the tasks layer — no
+    app/lab code touched."""
+    from sqlalchemy import select
+    from app.models.lab_run import LabRun
+    from app.models.lab_budget import LabRunBudget
+    _TERMINAL = ("succeeded", "failed", "cancelled")
+    released = 0
+    async with async_session() as db:
+        rows = (await db.execute(
+            select(LabRunBudget)
+            .join(LabRun, LabRun.id == LabRunBudget.run_id)
+            .where(LabRun.status.in_(_TERMINAL))
+        )).scalars().all()
+        for b in rows:
+            changed = False
+            for col in _RESERVED_BUDGET_COLS:
+                if (getattr(b, col, 0) or 0) > 0:
+                    setattr(b, col, 0)
+                    changed = True
+            if changed:
+                released += 1
+        if released:
+            await db.commit()
+    return released
 
 
 async def sweep_orphan_lab_runs() -> int:

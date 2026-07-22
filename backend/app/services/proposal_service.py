@@ -8,7 +8,7 @@ a P4 refinement).
 from __future__ import annotations
 
 import logging
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 
 from sqlalchemy import select
 
@@ -100,6 +100,28 @@ async def _fail_apply(db, p: WorldChangeProposal, note: str, reason: str) -> Non
         await coin_service.treasury_credit(db, p.author_slug, p.cost_sc, f"proposal_refund:{p.id}")
 
 
+async def reclaim_stuck_proposals(db, *, stuck_minutes: int | None = None) -> int:
+    """Realism P0-5b: reclaim proposals stuck in `approved` (a crash between the
+    CAS approve-commit and the applied-commit leaves them non-terminal forever —
+    no recycler existed, diagnosis §2.5). Mark failed + refund fuel, reusing the
+    shared `_fail_apply` path. Mirrors the Lab orphan-run reaper."""
+    from app.config import settings
+    minutes = settings.realism_proposal_stuck_minutes if stuck_minutes is None else stuck_minutes
+    cutoff = datetime.now(UTC) - timedelta(minutes=minutes)
+    rows = (await db.execute(
+        select(WorldChangeProposal).where(
+            WorldChangeProposal.status == "approved",
+            WorldChangeProposal.approved_at.isnot(None),
+            WorldChangeProposal.approved_at < cutoff,
+        )
+    )).scalars().all()
+    n = 0
+    for p in rows:
+        await _fail_apply(db, p, p.review_note or "", "stuck in approved (reclaimed)")
+        n += 1
+    return n
+
+
 async def approve_proposal(db, proposal_id: str, reviewer_id: str, note: str = "") -> WorldChangeProposal:
     p = await db.get(WorldChangeProposal, proposal_id)
     if p is None:
@@ -113,6 +135,11 @@ async def approve_proposal(db, proposal_id: str, reviewer_id: str, note: str = "
         db, proposal_id=proposal_id, expected=("pending",), new="approved",
         reviewer_id=reviewer_id, review_note=(note or p.review_note),
     )
+    if won:
+        # Realism P0-5b: stamp approved_at in the SAME commit as the approved
+        # status, so a crash before the applied commit leaves a datable "stuck
+        # in approved" row the reclaim sweep can find.
+        p.approved_at = datetime.now(UTC)
     await db.commit()
     if not won:
         raise ProposalError("proposal is not pending")
