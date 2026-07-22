@@ -86,8 +86,14 @@ async def handle_start_chat(ctx: ConnectionContext, data: dict) -> None:
                 "reason": f"wake:{slug}",
             })
             # Keep NPC awake: bump heat and update last_conversation_at
-            # so heat_cron won't put them back to sleep for at least 7 days
-            resident.heat = max(resident.heat, 10)
+            # so heat_cron won't put them back to sleep for at least 7 days.
+            # Realism P0-5a: the wake floor is a *pin* (display), keeping real
+            # heat free to reflect actual conversations; last_conversation_at is
+            # what actually blocks re-sleeping. Off → legacy heat bump.
+            if settings.realism_enabled:
+                resident.pinned_heat = max(resident.pinned_heat or 0, 10)
+            else:
+                resident.heat = max(resident.heat, 10)
             resident.last_conversation_at = datetime.now(UTC)
             # Broadcast wake-up to all players (including self)
             await manager.broadcast(

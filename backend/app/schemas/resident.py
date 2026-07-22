@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.world_geometry import MAP_HEIGHT_TILES, MAP_WIDTH_TILES
 
@@ -9,7 +9,9 @@ class ResidentListItem(BaseModel):
     name: str
     district: str
     status: str
-    heat: int
+    # Realism P0-5a: the API `heat` is the *display* value max(heat, pinned_heat)
+    # (reads the model's display_heat property). Off = pinned_heat 0 → unchanged.
+    heat: int = Field(validation_alias="display_heat")
     sprite_key: str
     tile_x: int
     tile_y: int
@@ -19,7 +21,7 @@ class ResidentListItem(BaseModel):
     meta_json: dict | None
     mood_label: str = "calm"
 
-    model_config = {"from_attributes": True}
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 
 class ResidentDetail(ResidentListItem):

@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, UTC
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models.resident import Resident
 from app.models.conversation import Conversation
 
@@ -41,8 +42,13 @@ async def recalculate_heat(db: AsyncSession) -> list[dict]:
     for resident in all_residents:
         new_heat = heat_map.get(resident.id, 0)
         old_status = resident.status
-        # Don't overwrite manually set heat with a lower value
-        resident.heat = max(new_heat, resident.heat) if new_heat > 0 else resident.heat
+        # Realism P0-5a: heat is the *real* 7-day conversation count and may fall
+        # (decay). Manual pins live in pinned_heat; display = max(heat,pinned_heat).
+        # Off → legacy "only goes up" clamp that protected manually-set values.
+        if settings.realism_enabled:
+            resident.heat = new_heat
+        else:
+            resident.heat = max(new_heat, resident.heat) if new_heat > 0 else resident.heat
 
         # Never change status of residents currently chatting
         if resident.status == "chatting":
