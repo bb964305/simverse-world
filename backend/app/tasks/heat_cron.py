@@ -20,6 +20,13 @@ async def heat_cron_loop():
                     await decay_all(db)
                 except Exception:
                     logger.warning("mood decay failed", exc_info=True)
+                # Realism P1-8: weak hourly weather mood nudge (rain/storm down,
+                # sunny morning up). No-op when realism is off.
+                try:
+                    from app.services.mood_service import apply_weather_mood
+                    await apply_weather_mood(db)
+                except Exception:
+                    logger.warning("weather mood failed", exc_info=True)
             for change in changes:
                 await manager.broadcast({
                     "type": "resident_status",

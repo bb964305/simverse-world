@@ -142,7 +142,8 @@ class AgentLoop:
                             })
                 return None
 
-            if not should_tick(schedule, current_hour):
+            weather_kind = (weather or {}).get("kind")
+            if not should_tick(schedule, current_hour, weather_kind):
                 return None
 
             async with semaphore:

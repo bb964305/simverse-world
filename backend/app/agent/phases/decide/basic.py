@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import random
 from datetime import datetime
 from typing import Any
 
@@ -18,6 +19,13 @@ logger = logging.getLogger(__name__)
 # Movement actions whose target tile is resolved server-side (realism P0-1).
 # GO_HOME is excluded — execute resolves the home entrance itself.
 _MOVEMENT_ACTIONS = {ActionType.WANDER, ActionType.VISIT_DISTRICT}
+
+
+def _weather_kind(world_events) -> str | None:
+    for e in world_events or []:
+        if e.get("type") == "weather":
+            return (e.get("payload_json") or {}).get("kind")
+    return None
 
 
 class BasicDecidePlugin:
@@ -47,6 +55,17 @@ class BasicDecidePlugin:
                 ctx.plan_followed = True
                 plan.status = "executing"
                 return ctx
+
+        # Realism P1-8: rule-level weather interrupt — duck out of rain/storm to
+        # the nearest indoor place (zero LLM). Below a high-importance plan,
+        # above the plan-skip fast path.
+        shelter = self._maybe_shelter(ctx)
+        if shelter is not None:
+            ctx.action_result = shelter
+            ctx.plan_followed = False
+            if plan:
+                plan.status = "interrupted"
+            return ctx
 
         # Case 2 (E-09/E-10): plan-priority skip. Follow the plan without an LLM
         # call when nothing warrants reconsidering. force_plan_only (budget 95%+)
@@ -120,6 +139,32 @@ class BasicDecidePlugin:
                 return True
 
         return False
+
+    def _maybe_shelter(self, ctx: TickContext) -> ActionResult | None:
+        """Realism P1-8: in rain/storm, an outdoor resident reroutes to the
+        nearest indoor location with probability realism_shelter_prob."""
+        if not settings.realism_enabled:
+            return None
+        if _weather_kind(getattr(ctx, "world_events", None)) not in ("rain", "storm"):
+            return None
+        if ActionType.VISIT_DISTRICT not in ctx.available_actions:
+            return None
+        from app.agent.map_data import (
+            get_location_id_at, location_is_indoor, nearest_indoor_location,
+            get_valid_target_tile,
+        )
+        here = get_location_id_at(ctx.resident.tile_x, ctx.resident.tile_y)
+        if here and location_is_indoor(here):
+            return None  # already sheltered
+        if random.random() >= settings.realism_shelter_prob:
+            return None
+        target_id = nearest_indoor_location((ctx.resident.tile_x, ctx.resident.tile_y))
+        if not target_id:
+            return None
+        return ActionResult(
+            action=ActionType.VISIT_DISTRICT, target_slug=target_id,
+            target_tile=get_valid_target_tile(target_id), reason="躲雨",
+        )
 
     def _force_execute_plan(self, plan, ctx: TickContext) -> ActionResult | None:
         try:

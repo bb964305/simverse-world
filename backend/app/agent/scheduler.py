@@ -107,7 +107,22 @@ def build_schedule(sbti_data: dict | None, weather: dict | None = None) -> Daily
     )
 
 
-def get_activity_probability(schedule: DailySchedule, hour: int) -> float:
+def _weather_activity_factor(weather_kind: str | None) -> float:
+    """Realism P1-8: weather multiplier on activity probability. Empty streets
+    in a storm are a glance-level realism cue."""
+    from app.config import settings
+    return {
+        "sunny": settings.realism_weather_sunny,
+        "cloudy": settings.realism_weather_cloudy,
+        "rain": settings.realism_weather_rain,
+        "storm": settings.realism_weather_storm,
+        "snow": settings.realism_weather_snow,
+    }.get(weather_kind or "", 1.0)
+
+
+def get_activity_probability(
+    schedule: DailySchedule, hour: int, weather_kind: str | None = None,
+) -> float:
     """Compute a 0.0-1.0 probability that a resident acts at this hour.
 
     Uses a smooth curve that:
@@ -136,16 +151,20 @@ def get_activity_probability(schedule: DailySchedule, hour: int) -> float:
     social_boost = 0.2 if hour in schedule.social_slots else 0.0
 
     prob = min(0.95, baseline + peak_boost + social_boost)
+    # Realism P1-8: weather scales the whole activity probability (post-cap so a
+    # storm can push the street below any baseline).
+    if settings.realism_enabled and weather_kind:
+        prob *= _weather_activity_factor(weather_kind)
     return prob
 
 
-def should_tick(schedule: DailySchedule, hour: int) -> bool:
+def should_tick(schedule: DailySchedule, hour: int, weather_kind: str | None = None) -> bool:
     """Roll against activity probability with ±15 minute jitter.
 
     The jitter means residents don't all wake up at exactly the same second,
     and slightly different residents will tick at different wall-clock moments.
     """
-    prob = get_activity_probability(schedule, hour)
+    prob = get_activity_probability(schedule, hour, weather_kind)
     if prob <= 0.0:
         return False
     # Jitter: add small random noise to prob (±0.1)

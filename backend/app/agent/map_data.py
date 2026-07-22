@@ -250,6 +250,36 @@ def get_location_by_id(loc_id: str) -> dict | None:
     return LOCATIONS.get(loc_id)
 
 
+def location_is_indoor(loc_id: str | None) -> bool:
+    """Realism P1-8: whether a location shelters from weather. Derived from the
+    existing ``type`` (outdoor plazas/parks/streets are exposed) with an optional
+    explicit ``indoor`` override. Deviation: not hand-tagging all ~20 locations —
+    ``type`` already carries indoor/outdoor and stays in sync."""
+    loc = get_location_by_id(loc_id) if loc_id else None
+    if loc is None:
+        return False
+    if "indoor" in loc:
+        return bool(loc["indoor"])
+    return loc.get("type") != "outdoor"
+
+
+def nearest_indoor_location(from_tile: tuple[int, int]) -> str | None:
+    """Nearest public indoor location entrance to ``from_tile`` (for 躲雨)."""
+    best, best_d = None, None
+    for loc_id, loc in LOCATIONS.items():
+        if loc.get("type") in ("private", "apartment"):
+            continue
+        if not location_is_indoor(loc_id):
+            continue
+        entrance = loc.get("entrance") or loc.get("center")
+        if not entrance:
+            continue
+        d = abs(from_tile[0] - entrance[0]) + abs(from_tile[1] - entrance[1])
+        if best_d is None or d < best_d:
+            best, best_d = loc_id, d
+    return best
+
+
 def get_location_id_by_name(name: str | None) -> str | None:
     """Reverse-lookup a location id by its display name (first match).
 
