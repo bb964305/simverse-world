@@ -395,3 +395,32 @@
   4. Task 12 归一化对 gossip(≥0.6)/检索排序有连带影响（realism on 时的预期校准效应）；<10 条历史跳过归一化避免冷启动失真。
 - **交付状态**：双分支 CI 绿 —— `feat/realism-p0`（P0，1145 passed）+ `feat/realism-p1`（P0+P1，1181 passed）+ 四探针出数。**不部署，等 Jimmy 拍板真实 burn-in。**
 
+### P2 完成（feat/realism-p2，从 feat/realism-p1 切，2026-07-22）
+
+- **验收门全绿**：`cd backend && python -m pytest` = **1243 passed / 1 skipped / 11 deselected（lab_oci 既有）/ 0 failed**。基线 1181 → +62 新测试，只增不减、零新增排除。
+- **三个独立开关默认 False**：`REALISM_RELATIONS_ENABLED` / `REALISM_INFO_GRADIENT_ENABLED` / `REALISM_CROWD_ENABLED`（互相独立、且独立于 `REALISM_ENABLED`）。任一关闭时对应路径行为与现状完全一致；全关时 1181 既有测试零改动通过。数值参数续 `REALISM_` 前缀进 config + `.env.example`。
+- **提交链**（每任务独立提交、带任务号，串行门：1→2、5→6 已守）：
+  - `realism-p2-1` resident_relations 表 + RelationService（原子 upsert + 规范化无向键 + 周衰减）+ 迁移 039（单头）
+  - `realism-p2-2` 写入面接线（互聊/玩家聊天/目击/送礼/投资 四触发点，复用既有输出零新增 LLM）
+  - `realism-p2-3` 读取面加权采样（偶遇/招呼/八卦/CHAT 目标/对话轮数 五处，注入 RNG + seeded 断言）
+  - `realism-p2-4` 圈子检测（连通分量）+ 三消费端（日报行 / `GET /admin/social-graph` / 剧本 `circle:<id>`）
+  - `realism-p2-5` 废除全知广播（信息梯度：地理相关+20% 灵通样本，天气全员例外，一手带 event_id）
+  - `realism-p2-6` 八卦成为二手通道（event_id 记忆进候选池、二手继承 event_id+hops，链路成立）
+  - `realism-p2-7` 人流聚集（节日地点 VISIT_DISTRICT ×3 抽签 + 从众 prompt 微提示）
+  - `realism-p2-8` 两探针（度分布偏度 + 信息扩散半衰期）出数
+- **两个新探针出数**（seeded fixture 演示，非真 agent burn-in；真 burn-in 待开 loop+时间，按"不部署/等拍板"延后）：
+  - **社交网络度分布偏度 = 1.775**（星形图 hub+6 spoke：节点 7、均度 2.0、度 1–6、直方图 {1:4, 2:2, 6:1}）——**右偏>0 = 存在社交明星与边缘者 ✅**；关闭开关的对照组（均匀随机）应近 0/近对称（`test_skewness_regular_graph_is_symmetric` 演示规则图 skew=0）。
+  - **信息扩散半衰期**：非天气事件 `ev1` 知情 5/7（71%）、**到 50% = 2.0h（数小时量级、非瞬时 ✅）**；对照组全知广播所有一手同刻写入 → t50≈0（`test_half_life_control_instant` 演示）。
+  - **知情顺序×关系强度 Pearson < 0**（信息沿强关系先流动，`test_diffusion_relation_correlation_negative_along_ties` 演示）。
+- **P2 偏差登记**：
+  1. **P2-1 clamp 可移植**：`familiarity/affinity` 增量封顶用 SQLAlchemy `CASE` 而非方案示例的 `LEAST/GREATEST`（SQLite 无此函数）——同一语句在测试 SQLite 与生产 Postgres 都跑，语义等价（原子 UPDATE 不变）。读取面加 `populate_existing` 避免同 session `synchronize_session=False` 写后读到身份映射旧值（coin_service 同类坑）。
+  2. **P2-2 玩家路径拆两点**：玩家↔居民 familiarity 记在 `handle_end_chat`（对话完成、无关评分），affinity 记在 `handle_rate_chat`（4-5★+0.03 / 1-2★−0.03）——玩家侧无 wrapup 情绪信号,续 P1「玩家聊天 mood 由 rating 承载」惯例。送礼 affinity 直接消费 item `relationship_boost`（0.08–0.15，接通诊断点名的"未见消费端"）,非固定 +0.1。
+  3. **P2-3 轮数确定式**：`turns_for_familiarity` 纯确定式插值（无 RNG，完全可复现），familiarity→[3,8]（<0.2≈3–4、>0.7≈6–8）。关系批量取进 `TickContext.relations`（每 tick +1 查询、非每候选，守性能红线）。CHAT 目标混入 ε=0.1 均匀分量（硬要求,防圈子僵化）。
+  4. **P2-4 圈子**：`circle_id = 最小成员 id`（成员稳定则跨夜稳定）；JSON 快照进 Redis；管理端只交付 JSON 端点，前端可视化不做（按方案；rolldown build 既有问题延续）。剧本 `circle:<id>` 靠 nightly 已 stamp 的 `meta_json.circle_id` 展开（关系关时 circle_id 不写 → 自然空展开）。
+  5. **P2-5 地理相关**：`location_visits` 是**玩家**访问表（非居民），故"近 7 天到访者"对居民不可用——地理相关改用**居民当前位置**在事件地点半径内（`payload_json.location_id`；现有节日 payload 无地点 → 默认只走 20% 灵通样本,仍 <50% 知情）。天气全员例外保留。
+  6. **P2-6 候选分类挪到 Python**：八卦候选池的 event_id 判定在 Python 做（metadata JSON 无法可移植 SQL 过滤）；事件类记忆 floor 降到 0.3 让 ×0.8/跳的 importance 撑过几跳（"朋友的朋友"）。关闭梯度时回落经典过滤（≥0.6+related_resident）,与 P1 字节一致。
+  7. **P2-7 补完 P1-9 偏差**：节日地点 ×3 权重以 decide 级**加权抽签重定向**实现（在计划/需求/躲雨之下、LLM 之上；抽中事件地点才重定向,故是 ×3 拉力非硬赶人）——补上 P1 记录的"无候选权重层"。从众提示为 decide-prompt 软注入；地点人数计数缓存 ~30s（每 tick 批一次查询、非每居民）。
+  8. **测试隔离硬化（非 app/lab 源码）**：全量套件里 `test_lab_e2e::test_approval_chain_v1_approve` 是既有的事件循环时序 flake（审批行与 `run.status='needs_approval'` 分两次提交,poll helper 抢跑读到瞬时 'running'）——本次新增测试文件改变了调度时序使其确定复现,遂**只**硬化其 poll helper（等 status 提交落定再返回）,未碰 `app/lab/` 任何源码。
+- **选做项不做**：世界时钟（§3.1B）与记忆失真（§6.3，唯一有 LLM 成本项）本次明确排除,按 kickoff 完成 8 项后停下等 Jimmy 拍板。
+- **交付状态**：`feat/realism-p2` CI 绿（1243 passed）+ 两探针出数 + PROGRESS 更新。**不合并、不部署,等 Jimmy 拍板真实 burn-in 与 REALISM_* 生产默认值。**
+
