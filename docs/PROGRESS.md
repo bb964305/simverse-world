@@ -348,4 +348,17 @@
   1. **分支从 `feat/lab-agent-v1` 切 `feat/realism-p0`**（非 master）：当前分支领先 master 78 commits，含 Lab 迁移链头 037 + 被 Task 5b 引用的 `sweep_orphan_lab_runs` 回收范式；回退 master 会丢迁移链且与 Explore 分析的工作树不一致。
   2. **Task 1 `plan.target` 语义漂移**：PLAN prompt 现让 LLM 把入口坐标 `[x,y]` 塞进 `target`、`location` 存地点名（`plan/basic.py:42,50`），故 `_force_execute_plan` 拿 `plan.target` 当 slug + `target_tile=None` 导致计划移动永远原地。修复=改 prompt 让 target 输出地点 id + 服务端从 id/名称解析 tile（忽略模型坐标）。
   3. **Task 3 玩家聊天 mood 不接**：方案称"两条路径都接"，但玩家聊天路径当前**无 positive/neutral/negative 输出**（`extract_events` prompt 无 mood 字段）；玩家侧情绪已由 `rating.py:54-58` 评分钩子承载。只接居民互聊路径；玩家 in-line mood 需给 LLM 输出加字段，超出"唯一例外=梦境 tone"授权，故不实现。
+  4. **Task 1 放弃改 PLAN prompt**：原计划改 prompt 让 target 输出地点 id，评估后改为纯靠 `resolve_target_tile` 的 id/名称双路解析（plan.location 已可靠存地点名，decide LLM target_slug 按 id+name 双试），避免 prompt-content 测试风险，收益等价。
+
+### P0 完成（全绿，2026-07-22）
+
+- **验收门全绿**：`cd backend && ./.venv/bin/python -m pytest` = **1145 passed / 1 skipped / 11 deselected（lab_oci 既有）/ 0 failed / exit 0（152s）**。基线 1106 → +39 新测试，**只增不减、零新增排除**。
+- **提交链**（`feat/realism-p0`）：`70a6a3d` docs → `d446701` p0-0 config → `1d9cf61` p0-1 移动 → `145760f` p0-2 检索+遗忘 → `83c8911` p0-3 情绪 → `bf25fc1` p0-4 剧本 → `2c7f8d3` p0-5a heat → `4115c83` p0-5b 回收 → `6e135ec` p0-5c Redis → `0272c0a` p0-5d coin → `81bfeea` p0-6 探针。
+- **新机制全部门控 `REALISM_ENABLED`（默认 False）**：off 时行为 == 现状（1106 既有测试零改动通过）；纯基础设施重构（5c Redis 迁移、5d coin 原子化）语义等价、不门控。
+- **迁移 038**（`archived_at`/`pinned_heat`/`approved_at`）链尾单头（down_revision=037，`grep` 计数=1）；测试走 sqlite `create_all`，PG 待部署时 `alembic upgrade`。
+- **两个 P0 探针出数**（seeded fixture 演示，非真 agent burn-in——真 burn-in 需开 loop+时间，按"不部署/等拍板"延后）：
+  - **计划到达率 = 75.0%**（4 个 VISIT_DISTRICT trip 中 3 个到达；修复前≈0，目标 >70% ✅）
+  - **行为-记忆一致率 = 100.0%**（8 条移动记忆文本全部匹配真实位移；目标 >95% ✅）
+  - 探针纯函数 `plan_arrival_rate`/`behavior_memory_consistency`/`fetch_move_records`/`render_probes` 已带单测（`test_burnin_report.py` +4）。
+- **下一步**：进 P1（任务 7–13），新开 `feat/realism-p1`。不部署。
 
