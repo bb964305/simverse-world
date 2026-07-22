@@ -11,6 +11,7 @@ from datetime import datetime, UTC
 from sqlalchemy import select
 
 from app.agent.map_data import get_location_by_id
+from app.config import settings
 from app.models.resident import Resident
 from app.redis_client import get_redis
 from app.ws.manager import manager
@@ -52,7 +53,7 @@ def _reset_for_tests() -> None:  # pragma: no cover
     pass
 
 
-async def maybe_encounter(db, user_id: str, location_id: str) -> dict | None:
+async def maybe_encounter(db, user_id: str, location_id: str, rng=random) -> dict | None:
     """Maybe surface an encounter with a nearby idle resident. Returns the payload if sent."""
     today = datetime.now(UTC).date().isoformat()
     r = get_redis()
@@ -77,10 +78,23 @@ async def maybe_encounter(db, user_id: str, location_id: str) -> dict | None:
     if not residents:
         return None
 
-    if random.random() >= ENCOUNTER_BASE_PROB:
+    if rng.random() >= ENCOUNTER_BASE_PROB:
         return None
 
-    resident = random.choice(residents)
+    # P2-3: familiar residents are likelier to "happen to" be the one you run
+    # into — weight 1 + coef×familiarity(player, resident). Uniform when off.
+    if settings.realism_relations_enabled:
+        from app.services import relation_service
+        rels = await relation_service.relations_for(db, user_id, party_type="player")
+        coef = settings.realism_rel_encounter_fam_coef
+
+        def _w(r):
+            v = rels.get(r.id)
+            return 1.0 + coef * (v.familiarity if v else 0.0)
+
+        resident = relation_service.weighted_pick(residents, _w, rng)
+    else:
+        resident = rng.choice(residents)
     opener = OPENERS.get(location_id, DEFAULT_OPENER).format(name=resident.name)
     payload = {
         "type": "encounter_prompt",

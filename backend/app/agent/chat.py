@@ -167,6 +167,18 @@ async def resident_chat(
     # Clamp turns to [3, 8]
     num_turns = max(3, min(max_turns, 8))
 
+    # P2-3: old friends linger, strangers keep it short — move the turn count with
+    # familiarity within [3, 8] (≈3-4 for near-strangers, ≈6-8 for close ties).
+    # Only when the caller didn't pin max_turns and the relations gate is on.
+    if settings.realism_relations_enabled and max_turns == settings.agent_chat_max_turns:
+        try:
+            from app.services import relation_service
+            rel_row = await relation_service.get_pair(db, initiator.id, target.id)
+            fam = rel_row.familiarity if rel_row else 0.0
+            num_turns = relation_service.turns_for_familiarity(fam)
+        except Exception:
+            logger.warning("familiarity turn interpolation failed", exc_info=True)
+
     # Lock both as socializing
     initiator.status = "socializing"
     target.status = "socializing"

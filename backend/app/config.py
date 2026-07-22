@@ -327,6 +327,10 @@ class Settings(BaseSettings):
     realism_rel_decay_idle_days: int = 30        # no interaction for this long → decay
     realism_rel_familiarity_decay: float = 0.95  # ×/week on idle relations
     realism_rel_affinity_decay: float = 0.98     # ×/week (2% regression toward 0)
+    # P2 Task 3 — read-path weighted sampling.
+    realism_rel_encounter_fam_coef: float = 2.0  # encounter weight = 1 + coef×familiarity
+    realism_rel_chat_epsilon: float = 0.1        # ε uniform mix in CHAT target sampling
+    realism_rel_gossip_fam_floor: float = 0.1    # gossip candidate weight = floor + familiarity(subject)
 
     model_config = {"env_file": ".env"}
 

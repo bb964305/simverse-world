@@ -45,7 +45,7 @@ async def _distort(content: str) -> str:
     return _extract_text(resp).strip() or content
 
 
-async def maybe_gossip(db, speaker: Resident, listener: Resident) -> Memory | None:
+async def maybe_gossip(db, speaker: Resident, listener: Resident, rng=random) -> Memory | None:
     """Maybe pass a third-party memory from speaker to listener. Returns the new memory."""
     if random.random() >= GOSSIP_PROBABILITY:
         return None
@@ -60,13 +60,25 @@ async def maybe_gossip(db, speaker: Resident, listener: Resident) -> Memory | No
         ).order_by(Memory.importance.desc()).limit(20)
     )).scalars().all()
 
-    origin = None
-    for m in candidates:
-        if (m.metadata_json or {}).get("hops", 0) < MAX_HOPS:  # hops>=4 terminates
-            origin = m
-            break
-    if origin is None:
+    usable = [m for m in candidates if (m.metadata_json or {}).get("hops", 0) < MAX_HOPS]  # hops>=4 terminates
+    if not usable:
         return None
+
+    if settings.realism_relations_enabled:
+        # P2-3: gossip flows along strong ties — weight each rumor by the speaker's
+        # familiarity with its *subject* (floor + familiarity so a stranger's rumor
+        # is still possible). Batched: one relations query, not one per candidate.
+        from app.services import relation_service
+        rmap = await relation_service.relations_for(db, speaker.id)
+        floor = settings.realism_rel_gossip_fam_floor
+
+        def _w(m):
+            v = rmap.get(m.related_resident_id)
+            return floor + (v.familiarity if v else 0.0)
+
+        origin = relation_service.weighted_pick(usable, _w, rng)
+    else:
+        origin = usable[0]  # importance-ordered first (pre-P2 behavior)
 
     origin_hops = (origin.metadata_json or {}).get("hops", 0)
     new_hops = origin_hops + 1
@@ -83,7 +95,6 @@ async def maybe_gossip(db, speaker: Resident, listener: Resident) -> Memory | No
 
     # Realism P1-11: being gossiped about (a distorted rumor, hops≥2, subject is a
     # real resident) is quietly unsettling — nudge the subject's mood.
-    from app.config import settings
     if settings.realism_enabled and new_hops >= 2 and origin.related_resident_id:
         try:
             from app.services.mood_service import apply_mood_event_by_id

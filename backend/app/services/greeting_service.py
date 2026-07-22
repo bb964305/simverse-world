@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, UTC
 
 from sqlalchemy import select
 
+from app.config import settings
 from app.database import async_session
 from app.memory.service import MemoryService
 from app.models.memory import Memory
@@ -92,34 +93,54 @@ async def maybe_greet(user_id: str) -> None:
             player = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
             player_name = player.name if player else "朋友"
 
+            # Collect eligible greeters (idle, not greeted in the last 24h).
+            eligible: list = []  # (rel_memory, resident)
             for rel in rels:
                 resident = await db.get(Resident, rel.resident_id)
                 if resident is None or resident.status != "idle":
                     continue
                 if await _recently(db, resident.id, user_id, "greeting", timedelta(hours=GREET_COOLDOWN_HOURS)):
                     continue
+                eligible.append((rel, resident))
+            if not eligible:
+                return
 
-                text = _pick_template(resident).format(player=player_name)
-                gift = None
-                if (rel.importance or 0) >= CLOSE_FRIEND_IMPORTANCE:
-                    gift = await _maybe_gift(db, resident, user_id)
+            # P2-3: greet the highest-*affinity* eligible resident rather than the
+            # first idle one (a warmer tie speaks up first). Falls back to the
+            # importance-ordered first when the relations gate is off.
+            if settings.realism_relations_enabled:
+                from app.services import relation_service
+                rmap = await relation_service.relations_for(db, user_id, party_type="player")
 
-                if await manager.is_online(user_id):
-                    await manager.send(user_id, {
-                        "type": "resident_greeting",
-                        "resident_slug": resident.slug,
-                        "text": text,
-                        "gift": gift,
-                    })
-                await notify(
-                    db, user_id, "resident_greeting", f"{resident.name} 跟你打招呼", text,
-                    {"resident_slug": resident.slug, "gift": gift},
-                )
-                await MemoryService(db).add_memory(
-                    resident.id, "event", "我跟一位老朋友打了招呼",
-                    importance=0.2, source="greeting", related_user_id=user_id,
-                    metadata_json={"greeted_user": user_id},
-                )
-                return  # one greeting per connection
+                def _aff(pair):
+                    v = rmap.get(pair[1].id)
+                    return v.affinity if v else 0.0
+
+                rel, resident = max(eligible, key=_aff)
+            else:
+                rel, resident = eligible[0]
+
+            text = _pick_template(resident).format(player=player_name)
+            gift = None
+            if (rel.importance or 0) >= CLOSE_FRIEND_IMPORTANCE:
+                gift = await _maybe_gift(db, resident, user_id)
+
+            if await manager.is_online(user_id):
+                await manager.send(user_id, {
+                    "type": "resident_greeting",
+                    "resident_slug": resident.slug,
+                    "text": text,
+                    "gift": gift,
+                })
+            await notify(
+                db, user_id, "resident_greeting", f"{resident.name} 跟你打招呼", text,
+                {"resident_slug": resident.slug, "gift": gift},
+            )
+            await MemoryService(db).add_memory(
+                resident.id, "event", "我跟一位老朋友打了招呼",
+                importance=0.2, source="greeting", related_user_id=user_id,
+                metadata_json={"greeted_user": user_id},
+            )
+            return  # one greeting per connection
     except Exception:
         logger.warning("maybe_greet failed for %s", user_id, exc_info=True)

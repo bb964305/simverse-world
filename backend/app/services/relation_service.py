@@ -23,6 +23,30 @@ from app.config import settings
 from app.models.resident_relation import ResidentRelation
 
 
+def weighted_pick(items, weight_fn, rng, epsilon: float = 0.0):
+    """Pick one item weighted by ``weight_fn(item) >= 0``, deterministic under a
+    seeded ``rng``. With probability ``epsilon`` a *uniform* pick is made instead
+    (the ε mixing mass that keeps low-weight items — strangers — reachable so
+    circles don't ossify). Falls back to uniform when all weights are 0."""
+    if not items:
+        return None
+    if epsilon and rng.random() < epsilon:
+        return rng.choice(items)
+    weights = [max(0.0, float(weight_fn(it))) for it in items]
+    if sum(weights) <= 0:
+        return rng.choice(items)
+    return rng.choices(items, weights=weights, k=1)[0]
+
+
+def turns_for_familiarity(familiarity: float, lo: int = 3, hi: int = 8) -> int:
+    """Map familiarity [0,1] linearly onto the conversation-length band [lo, hi]:
+    strangers talk briefly (≈3-4 turns), old friends linger (≈6-8). Deterministic
+    (fully reproducible) — old-friend length is a property of the tie, not a dice
+    roll."""
+    n = int(round(lo + (hi - lo) * max(0.0, min(1.0, familiarity))))
+    return max(lo, min(hi, n))
+
+
 def canonical_pair(
     id1: str, id2: str, type1: str = "resident", type2: str = "resident"
 ) -> tuple[str, str, str, str]:
