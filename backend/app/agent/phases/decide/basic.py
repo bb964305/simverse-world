@@ -15,6 +15,10 @@ from app.memory.service import MemoryService
 
 logger = logging.getLogger(__name__)
 
+# Movement actions whose target tile is resolved server-side (realism P0-1).
+# GO_HOME is excluded — execute resolves the home entrance itself.
+_MOVEMENT_ACTIONS = {ActionType.WANDER, ActionType.VISIT_DISTRICT}
+
 
 class BasicDecidePlugin:
     def __init__(self, params: dict[str, Any] | None = None):
@@ -125,10 +129,16 @@ class BasicDecidePlugin:
             return None
         if action not in ctx.available_actions:
             return None
+        # Realism P0-1: resolve the target tile server-side from the plan's
+        # location (id or display name); model-reported coords are ignored.
+        target_tile = None
+        if settings.realism_enabled and action in _MOVEMENT_ACTIONS:
+            from app.agent.plan_target import resolve_target_tile
+            target_tile = resolve_target_tile(plan.target, plan.location)
         return ActionResult(
             action=action,
             target_slug=plan.target,
-            target_tile=None,
+            target_tile=target_tile,
             reason=plan.reason[:100],
         )
 
@@ -161,7 +171,14 @@ class BasicDecidePlugin:
             system_prompt, [{"role": "user", "content": user_prompt}], max_tokens=200,
             meter=Meter(scenario="decide", resident_id=ctx.resident.id), expects_json=True,
         )
-        return parse_action_result(raw)
+        result = parse_action_result(raw)
+        # Realism P0-1: ignore any model-reported target_tile for movement
+        # actions; resolve it server-side from target_slug (tried as id and name).
+        if (result is not None and settings.realism_enabled
+                and result.action in _MOVEMENT_ACTIONS):
+            from app.agent.plan_target import resolve_target_tile
+            result.target_tile = resolve_target_tile(result.target_slug, result.target_slug)
+        return result
 
     async def _load_memories(self, ctx: TickContext) -> None:
         try:

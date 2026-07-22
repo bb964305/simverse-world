@@ -250,6 +250,20 @@ def get_location_by_id(loc_id: str) -> dict | None:
     return LOCATIONS.get(loc_id)
 
 
+def get_location_id_by_name(name: str | None) -> str | None:
+    """Reverse-lookup a location id by its display name (first match).
+
+    Used by realism plan/decision target resolution so a plan that only carries
+    the location display name (not the slug) still resolves to an entrance tile.
+    """
+    if not name:
+        return None
+    for loc_id, loc in LOCATIONS.items():
+        if loc.get("name") == name:
+            return loc_id
+    return None
+
+
 # ── Dynamic world overlay (Lab governance) ────────────────────────────
 # Slugs merged in from the ``dynamic_locations`` table so an approved
 # WorldChangeProposal can add a building without a redeploy. Tracked so a
