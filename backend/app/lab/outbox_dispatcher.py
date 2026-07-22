@@ -30,7 +30,8 @@ TOPIC_OWNERS = {
     "lab.task.terminalized": "lab_terminalizer",
     "world_changed": "world_relay",
     "lab_control": "lab_runner",
-    "artifact_cleanup": "artifact_cleanup",
+    "artifact.cleanup.requested": "lab_runner",
+    "artifact.cleanup.completed": "lab_runner",
 }
 KNOWN_TOPICS = tuple(TOPIC_OWNERS)
 
@@ -65,6 +66,10 @@ async def _publish_lab_control(_envelope: dict) -> None:
     """
 
 
+async def _publish_artifact_cleanup(_envelope: dict) -> None:
+    """Wakeup only; the Runner reconciles the durable Artifact operation rows."""
+
+
 def owned_topics(owner: str) -> frozenset[str]:
     return frozenset(topic for topic, topic_owner in TOPIC_OWNERS.items() if topic_owner == owner)
 
@@ -73,6 +78,8 @@ def default_publishers(*, owner: str | None = None) -> dict[str, Publisher]:
     registry: dict[str, Publisher] = {
         "lab.run.enqueue": _publish_run_enqueue,
         "lab_control": _publish_lab_control,
+        "artifact.cleanup.requested": _publish_artifact_cleanup,
+        "artifact.cleanup.completed": _publish_artifact_cleanup,
     }
     if owner is None:
         return dict(registry)

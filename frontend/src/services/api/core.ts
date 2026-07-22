@@ -26,6 +26,11 @@ function withTimeout(signal: AbortSignal | null | undefined): AbortSignal {
 }
 
 export async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const resp = await apiFetchResponse(path, options)
+  return resp.json() as Promise<T>
+}
+
+export async function apiFetchResponse(path: string, options: RequestInit = {}): Promise<Response> {
   const { signal: callerSignal, ...rest } = options
   let resp: Response
   try {
@@ -52,5 +57,5 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
     const body = await resp.text()
     throw new Error(`API ${resp.status}: ${body}`)
   }
-  return resp.json() as Promise<T>
+  return resp
 }

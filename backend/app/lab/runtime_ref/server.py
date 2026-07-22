@@ -16,14 +16,19 @@ The Gateway's ``SimverseRefAdapter`` points at this via
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import hashlib
 import json
 import os
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, Mapping
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from app.config import settings
@@ -33,6 +38,9 @@ from app.lab.protocol import (
     MAX_EVENT_BYTES,
     MAX_UNACKED_BYTES,
     MAX_UNACKED_EVENTS,
+    RuntimeArtifactManifest,
+    RuntimeArtifactUploadAck,
+    RuntimeArtifactUploadCommand,
     ControlCommand,
     RuntimeEvent,
     RuntimeV2Handshake,
@@ -63,10 +71,67 @@ from app.lab.runtime_ref.store import (
     RuntimeStoreNotFound,
     StoredSession,
 )
+from app.lab.runtime_ref.spool import ArtifactSpoolError
+from app.lab.runtime_ref.uploader import ArtifactUploader, ArtifactUploadError
 
 
 _RUNTIME_LOOP_VERSION = 1
 _MAX_RUNTIME_JSON_DEPTH = 32
+
+
+class _RuntimeWorkBackpressure(RuntimeError):
+    pass
+
+
+class _RuntimeWorkAdmission:
+    def __init__(self, *, max_concurrent: int, max_queue_depth: int) -> None:
+        if type(max_concurrent) is not int or max_concurrent <= 0:
+            raise ValueError("max_concurrent_turns must be positive")
+        if type(max_queue_depth) is not int or max_queue_depth < 0:
+            raise ValueError("max_queue_depth must be non-negative")
+        self.max_concurrent = max_concurrent
+        self.max_queue_depth = max_queue_depth
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._state_lock = asyncio.Lock()
+        self._running = 0
+        self._waiting = 0
+
+    @asynccontextmanager
+    async def slot(self):
+        queued = False
+        reserved = False
+        async with self._state_lock:
+            if self._running < self.max_concurrent:
+                self._running += 1
+                reserved = True
+            else:
+                if self._waiting >= self.max_queue_depth:
+                    raise _RuntimeWorkBackpressure("runtime model queue is full")
+                self._waiting += 1
+                queued = True
+        try:
+            await self._semaphore.acquire()
+        except BaseException:
+            async with self._state_lock:
+                if queued:
+                    self._waiting -= 1
+                if reserved:
+                    self._running -= 1
+            raise
+        if queued:
+            async with self._state_lock:
+                self._waiting -= 1
+                self._running += 1
+        try:
+            yield
+        finally:
+            async with self._state_lock:
+                self._running -= 1
+            self._semaphore.release()
+
+    async def status(self) -> dict[str, int]:
+        async with self._state_lock:
+            return {"running_turns": self._running, "queue_depth": self._waiting}
 
 
 @dataclass
@@ -250,12 +315,82 @@ def _create_v2_app(
     max_steps: int,
     runtime_store_path: str,
     service_auth: ServiceAuthConfig | Mapping[str, object],
+    runtime_spool_path: str | None,
+    runtime_shard_id: str,
+    artifact_ingest_base_url: str,
+    max_active_sessions: int,
+    max_concurrent_turns: int,
+    max_queue_depth: int,
+    max_spool_bytes: int,
+    max_artifact_bytes: int,
+    artifact_upload_timeout_seconds: float,
+    artifact_recovery_interval_seconds: float,
+    deployment_identity=None,
 ) -> FastAPI:
-    store = RuntimeStore(runtime_store_path)
+    if not isinstance(runtime_shard_id, str) or not runtime_shard_id.strip():
+        raise ValueError("protocol-v2 requires runtime_shard_id")
+    if len(runtime_shard_id) > 200 or runtime_shard_id != runtime_shard_id.strip():
+        raise ValueError("runtime_shard_id must be canonical and at most 200 chars")
+    if type(max_active_sessions) is not int or max_active_sessions <= 0:
+        raise ValueError("max_active_sessions must be positive")
+    if artifact_recovery_interval_seconds <= 0:
+        raise ValueError("artifact recovery interval must be positive")
+    store = RuntimeStore(
+        runtime_store_path,
+        artifact_spool_path=runtime_spool_path,
+        max_spool_bytes=max_spool_bytes,
+        max_artifact_bytes=max_artifact_bytes,
+    )
     validator = ServiceTokenValidator(service_auth)
-    app = FastAPI(title="Simverse Lab reference runtime", version="2.0")
+    work_admission = _RuntimeWorkAdmission(
+        max_concurrent=max_concurrent_turns,
+        max_queue_depth=max_queue_depth,
+    )
+    uploader = (
+        ArtifactUploader(
+            store=store,
+            ingest_base_url=artifact_ingest_base_url,
+            timeout_seconds=artifact_upload_timeout_seconds,
+        )
+        if artifact_ingest_base_url
+        else None
+    )
+
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        await store.initialize()
+        await store.artifact_spool.probe_writable()
+        stop = asyncio.Event()
+        recovery_task = None
+        if uploader is not None:
+            recovery_task = asyncio.create_task(
+                uploader.recovery_loop(
+                    stop, interval_seconds=artifact_recovery_interval_seconds
+                ),
+                name=f"runtime-artifact-recovery:{runtime_shard_id}",
+            )
+        try:
+            yield
+        finally:
+            stop.set()
+            if recovery_task is not None:
+                try:
+                    await asyncio.wait_for(recovery_task, timeout=5)
+                except TimeoutError:
+                    recovery_task.cancel()
+                    try:
+                        await recovery_task
+                    except asyncio.CancelledError:
+                        pass
+
+    app = FastAPI(
+        title="Simverse Lab reference runtime", version="2.0", lifespan=_lifespan
+    )
     app.state.runtime_store = store
     app.state.service_token_validator = validator
+    app.state.runtime_shard_id = runtime_shard_id
+    app.state.artifact_uploader = uploader
+    app.state.runtime_work_admission = work_admission
     session_locks: dict[str, asyncio.Lock] = {}
 
     def _session_lock(session_id: str) -> asyncio.Lock:
@@ -309,9 +444,17 @@ def _create_v2_app(
                 parse_constant=_reject_nonfinite_json,
             )
             _enforce_json_depth(value)
-            body = model_type.model_validate(
-                value, strict=model_type is not ControlCommand
-            )
+            if model_type in {
+                RuntimeArtifactUploadCommand,
+                RuntimeArtifactUploadAck,
+            }:
+                # Pydantic's strict JSON mode preserves strict integers/booleans
+                # while accepting the wire representation of aware datetimes.
+                body = model_type.model_validate_json(bytes(raw), strict=True)
+            else:
+                body = model_type.model_validate(
+                    value, strict=model_type is not ControlCommand
+                )
             canonical_json_bytes(body, max_bytes=MAX_REQUEST_BYTES)
             return body
         except RequestSchemaError as exc:
@@ -491,16 +634,147 @@ def _create_v2_app(
             raise RuntimeStoreConflict("runtime loop agent checkpoint is invalid")
         return value
 
-    @staticmethod
-    def _serialized_turn(turn: AgentTurn, *, turn_id: str) -> dict[str, Any]:
+    def _artifact_content(turn_artifact) -> tuple[bytes, str, str | None, int, str]:
+        if turn_artifact.uri is not None:
+            raise RuntimeStoreConflict(
+                "runtime artifacts cannot read arbitrary URI or host paths"
+            )
+        binary_bytes = getattr(turn_artifact, "content_bytes", None)
+        binary_base64 = getattr(turn_artifact, "content_base64", None)
+        if binary_bytes is not None and binary_base64 is not None:
+            raise RuntimeStoreConflict("runtime artifact has multiple byte sources")
+        if binary_bytes is not None or binary_base64 is not None:
+            if turn_artifact.text_md is not None:
+                raise RuntimeStoreConflict("runtime artifact has multiple byte sources")
+            if binary_bytes is not None:
+                if not isinstance(binary_bytes, bytes):
+                    raise RuntimeStoreConflict("runtime artifact bytes are invalid")
+                content = binary_bytes
+            else:
+                if not isinstance(binary_base64, str):
+                    raise RuntimeStoreConflict("runtime artifact base64 is invalid")
+                encoded_cap = (
+                    (store.artifact_spool.max_artifact_bytes + 2) // 3
+                ) * 4
+                if len(binary_base64) > encoded_cap:
+                    raise RuntimeStoreBackpressure(
+                        "runtime artifact exceeds byte cap"
+                    )
+                try:
+                    content = base64.b64decode(binary_base64, validate=True)
+                except (binascii.Error, ValueError) as exc:
+                    raise RuntimeStoreConflict(
+                        "runtime artifact base64 is invalid"
+                    ) from exc
+                if base64.b64encode(content).decode("ascii") != binary_base64:
+                    raise RuntimeStoreConflict(
+                        "runtime artifact base64 is not canonical"
+                    )
+            content_type = getattr(turn_artifact, "content_type", None)
+            original_filename = getattr(turn_artifact, "original_filename", None)
+            declared_byte_size = getattr(
+                turn_artifact, "declared_byte_size", None
+            )
+            expected_sha256 = getattr(turn_artifact, "expected_sha256", None)
+            if (
+                not isinstance(content_type, str)
+                or not content_type
+                or not isinstance(original_filename, str)
+                or not original_filename
+                or type(declared_byte_size) is not int
+                or not isinstance(expected_sha256, str)
+            ):
+                raise RuntimeStoreConflict(
+                    "binary runtime artifact declaration is incomplete"
+                )
+        else:
+            if not isinstance(turn_artifact.text_md, str):
+                raise RuntimeStoreConflict("runtime artifact has no byte source")
+            redacted_text = guard.redact_text(turn_artifact.text_md) or ""
+            content = redacted_text.encode("utf-8")
+            content_type = (
+                getattr(turn_artifact, "content_type", None)
+                or (
+                    "text/markdown; charset=utf-8"
+                    if turn_artifact.kind == "text"
+                    else "text/plain; charset=utf-8"
+                )
+            )
+            original_filename = getattr(
+                turn_artifact, "original_filename", None
+            ) or (
+                "research-summary.md" if turn_artifact.kind == "text" else None
+            )
+            declared_byte_size = getattr(
+                turn_artifact, "declared_byte_size", None
+            )
+            if declared_byte_size is None:
+                declared_byte_size = len(content)
+            expected_sha256 = getattr(turn_artifact, "expected_sha256", None)
+            if expected_sha256 is None:
+                expected_sha256 = hashlib.sha256(content).hexdigest()
+
+        actual_sha256 = hashlib.sha256(content).hexdigest()
+        if declared_byte_size != len(content) or expected_sha256 != actual_sha256:
+            raise RuntimeStoreConflict("runtime artifact byte declaration mismatch")
+        return (
+            content,
+            content_type,
+            original_filename,
+            declared_byte_size,
+            expected_sha256,
+        )
+
+    async def _serialized_turn(
+        turn: AgentTurn, *, turn_id: str, session_id: str
+    ) -> dict[str, Any]:
         artifact = None
         if turn.artifact is not None:
+            if turn.state != "final":
+                raise RuntimeStoreConflict(
+                    "runtime artifact is only valid on a final turn"
+                )
+            artifact_id = _stable_uuid(session_id, "artifact", turn_id)
+            (
+                content,
+                content_type,
+                original_filename,
+                declared_byte_size,
+                expected_sha256,
+            ) = _artifact_content(turn.artifact)
+            title = guard.redact_text(turn.artifact.title) or ""
+            meta = guard.redact_payload(turn.artifact.meta)
+            required = getattr(turn.artifact, "required", True)
+            store.artifact_declaration(
+                artifact_id=artifact_id,
+                kind=turn.artifact.kind,
+                title=title,
+                content_type=content_type,
+                original_filename=original_filename,
+                declared_byte_size=declared_byte_size,
+                expected_sha256=expected_sha256,
+                required=required,
+                producer_action_id=None,
+                meta=meta,
+            )
+            spooled = await store.stage_artifact_bytes(
+                session_id,
+                artifact_id,
+                content=content,
+                declared_byte_size=declared_byte_size,
+                expected_sha256=expected_sha256,
+            )
             artifact = {
+                "artifact_id": artifact_id,
                 "kind": turn.artifact.kind,
-                "title": guard.redact_text(turn.artifact.title) or "",
-                "uri": turn.artifact.uri,
-                "text_md": guard.redact_text(turn.artifact.text_md),
-                "meta": guard.redact_payload(turn.artifact.meta),
+                "title": title,
+                "meta": meta,
+                "content_type": content_type,
+                "original_filename": original_filename,
+                "declared_byte_size": declared_byte_size,
+                "expected_sha256": expected_sha256,
+                "required": required,
+                "spool_locator": spooled.locator,
             }
         tool_intent = None
         if turn.tool_intent is not None:
@@ -679,6 +953,9 @@ def _create_v2_app(
             return updated, loop
 
         if state == "final":
+            artifact = pending.get("artifact")
+            if not isinstance(artifact, dict):
+                raise RuntimeStoreConflict("final turn has no artifact")
             summary = steps[-1].get("summary", "")
             await _append_event(
                 session,
@@ -688,6 +965,12 @@ def _create_v2_app(
                 dedupe_key=f"turn:{turn_id}:final",
             )
             if broker_terminal_failure:
+                spool_locator = artifact.get("spool_locator")
+                if isinstance(spool_locator, str):
+                    try:
+                        await store.artifact_spool.delete(spool_locator)
+                    except (ArtifactSpoolError, OSError, ValueError):
+                        pass
                 loop.update({
                     "phase": "failed",
                     "active_intent_id": None,
@@ -700,12 +983,14 @@ def _create_v2_app(
                     checkpoint=loop,
                 )
                 return updated, loop
-            artifact = pending.get("artifact")
-            if not isinstance(artifact, dict):
-                raise RuntimeStoreConflict("final turn has no artifact")
+            artifact_id = _stable_uuid(session.session_id, "artifact", turn_id)
+            if artifact.get("artifact_id") != artifact_id:
+                raise RuntimeStoreConflict("runtime artifact binding changed")
             meta = dict(artifact.get("meta") or {})
+            producer_action_id = None
             if provenance:
                 latest = provenance[-1]
+                producer_action_id = latest["action_id"]
                 meta.update({
                     "broker_result_digest": latest["result_digest"],
                     "broker_result_provenance": {
@@ -715,14 +1000,19 @@ def _create_v2_app(
                     },
                     "broker_results": provenance,
                 })
-            await store.put_artifact(
+            await store.put_artifact_from_spool(
                 session.session_id,
-                artifact_id=_stable_uuid(session.session_id, "artifact", turn_id),
+                artifact_id=artifact_id,
                 kind=artifact["kind"],
                 title=artifact["title"],
-                uri=artifact.get("uri"),
-                text_md=artifact.get("text_md"),
+                spool_locator=artifact["spool_locator"],
                 meta=meta,
+                content_type=artifact["content_type"],
+                original_filename=artifact.get("original_filename"),
+                declared_byte_size=artifact["declared_byte_size"],
+                expected_sha256=artifact["expected_sha256"],
+                required=artifact["required"],
+                producer_action_id=producer_action_id,
             )
             loop.update({
                 "phase": "completed",
@@ -765,32 +1055,93 @@ def _create_v2_app(
         authorization: Annotated[str | None, Header(alias="Authorization")] = None,
     ):
         _authenticate(authorization, action="runtime.handshake")
+        capabilities = {
+            "artifact_manifests",
+            "backpressure",
+            "broker_mediation",
+            "cancel",
+            "control",
+            "cursor_replay",
+            "events_ack",
+            "idempotent_create",
+            "kill",
+            "reattach",
+            "result_receipts",
+            "scoped_auth",
+            "terminate",
+        }
+        if uploader is not None:
+            capabilities.update({"artifact_upload", "artifact_upload_ack"})
         manifest = RuntimeV2Handshake(
             protocol_version=2,
             provider_name="simverse_ref",
             durability_class="session_affine",
             reattach_capability="client_run_id",
             effect_mode="broker_only",
-            capabilities=sorted({
-                "backpressure",
-                "broker_mediation",
-                "cancel",
-                "control",
-                "cursor_replay",
-                "events_ack",
-                "idempotent_create",
-                "kill",
-                "reattach",
-                "result_receipts",
-                "scoped_auth",
-                "terminate",
-            }),
+            capabilities=sorted(capabilities),
         )
         return runtime_v2_supervision_handshake(manifest).model_dump(mode="json")
 
     @app.get("/livez")
     async def livez():
-        return {"alive": True, "protocol_version": 2}
+        payload = {
+            "alive": True,
+            "service": "lab-runtime",
+            "protocol_version": 2,
+            "runtime_shard_id": runtime_shard_id,
+        }
+        if deployment_identity is not None:
+            payload.update(deployment_identity.health_fields())
+        return payload
+
+    @app.get("/readyz")
+    async def readyz():
+        if uploader is None:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "ready": False,
+                    "service": "lab-runtime",
+                    "reason": "artifact_ingest_not_configured",
+                    "runtime_shard_id": runtime_shard_id,
+                },
+            )
+        try:
+            store_status = await store.readiness()
+            await store.artifact_spool.probe_writable()
+            work_status = await work_admission.status()
+        except Exception:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "ready": False,
+                    "service": "lab-runtime",
+                    "reason": "durable_storage_unavailable",
+                    "runtime_shard_id": runtime_shard_id,
+                },
+            )
+        if store_status["active_sessions"] >= max_active_sessions:
+            reason = "session_capacity_reached"
+        elif store_status["spool_bytes"] >= store.artifact_spool.max_bytes:
+            reason = "artifact_spool_capacity_reached"
+        elif work_status["queue_depth"] >= max_queue_depth and max_queue_depth > 0:
+            reason = "runtime_queue_capacity_reached"
+        else:
+            reason = None
+        content = {
+            "ready": reason is None,
+            "service": "lab-runtime",
+            "protocol_version": 2,
+            "runtime_shard_id": runtime_shard_id,
+            "active_sessions": store_status["active_sessions"],
+            "spool_bytes": store_status["spool_bytes"],
+            "running_turns": work_status["running_turns"],
+            "queue_depth": work_status["queue_depth"],
+        }
+        if reason is not None:
+            content["reason"] = reason
+            return JSONResponse(status_code=503, content=content)
+        return content
 
     @app.post("/runs", status_code=201)
     async def start_run_v2(
@@ -827,6 +1178,7 @@ def _create_v2_app(
                 scopes=body.scopes,
                 budget_usd=body.budget_usd,
                 egress_allowlist=body.egress_allowlist,
+                max_active_sessions=max_active_sessions,
             )
             started = await _append_event(
                 session,
@@ -844,6 +1196,8 @@ def _create_v2_app(
             return completed.response
         except CrossBindingReplay as exc:
             raise HTTPException(status_code=403, detail="command_binding_mismatch") from exc
+        except RuntimeStoreBackpressure as exc:
+            raise HTTPException(status_code=429, detail="runtime_capacity_reached") from exc
         except RuntimeStoreConflict as exc:
             raise HTTPException(status_code=409, detail="session_binding_conflict") from exc
 
@@ -925,12 +1279,13 @@ def _create_v2_app(
                     agent = RefAgent(
                         complete=completer_factory(), max_steps=max_steps
                     )
-                    turn = await agent.advance_turn(loop["agent_checkpoint"])
+                    async with work_admission.slot():
+                        turn = await agent.advance_turn(loop["agent_checkpoint"])
                     turn_id = _turn_id(
                         sid, body.command_id, loop["turn_sequence"]
                     )
-                    loop["pending_turn"] = _serialized_turn(
-                        turn, turn_id=turn_id
+                    loop["pending_turn"] = await _serialized_turn(
+                        turn, turn_id=turn_id, session_id=sid
                     )
                     loop["phase"] = "persisting_turn"
                     session = await store.transition_session(
@@ -959,6 +1314,8 @@ def _create_v2_app(
                     binding, response=response
                 )
                 return completed.response
+            except _RuntimeWorkBackpressure as exc:
+                raise HTTPException(status_code=429, detail="runtime_queue_full") from exc
             except RuntimeStoreBackpressure as exc:
                 raise HTTPException(status_code=429, detail="event_backpressure") from exc
             except RequestSchemaError as exc:
@@ -1129,19 +1486,20 @@ def _create_v2_app(
                     agent = RefAgent(
                         complete=completer_factory(), max_steps=max_steps
                     )
-                    turn = await agent.resume_turn(
-                        checkpoint=loop["agent_checkpoint"],
-                        tool=resume["tool"],
-                        outcome=resume["outcome"],
-                        payload=resume["payload"],
-                    )
+                    async with work_admission.slot():
+                        turn = await agent.resume_turn(
+                            checkpoint=loop["agent_checkpoint"],
+                            tool=resume["tool"],
+                            outcome=resume["outcome"],
+                            payload=resume["payload"],
+                        )
                     turn_id = _turn_id(
                         sid,
                         loop["goal_command_id"],
                         loop["turn_sequence"],
                     )
-                    loop["pending_turn"] = _serialized_turn(
-                        turn, turn_id=turn_id
+                    loop["pending_turn"] = await _serialized_turn(
+                        turn, turn_id=turn_id, session_id=sid
                     )
                     loop["phase"] = "persisting_turn"
                     session = await store.transition_session(
@@ -1166,6 +1524,8 @@ def _create_v2_app(
                     session=session,
                     loop=loop,
                 )
+            except _RuntimeWorkBackpressure as exc:
+                raise HTTPException(status_code=429, detail="runtime_queue_full") from exc
             except RuntimeStoreBackpressure as exc:
                 raise HTTPException(status_code=429, detail="event_backpressure") from exc
             except RequestSchemaError as exc:
@@ -1342,17 +1702,156 @@ def _create_v2_app(
         artifacts = await store.list_artifacts(sid)
         return {
             "artifacts": [
-                {
-                    "artifact_id": artifact.artifact_id,
-                    "kind": artifact.kind,
-                    "title": artifact.title,
-                    "uri": artifact.uri,
-                    "text_md": artifact.text_md,
-                    "meta": artifact.meta,
-                }
+                RuntimeArtifactManifest(
+                    provider_artifact_id=artifact.artifact_id,
+                    kind=artifact.kind,
+                    title=artifact.title,
+                    content_type=artifact.content_type,
+                    original_filename=artifact.original_filename,
+                    declared_byte_size=artifact.declared_byte_size,
+                    expected_sha256=artifact.expected_sha256,
+                    required=(
+                        False
+                        if artifact.upload_state == "legacy_inline"
+                        and artifact.kind == "link"
+                        else artifact.required
+                    ),
+                    producer_action_id=artifact.producer_action_id,
+                    upload_state=(
+                        artifact.upload_state
+                        if artifact.upload_state != "legacy_inline"
+                        else "failed"
+                    ),
+                    upload_receipt=artifact.upload_receipt,
+                ).model_dump(mode="json")
                 for artifact in artifacts
             ]
         }
+
+    @app.post("/runs/{sid}/artifacts/{provider_artifact_id}/upload")
+    async def upload_artifact_v2(
+        sid: str,
+        provider_artifact_id: str,
+        request: Request,
+        authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+    ):
+        if uploader is None:
+            raise HTTPException(
+                status_code=503, detail="artifact_upload_not_configured"
+            )
+        claims = _authenticate_path(
+            authorization, action="artifacts.upload", sid=sid
+        )
+        body = await _strict_json_body(request, RuntimeArtifactUploadCommand)
+        await _bound_body_session(
+            claims,
+            sid=sid,
+            run_id=body.run_id,
+            body_session_id=body.session_id,
+            epoch=body.epoch,
+        )
+        if body.provider_artifact_id != provider_artifact_id:
+            raise HTTPException(status_code=403, detail="binding_mismatch")
+        binding = _binding(body, claims, action="artifacts.upload")
+        known = await _inspect_command(binding)
+        if known is not None and known.state == "completed":
+            return known.response
+        session = await _session_for_claims(sid, claims)
+        if session.state != "completed" or await store.count_active_intents(sid):
+            raise HTTPException(status_code=409, detail="artifacts pending")
+        claim = await _claim_command(binding)
+        if claim.is_retry and claim.receipt.state == "completed":
+            return claim.receipt.response
+        try:
+            artifact = await uploader.execute(
+                body, command_digest=binding.request_digest
+            )
+            if (
+                artifact.upload_receipt is None
+                or artifact.upload_receipt_digest is None
+                or artifact.upload_id is None
+            ):
+                raise RuntimeStoreConflict("artifact upload has no durable receipt")
+            response = {
+                "receipt_id": claim.receipt.receipt_id,
+                "request_digest": binding.request_digest,
+                "runtime_shard_id": runtime_shard_id,
+                "session_id": sid,
+                "provider_artifact_id": provider_artifact_id,
+                "upload_id": artifact.upload_id,
+                "state": artifact.upload_state,
+                "upload_receipt": artifact.upload_receipt,
+                "upload_receipt_digest": artifact.upload_receipt_digest,
+            }
+            completed = await store.complete_command(binding, response=response)
+            return completed.response
+        except ArtifactUploadError as exc:
+            raise HTTPException(
+                status_code=503 if exc.retryable else 409,
+                detail=exc.error_code,
+            ) from exc
+        except (RuntimeStoreConflict, RuntimeStoreNotFound, ValueError) as exc:
+            raise HTTPException(status_code=409, detail="artifact_upload_conflict") from exc
+
+    @app.post("/runs/{sid}/artifacts/{provider_artifact_id}/upload/ack")
+    async def acknowledge_artifact_upload_v2(
+        sid: str,
+        provider_artifact_id: str,
+        request: Request,
+        authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+    ):
+        claims = _authenticate_path(
+            authorization, action="artifacts.upload.ack", sid=sid
+        )
+        body = await _strict_json_body(request, RuntimeArtifactUploadAck)
+        await _bound_body_session(
+            claims,
+            sid=sid,
+            run_id=body.run_id,
+            body_session_id=body.session_id,
+            epoch=body.epoch,
+        )
+        if body.provider_artifact_id != provider_artifact_id:
+            raise HTTPException(status_code=403, detail="binding_mismatch")
+        binding = _binding(body, claims, action="artifacts.upload.ack")
+        known = await _inspect_command(binding)
+        if known is not None and known.state == "completed":
+            return known.response
+        claim = await _claim_command(binding)
+        if claim.is_retry and claim.receipt.state == "completed":
+            return claim.receipt.response
+        try:
+            artifact = await store.acknowledge_artifact_upload(
+                sid,
+                provider_artifact_id,
+                receipt_digest=body.upload_receipt_digest,
+            )
+            spool_deleted = artifact.spool_deleted_at is not None
+            if not spool_deleted and artifact.spool_locator is not None:
+                try:
+                    await store.artifact_spool.delete(artifact.spool_locator)
+                    artifact = await store.mark_artifact_spool_deleted(
+                        sid, provider_artifact_id
+                    )
+                    spool_deleted = artifact.spool_deleted_at is not None
+                except Exception:
+                    # The durable ACK is the authorization boundary. Startup and
+                    # the recovery loop finish an interrupted local deletion.
+                    spool_deleted = False
+            response = {
+                "receipt_id": claim.receipt.receipt_id,
+                "request_digest": binding.request_digest,
+                "runtime_shard_id": runtime_shard_id,
+                "session_id": sid,
+                "provider_artifact_id": provider_artifact_id,
+                "state": "acknowledged",
+                "upload_receipt_digest": body.upload_receipt_digest,
+                "spool_deleted": spool_deleted,
+            }
+            completed = await store.complete_command(binding, response=response)
+            return completed.response
+        except (RuntimeStoreConflict, RuntimeStoreNotFound, ValueError) as exc:
+            raise HTTPException(status_code=409, detail="artifact_upload_ack_conflict") from exc
 
     @app.post("/runs/{sid}/approve")
     async def approve_v2(
@@ -1444,6 +1943,8 @@ def _create_v2_app(
                 "epoch": body.epoch,
                 "status": "confirmed_stopped",
                 "runtime_state": session.state,
+                "runtime_shard_id": runtime_shard_id,
+                "applied_at": datetime.now(UTC).isoformat(),
             }
             try:
                 completed = await store.complete_command(
@@ -1511,6 +2012,9 @@ def _create_v2_app(
         return {
             "alive": session.state not in {"completed", "failed", "cancelled"},
             "cancelled": session.state == "cancelled",
+            "state": session.state,
+            "epoch": session.epoch,
+            "runtime_shard_id": runtime_shard_id,
         }
 
     return app
@@ -1523,6 +2027,17 @@ def create_app(
     protocol_version: int = 1,
     runtime_store_path: str | None = None,
     service_auth: ServiceAuthConfig | Mapping[str, object] | None = None,
+    runtime_spool_path: str | None = None,
+    runtime_shard_id: str = "reference-0",
+    artifact_ingest_base_url: str = "",
+    max_active_sessions: int = 100,
+    max_concurrent_turns: int = 4,
+    max_queue_depth: int = 32,
+    max_spool_bytes: int = 1024 * 1024 * 1024,
+    max_artifact_bytes: int = 64 * 1024 * 1024,
+    artifact_upload_timeout_seconds: float = 300.0,
+    artifact_recovery_interval_seconds: float = 10.0,
+    deployment_identity=None,
 ) -> FastAPI:
     if protocol_version == 1:
         return _create_v1_app(completer_factory, max_steps)
@@ -1537,6 +2052,17 @@ def create_app(
         max_steps=max_steps,
         runtime_store_path=runtime_store_path,
         service_auth=service_auth,
+        runtime_spool_path=runtime_spool_path,
+        runtime_shard_id=runtime_shard_id,
+        artifact_ingest_base_url=artifact_ingest_base_url,
+        max_active_sessions=max_active_sessions,
+        max_concurrent_turns=max_concurrent_turns,
+        max_queue_depth=max_queue_depth,
+        max_spool_bytes=max_spool_bytes,
+        max_artifact_bytes=max_artifact_bytes,
+        artifact_upload_timeout_seconds=artifact_upload_timeout_seconds,
+        artifact_recovery_interval_seconds=artifact_recovery_interval_seconds,
+        deployment_identity=deployment_identity,
     )
 
 
@@ -1575,6 +2101,13 @@ def create_entrypoint_app(
     return create_app(
         protocol_version=2,
         runtime_store_path=store_path,
+        runtime_spool_path=(
+            env.get("LAB_RUNTIME_SPOOL_PATH") or f"{store_path}.artifacts"
+        ),
+        runtime_shard_id=env.get("LAB_RUNTIME_SHARD_ID", "reference-0"),
+        artifact_ingest_base_url=env.get(
+            "LAB_RUNTIME_ARTIFACT_INGEST_BASE_URL", ""
+        ),
         service_auth={
             "issuer": issuer,
             "audience": audience,
@@ -1591,6 +2124,10 @@ def _disabled_entrypoint_app() -> FastAPI:
     @disabled.get("/livez", status_code=503)
     async def disabled_livez():
         return {"alive": False, "reason": "runtime_protocol_not_configured"}
+
+    @disabled.get("/readyz", status_code=503)
+    async def disabled_readyz():
+        return {"ready": False, "reason": "runtime_protocol_not_configured"}
 
     return disabled
 

@@ -121,6 +121,7 @@ class LabToolExecution(Base):
         String(24), nullable=False, default="active", index=True
     )
     submit_receipt_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    result_receipt_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     control_receipt_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     stopped_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

@@ -102,11 +102,23 @@ async def run_nightly_jobs() -> None:
     # evidence during a flag-off rollback window) — the gate lives in the
     # service, not here, so it holds for every caller.
     try:
+        from app.config import settings
         from app.services import lab_artifact_service
+        pipeline_client = None
+        if settings.lab_artifact_pipeline_enabled:
+            from app.lab.artifact_pipeline import ArtifactPipelineClient
+
+            pipeline_client = ArtifactPipelineClient.from_settings()
         async with async_session() as db:
             held = await lab_artifact_service.apply_retention_holds(db)
-        async with async_session() as db:
-            stats = await lab_artifact_service.cleanup_expired(db)
+        try:
+            async with async_session() as db:
+                stats = await lab_artifact_service.cleanup_expired(
+                    db, pipeline_client=pipeline_client
+                )
+        finally:
+            if pipeline_client is not None:
+                await pipeline_client.aclose()
         if held or stats.get("deleted_count") or stats.get("quarantined_count"):
             logger.info(
                 "Lab: retention held %d artifacts, cleanup deleted=%d quarantined=%d",

@@ -55,6 +55,19 @@ def _require_execution_consumer(protocol_version: int | None = None) -> int:
     return selected
 
 
+def _require_v2_tenant_admitted(protocol_version: int, tenant_id: str) -> None:
+    """Keep canary admission closed unless the tenant is explicitly listed."""
+    if protocol_version != 2 or settings.lab_global_admission_enabled:
+        return
+    allowlist = {
+        value.strip()
+        for value in settings.lab_runtime_v2_canary_tenants
+        if value.strip()
+    }
+    if not allowlist or tenant_id not in allowlist:
+        raise LabTaskError("tenant is not admitted to the Lab protocol-v2 canary")
+
+
 # ── serialization ─────────────────────────────────────────────────────
 
 def serialize(t: LabTask) -> dict:
@@ -105,16 +118,10 @@ def serialize_step(s) -> dict:
 
 
 def serialize_artifact(a: LabArtifact, unlocked: bool) -> dict:
-    """Artifact view. Content (body + remote URI) is released ONLY when the task
-    is released (``unlocked``) AND the artifact is scan-clean + verified — a
-    skipped/unverified/flagged artifact keeps its body and remote URL
-    server-quarantined even after task completion (anti-freeload + anti-injection
-    + gap #10). V12 integrity/retention fields are read-only metadata, always
-    present so the client can render the reason it is withheld. The returned
-    ``unlocked`` reflects the FULL releasability, not just task-release."""
+    """Return metadata only; artifact content leaves through /download."""
     from app.services.lab_artifact_service import is_releasable
     releasable = bool(unlocked) and is_releasable(a)
-    base = {
+    return {
         "id": a.id, "run_id": a.run_id, "task_id": a.task_id,
         "kind": a.kind, "title": a.title, "unlocked": releasable,
         "created_at": a.created_at.isoformat() if a.created_at else None,
@@ -122,10 +129,54 @@ def serialize_artifact(a: LabArtifact, unlocked: bool) -> dict:
         "producer_action_id": a.producer_action_id, "provenance": a.provenance,
         "scan_status": a.scan_status,
         "verification_status": a.verification_status, "retention_hold": a.retention_hold,
+        "provider_artifact_id": a.provider_artifact_id,
+        "producer_epoch": a.producer_epoch,
+        "required": a.required,
+        "content_type": a.content_type,
+        "original_filename": a.original_filename,
+        "expected_sha256": a.expected_sha256,
+        "declared_byte_size": a.declared_byte_size,
+        "storage_status": a.storage_status,
+        "scanned_at": a.scanned_at.isoformat() if a.scanned_at else None,
+        "released_at": a.released_at.isoformat() if a.released_at else None,
+        "expires_at": a.expires_at.isoformat() if a.expires_at else None,
     }
-    if releasable:
-        base.update({"uri": a.uri, "text_md": a.text_md, "meta": a.meta_json or {}})
-    return base
+
+
+async def _require_required_artifacts_releasable(db, task: LabTask) -> None:
+    """Fence v2 settlement until every required production artifact is ready."""
+    if not task.accepted_run_id:
+        return
+    run = await db.get(LabRun, task.accepted_run_id)
+    if run is None or run.protocol_version != 2:
+        return
+    if not settings.lab_artifact_pipeline_enabled:
+        raise LabTaskError("protocol-v2 artifact pipeline is disabled")
+
+    from app.services.lab_artifact_service import is_releasable
+
+    artifacts = (
+        await db.execute(
+            select(LabArtifact).where(
+                LabArtifact.run_id == task.accepted_run_id,
+                LabArtifact.required.is_(True),
+            )
+        )
+    ).scalars().all()
+    if not artifacts:
+        raise LabTaskError("required artifacts are missing")
+    blocked = [artifact for artifact in artifacts if not is_releasable(artifact)]
+    if blocked:
+        states = sorted(
+            {
+                f"{artifact.storage_status}/{artifact.scan_status}/"
+                f"{artifact.verification_status}"
+                for artifact in blocked
+            }
+        )
+        raise LabTaskError(
+            "required artifacts are not releasable: " + ", ".join(states)
+        )
 
 
 # ── researcher selection (auto-dispatch) ──────────────────────────────
@@ -179,11 +230,19 @@ async def create_task(
     invalid/unavailable researcher.
     """
     protocol_version = _require_execution_consumer()
+    _require_v2_tenant_admitted(protocol_version, issuer_id)
     if reward_sc <= 0:
         raise LabTaskError("reward must be positive")
     scopes = [s for s in (scopes or []) if s in ALLOWED_SCOPES]
     if not scopes:
         raise LabTaskError("at least one valid scope is required")
+    if protocol_version == 2:
+        unsupported_scopes = sorted(set(scopes) - {"code"})
+        if unsupported_scopes:
+            raise LabTaskError(
+                "protocol-v2 does not provide production handlers for scopes: "
+                + ", ".join(unsupported_scopes)
+            )
 
     # Content moderation: reject a disallowed title/brief BEFORE any hold, and
     # record only a stable content-free CODE in telemetry (recovery plan Phase 4,
@@ -274,6 +333,7 @@ async def _assign_and_start(
     recruitment finds no idle researcher, the task stays ``funded`` for a later
     dispatch pass (dispatch_open_tasks)."""
     protocol_version = _require_execution_consumer(protocol_version)
+    _require_v2_tenant_admitted(protocol_version, task.issuer_user_id)
     if task.researcher_slug is None:
         picked = await _pick_researcher(db, task)
         if picked is None:
@@ -291,6 +351,7 @@ async def _start_run(
     from app.models.lab_event import OutboxEvent
 
     protocol_version = _require_execution_consumer(protocol_version)
+    _require_v2_tenant_admitted(protocol_version, task.issuer_user_id)
     budget_cents = int(round(settings.lab_default_budget_usd * 100))
     run = LabRun(
         task_id=task.id, researcher_slug=task.researcher_slug, adapter=settings.lab_adapter,
@@ -326,6 +387,10 @@ async def dispatch_open_tasks(db) -> int:
     )).scalars().all()
     n = 0
     for task in tasks:
+        try:
+            _require_v2_tenant_admitted(protocol_version, task.issuer_user_id)
+        except LabTaskError:
+            continue
         picked = await _pick_researcher(db, task)
         if picked is None:
             continue
@@ -393,6 +458,7 @@ async def fail_task(db, task: LabTask, reason: str = "") -> None:
 
 async def _settle_and_complete(db, task: LabTask) -> None:
     """Scheduler caller: enqueue auto-release without performing financial DML."""
+    await _require_required_artifacts_releasable(db, task)
     try:
         await lab_terminalization_service.submit_for_caller(
             db,
@@ -408,6 +474,7 @@ async def accept_result(db, task_id: str, user_id: str) -> LabTask:
     task = await _require_own_task(db, task_id, user_id)
     if task.status != "review":
         raise LabTaskError("task is not awaiting acceptance")
+    await _require_required_artifacts_releasable(db, task)
     try:
         await lab_terminalization_service.submit_for_caller(
             db, task=task, operation="accept", actor=user_id

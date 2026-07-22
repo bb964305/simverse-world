@@ -9,6 +9,7 @@ export interface ArtifactLike {
   verification_status?: string | null // unverified | verified | rejected
   provenance?: string | null          // runtime | verifier | system | (missing)
   retention_hold?: boolean
+  storage_status?: string | null       // pending_upload | quarantined | released | delete_pending | deleted
 }
 
 export interface KindBadge { kind: string; label: string; icon: string; known: boolean }
@@ -37,9 +38,12 @@ export function artifactStatusBadges(a: ArtifactLike): StatusBadge[] {
   const out: StatusBadge[] = []
   if (a.verification_status === 'rejected') out.push({ key: 'rejected', label: '已拒绝' })
   if (a.scan_status === 'flagged') out.push({ key: 'quarantined', label: '隔离' })
+  if (a.storage_status === 'pending_upload') out.push({ key: 'uploading', label: '上传中' })
+  if (a.scan_status === 'failed') out.push({ key: 'scan_failed', label: '扫描失败' })
   if (!a.provenance) out.push({ key: 'provenance_missing', label: '来源缺失' })
-  if (a.scan_status === 'pending') out.push({ key: 'scanning', label: '扫描中' })
+  if (a.scan_status === 'pending' || a.scan_status === 'scanning') out.push({ key: 'scanning', label: '扫描中' })
   if (a.verification_status === 'verified') out.push({ key: 'verified', label: '已验证' })
+  if (a.storage_status === 'deleted') out.push({ key: 'deleted', label: '已过期' })
   if (a.retention_hold) out.push({ key: 'retained', label: '留存' })
   if (a.unlocked === false) out.push({ key: 'locked', label: '锁定' })
   return out
