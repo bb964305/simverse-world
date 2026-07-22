@@ -338,3 +338,14 @@
 - **P1-1 限流子项已完成，主体仍未做（2026-07-08）**：本次只做 §P1-1 的"限流"子项（WS 频控 + REST slowapi）。§P1-1 主体——**LLM 计量（llm_usage 表）+ 每小时预算熔断器 + 分级模型路由**——未开工，这是 🔥 功能（A1/B1/C3/A5 等）的硬闸门。成本优化研究的 E-31（计量字段设计）/E-32（预算熔断稿）已在 `docs/research/DIRECTOR_ROADMAP.md` 备好，下次单独立项。本次限流用的进程内滑窗在 P0-3b Redis 化后应迁 Redis，使多 worker 共享计数。**（2026-07-08 更新：已在 P0-3b `94cdb8a` 迁 Redis ZSET 滑窗，多 worker 共享计数。）**
 - **前端 `npm run build` 在 Node v25 下失败（2026-07-08 发现）**：rolldown 原生 binding `MODULE_NOT_FOUND`，master 基线同样复现（非本次改动引入）。lint 回到基线（7 errors/3 warnings 均为预先存在）、`tsc --noEmit` 通过。需降 Node 至 v22/v20 或换 vite 原生构建解决——记入待办，不在限流 scope 内
 - **Cowork 沙箱 FUSE mount 偶发 unlink EPERM 卡死 git 锁（2026-07-09 E9 提交时遇到）**：一次崩溃的 `git commit` 残留 `.git/HEAD.lock`+`.git/index.lock`，之后 mount 拒绝 unlink（`Operation not permitted`，即便文件属主是自己），令后续所有 `git commit` 死锁。绕过办法：`GIT_INDEX_FILE=/tmp/svidx git read-tree HEAD && git add … && git write-tree` 用 /tmp 索引避开 mount 锁 → `git commit-tree` 造 commit 对象（对象写入正常，仅清理临时对象报 EPERM 无害）→ 用文件工具直接覆写 `.git/refs/heads/<branch>` 松散 ref（覆写/新建不需 unlink）→ `git log` 经 HEAD symref 指向新 SHA。残留 `.lock` 只要不再请求 git 去锁同名 ref 就无害。**后续提交若再遇到需重复此法**；根因是 mount 层限制，非仓库损坏
+
+## Kickoff REALISM — P0 一致性修复（2026-07-22）
+
+- **目标**：按 `docs/KICKOFF_PROMPT_REALISM.md` + `docs/REALISM_OPTIMIZATION_PLAN.md` 完成 P0（任务 1–6）后再进 P1（任务 7–13）。纯规则、零新增 LLM 调用，行为改变门控 `REALISM_ENABLED`（代码默认 False）。
+- **基线（改动前绿，回滚基准）**：`cd backend && ./.venv/bin/python -m pytest` = **1106 passed / 1 skipped / 11 deselected（lab_oci）/ exit 0（89s）**。collect=1107/1118。远超 kickoff "基线 711+"。
+- **计划**：`docs/superpowers/plans/2026-07-22-realism-p0.md`（TDD bite-sized，Task 0 config 基础设施 + 任务 1–6）。P1 计划待 P0 全绿后写。
+- **偏差登记（kickoff 授权"以代码为准记偏差"）**：
+  1. **分支从 `feat/lab-agent-v1` 切 `feat/realism-p0`**（非 master）：当前分支领先 master 78 commits，含 Lab 迁移链头 037 + 被 Task 5b 引用的 `sweep_orphan_lab_runs` 回收范式；回退 master 会丢迁移链且与 Explore 分析的工作树不一致。
+  2. **Task 1 `plan.target` 语义漂移**：PLAN prompt 现让 LLM 把入口坐标 `[x,y]` 塞进 `target`、`location` 存地点名（`plan/basic.py:42,50`），故 `_force_execute_plan` 拿 `plan.target` 当 slug + `target_tile=None` 导致计划移动永远原地。修复=改 prompt 让 target 输出地点 id + 服务端从 id/名称解析 tile（忽略模型坐标）。
+  3. **Task 3 玩家聊天 mood 不接**：方案称"两条路径都接"，但玩家聊天路径当前**无 positive/neutral/negative 输出**（`extract_events` prompt 无 mood 字段）；玩家侧情绪已由 `rating.py:54-58` 评分钩子承载。只接居民互聊路径；玩家 in-line mood 需给 LLM 输出加字段，超出"唯一例外=梦境 tone"授权，故不实现。
+
