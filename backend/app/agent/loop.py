@@ -105,12 +105,22 @@ class AgentLoop:
                 weather = await get_current_weather(db)
             except Exception:
                 weather = None
+            # Realism P1-9: is a festival world event active this round?
+            festival_active = False
+            try:
+                from app.services.world_event_service import get_active_events_cached
+                festival_active = any(
+                    e.get("type") == "festival" for e in await get_active_events_cached(db)
+                )
+            except Exception:
+                festival_active = False
         if not rows:
             return tier
 
         force_plan_only = tier == BudgetTier.RULE_ONLY
         suppress_chat = tier == BudgetTier.RULE_ONLY
         current_hour = datetime.now().hour
+        current_weekday = datetime.now().weekday()
         semaphore = asyncio.Semaphore(settings.agent_max_concurrent)
 
         async def guarded_tick(
@@ -119,7 +129,7 @@ class AgentLoop:
             """Run one resident's tick in its own session, bounded by semaphore."""
             # Evaluate schedule before acquiring semaphore (no DB needed)
             sbti_data = (meta_json or {}).get("sbti")
-            schedule = build_schedule(sbti_data, weather=weather)
+            schedule = build_schedule(sbti_data, weather=weather, weekday=current_weekday)
 
             if get_activity_probability(schedule, current_hour) <= 0.0:
                 # 作息门关闭：夜间归巢（零 LLM，一 tick 一步），不计日行动数
@@ -143,7 +153,7 @@ class AgentLoop:
                 return None
 
             weather_kind = (weather or {}).get("kind")
-            if not should_tick(schedule, current_hour, weather_kind):
+            if not should_tick(schedule, current_hour, weather_kind, festival_active):
                 return None
 
             async with semaphore:
