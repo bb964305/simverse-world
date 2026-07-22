@@ -307,6 +307,23 @@ class Settings(BaseSettings):
     realism_shift_percentile: float = 0.95       # shift gate: normalized ≥ P95 ...
     realism_shift_valence_gate: float = 0.5      # ... AND |valence| > this
 
+    # --- Realism P2 (social structure; three INDEPENDENT switches, all False) ---
+    # Each gate is independent of realism_enabled and of each other, so relations,
+    # information gradient and crowd can be A/B'd separately during burn-in. Any
+    # one False → the corresponding path behaves exactly as pre-P2.
+    realism_relations_enabled: bool = False
+    realism_info_gradient_enabled: bool = False
+    realism_crowd_enabled: bool = False
+    # P2 Task 1 — relation write deltas (reused, zero new LLM calls) + decay.
+    realism_rel_familiarity_chat: float = 0.05
+    realism_rel_affinity_chat: float = 0.03      # ± by wrapup mood (positive/negative)
+    realism_rel_familiarity_witness: float = 0.01
+    realism_rel_affinity_gift: float = 0.1
+    realism_rel_affinity_invest: float = 0.1
+    realism_rel_decay_idle_days: int = 30        # no interaction for this long → decay
+    realism_rel_familiarity_decay: float = 0.95  # ×/week on idle relations
+    realism_rel_affinity_decay: float = 0.98     # ×/week (2% regression toward 0)
+
     model_config = {"env_file": ".env"}
 
 

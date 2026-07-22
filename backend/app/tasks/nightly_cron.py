@@ -148,6 +148,21 @@ async def run_nightly_jobs() -> None:
                 logger.info("Realism: released %d orphan lab reservations", n)
         except Exception:
             logger.error("Realism lab reservation sweep failed", exc_info=True)
+
+    # Realism P2-1: weekly relationship decay (INDEPENDENT gate). Ties idle for
+    # 30 days lose familiarity (×0.95/week) and drift affinity toward 0
+    # (×0.98/week). Run once a week (Mondays) so the daily cron doesn't
+    # over-decay — the rate is per-week.
+    from app.config import settings as _rel_settings
+    if _rel_settings.realism_relations_enabled and datetime.now(UTC).weekday() == 0:
+        try:
+            from app.services import relation_service
+            async with async_session() as db:
+                n = await relation_service.decay(db)
+            if n:
+                logger.info("Realism P2: decayed %d idle relations", n)
+        except Exception:
+            logger.error("Realism relation decay failed", exc_info=True)
     # Future: E2 dreams, E7 capsule delivery — each own try/except.
 
 
