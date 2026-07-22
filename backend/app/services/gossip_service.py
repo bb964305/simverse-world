@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 GOSSIP_PROBABILITY = 0.3
 MAX_HOPS = 4
 IMPORTANCE_CAP = 0.7
+EVENT_GOSSIP_MIN_IMPORTANCE = 0.3  # P2-6: low floor so event info survives a few ×0.8 hops
 
 DISTORT_SYSTEM = "把下面这条传闻改写：夸大或改错一个细节，但保留主干。只输出改写后的一句话。"
 
@@ -50,17 +51,35 @@ async def maybe_gossip(db, speaker: Resident, listener: Resident, rng=random) ->
     if random.random() >= GOSSIP_PROBABILITY:
         return None
 
-    candidates = (await db.execute(
+    # Candidate rumors the speaker could pass on. Fetch a superset (JSON event_id
+    # can't be filtered in portable SQL) then classify in Python:
+    #   classic  = a third-party memory about a real resident (importance ≥ 0.6);
+    #   P2-6     = ANY memory carrying an event_id (first-hand world_event OR an
+    #              already-relayed gossip), so a partially-known world event
+    #              propagates "知情者→朋友→朋友的朋友" second-hand. Only when the
+    #              info gradient is on. Gate off → the classic filter alone, i.e.
+    #              behavior is byte-identical to pre-P2.
+    fetched = (await db.execute(
         select(Memory).where(
             Memory.resident_id == speaker.id,
             Memory.type == "event",
-            Memory.importance >= 0.6,
-            Memory.related_resident_id.is_not(None),
-            Memory.related_resident_id != listener.id,
-        ).order_by(Memory.importance.desc()).limit(20)
+            Memory.importance >= EVENT_GOSSIP_MIN_IMPORTANCE,
+        ).order_by(Memory.importance.desc()).limit(40)
     )).scalars().all()
 
-    usable = [m for m in candidates if (m.metadata_json or {}).get("hops", 0) < MAX_HOPS]  # hops>=4 terminates
+    def _is_candidate(m: Memory) -> bool:
+        meta = m.metadata_json or {}
+        if meta.get("hops", 0) >= MAX_HOPS:  # hops>=4 terminates the chain
+            return False
+        classic = (
+            (m.importance or 0) >= 0.6
+            and m.related_resident_id is not None
+            and m.related_resident_id != listener.id
+        )
+        event_class = settings.realism_info_gradient_enabled and bool(meta.get("event_id"))
+        return classic or event_class
+
+    usable = [m for m in fetched if _is_candidate(m)]
     if not usable:
         return None
 
@@ -85,12 +104,19 @@ async def maybe_gossip(db, speaker: Resident, listener: Resident, rng=random) ->
     distorted = random.random() < min(0.2 * new_hops, 0.8)
     content = await _distort(origin.content) if distorted else origin.content
     importance = min((origin.importance or 0.0) * 0.8, IMPORTANCE_CAP)
-    origin_id = (origin.metadata_json or {}).get("origin_memory_id") or origin.id
+    origin_meta = origin.metadata_json or {}
+    origin_id = origin_meta.get("origin_memory_id") or origin.id
+
+    new_meta = {"origin_memory_id": origin_id, "hops": new_hops, "distorted": distorted}
+    # P2-6: second-hand memories inherit the source event_id so the diffusion
+    # probe can follow "知情者→朋友→朋友的朋友" across hops (field must not drop).
+    if origin_meta.get("event_id"):
+        new_meta["event_id"] = origin_meta["event_id"]
 
     mem = await MemoryService(db).add_memory(
         listener.id, "event", content, importance=importance, source="gossip",
         related_resident_id=origin.related_resident_id,
-        metadata_json={"origin_memory_id": origin_id, "hops": new_hops, "distorted": distorted},
+        metadata_json=new_meta,
     )
 
     # Realism P1-11: being gossiped about (a distorted rumor, hops≥2, subject is a
