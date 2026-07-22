@@ -233,6 +233,30 @@ class Settings(BaseSettings):
     lab_budget_active_workers: int = 3
     lab_artifact_retention_days: int = 30   # V12: expires_at = finalized_at + this; retention_hold pins evidence
 
+    # --- Realism (world simulation; REALISM_*, master switch below) ---
+    # Master switch. Default False → behavior identical to pre-realism. Deploys
+    # opt in via REALISM_ENABLED=true for burn-in A/B and easy rollback.
+    realism_enabled: bool = False
+    # P1 movement (defined now so REALISM_MOVE_SPEED env parses; used in P1).
+    realism_move_speed: int = 8
+    # Task 2 retrieval scoring (Generative-Agents weights; must sum to 1.0).
+    realism_retrieval_relevance_weight: float = 0.45
+    realism_retrieval_recency_weight: float = 0.30
+    realism_retrieval_importance_weight: float = 0.25
+    realism_recency_tau_hours: float = 72.0   # τ base; τ = this × (1 + importance)
+    # Task 2 eviction (soft-archive) thresholds.
+    realism_evict_importance_floor: float = 0.35
+    realism_evict_idle_days: int = 90
+    # Task 5b recycling: approved proposal stuck longer than this → fail+refund.
+    realism_proposal_stuck_minutes: int = 10
+    # Task 3 mood write-back deltas (positive / negative chat outcome).
+    realism_mood_positive_valence: float = 0.15
+    realism_mood_positive_arousal: float = 0.05
+    realism_mood_negative_valence: float = -0.2
+    realism_mood_negative_arousal: float = 0.1
+    # Task 3 flashbulb: importance += coef × |valence| × arousal.
+    realism_flashbulb_coef: float = 0.2
+
     model_config = {"env_file": ".env"}
 
 
