@@ -232,6 +232,77 @@ def render_report(
 
 
 # ---------------------------------------------------------------------------
+# 拟真探针（realism P0-6 验收）：读移动记忆的 move 面包屑（memorize 写入的
+# metadata_json["move"] = {intent, target, moved, arrived}），纯函数聚合。
+# ---------------------------------------------------------------------------
+async def fetch_move_records(session, since: datetime) -> list[dict]:
+    """拉窗口内带 move 面包屑的动作记忆，规约为 probe 用的扁平 dict 列表。"""
+    from app.models.memory import Memory
+    stmt = (
+        select(Memory.resident_id, Memory.content, Memory.metadata_json, Memory.created_at)
+        .where(Memory.source == "agent_action", Memory.created_at >= since)
+    )
+    records: list[dict] = []
+    for rid, content, meta, created in (await session.execute(stmt)).all():
+        mv = meta.get("move") if isinstance(meta, dict) else None
+        if not isinstance(mv, dict):
+            continue
+        records.append({
+            "resident_id": rid,
+            "content": content or "",
+            "day": _day_key(created),
+            "target": mv.get("target"),
+            "intent": mv.get("intent"),
+            "moved": bool(mv.get("moved")),
+            "arrived": bool(mv.get("arrived")),
+        })
+    return records
+
+
+def plan_arrival_rate(records: list[dict]) -> float | None:
+    """计划到达率：VISIT_DISTRICT 计划-地点 trip（resident+target+day 去重）中实际
+    到达的比例。修复前 ≈0（计划移动不动），目标 >70%。无 trip 返回 None。"""
+    trips: dict[tuple, bool] = {}
+    for r in records:
+        if r["intent"] != "VISIT_DISTRICT" or not r["target"]:
+            continue
+        key = (r["resident_id"], r["target"], r["day"])
+        trips[key] = trips.get(key, False) or r["arrived"]
+    if not trips:
+        return None
+    return sum(1 for v in trips.values() if v) / len(trips)
+
+
+def behavior_memory_consistency(records: list[dict]) -> float | None:
+    """行为-记忆一致率：移动记忆文本与真实位移状态一致的比例（arrived⇒含"到达"、
+    moved⇒含"前往"、未移动⇒不含"到达/前往"）。目标 >95%。无样本返回 None。"""
+    if not records:
+        return None
+    ok = 0
+    for r in records:
+        c = r["content"]
+        if r["arrived"]:
+            consistent = "到达" in c
+        elif r["moved"]:
+            consistent = "前往" in c
+        else:
+            consistent = ("到达" not in c and "前往" not in c)
+        ok += 1 if consistent else 0
+    return ok / len(records)
+
+
+def render_probes(records: list[dict]) -> str:
+    out = ["== 拟真探针（P0 验收）=="]
+    out.append(f"  计划到达率        = {_pct(plan_arrival_rate(records))}"
+               "（VISIT_DISTRICT 计划-地点 trip 到达比例；修复前≈0，目标 >70%）")
+    out.append(f"  行为-记忆一致率   = {_pct(behavior_memory_consistency(records))}"
+               "（移动记忆文本匹配真实位移；目标 >95%）")
+    out.append(f"  样本 = {len(records)} 条移动记忆"
+               "（realism 关或无 agent 移动时为 0，探针显示 '-'）")
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 async def _run(days_window: int, residents: int, budget: float | None) -> str:
@@ -243,9 +314,11 @@ async def _run(days_window: int, residents: int, budget: float | None) -> str:
     since = datetime.now(UTC) - timedelta(days=days_window)
     async with async_session() as session:
         rows = await fetch_rows(session, since)
-    return render_report(
+        move_records = await fetch_move_records(session, since)
+    report = render_report(
         aggregate(rows), residents=residents, budget=budget, window_days=days_window
     )
+    return report + "\n\n" + render_probes(move_records)
 
 
 def main(argv: list[str] | None = None) -> None:

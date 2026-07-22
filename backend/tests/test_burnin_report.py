@@ -9,7 +9,22 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.models.llm_usage import LLMUsage
-from scripts.burnin_report import aggregate, fetch_rows, render_report, summarize_day
+from app.models.memory import Memory
+from scripts.burnin_report import (
+    aggregate, fetch_rows, render_report, summarize_day,
+    fetch_move_records, plan_arrival_rate, behavior_memory_consistency, render_probes,
+)
+
+
+def _move_mem(rid, content, *, target, intent="VISIT_DISTRICT", moved, arrived, days_ago=0):
+    m = Memory(resident_id=rid, type="event", content=content, importance=0.3,
+               source="agent_action",
+               metadata_json={"move": {"intent": intent, "target": target,
+                                       "moved": moved, "arrived": arrived}})
+    ts = datetime.now(UTC) - timedelta(days=days_ago)
+    m.created_at = ts
+    m.last_accessed_at = ts
+    return m
 
 
 def _usage(ts, scenario, *, in_tok, out_tok, cost, parse_ok=None, attempt_no=1,
@@ -78,3 +93,41 @@ async def test_render_report_per_resident_and_budget_math(db_session):
     assert "预算占用 = 2.0%" in report
     # 预测区间出处标注在场
     assert "COST_RESEARCH_REPORT" in report
+
+
+async def test_plan_arrival_rate_and_consistency(db_session):
+    now = datetime.now(UTC)
+    db_session.add_all([
+        # trip A: enroute then arrived → counts as arrived
+        _move_mem("r1", "正在前往学院", target="academy", moved=True, arrived=False),
+        _move_mem("r1", "到达了学院", target="academy", moved=False, arrived=True),
+        # trip B (different resident): only enroute → not arrived
+        _move_mem("r2", "正在前往图书馆", target="library", moved=True, arrived=False),
+        # a WANDER (not a planned trip) — excluded from arrival rate
+        _move_mem("r3", "在户外停留", target=None, intent="WANDER", moved=False, arrived=False),
+    ])
+    await db_session.commit()
+
+    records = await fetch_move_records(db_session, since=now - timedelta(days=1))
+    assert len(records) == 4
+
+    # 2 planned trips (academy, library); 1 arrived → 0.5
+    assert plan_arrival_rate(records) == pytest.approx(0.5)
+    # all 4 texts match their move state → 1.0
+    assert behavior_memory_consistency(records) == pytest.approx(1.0)
+
+    block = render_probes(records)
+    assert "计划到达率" in block and "50.0%" in block
+
+
+def test_probes_none_on_empty():
+    assert plan_arrival_rate([]) is None
+    assert behavior_memory_consistency([]) is None
+    assert "-" in render_probes([])
+
+
+def test_behavior_consistency_flags_phantom():
+    # a phantom: text claims arrival but the breadcrumb says it never moved
+    bad = [{"resident_id": "r", "content": "到达了学院", "day": "d",
+            "target": "academy", "intent": "VISIT_DISTRICT", "moved": False, "arrived": False}]
+    assert behavior_memory_consistency(bad) == pytest.approx(0.0)
