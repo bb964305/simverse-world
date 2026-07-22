@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 from sqlalchemy import select
 from app.models.resident import Resident
 from app.models.memory import Memory
-from app.agent.chat import resident_chat, _chat_cooldowns
+from app.agent.chat import resident_chat, _set_cooldown
 
 
 @pytest.fixture
@@ -58,7 +58,6 @@ def _mock_llm_text(text: str) -> str:
 @pytest.mark.anyio
 async def test_resident_chat_creates_memories(db_session, chat_pair):
     initiator, target = chat_pair
-    _chat_cooldowns.clear()
 
     dialog_responses = [
         "你好啊，今天天气不错！",       # turn 1: initiator opens
@@ -188,12 +187,9 @@ async def test_process_chat_wrapup_falls_back_when_both_fail(db_session, chat_pa
 @pytest.mark.anyio
 async def test_resident_chat_cooldown(db_session, chat_pair):
     initiator, target = chat_pair
-    _chat_cooldowns.clear()
 
-    # Manually set a fresh cooldown for this pair
-    pair_key = tuple(sorted([initiator.id, target.id]))
-    import time
-    _chat_cooldowns[pair_key] = time.time()  # just set, not expired
+    # Manually set a fresh cooldown for this pair (Redis-backed now).
+    await _set_cooldown(initiator, target)
 
     result = await resident_chat(db_session, initiator, target)
 
@@ -204,7 +200,6 @@ async def test_resident_chat_cooldown(db_session, chat_pair):
 @pytest.mark.anyio
 async def test_resident_chat_busy_target_skipped(db_session, chat_pair):
     initiator, target = chat_pair
-    _chat_cooldowns.clear()
     target.status = "chatting"
     await db_session.commit()
 

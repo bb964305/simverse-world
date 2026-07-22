@@ -15,6 +15,7 @@ from sqlalchemy import select, delete, func
 from app.database import async_session
 from app.agent.map_data import get_location_at, get_location_id_at
 from app.models.memory import Memory
+from app.redis_client import get_redis
 from app.services.location_tracker import pixel_to_tile
 from app.ws.manager import manager
 
@@ -25,8 +26,14 @@ WITNESS_DEDUP_SECONDS = 4 * 3600
 MAX_WITNESS_PER_RESIDENT = 20
 _SNAPSHOT_TTL = 5.0
 
+# Realism P0-5c: the per-(resident, player) 4h dedup lives in Redis (SET NX EX =
+# atomic check-and-set). The 5s online-player snapshot stays process-local (a
+# hot per-round cache, not cross-worker cooldown state).
 _snapshot: dict = {"ts": 0.0, "players": []}
-_last_witness: dict[tuple[str, str], float] = {}
+
+
+def _witness_key(resident_id: str, user_id: str) -> str:
+    return f"sv:witness:{resident_id}:{user_id}"
 
 
 async def _players_snapshot() -> list[dict]:
@@ -54,9 +61,9 @@ async def record_witnesses(resident_id: str, tile_x: int, tile_y: int, home_loca
     if not players:
         return 0
 
-    now_mono = time.monotonic()
     loc = get_location_at(tile_x, tile_y)
     loc_name = loc["name"] if loc else "外面"
+    r = get_redis()
 
     pending: list[tuple[str, str]] = []  # (user_id, content)
     for p in players:
@@ -66,15 +73,11 @@ async def record_witnesses(resident_id: str, tile_x: int, tile_y: int, home_loca
         ptile = pixel_to_tile(p.get("x", 0), p.get("y", 0))
         if abs(ptile[0] - tile_x) + abs(ptile[1] - tile_y) > WITNESS_RADIUS_TILES:
             continue
-        key = (resident_id, uid)
-        # Membership check, not a 0.0 default: time.monotonic() is seconds
-        # since boot, so on a machine up < 4h the 0.0 default made
-        # `now - 0.0 < WITNESS_DEDUP_SECONDS` always true and silently
-        # suppressed every first-ever witness (bit CI/fresh VMs).
-        last_seen = _last_witness.get(key)
-        if last_seen is not None and now_mono - last_seen < WITNESS_DEDUP_SECONDS:
+        # SET NX EX: True iff not witnessed in the last 4h → atomic dedup mark.
+        is_fresh = await r.set(_witness_key(resident_id, uid), "1",
+                               ex=WITNESS_DEDUP_SECONDS, nx=True)
+        if not is_fresh:
             continue
-        _last_witness[key] = now_mono
         phrase = _situation(home_location_id, ptile)
         content = f"在{loc_name}看到{p.get('name', '一位玩家')}{phrase}"
         pending.append((uid, content))
@@ -112,6 +115,7 @@ async def _prune(db, resident_id: str) -> None:
 
 
 def _reset_for_tests() -> None:  # pragma: no cover
+    # Only the process-local snapshot remains; the dedup set is Redis-backed and
+    # fakeredis is fresh per test (conftest).
     _snapshot["ts"] = 0.0
     _snapshot["players"] = []
-    _last_witness.clear()

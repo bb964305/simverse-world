@@ -1,6 +1,5 @@
 """Inter-resident conversation engine with memory generation and broadcasting."""
 import logging
-import time
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,12 +10,13 @@ from app.llm.client import chat as llm_chat
 from app.llm.metering import Meter
 from app.memory.service import MemoryService
 from app.models.resident import Resident
+from app.redis_client import get_redis
 from app.services.mood_service import apply_mood_event
 
 logger = logging.getLogger(__name__)
 
-# Cooldown tracking: {frozenset(id1, id2): last_chat_timestamp}
-_chat_cooldowns: dict[tuple[str, str], float] = {}
+# Realism P0-5c: resident-pair chat cooldown lives in Redis (cross-worker,
+# survives restart) instead of a process-local dict.
 
 # Realism P0-3: map the wrap-up mood judgement to a (valence, arousal) nudge.
 _CHAT_MOOD_DELTA = {
@@ -44,20 +44,17 @@ async def _apply_chat_mood(db, initiator, target, mood: str | None) -> None:
             logger.warning("chat mood write-back failed", exc_info=True)
 
 
-def _pair_key(a: Resident, b: Resident) -> tuple[str, str]:
-    return tuple(sorted([a.id, b.id]))  # type: ignore[return-value]
+def _pair_key(a: Resident, b: Resident) -> str:
+    lo, hi = sorted([a.id, b.id])
+    return f"sv:chat_cd:{lo}:{hi}"
 
 
-def _is_on_cooldown(initiator: Resident, target: Resident) -> bool:
-    key = _pair_key(initiator, target)
-    last = _chat_cooldowns.get(key)
-    if last is None:
-        return False
-    return (time.time() - last) < settings.agent_chat_cooldown
+async def _is_on_cooldown(initiator: Resident, target: Resident) -> bool:
+    return bool(await get_redis().exists(_pair_key(initiator, target)))
 
 
-def _set_cooldown(initiator: Resident, target: Resident) -> None:
-    _chat_cooldowns[_pair_key(initiator, target)] = time.time()
+async def _set_cooldown(initiator: Resident, target: Resident) -> None:
+    await get_redis().set(_pair_key(initiator, target), "1", ex=settings.agent_chat_cooldown)
 
 
 async def _get_relationship_text(svc: MemoryService, resident: Resident, other: Resident) -> str:
@@ -115,7 +112,7 @@ async def resident_chat(
     Returns None if skipped (cooldown, busy target, etc.)
     """
     # Pre-checks
-    if _is_on_cooldown(initiator, target):
+    if await _is_on_cooldown(initiator, target):
         logger.debug("Chat skipped: %s<->%s on cooldown", initiator.slug, target.slug)
         return {"skipped": True, "reason": "cooldown"}
 
@@ -187,7 +184,7 @@ async def resident_chat(
         except Exception:
             logger.warning("gossip handoff failed", exc_info=True)
 
-        _set_cooldown(initiator, target)
+        await _set_cooldown(initiator, target)
 
         return {
             "initiator_slug": initiator.slug,

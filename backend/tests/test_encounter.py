@@ -76,22 +76,24 @@ async def test_cooldown_blocks_repeat(db_session):
 
 @pytest.mark.anyio
 async def test_first_encounter_on_freshly_booted_machine(db_session):
-    """monotonic() 是开机秒数：0.0 默认值会让开机 < 冷却时长的机器（CI runner 必然）
-    把首次偶遇当成冷却中恒杀——witness 45be03f 同款，回归钉死。"""
+    """The old monotonic()-since-boot dedup could suppress the first-ever
+    encounter on a freshly booted machine (bug 45be03f). Redis TTL keys have no
+    such 0.0-default hazard — the first encounter must fire on a fresh store."""
     from app.services import encounter_service as es
     await _resident(db_session, "klaus", (20, 20))
     with patch.object(es.manager, "send", new_callable=AsyncMock), \
          patch("app.services.encounter_service.random.random", return_value=0.1), \
-         patch("app.services.encounter_service.random.choice", side_effect=lambda x: x[0]), \
-         patch("app.services.encounter_service.time.monotonic", return_value=120.0):
+         patch("app.services.encounter_service.random.choice", side_effect=lambda x: x[0]):
         assert await es.maybe_encounter(db_session, "u1", "academy") is not None
 
 
 @pytest.mark.anyio
 async def test_daily_cap(db_session):
     from app.services import encounter_service as es
+    from app.redis_client import get_redis
     await _resident(db_session, "klaus", (20, 20))
-    es._daily[("u1", datetime.now(UTC).date().isoformat())] = 5
+    today = datetime.now(UTC).date().isoformat()
+    await get_redis().set(es._daily_key("u1", today), "5")
     with patch.object(es.manager, "send", new_callable=AsyncMock), \
          patch("app.services.encounter_service.random.random", return_value=0.1):
         assert await es.maybe_encounter(db_session, "u1", "academy") is None
