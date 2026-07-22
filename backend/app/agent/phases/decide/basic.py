@@ -93,6 +93,16 @@ class BasicDecidePlugin:
                 plan.status = "interrupted"
             return ctx
 
+        # Realism P2-7: festival/script events draw a crowd — with the crowd gate
+        # on, the event location wins the VISIT_DISTRICT draw ×3 (人流聚集, zero LLM).
+        crowd = self._maybe_crowd_draw(ctx)
+        if crowd is not None:
+            ctx.action_result = crowd
+            ctx.plan_followed = False
+            if plan:
+                plan.status = "interrupted"
+            return ctx
+
         # Case 2 (E-09/E-10): plan-priority skip. Follow the plan without an LLM
         # call when nothing warrants reconsidering. force_plan_only (budget 95%+)
         # hard-disables interrupts — the breaker's rule-based fallback.
@@ -220,6 +230,44 @@ class BasicDecidePlugin:
             target_tile=get_valid_target_tile(target_id), reason="躲雨",
         )
 
+    def _maybe_crowd_draw(self, ctx: TickContext, rng=random) -> ActionResult | None:
+        """Realism P2-7: during an active festival/script event, the event location
+        gets a ×realism_festival_weight pull in the VISIT_DISTRICT draw. Gated on
+        the crowd flag; a high-importance plan (handled above) still wins, and it
+        never fires when the resident is already there."""
+        if not settings.realism_crowd_enabled:
+            return None
+        if ActionType.VISIT_DISTRICT not in ctx.available_actions:
+            return None
+        from app.agent.map_data import get_location_id_at, get_valid_target_tile
+        from app.services import crowd_service
+        here = get_location_id_at(ctx.resident.tile_x, ctx.resident.tile_y)
+        target = crowd_service.festival_draw_target(getattr(ctx, "world_events", None), here, rng)
+        if not target:
+            return None
+        return ActionResult(
+            action=ActionType.VISIT_DISTRICT, target_slug=target,
+            target_tile=get_valid_target_tile(target), reason="去凑热闹",
+        )
+
+    async def _crowd_hint(self, ctx: TickContext) -> str:
+        """Realism P2-7 herd micro-rule: soft "那边好像很热闹" nudge when the
+        resident's social need is low and a nearby spot is already lively."""
+        from app.agent.needs import get_needs
+        social = get_needs(ctx.resident).get("social", 1.0)
+        if social >= settings.realism_crowd_social_max:
+            return ""
+        from app.agent.map_data import get_location_id_at, get_location_by_id
+        from app.services import crowd_service
+        counts = await crowd_service.location_resident_counts(ctx.db)
+        here = get_location_id_at(ctx.resident.tile_x, ctx.resident.tile_y)
+        busy = crowd_service.busiest_crowded_location(counts, exclude=here)
+        if not busy:
+            return ""
+        loc = get_location_by_id(busy)
+        name = (loc or {}).get("name", busy)
+        return f"\n（{name}那边好像很热闹，很多人聚在那里。）"
+
     def _force_execute_plan(self, plan, ctx: TickContext) -> ActionResult | None:
         try:
             action = ActionType(plan.action)
@@ -268,6 +316,10 @@ class BasicDecidePlugin:
 
         if settings.realism_enabled:
             user_prompt += _needs_prompt_hint(ctx.resident)
+
+        # Realism P2-7: herd micro-rule soft hint (independent crowd gate).
+        if settings.realism_crowd_enabled:
+            user_prompt += await self._crowd_hint(ctx)
 
         raw = await llm_chat(
             system_prompt, [{"role": "user", "content": user_prompt}], max_tokens=200,

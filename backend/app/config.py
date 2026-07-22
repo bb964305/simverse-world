@@ -338,6 +338,11 @@ class Settings(BaseSettings):
     realism_info_sample_frac: float = 0.2        # random "well-informed" first-hand sample of the rest
     realism_info_geo_importance: float = 0.6     # first-hand importance for geo-related residents
     realism_info_sample_importance: float = 0.5  # first-hand importance for the random sample
+    # P2 Task 7 — crowd / 人流聚集 (festival draw + herd micro-rule).
+    realism_festival_location: str = "central_plaza"  # default gathering place for a location-less festival
+    realism_crowd_threshold: int = 5             # a location with ≥ this many residents reads as "lively"
+    realism_crowd_social_max: float = 0.5        # herd hint only when own social need < this
+    # (festival ×3 draw reuses realism_festival_weight defined above)
 
     model_config = {"env_file": ".env"}
 
