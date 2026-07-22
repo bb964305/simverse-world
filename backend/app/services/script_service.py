@@ -22,6 +22,7 @@ from datetime import datetime, UTC, timedelta
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 
+from app.config import settings
 from app.models.season import Season, SeasonScript, Poll, Vote
 from app.models.world_event import WorldEvent
 from app.models.bulletin_post import BulletinPost
@@ -54,14 +55,17 @@ async def fire_due_scripts(db) -> list[dict]:
             continue
 
         p = s.event_payload_json or {}
-        # 1. World event — active immediately, description flows into prompts.
+        # 1. World event. Realism P0-4: start inactive with starts_at=now so the
+        # event_cron flip_active_events emits a "start" transition next pass —
+        # driving the WS broadcast + collective memory the direct is_active=True
+        # path skipped (diagnosis §2.6). Off → keep the legacy immediate-active.
         we = WorldEvent(
             type="script",
             title=p.get("title", f"剧本 · 第{s.act}幕"),
             description=p.get("description", ""),
             starts_at=now,
             ends_at=now + timedelta(hours=int(p.get("duration_hours", 24))),
-            is_active=True,
+            is_active=(False if settings.realism_enabled else True),
             payload_json={"season_id": s.season_id, "act": s.act},
         )
         db.add(we)
