@@ -121,7 +121,7 @@ class AgentLoop:
                 # calls (WS chat) keep running on their own path.
                 return tier
             result = await db.execute(
-                select(Resident.id, Resident.meta_json).where(
+                select(Resident.id, Resident.meta_json, Resident.mood_json).where(
                     Resident.status.not_in(["sleeping"])
                 )
             )
@@ -159,7 +159,7 @@ class AgentLoop:
         semaphore = asyncio.Semaphore(settings.agent_max_concurrent)
 
         async def guarded_tick(
-            resident_id: str, meta_json: dict | None
+            resident_id: str, meta_json: dict | None, mood_json: dict | None = None
         ) -> ActionResult | None:
             """Run one resident's tick in its own session, bounded by semaphore."""
             # Evaluate schedule before acquiring semaphore (no DB needed)
@@ -188,7 +188,8 @@ class AgentLoop:
                 return None
 
             weather_kind = (weather or {}).get("kind")
-            if not should_tick(schedule, current_hour, weather_kind, festival_active):
+            valence = (mood_json or {}).get("valence") if settings.realism_enabled else None
+            if not should_tick(schedule, current_hour, weather_kind, festival_active, valence):
                 return None
 
             async with semaphore:
@@ -212,7 +213,7 @@ class AgentLoop:
 
         # Run all ticks concurrently, bounded by semaphore
         await asyncio.gather(
-            *(guarded_tick(row.id, row.meta_json) for row in rows),
+            *(guarded_tick(row.id, row.meta_json, row.mood_json) for row in rows),
             return_exceptions=True,
         )
         return tier

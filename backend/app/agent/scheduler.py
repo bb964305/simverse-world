@@ -144,7 +144,7 @@ def _weather_activity_factor(weather_kind: str | None) -> float:
 
 def get_activity_probability(
     schedule: DailySchedule, hour: int, weather_kind: str | None = None,
-    festival_active: bool = False,
+    festival_active: bool = False, valence: float | None = None,
 ) -> float:
     """Compute a 0.0-1.0 probability that a resident acts at this hour.
 
@@ -181,19 +181,23 @@ def get_activity_probability(
     # storm can push the street below any baseline).
     if settings.realism_enabled and weather_kind:
         prob *= _weather_activity_factor(weather_kind)
+    # Realism P1-11: mood scales activity — a depressed resident doesn't feel like
+    # going out (×(1+0.2×valence)); an upbeat one is a bit more active.
+    if settings.realism_enabled and valence is not None:
+        prob *= max(0.0, 1.0 + settings.realism_valence_activity_coef * valence)
     return prob
 
 
 def should_tick(
     schedule: DailySchedule, hour: int, weather_kind: str | None = None,
-    festival_active: bool = False,
+    festival_active: bool = False, valence: float | None = None,
 ) -> bool:
     """Roll against activity probability with ±15 minute jitter.
 
     The jitter means residents don't all wake up at exactly the same second,
     and slightly different residents will tick at different wall-clock moments.
     """
-    prob = get_activity_probability(schedule, hour, weather_kind, festival_active)
+    prob = get_activity_probability(schedule, hour, weather_kind, festival_active, valence)
     if prob <= 0.0:
         return False
     # Jitter: add small random noise to prob (±0.1)

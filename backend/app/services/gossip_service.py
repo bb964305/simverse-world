@@ -75,11 +75,26 @@ async def maybe_gossip(db, speaker: Resident, listener: Resident) -> Memory | No
     importance = min((origin.importance or 0.0) * 0.8, IMPORTANCE_CAP)
     origin_id = (origin.metadata_json or {}).get("origin_memory_id") or origin.id
 
-    return await MemoryService(db).add_memory(
+    mem = await MemoryService(db).add_memory(
         listener.id, "event", content, importance=importance, source="gossip",
         related_resident_id=origin.related_resident_id,
         metadata_json={"origin_memory_id": origin_id, "hops": new_hops, "distorted": distorted},
     )
+
+    # Realism P1-11: being gossiped about (a distorted rumor, hops≥2, subject is a
+    # real resident) is quietly unsettling — nudge the subject's mood.
+    from app.config import settings
+    if settings.realism_enabled and new_hops >= 2 and origin.related_resident_id:
+        try:
+            from app.services.mood_service import apply_mood_event_by_id
+            await apply_mood_event_by_id(
+                db, origin.related_resident_id,
+                settings.realism_gossip_victim_valence,
+                settings.realism_gossip_victim_arousal)
+        except Exception:
+            logger.warning("gossip victim mood write-back failed", exc_info=True)
+
+    return mem
 
 
 async def get_rumor_chain(db, origin_memory_id: str) -> list[dict]:

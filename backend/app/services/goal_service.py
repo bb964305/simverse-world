@@ -145,6 +145,21 @@ async def _on_resolved(db, resident_id, goal, verdict) -> None:
         resident_id, "reflection", f"我{verb}我的人生目标「{goal.title}」，这让我对自己有了新的认识。",
         importance=0.9, source="reflection",
     )
+    # Realism P1-11: a resolved life goal moves mood (emotion-loop input).
+    from app.config import settings
+    if settings.realism_enabled:
+        try:
+            from app.services.mood_service import apply_mood_event_by_id
+            if verdict == "achieved":
+                await apply_mood_event_by_id(
+                    db, resident_id, settings.realism_goal_achieved_valence,
+                    settings.realism_goal_achieved_arousal)
+            elif verdict == "failed":
+                await apply_mood_event_by_id(
+                    db, resident_id, settings.realism_goal_failed_valence,
+                    settings.realism_goal_failed_arousal)
+        except Exception:
+            logger.warning("goal verdict mood write-back failed", exc_info=True)
     # E13: settle any investments in this goal on the verdict.
     try:
         from app.services.investment_service import settle_goal_investments

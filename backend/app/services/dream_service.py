@@ -31,6 +31,13 @@ DREAM_SYSTEM = (
     "你是梦境编织者。把下面的记忆素材揉成一段梦，允许荒诞的混搭与错位，第一人称，"
     "80 字以内，符合角色人格。只输出梦的内容。"
 )
+# Realism P1-11: piggyback a mood `tone` on the SAME dream call (the sole
+# sanctioned LLM-output extension) — no new call.
+DREAM_SYSTEM_JSON = (
+    "你是梦境编织者。把下面的记忆素材揉成一段梦，允许荒诞的混搭与错位，第一人称，"
+    "80 字以内，符合角色人格。只输出 JSON："
+    '{"dream": "梦的内容", "tone": "positive|neutral|negative"}。'
+)
 
 
 def _extract_text(resp) -> str:
@@ -66,12 +73,25 @@ async def generate_dream(db, resident: Resident) -> Memory | None:
 
     client = get_client("system")
     model = settings.effective_model
-    resp = await client.messages.create(
-        model=model, max_tokens=200, system=DREAM_SYSTEM,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    content = _extract_text(resp).strip()[:120]
-    await record_usage("dream", model=model, owner="system", response=resp)
+    tone = None
+    if settings.realism_enabled:
+        resp = await client.messages.create(
+            model=model, max_tokens=250, system=DREAM_SYSTEM_JSON,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        await record_usage("dream", model=model, owner="system", response=resp)
+        from app.llm.json_extract import extract_json_object
+        data = extract_json_object(_extract_text(resp).strip()) or {}
+        content = str(data.get("dream") or "").strip()[:120]
+        t = data.get("tone")
+        tone = t if t in ("positive", "neutral", "negative") else "neutral"
+    else:
+        resp = await client.messages.create(
+            model=model, max_tokens=200, system=DREAM_SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        content = _extract_text(resp).strip()[:120]
+        await record_usage("dream", model=model, owner="system", response=resp)
     if not content:
         return None
 
@@ -79,6 +99,15 @@ async def generate_dream(db, resident: Resident) -> Memory | None:
         resident.id, "dream", content, importance=0.4, source="reflection",
         metadata_json={"date": today_start.date().isoformat(), "involves_user_id": involves},
     )
+
+    # Realism P1-11: a dream's tone nudges mood ±0.1 (emotion-loop input).
+    if tone in ("positive", "negative"):
+        delta = settings.realism_dream_tone_delta if tone == "positive" else -settings.realism_dream_tone_delta
+        try:
+            from app.services.mood_service import apply_mood_event
+            await apply_mood_event(db, resident, delta, 0.0)
+        except Exception:
+            logger.warning("dream tone mood write-back failed", exc_info=True)
 
     if involves:
         try:

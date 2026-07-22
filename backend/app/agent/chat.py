@@ -11,7 +11,7 @@ from app.llm.metering import Meter
 from app.memory.service import MemoryService
 from app.models.resident import Resident
 from app.redis_client import get_redis
-from app.services.mood_service import apply_mood_event
+from app.services.mood_service import apply_mood_event, get_mood
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,22 @@ async def _apply_chat_mood(db, initiator, target, mood: str | None) -> None:
             await apply_mood_event(db, res, dv, da)
         except Exception:
             logger.warning("chat mood write-back failed", exc_info=True)
+
+
+async def _apply_contagion(db, a, b) -> None:
+    """Realism P1-11: emotion contagion — after a conversation both residents'
+    valence moves toward their shared mean (a bad day ripples out)."""
+    if not settings.realism_enabled:
+        return
+    va = float(get_mood(a).get("valence", 0.0))
+    vb = float(get_mood(b).get("valence", 0.0))
+    mean = (va + vb) / 2.0
+    rate = settings.realism_contagion_rate
+    try:
+        await apply_mood_event(db, a, rate * (mean - va), 0.0)
+        await apply_mood_event(db, b, rate * (mean - vb), 0.0)
+    except Exception:
+        logger.warning("emotion contagion failed", exc_info=True)
 
 
 def _pair_key(a: Resident, b: Resident) -> str:
@@ -175,6 +191,8 @@ async def resident_chat(
 
         # Realism P0-3: write the wrap-up mood back to both residents.
         await _apply_chat_mood(svc.db, initiator, target, summary_data.get("mood"))
+        # Realism P1-11: emotion contagion toward the pair's mean valence.
+        await _apply_contagion(svc.db, initiator, target)
 
         # E3: each may pass a third-party rumor to the other (best-effort).
         try:
