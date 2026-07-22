@@ -377,3 +377,21 @@
 - **prompt**：decide/chat 注入一行需求摘要（"你有点饿了"）。
 - **偏差**：睡眠恢复/唤醒需 loop 纳入 sleeping 居民（原 loop 显式排除）——realism on 才纳入，off 时行为与现状完全一致。
 
+### P1 完成（全绿，2026-07-22）
+
+- **验收门全绿**：`cd backend && ./.venv/bin/python -m pytest` = **1181 passed / 1 skipped / 11 deselected（lab_oci 既有）/ 0 failed / exit 0（143s）**。基线 1106 → +75 新测试，只增不减、零新增排除。
+- **前端四连**：`tsc --noEmit` rc=0、`eslint .` rc=0、`vitest run` 77 passed；**build 因 Node v25 rolldown 原生 binding 缺失失败（既有基线问题，PROGRESS 早有记录，本次未改任何前端代码，WS payload 形状不变）**。3/4 绿，第 4 项被已知环境问题阻塞。
+- **提交链**（`feat/realism-p1`，接 P0 之后）：`e286fed` p1-0 config → `dac3a49` p1-7 移动 → `05d6bde` p1-8 天气 → `29d7e72` p1-9 星期节日 → `21a02f1` p1-10 三需求 → `289446d` p1-11 情绪环 → `4ff9480` p1-12 校准 → `c578dd2` p1-13 探针 → `<fixup>` EAT append-only 末位。
+- **四个探针出数**（seeded fixture 演示，非真 agent burn-in；真 burn-in 待开 loop+时间，按"不部署/等拍板"延后）：
+  - **计划到达率 = 83.3%**（P0，>70% ✅）
+  - **行为-记忆一致率 = 100.0%**（P0，>95% ✅）
+  - **地点小时人流 = dining{12:2, 19:1}, other{9:1,10:1}**（P1，dining 呈午/晚双峰 ✅）
+  - **需求健康度 = energy(均0.667/低0.4) satiety(均0.517/低0.15) social(均0.533/低0.3)，饥饿 1/3 人**（P1，无持续死锁 ✅）
+- **新机制全部门控 `REALISM_ENABLED`（默认 False）**：off 时 1106 既有测试零改动通过。
+- **P1 偏差登记**：
+  1. Task 8 `location_is_indoor` 据 `type` 派生（不逐地点手标 indoor）；`location_category` dining 用 cafe/tavern 白名单（不逐地点手标 category）——行为等价，显式键仍可覆盖。
+  2. Task 9 festival 地点 VISIT_DISTRICT ×3 权重未实现（无候选权重层），社交时段 +0.2 为实装效果。
+  3. Task 11 valence<-0.4 的 CHAT×0.5/REFLECT×2 硬权重 + 对话轮数随 valence 未升为硬机制（无动作候选权重层），保留现有 mood-label 软 prompt 提示。
+  4. Task 12 归一化对 gossip(≥0.6)/检索排序有连带影响（realism on 时的预期校准效应）；<10 条历史跳过归一化避免冷启动失真。
+- **交付状态**：双分支 CI 绿 —— `feat/realism-p0`（P0，1145 passed）+ `feat/realism-p1`（P0+P1，1181 passed）+ 四探针出数。**不部署，等 Jimmy 拍板真实 burn-in。**
+
