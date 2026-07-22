@@ -257,6 +257,56 @@ class Settings(BaseSettings):
     # Task 3 flashbulb: importance += coef × |valence| × arousal.
     realism_flashbulb_coef: float = 0.2
 
+    # --- Realism P1 (rule-based realism; still gated by realism_enabled) ---
+    # Task 7 movement modulation (multiplicative on base speed).
+    realism_move_rain: float = 0.75
+    realism_move_storm: float = 0.5
+    realism_move_snow: float = 0.6
+    realism_move_arousal_boost: float = 1.2   # applied when arousal > threshold
+    realism_move_arousal_threshold: float = 0.7
+    # Task 8 weather → activity probability multiplier.
+    realism_weather_sunny: float = 1.0
+    realism_weather_cloudy: float = 0.95
+    realism_weather_rain: float = 0.7
+    realism_weather_storm: float = 0.4
+    realism_weather_snow: float = 0.75
+    realism_shelter_prob: float = 0.6         # P(outdoor resident reroutes indoors in rain/storm)
+    realism_weather_mood_rain_valence: float = -0.02
+    realism_weather_mood_rain_arousal: float = -0.01
+    realism_weather_mood_sunny_valence: float = 0.02
+    # Task 9 weekday/festival.
+    realism_weekend_wake_delay: int = 1       # weekend wake_hour += this
+    realism_weekend_rest_boost: float = 0.1
+    realism_festival_social_boost: float = 0.2
+    realism_festival_weight: float = 3.0
+    # Task 10 needs metabolism (per tick unless noted).
+    realism_needs_initial: float = 0.8
+    realism_needs_critical: float = 0.25
+    realism_energy_awake: float = -0.004
+    realism_energy_walking: float = -0.006
+    realism_energy_sleep: float = 0.02
+    realism_satiety_decay: float = -0.005
+    realism_eat_restore: float = 0.5
+    realism_social_introvert: float = -0.001
+    realism_social_extravert: float = -0.006
+    realism_social_default: float = -0.003
+    realism_social_chat: float = 0.4
+    realism_social_greet: float = 0.1
+    # Task 11 emotion loop.
+    realism_goal_achieved_valence: float = 0.4
+    realism_goal_achieved_arousal: float = 0.2
+    realism_goal_failed_valence: float = -0.3
+    realism_goal_failed_arousal: float = 0.1
+    realism_gossip_victim_valence: float = -0.1
+    realism_gossip_victim_arousal: float = 0.15
+    realism_dream_tone_delta: float = 0.1
+    realism_valence_activity_coef: float = 0.2   # activity ×= (1 + coef×valence)
+    realism_contagion_rate: float = 0.1          # v += rate × (mean − v)
+    # Task 12 importance calibration.
+    realism_importance_window: int = 100
+    realism_shift_percentile: float = 0.95       # shift gate: normalized ≥ P95 ...
+    realism_shift_valence_gate: float = 0.5      # ... AND |valence| > this
+
     model_config = {"env_file": ".env"}
 
 

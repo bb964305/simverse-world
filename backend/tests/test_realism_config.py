@@ -26,6 +26,16 @@ def test_realism_evict_and_mood_defaults():
     assert s.realism_flashbulb_coef == 0.2
 
 
+def test_realism_p1_defaults():
+    s = Settings(_env_file=None)
+    assert s.realism_weather_storm == 0.4 and s.realism_weather_sunny == 1.0
+    assert s.realism_move_storm == 0.5
+    assert s.realism_needs_initial == 0.8 and s.realism_needs_critical == 0.25
+    assert s.realism_eat_restore == 0.5
+    assert s.realism_shift_percentile == 0.95 and s.realism_shift_valence_gate == 0.5
+    assert s.realism_importance_window == 100
+
+
 def test_realism_env_override(monkeypatch):
     monkeypatch.setenv("REALISM_ENABLED", "true")
     monkeypatch.setenv("REALISM_MOVE_SPEED", "8")
