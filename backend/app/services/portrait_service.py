@@ -28,11 +28,18 @@ def build_portrait_prompt(name: str, persona_md: str) -> str:
         appearance_hints = "a cyberpunk city character with distinct personality"
 
     return (
-        f"Generate a Q-style chibi pixel-art portrait of a character named '{name}'. "
+        f"Pixel art game sprite of a character named '{name}'. "
         f"Character traits: {appearance_hints}. "
-        f"Style: 2D pixel art, cyberpunk aesthetic, 128x128 pixels, "
-        f"transparent background, game sprite portrait, cute chibi proportions. "
-        f"Output a single character portrait, no text, no watermark."
+        "STYLE: authentic retro 2D pixel art, like a 16-bit SNES RPG character sprite. "
+        "Full-body chibi character, standing, facing the viewer, about 2.5 heads tall "
+        "with a big head and small body. Large chunky visible square pixels, flat "
+        "colors with simple two-tone shading, crisp 1-pixel dark outlines, a limited "
+        "palette of at most 16 colors, subtle cyberpunk neon accents. "
+        "COMPOSITION: exactly one character, centered, filling about 90% of the "
+        "image height. "
+        "BACKGROUND: solid uniform magenta (#FF00FF), completely flat, no gradient, "
+        "no floor, no ground shadow, no border. "
+        "Do not include any text, watermark, logo, frame, UI, or extra objects."
     )
 
 
@@ -122,6 +129,23 @@ async def generate_portrait(
                 str(data)[:300],
             )
             return None
+
+        # Snap the raw AI render onto a true pixel grid (Image-to-Pixel style:
+        # downsample + palette quantization + transparent backdrop). On any
+        # failure keep the raw image rather than losing the portrait.
+        try:
+            from app.services.pixelate_service import pixelate_image
+
+            image_data = pixelate_image(
+                image_data,
+                grid=settings.portrait_pixel_grid,
+                colors=settings.portrait_pixel_colors,
+            )
+        except Exception:
+            logger.warning(
+                "Pixelation failed for %s; saving raw portrait", resident_id,
+                exc_info=True,
+            )
 
         return save_portrait_image(resident_id, image_data)
 

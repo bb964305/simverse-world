@@ -268,7 +268,9 @@ async def regenerate_or_upload_avatar(
     user, resident, db = await _require_resident(request, db)
     try:
         from app.services.portrait_service import generate_portrait
-        portrait_url = await generate_portrait(resident)
+        portrait_url = await generate_portrait(
+            resident.id, resident.name, resident.persona_md or ""
+        )
         resident.portrait_url = portrait_url
         await db.commit()
         await db.refresh(resident)
