@@ -20,6 +20,11 @@ def _weather_kind(world_events) -> str | None:
     return None
 
 
+def _energy_critical(resident) -> bool:
+    from app.agent.needs import get_needs
+    return get_needs(resident).get("energy", 1.0) < settings.realism_needs_critical
+
+
 def _effective_speed(base: int, weather_kind: str | None, arousal: float | None) -> int:
     """Realism P1-7: tiles walked per tick = base × weather × arousal (min 1).
     rain 0.75 / storm 0.5 / snow 0.6; arousal>0.7 ×1.2 (in a hurry)."""
@@ -85,8 +90,14 @@ class BasicExecutePlugin:
                         ctx.resident.status = "walking"
                         ctx.new_tile = next_tile
                     else:
-                        # Already at destination or unreachable — reset to idle
-                        ctx.resident.status = "idle"
+                        # Already at destination or unreachable — reset to idle.
+                        # Realism P1-10: arriving home exhausted → sleep (energy
+                        # recovers overnight; loop wakes within the schedule window).
+                        if (settings.realism_enabled and action == ActionType.GO_HOME
+                                and _energy_critical(ctx.resident)):
+                            ctx.resident.status = "sleeping"
+                        else:
+                            ctx.resident.status = "idle"
                         ctx.new_tile = (ctx.resident.tile_x, ctx.resident.tile_y)
                     await ctx.db.commit()
                 else:
@@ -112,6 +123,17 @@ class BasicExecutePlugin:
                 if ctx.resident.status not in ("chatting", "socializing"):
                     ctx.resident.status = "researching"
                     await ctx.db.commit()
+            elif action == ActionType.EAT:
+                # Realism P1-10: pure state change — restore satiety (must be in a
+                # dining location, enforced by get_available_actions).
+                if ctx.resident.status not in ("chatting", "socializing"):
+                    ctx.resident.status = "idle"
+                if settings.realism_enabled:
+                    from app.agent.needs import get_needs, write_needs
+                    needs = get_needs(ctx.resident)
+                    needs["satiety"] = min(1.0, needs["satiety"] + settings.realism_eat_restore)
+                    write_needs(ctx.resident, needs)
+                await ctx.db.commit()
         except Exception as e:
             logger.warning("Execute failed for %s: %s", ctx.resident.slug, e)
 

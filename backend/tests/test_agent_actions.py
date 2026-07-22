@@ -18,9 +18,9 @@ def _make_resident(status="idle", district="engineering", tile_x=76, tile_y=50):
     return r
 
 
-def test_all_15_action_types_exist():
-    # RESEARCH is the 15th action (Lab / experiment building, spec §5.4). It is
-    # append-only: the original 14 keep their names/order/semantics.
+def test_all_16_action_types_exist():
+    # RESEARCH is the 15th (Lab, spec §5.4); EAT is the 16th (realism P1-10 needs
+    # layer). Append-only: the original 14 keep their names/order/semantics.
     expected = {
         "CHAT_RESIDENT", "CHAT_FOLLOW_UP", "GOSSIP",
         "WANDER", "VISIT_DISTRICT", "GO_HOME",
@@ -29,6 +29,7 @@ def test_all_15_action_types_exist():
         "WORK", "STUDY",
         "IDLE", "NAP",
         "RESEARCH",
+        "EAT",
     }
     actual = {a.value for a in ActionType}
     assert actual == expected

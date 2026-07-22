@@ -41,6 +41,34 @@ logger = logging.getLogger(__name__)
 # route/filter behavior replay separately from app logs.
 events_logger = logging.getLogger("agent.events")
 
+# Realism P1-10: energy that lets a sleeping resident wake.
+_WAKE_ENERGY = 0.5
+
+
+async def _metabolize_sleepers(current_hour: int, current_weekday: int) -> int:
+    """Recover sleeping residents' energy and wake those rested + in-window.
+
+    Sleeping residents are excluded from the main tick round, so their energy is
+    metabolized here (own session). Returns the number woken."""
+    from app.agent.needs import get_needs, metabolize, write_needs
+    woke = 0
+    async with async_session() as db:
+        sleepers = (await db.execute(
+            select(Resident).where(Resident.status == "sleeping")
+        )).scalars().all()
+        for r in sleepers:
+            sbti = (r.meta_json or {}).get("sbti")
+            needs = metabolize(get_needs(r), status="sleeping", sbti=sbti)
+            write_needs(r, needs)
+            sched = build_schedule(sbti, weekday=current_weekday)
+            in_window = sched.wake_hour <= current_hour < sched.sleep_hour
+            if needs["energy"] >= _WAKE_ENERGY and in_window:
+                r.status = "idle"
+                woke += 1
+        if sleepers:
+            await db.commit()
+    return woke
+
 
 class AgentLoop:
     """Centralized agent loop — runs as a FastAPI background task.
@@ -121,6 +149,13 @@ class AgentLoop:
         suppress_chat = tier == BudgetTier.RULE_ONLY
         current_hour = datetime.now().hour
         current_weekday = datetime.now().weekday()
+        # Realism P1-10: sleeping residents (excluded from the tick round) recover
+        # energy and wake within their schedule window once rested.
+        if settings.realism_enabled:
+            try:
+                await _metabolize_sleepers(current_hour, current_weekday)
+            except Exception:
+                logger.warning("sleeper metabolism failed", exc_info=True)
         semaphore = asyncio.Semaphore(settings.agent_max_concurrent)
 
         async def guarded_tick(

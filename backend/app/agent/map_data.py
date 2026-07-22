@@ -250,6 +250,37 @@ def get_location_by_id(loc_id: str) -> dict | None:
     return LOCATIONS.get(loc_id)
 
 
+_DINING_LOCATIONS = {"cafe", "tavern"}
+
+
+def location_category(loc_id: str | None) -> str | None:
+    """Realism P1-10: coarse location category (e.g. "dining"). Reads an explicit
+    ``category`` key if present, else a small dining allowlist (cafe/tavern).
+    Deviation: allowlist instead of hand-tagging every location dict — same
+    behavior, and an explicit ``category`` key still wins."""
+    if not loc_id:
+        return None
+    loc = get_location_by_id(loc_id)
+    if loc and loc.get("category"):
+        return loc["category"]
+    return "dining" if loc_id in _DINING_LOCATIONS else None
+
+
+def nearest_dining_location(from_tile: tuple[int, int]) -> str | None:
+    """Nearest dining-category location entrance to ``from_tile``."""
+    best, best_d = None, None
+    for loc_id, loc in LOCATIONS.items():
+        if location_category(loc_id) != "dining":
+            continue
+        entrance = loc.get("entrance") or loc.get("center")
+        if not entrance:
+            continue
+        d = abs(from_tile[0] - entrance[0]) + abs(from_tile[1] - entrance[1])
+        if best_d is None or d < best_d:
+            best, best_d = loc_id, d
+    return best
+
+
 def location_is_indoor(loc_id: str | None) -> bool:
     """Realism P1-8: whether a location shelters from weather. Derived from the
     existing ``type`` (outdoor plazas/parks/streets are exposed) with an optional

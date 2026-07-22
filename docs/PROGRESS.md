@@ -362,3 +362,18 @@
   - 探针纯函数 `plan_arrival_rate`/`behavior_memory_consistency`/`fetch_move_records`/`render_probes` 已带单测（`test_burnin_report.py` +4）。
 - **下一步**：进 P1（任务 7–13），新开 `feat/realism-p1`。不部署。
 
+### P1 进展（feat/realism-p1，2026-07-22）
+
+- `e286fed` p1-0 config（weather/needs/emotion/calibration 全部 REALISM_* + .env.example）
+- `dac3a49` p1-7 移动提速（execute 走 speed 格，天气/唤醒调制；plan 附通勤分钟）+ 前端四连（tsc/eslint/vitest 绿，build 因 Node v25 rolldown 既有失败）
+- `05d6bde` p1-8 天气影响（活动概率乘子 + 躲雨改道 + 天气心情）
+- `29d7e72` p1-9 星期/节日（周末作息 + 节日社交 +0.2；festival 地点×3 权重因无候选权重层简化为社交时段加成，记偏差）
+
+#### Task 10 三需求底座 — 设计小结（动手前）
+- **状态**：`resident.meta_json.needs = {energy, satiety, social}`（0–1，init 0.8）。纯函数模块 `app/agent/needs.py`：`get_needs/write_needs/metabolize(needs,status,sbti)/most_critical(needs)`。
+- **代谢挂点**：`resident_tick` 顶部（daily-limit 后、phase chain 前）对活跃居民代谢（清醒-0.004/walking-0.006、satiety-0.005、social 按 So1 内外向 -0.001/-0.006/-0.003）——**不计每日行动数**（在 phase chain 外）。睡眠恢复+唤醒：loop 改为 realism 时**不排除 sleeping** 居民，在 guarded_tick 里对 sleeping 居民 energy+0.02、恢复到阈值且在作息窗内→醒（status idle），否则续睡（不跑完整 tick）。
+- **EAT 动作**：`ActionType.EAT`（纯状态：satiety+=0.5）；`get_available_actions` 在餐饮类地点（`map_data` 地点加 `category`，cafe/tavern→dining）加 EAT；execute 处理 EAT。
+- **裁决层**（decide，Case 1 高重要度计划之下、plan-skip 之上）：energy<0.25→GO_HOME（到家 execute 置 sleeping）；satiety<0.25→在餐饮地点则 EAT，否则 VISIT_DISTRICT 最近餐饮；social<0.25→软提升 CHAT 权重（非硬 force，按方案表格）。
+- **prompt**：decide/chat 注入一行需求摘要（"你有点饿了"）。
+- **偏差**：睡眠恢复/唤醒需 loop 纳入 sleeping 居民（原 loop 显式排除）——realism on 才纳入，off 时行为与现状完全一致。
+

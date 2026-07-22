@@ -28,6 +28,21 @@ def _weather_kind(world_events) -> str | None:
     return None
 
 
+def _needs_prompt_hint(resident) -> str:
+    """Realism P1-10: a one-line need summary softly injected into the decide
+    prompt so the LLM's non-forced choices lean toward the resident's state."""
+    from app.agent.needs import get_needs
+    needs = get_needs(resident)
+    parts = []
+    if needs["satiety"] < 0.4:
+        parts.append("有点饿了")
+    if needs["energy"] < 0.4:
+        parts.append("有些疲惫")
+    if needs["social"] < 0.4:
+        parts.append("想找人说说话")
+    return f"\n（你现在{'，'.join(parts)}）" if parts else ""
+
+
 class BasicDecidePlugin:
     def __init__(self, params: dict[str, Any] | None = None):
         params = params or {}
@@ -55,6 +70,17 @@ class BasicDecidePlugin:
                 ctx.plan_followed = True
                 plan.status = "executing"
                 return ctx
+
+        # Realism P1-10: needs arbitration — a critical need (<0.25) forces the
+        # matching behavior (zero LLM). Below a high-importance plan, above the
+        # weather/plan-skip paths.
+        needs_action = self._maybe_needs_action(ctx)
+        if needs_action is not None:
+            ctx.action_result = needs_action
+            ctx.plan_followed = False
+            if plan:
+                plan.status = "interrupted"
+            return ctx
 
         # Realism P1-8: rule-level weather interrupt — duck out of rain/storm to
         # the nearest indoor place (zero LLM). Below a high-importance plan,
@@ -140,6 +166,34 @@ class BasicDecidePlugin:
 
         return False
 
+    def _maybe_needs_action(self, ctx: TickContext) -> ActionResult | None:
+        """Realism P1-10: force a behavior when a need is critical. energy→GO_HOME
+        (execute sleeps once home); satiety→EAT here or head to nearest dining.
+        social is soft (CHAT weight / prompt), not a hard force — returns None."""
+        if not settings.realism_enabled:
+            return None
+        from app.agent.needs import get_needs, most_critical
+        crit = most_critical(get_needs(ctx.resident))
+        if crit is None or crit == "social":
+            return None
+        from app.agent.map_data import (
+            get_location_id_at, location_category, nearest_dining_location,
+            get_valid_target_tile,
+        )
+        if crit == "energy":
+            if ActionType.GO_HOME in ctx.available_actions:
+                return ActionResult(ActionType.GO_HOME, None, None, "精力耗尽，回家休息")
+            return None
+        # satiety
+        here = get_location_id_at(ctx.resident.tile_x, ctx.resident.tile_y)
+        if location_category(here) == "dining" and ActionType.EAT in ctx.available_actions:
+            return ActionResult(ActionType.EAT, here, None, "饿了，吃点东西")
+        target = nearest_dining_location((ctx.resident.tile_x, ctx.resident.tile_y))
+        if target and ActionType.VISIT_DISTRICT in ctx.available_actions:
+            return ActionResult(
+                ActionType.VISIT_DISTRICT, target, get_valid_target_tile(target), "去找吃的")
+        return None
+
     def _maybe_shelter(self, ctx: TickContext) -> ActionResult | None:
         """Realism P1-8: in rain/storm, an outdoor resident reroutes to the
         nearest indoor location with probability realism_shelter_prob."""
@@ -211,6 +265,9 @@ class BasicDecidePlugin:
             plan = ctx.current_plan
             hint = f"\n\n你原本计划在这个时段 {plan.action}（{plan.reason}），但你可以根据当前情况改变主意。"
             user_prompt += hint
+
+        if settings.realism_enabled:
+            user_prompt += _needs_prompt_hint(ctx.resident)
 
         raw = await llm_chat(
             system_prompt, [{"role": "user", "content": user_prompt}], max_tokens=200,

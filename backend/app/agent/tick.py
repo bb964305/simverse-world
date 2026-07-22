@@ -50,6 +50,18 @@ async def resident_tick(
     ``force_plan_only`` (set by the budget breaker's 95%+ tier) makes decide
     hard-follow the plan with no LLM interrupt — the rule-based fallback.
     """
+    # Realism P1-10: metabolize needs each processed tick (energy/satiety/social
+    # drain). Not an action — runs before the daily-cap gate so needs keep moving
+    # even after a resident spends its action budget, and never counts as an action.
+    if settings.realism_enabled:
+        try:
+            from app.agent.needs import get_needs, metabolize, write_needs
+            sbti = (resident.meta_json or {}).get("sbti")
+            write_needs(resident, metabolize(get_needs(resident), status=resident.status, sbti=sbti))
+            await db.commit()
+        except Exception:
+            logger.warning("needs metabolism failed for %s", resident.slug, exc_info=True)
+
     if await _over_daily_limit(resident.id):
         return None
 

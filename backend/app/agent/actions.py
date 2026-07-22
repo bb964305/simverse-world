@@ -24,6 +24,8 @@ class ActionType(str, Enum):
     # Rest
     IDLE           = "IDLE"
     NAP            = "NAP"
+    # Needs (realism P1-10): eat at a dining-category location (pure state change).
+    EAT            = "EAT"
     # Lab (元游戏入口): narrative-only tick action, gated to researchers inside
     # the experiment building. It never runs the real sandbox (that is the Lab
     # Runner's job); it only flips status→researching + writes a memory.
@@ -98,6 +100,13 @@ def get_available_actions(resident, nearby_residents: list) -> list[ActionType]:
         from app.agent.map_data import get_location_id_at
         if get_location_id_at(resident.tile_x, resident.tile_y) == "experiment_building":
             available.append(ActionType.RESEARCH)
+
+    # EAT (realism P1-10): only inside a dining-category location.
+    from app.config import settings as _settings
+    if _settings.realism_enabled:
+        from app.agent.map_data import location_category, get_location_id_at
+        if location_category(get_location_id_at(resident.tile_x, resident.tile_y)) == "dining":
+            available.append(ActionType.EAT)
 
     # Deduplicate while preserving order
     seen: set[ActionType] = set()
