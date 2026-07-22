@@ -247,16 +247,64 @@ async def fetch_move_records(session, since: datetime) -> list[dict]:
         mv = meta.get("move") if isinstance(meta, dict) else None
         if not isinstance(mv, dict):
             continue
+        ts = created.astimezone(UTC) if created.tzinfo else created
         records.append({
             "resident_id": rid,
             "content": content or "",
             "day": _day_key(created),
+            "hour": ts.hour,
             "target": mv.get("target"),
             "intent": mv.get("intent"),
             "moved": bool(mv.get("moved")),
             "arrived": bool(mv.get("arrived")),
         })
     return records
+
+
+async def fetch_resident_needs(session) -> list[dict]:
+    """当前全体居民的三需求快照（realism P1-13 需求健康度探针）。"""
+    from app.models.resident import Resident
+    rows = (await session.execute(select(Resident.meta_json))).all()
+    out: list[dict] = []
+    for (meta,) in rows:
+        needs = meta.get("needs") if isinstance(meta, dict) else None
+        if isinstance(needs, dict):
+            out.append(needs)
+    return out
+
+
+def location_hourly_traffic(records: list[dict]) -> dict[str, dict[int, int]]:
+    """地点小时人流曲线：按 category 地点 × 小时统计到达计数（读到达记忆的
+    target→category + hour）。期望餐饮出现午晚双峰。"""
+    from app.agent.map_data import location_category
+    traffic: dict[str, dict[int, int]] = {}
+    for r in records:
+        if not r["arrived"] or not r["target"]:
+            continue
+        cat = location_category(r["target"]) or "other"
+        traffic.setdefault(cat, {})
+        traffic[cat][r["hour"]] = traffic[cat].get(r["hour"], 0) + 1
+    return traffic
+
+
+def needs_health(needs_list: list[dict]) -> dict | None:
+    """需求健康度：全体三需求的均值/最低值 + 持续饥饿（satiety<临界）人数。
+    死锁信号 = starving 人数高居不下。无居民返回 None。"""
+    if not needs_list:
+        return None
+    from app.config import settings
+    keys = ("energy", "satiety", "social")
+    stats: dict = {}
+    for k in keys:
+        vals = [float(n.get(k, 1.0)) for n in needs_list if isinstance(n.get(k), (int, float))]
+        if vals:
+            stats[k] = {"mean": round(sum(vals) / len(vals), 3), "min": round(min(vals), 3)}
+    starving = sum(1 for n in needs_list
+                   if isinstance(n.get("satiety"), (int, float))
+                   and n["satiety"] < settings.realism_needs_critical)
+    stats["starving_count"] = starving
+    stats["residents"] = len(needs_list)
+    return stats
 
 
 def plan_arrival_rate(records: list[dict]) -> float | None:
@@ -302,6 +350,29 @@ def render_probes(records: list[dict]) -> str:
     return "\n".join(out)
 
 
+def render_probes_p1(records: list[dict], needs_list: list[dict]) -> str:
+    out = ["== 拟真探针（P1 验收）=="]
+    traffic = location_hourly_traffic(records)
+    if traffic:
+        out.append("  地点小时人流（category → {小时:到访数}）：")
+        for cat in sorted(traffic):
+            hours = ", ".join(f"{h}:{traffic[cat][h]}" for h in sorted(traffic[cat]))
+            out.append(f"    {cat:<8} {{{hours}}}")
+        out.append("    （期望：dining 午/晚双峰、雨天户外下降）")
+    else:
+        out.append("  地点小时人流 = -（无到达记忆）")
+    nh = needs_health(needs_list)
+    if nh:
+        parts = ", ".join(
+            f"{k}(均{nh[k]['mean']}/低{nh[k]['min']})" for k in ("energy", "satiety", "social") if k in nh)
+        out.append(f"  需求健康度 = {parts}")
+        out.append(f"    饥饿(satiety<临界)={nh['starving_count']}/{nh['residents']} 人"
+                   "（持续高企=需求死锁信号）")
+    else:
+        out.append("  需求健康度 = -（无居民 needs 数据；realism 关或未起 tick）")
+    return "\n".join(out)
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -315,10 +386,12 @@ async def _run(days_window: int, residents: int, budget: float | None) -> str:
     async with async_session() as session:
         rows = await fetch_rows(session, since)
         move_records = await fetch_move_records(session, since)
+        resident_needs = await fetch_resident_needs(session)
     report = render_report(
         aggregate(rows), residents=residents, budget=budget, window_days=days_window
     )
-    return report + "\n\n" + render_probes(move_records)
+    return (report + "\n\n" + render_probes(move_records)
+            + "\n\n" + render_probes_p1(move_records, resident_needs))
 
 
 def main(argv: list[str] | None = None) -> None:

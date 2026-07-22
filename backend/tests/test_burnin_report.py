@@ -13,6 +13,7 @@ from app.models.memory import Memory
 from scripts.burnin_report import (
     aggregate, fetch_rows, render_report, summarize_day,
     fetch_move_records, plan_arrival_rate, behavior_memory_consistency, render_probes,
+    location_hourly_traffic, needs_health, render_probes_p1, fetch_resident_needs,
 )
 
 
@@ -131,3 +132,36 @@ def test_behavior_consistency_flags_phantom():
     bad = [{"resident_id": "r", "content": "到达了学院", "day": "d",
             "target": "academy", "intent": "VISIT_DISTRICT", "moved": False, "arrived": False}]
     assert behavior_memory_consistency(bad) == pytest.approx(0.0)
+
+
+def test_location_hourly_traffic():
+    records = [
+        {"arrived": True, "target": "cafe", "hour": 12},
+        {"arrived": True, "target": "cafe", "hour": 12},
+        {"arrived": True, "target": "tavern", "hour": 19},
+        {"arrived": True, "target": "academy", "hour": 9},   # non-dining
+        {"arrived": False, "target": "cafe", "hour": 8},     # not arrived → ignored
+    ]
+    traffic = location_hourly_traffic(records)
+    assert traffic["dining"][12] == 2 and traffic["dining"][19] == 1
+    assert 8 not in traffic.get("dining", {})   # en-route not counted
+
+
+def test_needs_health():
+    needs_list = [
+        {"energy": 0.8, "satiety": 0.1, "social": 0.5},   # starving
+        {"energy": 0.6, "satiety": 0.9, "social": 0.7},
+    ]
+    nh = needs_health(needs_list)
+    assert nh["residents"] == 2
+    assert nh["starving_count"] == 1
+    assert nh["satiety"]["min"] == 0.1
+    assert nh["energy"]["mean"] == pytest.approx(0.7)
+    assert needs_health([]) is None
+
+
+def test_render_probes_p1_smoke():
+    records = [{"arrived": True, "target": "cafe", "hour": 12}]
+    needs = [{"energy": 0.5, "satiety": 0.5, "social": 0.5}]
+    block = render_probes_p1(records, needs)
+    assert "地点小时人流" in block and "需求健康度" in block
