@@ -5,11 +5,34 @@ import logging
 from typing import Any
 
 from app.agent.actions import ActionType
+from app.config import settings
 from app.agent.map_data import get_valid_target_tile
 from app.agent.pathfinder import get_walkable_tiles, find_path
 from app.agent.schemas import TickContext
 
 logger = logging.getLogger(__name__)
+
+
+def _weather_kind(world_events) -> str | None:
+    for e in world_events or []:
+        if e.get("type") == "weather":
+            return (e.get("payload_json") or {}).get("kind")
+    return None
+
+
+def _effective_speed(base: int, weather_kind: str | None, arousal: float | None) -> int:
+    """Realism P1-7: tiles walked per tick = base × weather × arousal (min 1).
+    rain 0.75 / storm 0.5 / snow 0.6; arousal>0.7 ×1.2 (in a hurry)."""
+    factor = 1.0
+    if weather_kind == "rain":
+        factor *= settings.realism_move_rain
+    elif weather_kind == "storm":
+        factor *= settings.realism_move_storm
+    elif weather_kind == "snow":
+        factor *= settings.realism_move_snow
+    if arousal is not None and arousal > settings.realism_move_arousal_threshold:
+        factor *= settings.realism_move_arousal_boost
+    return max(1, round(base * factor))
 
 
 class BasicExecutePlugin:
@@ -44,7 +67,19 @@ class BasicExecutePlugin:
                         walkable,
                     )
                     if path and len(path) >= 2:
-                        next_tile = path[1]
+                        # Realism P1-7: advance up to `speed` path tiles per tick
+                        # (weather/arousal-modulated), instead of a single tile.
+                        if settings.realism_enabled:
+                            arousal = (ctx.resident.mood_json or {}).get("arousal")
+                            speed = _effective_speed(
+                                settings.realism_move_speed,
+                                _weather_kind(getattr(ctx, "world_events", None)),
+                                arousal,
+                            )
+                        else:
+                            speed = 1
+                        idx = min(speed, len(path) - 1)
+                        next_tile = path[idx]
                         ctx.resident.tile_x = next_tile[0]
                         ctx.resident.tile_y = next_tile[1]
                         ctx.resident.status = "walking"

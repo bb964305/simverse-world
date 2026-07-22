@@ -170,7 +170,9 @@ class BasicPlanPlugin:
             if home_loc:
                 home_name = home_loc["name"]
 
-        location_list = format_location_list_for_prompt()
+        location_list = format_location_list_for_prompt(
+            from_tile=(ctx.resident.tile_x, ctx.resident.tile_y),
+        )
 
         preferred_hint = ""
         if self.preferred_actions:
