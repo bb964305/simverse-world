@@ -12,6 +12,7 @@ from datetime import datetime, UTC
 
 from sqlalchemy import select, delete, func
 
+from app.config import settings
 from app.database import async_session
 from app.agent.map_data import get_location_at, get_location_id_at
 from app.models.memory import Memory
@@ -93,6 +94,19 @@ async def record_witnesses(resident_id: str, tile_x: int, tile_y: int, home_loca
             ))
         await db.commit()
         await _prune(db, resident_id)
+        # Realism P2-2: witnessing a player nudges familiarity (+0.01). Rides the
+        # existing (4h-deduped) witness event; no-op when the relations gate is off.
+        if settings.realism_relations_enabled:
+            try:
+                from app.services import relation_service
+                for uid, _ in pending:
+                    await relation_service.bump(
+                        db, resident_id, uid,
+                        d_familiarity=settings.realism_rel_familiarity_witness,
+                        type1="resident", type2="player",
+                    )
+            except Exception:
+                logger.warning("witness relation bump failed", exc_info=True)
     return len(pending)
 
 

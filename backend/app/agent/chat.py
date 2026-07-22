@@ -44,6 +44,31 @@ async def _apply_chat_mood(db, initiator, target, mood: str | None) -> None:
             logger.warning("chat mood write-back failed", exc_info=True)
 
 
+async def _apply_chat_relations(db, a, b, mood: str | None) -> None:
+    """Realism P2-2: a resident-resident conversation bumps the numeric relation.
+
+    familiarity += 0.05 always (they spent time together); affinity ±0.03 by the
+    wrap-up mood (positive/negative; neutral = no affinity change). Reuses the
+    existing wrap-up mood judgement — zero new LLM. No-op when the relations gate
+    is off, so the pre-P2 path is byte-for-byte unchanged."""
+    if not settings.realism_relations_enabled:
+        return
+    d_aff = 0.0
+    if mood == "positive":
+        d_aff = settings.realism_rel_affinity_chat
+    elif mood == "negative":
+        d_aff = -settings.realism_rel_affinity_chat
+    try:
+        from app.services import relation_service
+        await relation_service.bump(
+            db, a.id, b.id,
+            d_familiarity=settings.realism_rel_familiarity_chat,
+            d_affinity=d_aff,
+        )
+    except Exception:
+        logger.warning("chat relation bump failed", exc_info=True)
+
+
 async def _apply_contagion(db, a, b) -> None:
     """Realism P1-11: emotion contagion — after a conversation both residents'
     valence moves toward their shared mean (a bad day ripples out)."""
@@ -193,6 +218,8 @@ async def resident_chat(
         await _apply_chat_mood(svc.db, initiator, target, summary_data.get("mood"))
         # Realism P1-11: emotion contagion toward the pair's mean valence.
         await _apply_contagion(svc.db, initiator, target)
+        # Realism P2-2: numeric relation bump (familiarity + affinity by mood).
+        await _apply_chat_relations(svc.db, initiator, target, summary_data.get("mood"))
 
         # E3: each may pass a third-party rumor to the other (best-effort).
         try:

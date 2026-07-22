@@ -352,6 +352,21 @@ async def handle_end_chat(ctx: ConnectionContext, data: dict) -> None:
 
         await db.commit()
 
+        # Realism P2-2: a completed player↔resident conversation bumps
+        # familiarity (+0.05). Affinity for this path rides the rating
+        # (handle_rate_chat) — the P1-established player-sentiment carrier.
+        # Reuses the existing end-chat event; no-op when the gate is off.
+        if settings.realism_relations_enabled:
+            try:
+                from app.services import relation_service
+                await relation_service.bump(
+                    db, resident_id, ctx.user_id,
+                    d_familiarity=settings.realism_rel_familiarity_chat,
+                    type1="resident", type2="player",
+                )
+            except Exception:
+                logger.warning("player-chat relation bump failed", exc_info=True)
+
         prev_status = fresh_resident.status if fresh_resident else "idle"
         fresh_resident_name = fresh_resident.name if fresh_resident else ""
         fresh_resident_mood = fresh_resident.mood_label if fresh_resident else "calm"

@@ -57,6 +57,20 @@ async def invest(db, user_id: str, goal_id: str, amount: int) -> GoalInvestment:
                          f"{resident.name} 的目标「{goal.title}」收到一笔 {amount} 🪙 投资。", {"goal_id": goal_id})
     except Exception:
         logger.warning("investment side effects failed", exc_info=True)
+
+    # Realism P2-2: backing a resident's dream raises affinity (player→resident,
+    # +0.1). Reuses the invest event; no-op when the relations gate is off.
+    from app.config import settings
+    if settings.realism_relations_enabled:
+        try:
+            from app.services import relation_service
+            await relation_service.bump(
+                db, goal.resident_id, user_id,
+                d_affinity=settings.realism_rel_affinity_invest,
+                type1="resident", type2="player",
+            )
+        except Exception:
+            logger.warning("investment relation bump failed", exc_info=True)
     return inv
 
 
