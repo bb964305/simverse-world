@@ -84,7 +84,7 @@ class ArtifactUploader:
     def _command_from_stored(value: Any) -> RuntimeArtifactUploadCommand:
         try:
             return RuntimeArtifactUploadCommand.model_validate_json(
-                canonical_json_bytes(value), strict=True
+                canonical_json_bytes(value)
             )
         except (ValidationError, ValueError, TypeError) as exc:
             raise ArtifactUploadError(

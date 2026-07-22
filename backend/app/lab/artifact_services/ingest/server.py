@@ -13,6 +13,7 @@ from app.lab.artifact_services.auth import (
     ArtifactAuthError,
     RequestBinding,
     ServiceTokenValidator,
+    UploadCapabilityClaims,
     extract_bearer,
 )
 from app.lab.artifact_services.ingest.service import IngestError, IngestService
@@ -86,7 +87,10 @@ def create_app(
         token = extract_bearer(authorization)
         # Validate signature/action/path binding before the operation-store lookup.
         claims = service.upload_validator.validate(
-            token, action="artifact.upload", allow_expired=True
+            token,
+            action="artifact.upload",
+            claims_type=UploadCapabilityClaims,
+            allow_expired=True,
         )
         if claims.operation_id != upload_id:
             from app.lab.artifact_services.auth import ArtifactAuthorizationError

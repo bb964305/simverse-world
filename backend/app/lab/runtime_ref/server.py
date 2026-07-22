@@ -448,9 +448,10 @@ def _create_v2_app(
                 RuntimeArtifactUploadCommand,
                 RuntimeArtifactUploadAck,
             }:
-                # Pydantic's strict JSON mode preserves strict integers/booleans
-                # while accepting the wire representation of aware datetimes.
-                body = model_type.model_validate_json(bytes(raw), strict=True)
+                # Protocol fields use StrictInt/StrictBool where coercion is
+                # forbidden. Global strict mode would also reject the ISO-8601
+                # datetime representation required on the JSON wire.
+                body = model_type.model_validate_json(bytes(raw))
             else:
                 body = model_type.model_validate(
                     value, strict=model_type is not ControlCommand

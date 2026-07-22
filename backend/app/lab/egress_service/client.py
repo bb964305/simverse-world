@@ -41,7 +41,10 @@ class RemoteEgressClient:
             raise ValueError("invalid egress service base URL") from exc
         if parsed.scheme not in {"http", "https"} or not parsed.host:
             raise ValueError("egress service base URL must be HTTP(S)")
-        if parsed.username is not None or parsed.password is not None:
+        # ``httpx.URL`` exposes absent credentials as empty strings, unlike
+        # ``urllib.parse.SplitResult`` which uses ``None``.  Checking identity
+        # here therefore rejected every normal credential-free service URL.
+        if parsed.username or parsed.password:
             raise ValueError("egress service base URL cannot contain credentials")
         if len(api_key) < 32:
             raise ValueError("egress service API key must contain at least 32 characters")

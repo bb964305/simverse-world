@@ -52,6 +52,16 @@ def _b64url_decode(value: str) -> bytes:
         raise ReceiptSignatureError("receipt signature is not base64url") from exc
 
 
+def _validated_signing_payload(
+    receipt_type: type[ReceiptT], payload: dict
+) -> dict:
+    """Normalize datetimes and nested models before producing signed bytes."""
+    draft = receipt_type.model_validate(
+        {**payload, "signature": _b64url(bytes(32))}
+    )
+    return receipt_signing_payload(draft)
+
+
 def _openssl() -> str:
     executable = shutil.which("openssl")
     if executable is None:
@@ -111,13 +121,15 @@ class HmacReceiptSigner:
         body["algorithm"] = "HS256"
         body["issuer"] = self.issuer
         body["kid"] = self.current_kid
+        unsigned = _validated_signing_payload(receipt_type, body)
         signature = hmac.new(
             self.current_key.encode("utf-8"),
-            canonical_json_bytes(receipt_signing_payload(body)),
+            canonical_json_bytes(unsigned),
             hashlib.sha256,
         ).digest()
-        body["signature"] = _b64url(signature)
-        return receipt_type.model_validate(body)
+        return receipt_type.model_validate(
+            {**unsigned, "signature": _b64url(signature)}
+        )
 
 
 @dataclass(frozen=True)
@@ -163,7 +175,8 @@ class Ed25519ReceiptSigner:
         body["algorithm"] = "EdDSA"
         body["issuer"] = self.issuer
         body["kid"] = self.current_kid
-        signing_payload = canonical_json_bytes(receipt_signing_payload(body))
+        unsigned = _validated_signing_payload(receipt_type, body)
+        signing_payload = canonical_json_bytes(unsigned)
         try:
             completed = subprocess.run(
                 [
@@ -184,8 +197,9 @@ class Ed25519ReceiptSigner:
             raise ReceiptSignatureError("EdDSA receipt signing failed") from exc
         if completed.returncode != 0 or len(completed.stdout) != 64:
             raise ReceiptSignatureError("EdDSA receipt signing failed")
-        body["signature"] = _b64url(completed.stdout)
-        return receipt_type.model_validate(body)
+        return receipt_type.model_validate(
+            {**unsigned, "signature": _b64url(completed.stdout)}
+        )
 
 
 @dataclass(frozen=True)

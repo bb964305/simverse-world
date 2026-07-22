@@ -13,8 +13,9 @@ non-root user, ``no-new-privileges``, and memory/cpu/pids caps. There is never a
 host bind mount and never the docker socket, so a compromised payload cannot
 read host files or reach the daemon. The wall-clock bound wraps the subprocess
 in ``asyncio.wait_for``; a timeout ``docker kill``s the container and reports
-``timed_out``. Ordinary jobs use ``--rm``; output jobs are paused for a bounded
-snapshot and force-removed. Both paths verify teardown — a container that
+``timed_out``. Ordinary jobs use ``--rm``; output jobs freeze workload processes,
+stream a bounded scratch archive, and are force-removed. Both paths verify
+teardown — a container that
 ``docker inspect`` still finds marks the executor permanently unusable, because
 an un-torn-down sandbox is an isolation breach, not a warning.
 
@@ -35,6 +36,7 @@ import re
 import shlex
 import shutil
 import stat
+import tarfile
 import tempfile
 import uuid
 from dataclasses import dataclass, field
@@ -61,6 +63,8 @@ _MAX_STREAM_CHARS = 64 * 1024
 _READ_CHUNK = 64 * 1024
 _OUTPUT_EXIT_MARKER = "/scratch/.simverse-executor-exit"
 _OUTPUT_POLL_INTERVAL_S = 0.1
+_OUTPUT_ARCHIVE_OVERHEAD_BYTES = 8 * 1024 * 1024
+_MAX_OUTPUT_ARCHIVE_MEMBERS = 16_384
 
 
 class ExecutorError(Exception):
@@ -323,27 +327,13 @@ class OciExecutor:
             await self.verify_teardown(name)
             raise
 
-        output_files: tuple[SandboxOutputFile, ...] = ()
-        output_snapshot: str | None = None
-        output_error_code: str | None = None
         try:
             if on_teardown_pending is not None:
                 pending = on_teardown_pending(name)
                 if inspect.isawaitable(pending):
                     await pending
-            if output_requests and exit_code == 0 and not timed_out:
-                try:
-                    output_files, snapshot = await self._collect_outputs(
-                        name,
-                        requests=output_requests,
-                        output_root=Path(output_root),
-                    )
-                    output_snapshot = str(snapshot)
-                except SandboxOutputError as exc:
-                    output_error_code = exc.error_code
         finally:
-            # --rm reaps ordinary jobs; output jobs remain stopped long enough for
-            # an Executor-owned scratch snapshot and are then force-removed.
+            # ``--rm`` reaps ordinary jobs after their streams reach EOF.
             await self._docker(["rm", "-f", name])
             teardown_proof = await self.verify_teardown(name)
 
@@ -354,9 +344,6 @@ class OciExecutor:
             timed_out=timed_out,
             teardown_proof=teardown_proof,
             truncated=truncated,
-            output_files=output_files,
-            output_snapshot=output_snapshot,
-            output_error_code=output_error_code,
         )
 
     @staticmethod
@@ -398,7 +385,6 @@ class OciExecutor:
         process_task = asyncio.create_task(proc.wait())
         marker_task = asyncio.create_task(self._wait_for_output_exit(name))
         timed_out = False
-        paused = False
         exit_code = -1
         output_files: tuple[SandboxOutputFile, ...] = ()
         output_snapshot: str | None = None
@@ -418,14 +404,6 @@ class OciExecutor:
                     exit_code = marker_task.result()
                 except SandboxOutputError as exc:
                     output_error_code = exc.error_code
-                if output_error_code is None:
-                    pause_code, _pause_out, _pause_err = await self._docker(
-                        ["pause", name]
-                    )
-                    if pause_code != 0:
-                        output_error_code = "output_snapshot_freeze_failed"
-                    else:
-                        paused = True
             else:
                 exit_code = process_task.result()
                 output_error_code = "output_supervisor_terminated"
@@ -435,19 +413,23 @@ class OciExecutor:
                 if inspect.isawaitable(pending):
                     await pending
 
-            if paused and exit_code == 0 and output_error_code is None:
+            if exit_code == 0 and output_error_code is None:
                 try:
                     output_files, snapshot = await self._collect_outputs(
                         name,
                         requests=output_requests,
                         output_root=output_root,
+                        scratch_limit_bytes=(
+                            int(effective_limits.scratch_mb) * 1024 * 1024
+                        ),
+                        snapshot_timeout_seconds=max(
+                            1.0, float(effective_limits.wall_clock_s)
+                        ),
                     )
                     output_snapshot = str(snapshot)
                 except SandboxOutputError as exc:
                     output_error_code = exc.error_code
         finally:
-            if paused:
-                await self._docker(["unpause", name])
             await self._docker(["rm", "-f", name])
             marker_task.cancel()
             if not process_task.done():
@@ -509,6 +491,8 @@ class OciExecutor:
         *,
         requests: tuple[SandboxOutputRequest, ...],
         output_root: Path,
+        scratch_limit_bytes: int,
+        snapshot_timeout_seconds: float,
     ) -> tuple[tuple[SandboxOutputFile, ...], Path]:
         try:
             output_root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -525,27 +509,244 @@ class OciExecutor:
             raise
         except OSError as exc:
             raise SandboxOutputError("output_snapshot_unavailable") from exc
+        archive_path = output_root / f".{snapshot.name}.tar"
         try:
-            return_code, _stdout, _stderr = await self._docker(
-                ["cp", f"{container_name}:/scratch/.", str(snapshot)]
+            # Docker's archive API does not expose tmpfs contents consistently
+            # across runtimes (notably Docker-on-Colima). Freeze every process the
+            # unprivileged workload user can signal, then stream the mounted
+            # scratch tree from inside the still-running container.
+            freeze_code, _freeze_stdout, _freeze_stderr = await self._docker(
+                [
+                    "exec",
+                    "--user",
+                    self.user,
+                    container_name,
+                    "/bin/sh",
+                    "-c",
+                    "kill -STOP -1",
+                ]
             )
-            if return_code != 0:
-                raise SandboxOutputError("output_snapshot_failed")
-            inspected = await asyncio.gather(
-                    *(
-                        asyncio.to_thread(
-                            self._inspect_output_file,
-                            snapshot,
-                            request,
-                        )
-                        for request in requests
-                    )
+            if freeze_code != 0:
+                raise SandboxOutputError("output_snapshot_freeze_failed")
+            try:
+                await asyncio.wait_for(
+                    self._capture_output_archive(
+                        container_name,
+                        archive_path=archive_path,
+                        max_bytes=(
+                            max(1, scratch_limit_bytes)
+                            + _OUTPUT_ARCHIVE_OVERHEAD_BYTES
+                        ),
+                    ),
+                    timeout=snapshot_timeout_seconds,
                 )
+            except TimeoutError as exc:
+                raise SandboxOutputError("output_snapshot_timeout") from exc
+            await asyncio.to_thread(
+                self._extract_declared_output_members,
+                archive_path,
+                snapshot,
+                requests,
+            )
+            inspected = await asyncio.gather(
+                *(
+                    asyncio.to_thread(
+                        self._inspect_output_file,
+                        snapshot,
+                        request,
+                    )
+                    for request in requests
+                )
+            )
             files = tuple(item for item in inspected if item is not None)
             return files, snapshot
+        except SandboxOutputError:
+            shutil.rmtree(snapshot, ignore_errors=True)
+            raise
+        except (OSError, EOFError, tarfile.TarError) as exc:
+            shutil.rmtree(snapshot, ignore_errors=True)
+            raise SandboxOutputError("output_snapshot_invalid") from exc
         except BaseException:
             shutil.rmtree(snapshot, ignore_errors=True)
             raise
+        finally:
+            archive_path.unlink(missing_ok=True)
+
+    async def _capture_output_archive(
+        self,
+        container_name: str,
+        *,
+        archive_path: Path,
+        max_bytes: int,
+    ) -> None:
+        proc = await _exec_run(
+            [
+                self.runner,
+                "exec",
+                "--user",
+                self.user,
+                container_name,
+                "/bin/tar",
+                "-C",
+                "/scratch",
+                "-cf",
+                "-",
+                ".",
+            ],
+            self._host_env(),
+        )
+        stderr_task = asyncio.create_task(
+            _read_capped(proc.stderr, _MAX_STREAM_CHARS)
+        )
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(archive_path, flags, 0o600)
+            except OSError as exc:
+                raise SandboxOutputError("output_snapshot_unavailable") from exc
+            observed = 0
+            try:
+                with os.fdopen(descriptor, "wb", closefd=False) as archive_handle:
+                    while True:
+                        chunk = await proc.stdout.read(_READ_CHUNK)
+                        if not chunk:
+                            break
+                        observed += len(chunk)
+                        if observed > max_bytes:
+                            raise SandboxOutputError("output_snapshot_too_large")
+                        archive_handle.write(chunk)
+                    archive_handle.flush()
+                    os.fsync(archive_handle.fileno())
+            finally:
+                os.close(descriptor)
+            await proc.wait()
+            await stderr_task
+            if proc.returncode != 0:
+                raise SandboxOutputError("output_snapshot_failed")
+        except BaseException:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            if not stderr_task.done():
+                stderr_task.cancel()
+            await asyncio.gather(stderr_task, return_exceptions=True)
+            raise
+
+    @classmethod
+    def _extract_declared_output_members(
+        cls,
+        archive_path: Path,
+        snapshot: Path,
+        requests: tuple[SandboxOutputRequest, ...],
+    ) -> None:
+        try:
+            archive = tarfile.open(archive_path, mode="r:")
+        except (OSError, tarfile.TarError) as exc:
+            raise SandboxOutputError("output_snapshot_invalid") from exc
+
+        with archive:
+            members: dict[str, tarfile.TarInfo] = {}
+            hardlink_targets: set[str] = set()
+            try:
+                for index, member in enumerate(archive):
+                    if index >= _MAX_OUTPUT_ARCHIVE_MEMBERS:
+                        raise SandboxOutputError("output_snapshot_too_many_files")
+                    name = cls._normalize_archive_path(member.name)
+                    if name is None:
+                        continue
+                    if name in members:
+                        raise SandboxOutputError("output_snapshot_duplicate_path")
+                    members[name] = member
+                    if member.islnk():
+                        target = cls._normalize_archive_path(member.linkname)
+                        if target is not None:
+                            hardlink_targets.add(target)
+            except tarfile.TarError as exc:
+                raise SandboxOutputError("output_snapshot_invalid") from exc
+
+            for request in requests:
+                cls._extract_declared_output_member(
+                    archive,
+                    snapshot,
+                    request,
+                    members=members,
+                    hardlink_targets=hardlink_targets,
+                )
+
+    @staticmethod
+    def _normalize_archive_path(value: str) -> str | None:
+        if not value or value.startswith("/") or "\\" in value:
+            raise SandboxOutputError("output_snapshot_invalid_path")
+        normalized = value
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        normalized = normalized.rstrip("/")
+        if normalized in {"", "."}:
+            return None
+        if any(part in {"", ".", ".."} for part in normalized.split("/")):
+            raise SandboxOutputError("output_snapshot_invalid_path")
+        return normalized
+
+    @classmethod
+    def _extract_declared_output_member(
+        cls,
+        archive: tarfile.TarFile,
+        snapshot: Path,
+        request: SandboxOutputRequest,
+        *,
+        members: dict[str, tarfile.TarInfo],
+        hardlink_targets: set[str],
+    ) -> None:
+        parts = request.relative_path.split("/")
+        for index in range(1, len(parts)):
+            parent = members.get("/".join(parts[:index]))
+            if parent is None:
+                continue
+            if parent.issym():
+                raise SandboxOutputError("declared_output_symlink")
+            if not parent.isdir():
+                raise SandboxOutputError("declared_output_parent_invalid")
+
+        member = members.get(request.relative_path)
+        if member is None:
+            if request.required:
+                raise SandboxOutputError("declared_output_missing")
+            return
+        if member.issym():
+            raise SandboxOutputError("declared_output_symlink")
+        if member.islnk() or request.relative_path in hardlink_targets:
+            raise SandboxOutputError("declared_output_linked")
+        if not member.isreg():
+            raise SandboxOutputError("declared_output_not_regular")
+        if member.size < 0 or member.size > request.max_bytes:
+            raise SandboxOutputError("declared_output_too_large")
+
+        source = archive.extractfile(member)
+        if source is None:
+            raise SandboxOutputError("declared_output_unreadable")
+        target = snapshot.joinpath(*parts)
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(target, flags, 0o600)
+        except OSError as exc:
+            raise SandboxOutputError("declared_output_unreadable") from exc
+        observed = 0
+        try:
+            with source, os.fdopen(descriptor, "wb", closefd=False) as target_handle:
+                while chunk := source.read(_READ_CHUNK):
+                    observed += len(chunk)
+                    if observed > request.max_bytes:
+                        raise SandboxOutputError("declared_output_too_large")
+                    target_handle.write(chunk)
+                target_handle.flush()
+                os.fsync(target_handle.fileno())
+        finally:
+            os.close(descriptor)
+        if observed != member.size:
+            raise SandboxOutputError("output_snapshot_invalid")
 
     @staticmethod
     def _inspect_output_file(

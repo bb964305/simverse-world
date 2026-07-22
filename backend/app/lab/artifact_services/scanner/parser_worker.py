@@ -542,9 +542,13 @@ def _apply_resource_limits(*, max_memory_bytes: int, max_cpu_seconds: int) -> No
         raise WorkerFailure("parser_resource_limits_unavailable") from exc
     try:
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-        resource.setrlimit(
-            resource.RLIMIT_AS, (max_memory_bytes, max_memory_bytes)
-        )
+        if sys.platform != "darwin":
+            resource.setrlimit(
+                resource.RLIMIT_AS, (max_memory_bytes, max_memory_bytes)
+            )
+        # Python on Darwin cannot lower RLIMIT_AS. Local scans still have parser
+        # byte/structure bounds, this CPU limit, and the parent wall-clock limit;
+        # production admission remains Linux-only and requires the memory limit.
         resource.setrlimit(
             resource.RLIMIT_CPU, (max_cpu_seconds, max_cpu_seconds + 1)
         )
