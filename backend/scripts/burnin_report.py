@@ -32,7 +32,7 @@ from datetime import datetime, timedelta, UTC
 # `python scripts/burnin_report.py` 直接跑时保证 `app` 可导入
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import select, func  # noqa: E402
 
 from app.models.llm_usage import LLMUsage  # noqa: E402
 
@@ -374,6 +374,175 @@ def render_probes_p1(records: list[dict], needs_list: list[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# P2 验收探针（社会结构）：社交网络度分布偏度 + 信息扩散半衰期
+# ---------------------------------------------------------------------------
+async def fetch_relation_edges(session) -> list[tuple[str, str, float]]:
+    """resident_relations 中 familiarity>0.1 的居民-居民边 (a, b, familiarity)。"""
+    from app.models.resident_relation import ResidentRelation
+    rows = (await session.execute(
+        select(ResidentRelation.party_a, ResidentRelation.party_b, ResidentRelation.familiarity,
+               ResidentRelation.party_a_type, ResidentRelation.party_b_type)
+    )).all()
+    return [(a, b, float(fam)) for a, b, fam, at, bt in rows
+            if fam is not None and fam > 0.1 and at == "resident" and bt == "resident"]
+
+
+async def fetch_event_diffusion(session) -> dict:
+    """事件记忆（一手 world_event + 二手 gossip，带 event_id）+ 事件类型 + 居民总数。"""
+    from app.models.memory import Memory
+    from app.models.world_event import WorldEvent
+    from app.models.resident import Resident
+    ev_type = {eid: t for eid, t in (await session.execute(
+        select(WorldEvent.id, WorldEvent.type))).all()}
+    records = []
+    for rid, meta, created in (await session.execute(
+        select(Memory.resident_id, Memory.metadata_json, Memory.created_at)
+        .where(Memory.source.in_(("world_event", "gossip")))
+    )).all():
+        eid = (meta or {}).get("event_id")
+        if eid:
+            records.append({"event_id": eid, "resident_id": rid, "created_at": created})
+    total = (await session.execute(select(func.count()).select_from(Resident))).scalar_one()
+    return {"records": records, "event_type": ev_type, "total_residents": total or 0}
+
+
+def degree_distribution_skewness(edges: list[tuple[str, str, float]]) -> dict | None:
+    """居民对话/关系图的度分布 + 偏度（Fisher-Pearson g1，纯 Python）。右偏(>0) =
+    存在社交明星与边缘者；关闭开关的对照组因均匀随机应近 0/近对称。无边返回 None。"""
+    if not edges:
+        return None
+    from collections import Counter
+    deg: Counter = Counter()
+    for a, b, _ in edges:
+        deg[a] += 1
+        deg[b] += 1
+    degrees = list(deg.values())
+    n = len(degrees)
+    mean = sum(degrees) / n
+    var = sum((d - mean) ** 2 for d in degrees) / n
+    std = var ** 0.5
+    skew = 0.0 if std == 0 else (sum((d - mean) ** 3 for d in degrees) / n) / (std ** 3)
+    return {
+        "skewness": round(skew, 3),
+        "n_nodes": n,
+        "mean_degree": round(mean, 2),
+        "max_degree": max(degrees),
+        "min_degree": min(degrees),
+        "histogram": dict(sorted(Counter(degrees).items())),
+    }
+
+
+def _ts(x):
+    return x if x is not None else datetime.min.replace(tzinfo=UTC)
+
+
+def info_diffusion_half_life(diffusion: dict, exclude_weather: bool = True) -> dict:
+    """每个非天气事件：知情居民比例随模拟时间的终值 + 到 50% 的时长（小时）。
+    梯度开启时应为数小时量级；对照组(全知广播)所有一手记忆同刻写入 → t50≈0。"""
+    from collections import defaultdict
+    records = diffusion["records"]
+    ev_type = diffusion["event_type"]
+    total = diffusion["total_residents"] or 1
+    per_event: dict[str, list] = defaultdict(list)
+    for r in records:
+        if exclude_weather and ev_type.get(r["event_id"]) == "weather":
+            continue
+        per_event[r["event_id"]].append((r["created_at"], r["resident_id"]))
+
+    events = []
+    for eid, entries in per_event.items():
+        entries.sort(key=lambda e: _ts(e[0]))
+        start = entries[0][0]
+        seen: set[str] = set()
+        t50 = None
+        for ts, rid in entries:
+            seen.add(rid)
+            if t50 is None and len(seen) / total >= 0.5:
+                t50 = ((ts - start).total_seconds() / 3600.0) if (ts and start) else 0.0
+        events.append({
+            "event_id": eid,
+            "informed_count": len(seen),
+            "informed_ratio": round(len(seen) / total, 3),
+            "time_to_50pct_hours": (round(t50, 3) if t50 is not None else None),
+        })
+    events.sort(key=lambda e: -e["informed_ratio"])
+    return {"events": events, "total_residents": total}
+
+
+def diffusion_relation_correlation(diffusion: dict, edges: list[tuple[str, str, float]]) -> float | None:
+    """抽样验证「知情顺序与关系强度正相关」：取扩散最广的非天气事件，计算被通知
+    次序 rank 与该居民对已知情集合的最大 familiarity 的 Pearson 相关。信息若沿强关系
+    流动,越晚知情者与先知情者的关系越弱 → 期望负相关。样本不足返回 None。"""
+    from collections import defaultdict
+    ev_type = diffusion["event_type"]
+    per_event: dict[str, list] = defaultdict(list)
+    for r in diffusion["records"]:
+        if ev_type.get(r["event_id"]) == "weather":
+            continue
+        per_event[r["event_id"]].append((r["created_at"], r["resident_id"]))
+    if not per_event:
+        return None
+    eid = max(per_event, key=lambda k: len({r for _, r in per_event[k]}))
+    entries = sorted(per_event[eid], key=lambda e: _ts(e[0]))
+    fam = {}
+    for a, b, f in edges:
+        fam[(a, b)] = f
+        fam[(b, a)] = f
+    ranks, strengths = [], []
+    informed: list[str] = []
+    for i, (_, rid) in enumerate(entries):
+        if rid in informed:
+            continue
+        if informed:  # skip the very first (no prior informed set)
+            best = max((fam.get((rid, o), 0.0) for o in informed), default=0.0)
+            ranks.append(float(i))
+            strengths.append(best)
+        informed.append(rid)
+    if len(ranks) < 3:
+        return None
+    n = len(ranks)
+    mr, ms = sum(ranks) / n, sum(strengths) / n
+    cov = sum((ranks[i] - mr) * (strengths[i] - ms) for i in range(n))
+    vr = sum((r - mr) ** 2 for r in ranks) ** 0.5
+    vs = sum((s - ms) ** 2 for s in strengths) ** 0.5
+    if vr == 0 or vs == 0:
+        return None
+    return round(cov / (vr * vs), 3)
+
+
+def render_probes_p2(edges: list[tuple[str, str, float]], diffusion: dict) -> str:
+    out = ["== 拟真探针（P2 验收：社会结构）=="]
+    skew = degree_distribution_skewness(edges)
+    if skew:
+        out.append(f"  社交网络度分布偏度 = {skew['skewness']}"
+                   f"（节点 {skew['n_nodes']}, 均度 {skew['mean_degree']}, "
+                   f"度 {skew['min_degree']}–{skew['max_degree']}；目标右偏>0=有社交明星，"
+                   "对照组近 0）")
+        out.append(f"    度直方图 = {skew['histogram']}")
+    else:
+        out.append("  社交网络度分布偏度 = -（无 familiarity>0.1 的关系边；"
+                   "REALISM_RELATIONS_ENABLED 关或未起 tick）")
+
+    hl = info_diffusion_half_life(diffusion)
+    if hl["events"]:
+        out.append(f"  信息扩散半衰期（非天气事件，共 {len(hl['events'])} 个，"
+                   f"居民 {hl['total_residents']}）：")
+        for e in hl["events"][:5]:
+            t50 = "未达50%" if e["time_to_50pct_hours"] is None else f"{e['time_to_50pct_hours']}h"
+            out.append(f"    {e['event_id'][:12]:<12} 知情 {e['informed_count']} 人"
+                       f"（{e['informed_ratio']*100:.0f}%）| 到50%={t50}")
+        corr = diffusion_relation_correlation(diffusion, edges)
+        if corr is not None:
+            out.append(f"    知情顺序×关系强度 Pearson = {corr}"
+                       "（负=信息沿强关系先流动，抽样最广事件）")
+        out.append("    （目标：t50 数小时量级；对照组全知广播 t50≈0）")
+    else:
+        out.append("  信息扩散半衰期 = -（无带 event_id 的事件记忆；"
+                   "REALISM_INFO_GRADIENT_ENABLED 关或无世界事件）")
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 async def _run(days_window: int, residents: int, budget: float | None) -> str:
@@ -387,11 +556,14 @@ async def _run(days_window: int, residents: int, budget: float | None) -> str:
         rows = await fetch_rows(session, since)
         move_records = await fetch_move_records(session, since)
         resident_needs = await fetch_resident_needs(session)
+        rel_edges = await fetch_relation_edges(session)
+        diffusion = await fetch_event_diffusion(session)
     report = render_report(
         aggregate(rows), residents=residents, budget=budget, window_days=days_window
     )
     return (report + "\n\n" + render_probes(move_records)
-            + "\n\n" + render_probes_p1(move_records, resident_needs))
+            + "\n\n" + render_probes_p1(move_records, resident_needs)
+            + "\n\n" + render_probes_p2(rel_edges, diffusion))
 
 
 def main(argv: list[str] | None = None) -> None:
