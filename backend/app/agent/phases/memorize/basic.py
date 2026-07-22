@@ -16,6 +16,13 @@ logger = logging.getLogger(__name__)
 _MOVEMENT_ACTIONS = {ActionType.WANDER, ActionType.VISIT_DISTRICT, ActionType.GO_HOME}
 
 
+def _flashbulb_boost(mood_json: dict | None) -> float:
+    """Realism P0-3 flashbulb effect: strong emotion burns memories in harder.
+    importance += coef × |valence| × arousal."""
+    m = mood_json or {}
+    return settings.realism_flashbulb_coef * abs(float(m.get("valence", 0.0))) * float(m.get("arousal", 0.0))
+
+
 def _target_name(slug) -> str | None:
     if not isinstance(slug, str):
         return None
@@ -127,6 +134,9 @@ class BasicMemorizePlugin:
             memory_content, move_meta = _movement_memory(ctx)
         else:
             memory_content = format_action_memory(ctx.action_result, ctx.resident)
+
+        if settings.realism_enabled:
+            importance += _flashbulb_boost(ctx.resident.mood_json)
 
         importance = min(importance, 1.0)
 

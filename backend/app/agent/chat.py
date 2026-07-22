@@ -11,11 +11,37 @@ from app.llm.client import chat as llm_chat
 from app.llm.metering import Meter
 from app.memory.service import MemoryService
 from app.models.resident import Resident
+from app.services.mood_service import apply_mood_event
 
 logger = logging.getLogger(__name__)
 
 # Cooldown tracking: {frozenset(id1, id2): last_chat_timestamp}
 _chat_cooldowns: dict[tuple[str, str], float] = {}
+
+# Realism P0-3: map the wrap-up mood judgement to a (valence, arousal) nudge.
+_CHAT_MOOD_DELTA = {
+    "positive": ("realism_mood_positive_valence", "realism_mood_positive_arousal"),
+    "negative": ("realism_mood_negative_valence", "realism_mood_negative_arousal"),
+}
+
+
+async def _apply_chat_mood(db, initiator, target, mood: str | None) -> None:
+    """Write the resident-chat wrap-up mood back to both residents' mood_json
+    (realism P0-3, main emotion-loop input source). Neutral / realism-off = no-op.
+    Player-chat mood is intentionally not wired here (no such signal on that
+    path; player sentiment flows via ratings — see PROGRESS deviation)."""
+    if not settings.realism_enabled:
+        return
+    keys = _CHAT_MOOD_DELTA.get(mood or "")
+    if keys is None:
+        return
+    dv = getattr(settings, keys[0])
+    da = getattr(settings, keys[1])
+    for res in (initiator, target):
+        try:
+            await apply_mood_event(db, res, dv, da)
+        except Exception:
+            logger.warning("chat mood write-back failed", exc_info=True)
 
 
 def _pair_key(a: Resident, b: Resident) -> tuple[str, str]:
@@ -149,6 +175,9 @@ async def resident_chat(
         # relationship updates + the broadcast summary (E-04/E-05), replacing the
         # old five calls. It persists memories/relationships and runs evolution.
         summary_data = await svc.process_chat_wrapup(initiator, target, dialog_text)
+
+        # Realism P0-3: write the wrap-up mood back to both residents.
+        await _apply_chat_mood(svc.db, initiator, target, summary_data.get("mood"))
 
         # E3: each may pass a third-party rumor to the other (best-effort).
         try:
