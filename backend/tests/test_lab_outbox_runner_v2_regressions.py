@@ -196,3 +196,74 @@ async def test_critical_dispatcher_failure_fails_readiness_and_cancels_siblings(
     assert service.ready is False
     assert service.failure == "outbox_dispatcher: injected critical dispatcher crash"
     assert cancelled == {"runner", "world_reload"}
+
+
+@pytest.mark.anyio
+async def test_runner_service_owns_durable_control_loop_and_exact_controllers():
+    from app.lab.main import RunnerService
+
+    stop = asyncio.Event()
+    started = asyncio.Event()
+    captured: dict = {}
+
+    async def standby():
+        await stop.wait()
+
+    async def controller(command):
+        return command
+
+    async def control_loop(
+        session_factory, *, owner_id, controllers, stop_event
+    ):
+        captured.update(
+            session_factory=session_factory,
+            owner_id=owner_id,
+            controllers=set(controllers),
+        )
+        started.set()
+        await stop_event.wait()
+
+    service = RunnerService(
+        session_factory="factory",
+        runner_loop=standby,
+        world_reload_loop=standby,
+        control_loop=control_loop,
+        control_controllers={"runtime": controller, "executor": controller},
+        control_owner_id="runner-control-owner",
+    )
+    running = asyncio.create_task(service.run(stop_event=stop))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    await service.wait_ready(timeout=1)
+
+    assert captured == {
+        "session_factory": "factory",
+        "owner_id": "runner-control-owner",
+        "controllers": {"runtime", "executor"},
+    }
+    stop.set()
+    await asyncio.wait_for(running, timeout=1)
+
+
+@pytest.mark.anyio
+async def test_runner_service_rejects_partial_control_before_starting_tasks():
+    from app.lab.main import RunnerService
+
+    started = False
+
+    async def sibling():
+        nonlocal started
+        started = True
+
+    async def control_loop(*args, **kwargs):
+        return None
+
+    service = RunnerService(
+        session_factory=object(),
+        runner_loop=sibling,
+        world_reload_loop=sibling,
+        control_loop=control_loop,
+        control_controllers={"runtime": control_loop},
+    )
+    with pytest.raises(RuntimeError, match="runtime and executor"):
+        await service.run(stop_event=asyncio.Event())
+    assert started is False

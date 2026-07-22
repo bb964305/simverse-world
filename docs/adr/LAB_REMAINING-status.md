@@ -34,8 +34,8 @@ P0 state:
   has zero missing/unknown sites. The exact cohort matrix contains 1120 unique
   tuples, and seven rows collected directly from a disposable migrated database
   map without anomalies or unresolved classifications.
-- P2 protocol/session subset: `PASS`, default-off. Revision 039 is the single
-  migration head and adds immutable explicit run protocol versions plus
+- P2 protocol/session subset: `PASS`, default-off. Revision 039 adds immutable
+  explicit run protocol versions plus
   session/turn/intent/result/control state with composite cross-binding
   constraints. v1/v2 use four physically distinct Redis lists; legacy lists must
   drain before Runner startup. P2 deliberately registers no v2 execution handler,
@@ -47,10 +47,44 @@ P0 state:
   Session-affine provider creation is registered before external I/O and bound to
   the live lease owner/epoch; restart reattaches, while host loss/divergence
   quarantines. Fresh PostgreSQL evidence is 3 migration and 10 Runtime cases.
-- P2 does **not** implement the model/tool-result loop: goal/result/control routes
-  remain fail-closed scaffolds, and the v2 Runner handler remains absent. P3 must
-  still prove real Broker result resume, provider ACK/replay/backpressure, and
-  Artifact provenance. P4/P4b and all production topology work also remain open.
+- P3 result/supervision subset: `PASS`, default-off. Revision 040 permits a
+  Broker result to commit before transport receipt and refuses downgrade while
+  any delivery remains pending. The Runtime
+  durably pauses the same model turn at a real tool intent; the Gateway commits
+  canonical state before ACK, executes only through Policy/Broker, durably records
+  the outcome, and resumes with the exact idempotent result command. Replay, reconnect,
+  reattach, cursor gaps/regression, the 128-event/byte window, receipt-loss
+  recovery, approval denial/timeout, tool failure, and lease loss all fail closed.
+- Artifact collection now requires Runtime final plus Gateway proof that pending
+  intents are zero and every result is `runtime_acked`. Successful delivery also
+  requires a real succeeded Broker result, and provenance is rebuilt from the
+  Gateway result rows; zero-result, denied, or failed runs cannot become a
+  successful Artifact.
+- Deterministic local P3 evidence is owned by the canonical release-manifest step
+  `run-all:ac07-runtime-result-loop`. It enumerates the frozen protocol, legacy
+  compatibility, Runtime HTTP/store/loop, Gateway supervision, and full sentinel
+  round-trip unit suites, plus the required real-Postgres supervision suite. The
+  opt-in live-LLM test is excluded from this oracle; no live model run or old
+  buffered score is credited as correctness evidence.
+- P4 durable-control subset: `PASS`, default-off. Revision 041 adds persistent
+  run/global control requests, target receipts, Runtime/Executor fencing epochs,
+  and durable v2 queue claims. The Runner owns claim recovery, outbox dispatch,
+  and control reconciliation; exact receipt replay is idempotent across restart,
+  expired claims requeue once, live claims stay owned, and missing target
+  inventory quarantines instead of reporting false completion. Global admission
+  cannot open without D0-provisioned controllers and protocol v2.
+- P4b world-governance subset: `PASS`, default-off. Revision 042 is the current
+  single migration head. Proposal approval/revert, overlay mutation, revision,
+  and outbox publication share one transaction; proposal and global epochs fence
+  stale writers, duplicate revisions are rejected by the database, concurrent
+  administrators produce one winner, and an outbox fault rolls every write back.
+  Dangerous proposal kinds remain disabled before persistence.
+- The scoped integration decision in `ADR-lab-default-off-integration.md` now
+  permits this complete P0-P4b source checkpoint to merge while every rollout
+  flag is false. D0 remains absent, so P5 service/image/network changes,
+  production identity work, staging/capacity drills, formal visual/asset release
+  evidence, and release push remain prohibited. No local result may be read as
+  D1c, production, canary, or release approval.
 - Current comparison after P1: A' is 28 files/29 symbols/12 tables/3
   backfills/3 services/one financial domain, versus B at 38/39/20/8/5/two.
   Evidence and hashes are recorded in `docs/adr/ADR-lab-v2-cutover.md`.
@@ -65,11 +99,14 @@ P0 state:
   JUnit and hashes are sealed outside Git under `p0-expected-red/`.
 
 No wording below may be read as overall D1b, D1c, AC01-AC21, or release approval.
-The P1/P2 results above are default-off implementation subsets only. The
+The P1-P4b results above are default-off implementation subsets only. The
 authoritative decision record is `docs/adr/ADR-lab-v2-cutover.md` and the only
 implementation/release authority is the Approved-v10 blocker-resolution plan.
 
-Last verified: 2026-07-19. Branch: `feat/lab-agent-v1` at `99a5ac2`.
+Current default-off integration verification: 2026-07-22 on
+`feat/lab-agent-completion`; the clean commit and evidence hashes are recorded in
+the external merge-gate evidence package. Historical snapshot below last
+verified: 2026-07-19 on `feat/lab-agent-v1` at `99a5ac2`.
 
 This report distinguishes code that exists, behavior that was reproduced in the
 current worktree, and work that remains blocked by external infrastructure. It
@@ -414,17 +451,12 @@ Genuinely remaining — none of it a code task I can complete unilaterally:
    scored desktop/tablet/mobile pass remains a manual QA step.
 2. **Externally BLOCKED (verified, never faked) — the achievable design/audit
    parts are now DONE; only the external inputs remain:**
-   - **P7 real Adapter — DONE differently than assumed (`6e5b924`).** Rather than
-     wait for a commercial endpoint, a REAL self-hosted LLM-backed runtime was
-     built (`app/lab/runtime_ref/`, driven by the project's configured
-     Anthropic-compatible endpoint), run through the executable conformance gate
-     with a real LLM-driven agent loop, and SELECTED (**100/100**, every mandatory
-     dimension satisfied; real web.search→browser.navigate→code.run research plan,
-     2161 real tokens). Evidence: `docs/renders/lab-p7-evidence/`. The commercial
-     hermes/openclaw/computer_use runtimes stay unevaluated (no endpoints — scores
-     never fabricated). Default stays `lab_adapter=mock`; production enablement
-     needs the runtime deployed as an isolated service + OCI isolation for its tool
-     effects + a staging canary.
+   - **Historical P7 v1 Adapter record — superseded by Approved-v10.** Commit
+     `6e5b924` built a self-hosted LLM-backed runtime and the former buffered-v1
+     gate scored it 100/100. That score is preserved under
+     `docs/renders/lab-p7-evidence/` for audit only; it does not prove the P3
+     result loop and cannot enable a Runtime or satisfy release criteria. The
+     commercial Hermes/OpenClaw/computer-use runtimes remained unevaluated.
    - **Asset licensing:** the manifest audit confirms all 16 entries are genuinely
      third-party (CuteRPG tilesets, LimeZu Room Builder — commercial/unverified,
      "NO redistribution"); none are first-party/CC0, so none are clearable without

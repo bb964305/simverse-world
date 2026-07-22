@@ -27,6 +27,10 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _authority_epoch_default(context) -> int:
+    return int(context.get_current_parameters().get("fencing_epoch") or 0)
+
+
 class LabRuntimeSession(Base):
     __tablename__ = "lab_runtime_sessions"
     __table_args__ = (
@@ -56,6 +60,10 @@ class LabRuntimeSession(Base):
             name="ck_lab_runtime_sessions_epoch",
         ),
         CheckConstraint(
+            "authority_epoch >= fencing_epoch",
+            name="ck_lab_runtime_sessions_authority_epoch",
+        ),
+        CheckConstraint(
             "provider_cursor_committed >= 0 AND provider_cursor_acked >= 0 "
             "AND provider_cursor_acked <= provider_cursor_committed",
             name="ck_lab_runtime_sessions_cursors",
@@ -68,6 +76,9 @@ class LabRuntimeSession(Base):
     )
     client_run_id: Mapped[str] = mapped_column(String(80), nullable=False)
     fencing_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    authority_epoch: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=_authority_epoch_default
+    )
     protocol_version: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     provider_name: Mapped[str] = mapped_column(String(80), nullable=False)
     provider_session_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
@@ -238,6 +249,11 @@ class LabRuntimeResult(Base):
             "outcome IN ('succeeded','denied','failed')",
             name="ck_lab_runtime_results_outcome",
         ),
+        CheckConstraint(
+            "(receipt_id IS NULL AND runtime_acked_at IS NULL) OR "
+            "(receipt_id IS NOT NULL AND runtime_acked_at IS NOT NULL)",
+            name="ck_lab_runtime_results_receipt_ack_pair",
+        ),
         CheckConstraint("fencing_epoch >= 0", name="ck_lab_runtime_results_epoch"),
     )
 
@@ -248,7 +264,9 @@ class LabRuntimeResult(Base):
     intent_id: Mapped[str] = mapped_column(String(100), nullable=False)
     action_id: Mapped[str] = mapped_column(String(100), nullable=False)
     command_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    receipt_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Populated only after the authenticated Runtime accepts this exact command.
+    # NULL is the durable "persisted but not yet delivered" state.
+    receipt_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     outcome: Mapped[str] = mapped_column(String(20), nullable=False)
     request_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     result_digest: Mapped[str] = mapped_column(String(64), nullable=False)

@@ -50,6 +50,7 @@ def _token(
     jti: str = "jti-1",
     not_before: int | None = None,
     expires_at: int | None = None,
+    actions: list[str] | None = None,
 ) -> str:
     now = int(time.time())
     return jwt.encode(
@@ -59,7 +60,7 @@ def _token(
             "run_id": run_id,
             "session_id": session_id,
             "epoch": epoch,
-            "actions": [action],
+            "actions": [action] if actions is None else actions,
             "jti": jti,
             "nbf": now - 1 if not_before is None else not_before,
             "exp": now + 300 if expires_at is None else expires_at,
@@ -297,6 +298,13 @@ def test_service_auth_rejects_action_and_request_binding_before_lookup():
     with pytest.raises(ServiceAuthorizationError) as wrong_action:
         validator.validate(_token(), required_action="runtime.control")
     assert wrong_action.value.reason == "action_not_allowed"
+
+    with pytest.raises(ServiceAuthorizationError) as multiple_actions:
+        validator.validate(
+            _token(actions=["tool_result.submit", "runtime.control"]),
+            required_action="tool_result.submit",
+        )
+    assert multiple_actions.value.reason == "action_not_allowed"
 
     for expected in (
         ServiceBinding(run_id="other-run", session_id="session-1", epoch=7),

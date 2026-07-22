@@ -84,8 +84,15 @@ async def list_processing(*, protocol_version: int) -> list[str]:
 
 
 async def requeue_run(run_id: str, *, protocol_version: int) -> None:
-    """Move an id from processing back to pending (orphan recovery)."""
+    """Atomically move one id from processing back to pending.
+
+    Removing every existing copy from both lists before the LPUSH makes crash
+    recovery idempotent: repeated reconcilers leave exactly one pending item.
+    """
     pending_key, processing_key = queue_keys(protocol_version)
     r = get_redis()
-    await r.lrem(processing_key, 0, run_id)
-    await r.lpush(pending_key, run_id)
+    async with r.pipeline(transaction=True) as pipe:
+        pipe.lrem(processing_key, 0, run_id)
+        pipe.lrem(pending_key, 0, run_id)
+        pipe.lpush(pending_key, run_id)
+        await pipe.execute()

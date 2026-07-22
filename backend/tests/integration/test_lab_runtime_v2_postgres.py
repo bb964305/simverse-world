@@ -90,11 +90,11 @@ async def pg_factory(migrated_postgres_url: str):
                 not release_run_id
                 or database != expected_database
                 or disposable != "on"
-                or revision != "039_add_lab_protocol_v2_state"
+                or revision != "042_lab_world_fencing"
                 or schema_columns != 3
             ):
                 pytest.fail(
-                    "runtime-v2 PG tests require the exact disposable 039 schema: "
+                    "runtime-v2 PG tests require the exact disposable head schema: "
                     f"database={database!r}, expected={expected_database!r}, "
                     f"disposable={disposable!r}, revision={revision!r}, "
                     f"schema_columns={schema_columns}"

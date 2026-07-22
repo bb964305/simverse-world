@@ -46,11 +46,26 @@ RUNTIME_V2_SAFE_CAPABILITIES: frozenset[str] = frozenset({
     "checkpoint",
     "control",
     "cursor_replay",
+    "events_ack",
+    "idempotent_create",
     "kill",
     "reattach",
+    "result_receipts",
+    "scoped_auth",
     "streaming",
     "subagent",
     "terminate",
+})
+
+RUNTIME_V2_SUPERVISION_CAPABILITIES: frozenset[str] = frozenset({
+    "backpressure",
+    "broker_mediation",
+    "cursor_replay",
+    "events_ack",
+    "idempotent_create",
+    "reattach",
+    "result_receipts",
+    "scoped_auth",
 })
 
 EVENT_TYPES: frozenset[str] = frozenset({
@@ -274,6 +289,91 @@ class RuntimeV2Handshake(_StrictV2Model):
                 + ", ".join(forbidden)
             )
         return capabilities
+
+
+class RuntimeV2SchemaHashes(_StrictV2Model):
+    """Hashes for the wire objects whose meaning must match on both peers."""
+
+    runtime_event: str = Field(pattern=r"^[0-9a-f]{64}$")
+    tool_result_command: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class RuntimeV2Limits(_StrictV2Model):
+    """Flow-control limits proven by the provider before event ingestion."""
+
+    max_event_bytes: StrictInt = Field(gt=0)
+    max_command_bytes: StrictInt = Field(gt=0)
+    max_unacked_events: StrictInt = Field(gt=0)
+    max_unacked_bytes: StrictInt = Field(gt=0)
+
+
+def runtime_v2_schema_hashes() -> RuntimeV2SchemaHashes:
+    """Return canonical hashes of the two result-loop wire schemas."""
+
+    return RuntimeV2SchemaHashes(
+        runtime_event=content_digest(RuntimeEvent.model_json_schema()),
+        tool_result_command=content_digest(ToolResultCommand.model_json_schema()),
+    )
+
+
+def runtime_v2_protocol_schema_hash() -> str:
+    """Bind protocol version and individual wire hashes into one digest."""
+
+    hashes = runtime_v2_schema_hashes()
+    return content_digest({
+        "protocol_version": PROTOCOL_V2,
+        "schema_hashes": hashes.model_dump(mode="json"),
+    })
+
+
+def runtime_v2_limits() -> RuntimeV2Limits:
+    return RuntimeV2Limits(
+        max_event_bytes=MAX_EVENT_BYTES,
+        max_command_bytes=MAX_COMMAND_BYTES,
+        max_unacked_events=MAX_UNACKED_EVENTS,
+        max_unacked_bytes=MAX_UNACKED_BYTES,
+    )
+
+
+class RuntimeV2SupervisionHandshake(_StrictV2Model):
+    """Complete proof required before Gateway emits ``run.started``."""
+
+    manifest: RuntimeV2Handshake
+    protocol_schema_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    schema_hashes: RuntimeV2SchemaHashes
+    limits: RuntimeV2Limits
+
+    @model_validator(mode="after")
+    def _validate_local_contract(self) -> "RuntimeV2SupervisionHandshake":
+        missing = sorted(
+            RUNTIME_V2_SUPERVISION_CAPABILITIES
+            - set(self.manifest.capabilities)
+        )
+        if missing:
+            raise ValueError(
+                "runtime missing mandatory supervision capabilities: "
+                + ", ".join(missing)
+            )
+        if self.schema_hashes != runtime_v2_schema_hashes():
+            raise ValueError("runtime wire schema hashes do not match Gateway")
+        if self.protocol_schema_hash != runtime_v2_protocol_schema_hash():
+            raise ValueError("runtime protocol schema hash does not match Gateway")
+        if self.limits != runtime_v2_limits():
+            raise ValueError("runtime flow-control limits do not match Gateway")
+        return self
+
+
+def runtime_v2_supervision_handshake(
+    manifest: RuntimeV2Handshake,
+) -> RuntimeV2SupervisionHandshake:
+    """Build the local provider proof from the canonical protocol contract."""
+
+    return RuntimeV2SupervisionHandshake(
+        manifest=manifest,
+        protocol_schema_hash=runtime_v2_protocol_schema_hash(),
+        schema_hashes=runtime_v2_schema_hashes(),
+        limits=runtime_v2_limits(),
+    )
 
 
 class RunEventEnvelope(BaseModel):

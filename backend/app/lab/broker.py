@@ -31,6 +31,7 @@ import uuid
 from datetime import datetime, timedelta, UTC
 from urllib.parse import urlparse
 
+from pydantic import ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
@@ -38,6 +39,12 @@ from app.config import settings
 from app.lab import budgets, grants, guard, leases, policy, protocol, telemetry
 from app.lab.sandbox import isolation
 from app.models.lab_action import LabToolAction, LabApproval
+from app.models.lab_runtime import (
+    LabRuntimeIntent,
+    LabRuntimeResult,
+    LabRuntimeSession,
+    LabRuntimeTurn,
+)
 
 # Terminal / parked states: re-invoking execute_action on one of these must
 # never run the executor again — return the existing outcome (idempotent,
@@ -85,6 +92,244 @@ class UncertainOutcome(Exception):
     """An executor raises this when a side effect may have partially happened
     and cannot be confirmed — the action is parked for reconciliation rather
     than retried."""
+
+
+class RuntimeResultConflict(BrokerError):
+    """A Broker outcome cannot be bound to the requested Runtime intent."""
+
+
+def _runtime_outcome(action: LabToolAction) -> tuple[str, dict]:
+    value = guard.redact_payload(action.result_json or {})
+    if not isinstance(value, dict):
+        value = {"result": value}
+    if action.status == "succeeded":
+        return "succeeded", value
+    if action.status == "denied":
+        return "denied", value
+    if action.status in {
+        "failed",
+        "cancelled",
+        "reconciliation_required",
+    }:
+        return "failed", value
+    raise RuntimeResultConflict(
+        f"Broker action {action.id} has no terminal outcome: {action.status}"
+    )
+
+
+async def _persist_runtime_result(
+    db,
+    *,
+    session_id: str,
+    intent_row_id: str,
+    action: LabToolAction,
+    owner_id: str,
+) -> protocol.ToolResultCommand:
+    """Persist one ToolResultCommand before any Runtime delivery attempt.
+
+    The delivery receipt remains NULL until the authenticated Runtime response
+    is validated and CASed by supervision. This makes the pre-delivery row an
+    honest durable ToolResultCommand, not a fabricated receipt.
+    """
+    from app.lab import supervision
+
+    runtime_epoch = await db.scalar(
+        select(LabRuntimeSession.fencing_epoch).where(
+            LabRuntimeSession.id == session_id
+        )
+    )
+    if runtime_epoch is None:
+        raise RuntimeResultConflict("Runtime session binding is missing")
+    session = await supervision.lock_runtime_authority(
+        db,
+        run_id=action.run_id,
+        session_id=session_id,
+        epoch=runtime_epoch,
+        owner_id=owner_id,
+        provider_binding=False,
+    )
+    intent = await db.scalar(
+        select(LabRuntimeIntent)
+        .where(LabRuntimeIntent.id == intent_row_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if intent is None or intent.session_id != session_id:
+        raise RuntimeResultConflict("Runtime session or intent binding is missing")
+    turn = await db.scalar(
+        select(LabRuntimeTurn)
+        .where(
+            LabRuntimeTurn.id == intent.runtime_turn_id,
+            LabRuntimeTurn.session_id == session_id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if turn is None:
+        raise RuntimeResultConflict("Runtime turn binding is missing")
+    if session.status != "ready" or session.protocol_version != protocol.PROTOCOL_V2:
+        raise RuntimeResultConflict(
+            f"Runtime result cannot be persisted in session state {session.status}"
+        )
+    if not session.provider_session_id:
+        raise RuntimeResultConflict("Runtime provider session binding is missing")
+    if (
+        action.run_id != session.run_id
+        or action.status not in _NO_REEXEC + ("denied",)
+        or not session.fencing_epoch
+        <= action.fencing_epoch
+        <= session.authority_epoch
+        or action.tool_name != intent.tool_name
+        or action.args_hash != intent.args_digest
+    ):
+        raise RuntimeResultConflict("Broker action changed the Runtime intent binding")
+    if intent.action_id not in (None, action.id):
+        raise RuntimeResultConflict("Runtime intent is already bound to another action")
+
+    outcome, payload = _runtime_outcome(action)
+    result_digest = protocol.content_digest(payload)
+    command_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            "simverse:lab-runtime-result:"
+            f"{session.id}:{intent.intent_id}:{action.id}:{result_digest}",
+        )
+    )
+    try:
+        command = protocol.ToolResultCommand(
+            command_id=command_id,
+            run_id=session.run_id,
+            session_id=session.provider_session_id,
+            turn_id=turn.turn_id,
+            intent_id=intent.intent_id,
+            action_id=action.id,
+            outcome=outcome,
+            payload=payload,
+            result_digest=result_digest,
+            epoch=session.fencing_epoch,
+        )
+    except ValidationError as exc:
+        raise RuntimeResultConflict(
+            "Broker result cannot be encoded as a bounded Runtime command"
+        ) from exc
+    request_digest = protocol.content_digest(command.model_dump(mode="json"))
+    existing = await db.scalar(
+        select(LabRuntimeResult).where(
+            LabRuntimeResult.runtime_intent_id == intent.id
+        )
+    )
+    if existing is not None:
+        if (
+            existing.command_id != command.command_id
+            or existing.session_id != session.id
+            or existing.runtime_turn_id != turn.id
+            or existing.intent_id != command.intent_id
+            or existing.action_id != command.action_id
+            or existing.outcome != command.outcome
+            or existing.request_digest != request_digest
+            or existing.result_digest != command.result_digest
+            or existing.payload_json != command.payload
+            or existing.fencing_epoch != command.epoch
+        ):
+            raise RuntimeResultConflict(
+                "Runtime intent already has a different Broker result"
+            )
+        await supervision.assert_runtime_authority_live(
+            db, session=session, owner_id=owner_id
+        )
+        await db.commit()
+        return command
+
+    if intent.status != "pending" or turn.status != "intent_pending":
+        raise RuntimeResultConflict("Runtime intent cannot record a result now")
+    intent.action_id = action.id
+    intent.status = "result_recorded"
+    turn.status = "result_recorded"
+    await db.flush()
+    db.add(
+        LabRuntimeResult(
+            session_id=session.id,
+            runtime_turn_id=turn.id,
+            runtime_intent_id=intent.id,
+            intent_id=intent.intent_id,
+            action_id=action.id,
+            command_id=command.command_id,
+            receipt_id=None,
+            outcome=command.outcome,
+            request_digest=request_digest,
+            result_digest=command.result_digest,
+            payload_json=command.payload,
+            fencing_epoch=command.epoch,
+        )
+    )
+    await supervision.assert_runtime_authority_live(
+        db, session=session, owner_id=owner_id
+    )
+    await db.commit()
+    return command
+
+
+async def persist_runtime_result(
+    db,
+    *,
+    session_id: str,
+    intent_row_id: str,
+    action: LabToolAction,
+    owner_id: str,
+) -> protocol.ToolResultCommand:
+    try:
+        return await _persist_runtime_result(
+            db,
+            session_id=session_id,
+            intent_row_id=intent_row_id,
+            action=action,
+            owner_id=owner_id,
+        )
+    except BaseException:
+        await db.rollback()
+        raise
+
+
+async def pending_runtime_result_commands(
+    db, *, session_id: str
+) -> list[protocol.ToolResultCommand]:
+    """Rebuild every persisted-but-unacknowledged Runtime command exactly."""
+    session = await db.get(LabRuntimeSession, session_id)
+    if session is None or not session.provider_session_id:
+        raise RuntimeResultConflict("Runtime provider session binding is missing")
+    rows = (
+        await db.execute(
+            select(LabRuntimeResult)
+            .where(
+                LabRuntimeResult.session_id == session_id,
+                LabRuntimeResult.runtime_acked_at.is_(None),
+            )
+            .order_by(LabRuntimeResult.created_at, LabRuntimeResult.id)
+        )
+    ).scalars().all()
+    commands: list[protocol.ToolResultCommand] = []
+    for row in rows:
+        turn = await db.get(LabRuntimeTurn, row.runtime_turn_id)
+        if turn is None or turn.session_id != session_id:
+            raise RuntimeResultConflict("Runtime result turn binding is missing")
+        command = protocol.ToolResultCommand(
+            command_id=row.command_id,
+            run_id=session.run_id,
+            session_id=session.provider_session_id,
+            turn_id=turn.turn_id,
+            intent_id=row.intent_id,
+            action_id=row.action_id,
+            outcome=row.outcome,
+            payload=row.payload_json,
+            result_digest=row.result_digest,
+            epoch=row.fencing_epoch,
+        )
+        if row.request_digest != protocol.content_digest(
+            command.model_dump(mode="json")
+        ):
+            raise RuntimeResultConflict("Runtime result request digest changed")
+        commands.append(command)
+    return commands
 
 
 def _now() -> datetime:
@@ -187,6 +432,7 @@ async def _persist(db, action: LabToolAction, approval: LabApproval | None = Non
     """Commit a new action (and optionally its approval) as one transaction.
     On a unique-key collision (concurrent duplicate request) re-read and return
     the winner — at-least-once request semantics."""
+    idempotency_key = action.idempotency_key
     db.add(action)
     if approval is not None:
         db.add(approval)
@@ -195,9 +441,12 @@ async def _persist(db, action: LabToolAction, approval: LabApproval | None = Non
         return action, False
     except IntegrityError:
         await db.rollback()
-        existing = await _by_idem(db, action.idempotency_key)
+        existing = await _by_idem(db, idempotency_key)
         if existing is not None:
             return existing, True
+        raise
+    except BaseException:
+        await db.rollback()
         raise
 
 
@@ -292,28 +541,33 @@ async def request_action(db, *, claims, token, tool_name, args, idempotency_key=
         reason, hard = egress
         await _deny(decision.risk_class, reason, hard=hard, decision=decision)
 
-    # 3c. Hard budget: reserve one tool_calls unit (and, for a network-target
-    # action, one egress_requests unit) before persisting the action. A run with
-    # no LabRunBudget row (legacy path / never initialised) bypasses budgeting
-    # entirely — reserve() is a silent no-op in that case. Exhaustion of either
-    # dimension is terminal for the run: leave a denied audit row, revoke every
-    # grant, and re-raise BudgetExhausted (not ActionDenied — a distinct failure
-    # mode from a policy/grant/egress refusal). The egress reservation is settled
-    # (confirm/release) in lock-step with tool_calls: on execute in
-    # ``execute_action``, on an approval denial / execute-time refusal in the
-    # orchestrator.
-    try:
-        await budgets.reserve(db, run_id=claims.run_id, dimension="tool_calls")
-        if _is_egress_action(decision.tool, args):
-            await budgets.reserve(db, run_id=claims.run_id, dimension="egress_requests")
-    except budgets.BudgetExhausted as exc:
-        action = _build("denied", decision.risk_class,
-                        result_json={"reason": f"budget_exhausted:{exc.dimension}"})
+    # 3c. Stage both request-side reservations together. ``_persist`` commits
+    # them with the action/approval, so partial egress reservation, persistence
+    # failure, and idempotency-key races cannot orphan a counter.
+    is_egress = _is_egress_action(decision.tool, args)
+    exhausted = await budgets.stage_action_reservation(
+        db, run_id=claims.run_id, is_egress=is_egress
+    )
+    if exhausted is not None:
+        action = _build(
+            "denied",
+            decision.risk_class,
+            result_json={"reason": f"budget_exhausted:{exhausted}"},
+        )
         stored, existed = await _persist(db, action)
+        if existed:
+            return stored
         if not existed:
             await _emit(on_event, stored)
         await grants.revoke_run_grants(db, claims.run_id)
-        raise
+        telemetry.emit_alert(
+            telemetry.LabAlert.BUDGET_EXHAUSTED,
+            run_id=claims.run_id,
+            tenant_id=claims.tenant_id,
+            dimension=exhausted,
+            reason="limit",
+        )
+        raise budgets.BudgetExhausted(exhausted)
 
     # 4. ask → waiting_approval + a pending approval, committed together.
     if decision.effect == "ask":
@@ -339,13 +593,106 @@ async def request_action(db, *, claims, token, tool_name, args, idempotency_key=
     return stored
 
 
-async def decide_approval(db, *, approval_id, decider_user_id, approve, task_owner_id,
-                          is_admin=False) -> LabApproval:
+async def recover_action_authority(
+    db,
+    *,
+    action_id: str,
+    claims,
+    token: str,
+    tool_name: str,
+    args: dict,
+    expected_epoch: int,
+) -> LabToolAction:
+    """Adopt only a pre-effect replayable action after Gateway takeover."""
+    verified = grants.verify_grant(token)
+    if verified.jti != claims.jti or claims.fencing_epoch != expected_epoch:
+        raise RuntimeResultConflict("recovery grant binding changed")
+    await grants.check_grant_active(db, claims, expected_epoch=expected_epoch)
+    await leases.assert_epoch(
+        db, run_id=claims.run_id, epoch=expected_epoch
+    )
+    action = await db.scalar(
+        select(LabToolAction)
+        .where(LabToolAction.id == action_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if (
+        action is None
+        or action.run_id != claims.run_id
+        or action.task_id != claims.task_id
+        or action.tenant_id != claims.tenant_id
+        or action.tool_name != tool_name
+        or action.args_hash != protocol.args_digest(args)
+        or action.fencing_epoch > expected_epoch
+    ):
+        raise RuntimeResultConflict("replayed Broker action binding changed")
+    if action.fencing_epoch == expected_epoch or action.status in _NO_REEXEC + (
+        "denied",
+    ):
+        await db.commit()
+        return action
+    if action.status == "executing":
+        raise RuntimeResultConflict(
+            "replayed Broker action has an uncertain executing effect"
+        )
+    if action.status not in {"approved", "waiting_approval"}:
+        raise RuntimeResultConflict(
+            f"replayed Broker action cannot transfer from state {action.status}"
+        )
+    if action.attempts:
+        raise RuntimeResultConflict(
+            "replayed Broker action has a nonzero pre-effect attempt count"
+        )
+    if action.approval_id is not None:
+        approval = await db.scalar(
+            select(LabApproval)
+            .where(LabApproval.id == action.approval_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if (
+            approval is None
+            or approval.action_id != action.id
+            or approval.fencing_epoch != action.fencing_epoch
+            or approval.decision not in {"pending", "approved"}
+        ):
+            raise RuntimeResultConflict(
+                "replayed Broker approval binding changed"
+            )
+        approval.fencing_epoch = expected_epoch
+    action.fencing_epoch = expected_epoch
+    action.grant_jti = claims.jti
+    await leases.assert_epoch(
+        db, run_id=claims.run_id, epoch=expected_epoch
+    )
+    await db.commit()
+    return action
+
+
+async def _release_action_reservations(db, action: LabToolAction) -> None:
+    await budgets.stage_action_settlement(
+        db,
+        run_id=action.run_id,
+        succeeded=False,
+        is_egress=is_egress_action(
+            action.tool_name, dict(action.args_redacted_json or {})
+        ),
+    )
+
+
+async def _decide_approval(db, *, approval_id, decider_user_id, approve, task_owner_id,
+                           is_admin=False) -> LabApproval:
     """Resolve a pending approval. Only the task owner (or an admin) may decide;
     the window must not have lapsed; a decided/consumed approval cannot be
     re-decided. Writes the decision and flips the action status in one txn."""
     now = _now()
-    approval = await db.get(LabApproval, approval_id)
+    approval = await db.scalar(
+        select(LabApproval)
+        .where(LabApproval.id == approval_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if approval is None:
         raise ApprovalInvalid("not_found")
 
@@ -359,23 +706,141 @@ async def decide_approval(db, *, approval_id, decider_user_id, approve, task_own
     if approval.decision != "pending":
         raise ApprovalInvalid(f"already_{approval.decision}")
 
+    action = await db.scalar(
+        select(LabToolAction)
+        .where(LabToolAction.id == approval.action_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if (
+        action is None
+        or action.approval_id != approval.id
+        or action.run_id != approval.run_id
+        or action.task_id != approval.task_id
+        or action.fencing_epoch != approval.fencing_epoch
+        or action.status != "waiting_approval"
+    ):
+        raise ApprovalInvalid("approval_binding")
+
     if _aware(approval.expires_at) <= now:
-        approval.decision = "expired"
-        await db.commit()
+        try:
+            approval.decision = "expired"
+            approval.decided_at = now
+            action.status = "denied"
+            action.result_json = {"reason": "approval_timeout"}
+            await _release_action_reservations(db, action)
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
         telemetry.emit_alert(
             telemetry.LabAlert.APPROVAL_TIMEOUT,
             run_id=approval.run_id, approval_id=approval.id, reason="expired",
         )
         raise ApprovalInvalid("expired")
 
-    approval.decision = "approved" if approve else "denied"
-    approval.decided_by = decider_user_id
-    approval.decided_at = now
-    action = await db.get(LabToolAction, approval.action_id)
-    if action is not None:
+    try:
+        approval.decision = "approved" if approve else "denied"
+        approval.decided_by = decider_user_id
+        approval.decided_at = now
         action.status = "approved" if approve else "denied"
-    await db.commit()
+        if not approve:
+            action.result_json = {"reason": "approval_denied"}
+            await _release_action_reservations(db, action)
+        await db.commit()
+    except BaseException:
+        await db.rollback()
+        raise
     return approval
+
+
+async def decide_approval(db, *, approval_id, decider_user_id, approve, task_owner_id,
+                          is_admin=False) -> LabApproval:
+    return await _decide_approval(
+        db,
+        approval_id=approval_id,
+        decider_user_id=decider_user_id,
+        approve=approve,
+        task_owner_id=task_owner_id,
+        is_admin=is_admin,
+    )
+
+
+async def _expire_pending_approval(
+    db, *, action_id: str, expected_epoch: int
+) -> LabToolAction:
+    """Atomically converge an elapsed pending approval to a denied action."""
+    now = _now()
+    action = await db.scalar(
+        select(LabToolAction)
+        .where(LabToolAction.id == action_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if action is None:
+        raise ApprovalInvalid("missing_action")
+    if action.fencing_epoch != expected_epoch:
+        raise ApprovalInvalid("stale_epoch")
+    if action.approval_id is None:
+        raise ApprovalInvalid("missing_approval")
+    approval = await db.scalar(
+        select(LabApproval)
+        .where(
+            LabApproval.id == action.approval_id,
+            LabApproval.action_id == action.id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if approval is None or approval.fencing_epoch != expected_epoch:
+        raise ApprovalInvalid("approval_binding")
+
+    if approval.decision == "approved":
+        if action.status != "approved":
+            raise ApprovalInvalid("approved_action_mismatch")
+        await db.commit()
+        return action
+    if approval.decision == "denied":
+        if action.status != "denied":
+            raise ApprovalInvalid("denied_action_mismatch")
+        if not action.result_json:
+            action.result_json = {"reason": "approval_denied"}
+        await db.commit()
+        return action
+    if approval.decision not in {"pending", "expired"}:
+        raise ApprovalInvalid(f"invalid_decision:{approval.decision}")
+    if approval.decision == "pending" and _aware(approval.expires_at) > now:
+        raise ApprovalRequired(action_id=action.id, approval_id=approval.id)
+    if action.status not in {"waiting_approval", "denied"}:
+        raise ApprovalInvalid(f"timeout_action_state:{action.status}")
+
+    newly_expired = approval.decision == "pending"
+    approval.decision = "expired"
+    approval.decided_at = approval.decided_at or now
+    action.status = "denied"
+    action.result_json = {"reason": "approval_timeout"}
+    if newly_expired:
+        await _release_action_reservations(db, action)
+    await db.commit()
+    telemetry.emit_alert(
+        telemetry.LabAlert.APPROVAL_TIMEOUT,
+        run_id=approval.run_id,
+        approval_id=approval.id,
+        reason="expired",
+    )
+    return action
+
+
+async def expire_pending_approval(
+    db, *, action_id: str, expected_epoch: int
+) -> LabToolAction:
+    try:
+        return await _expire_pending_approval(
+            db, action_id=action_id, expected_epoch=expected_epoch
+        )
+    except BaseException:
+        await db.rollback()
+        raise
 
 
 async def execute_action(db, *, action_id, claims, executor, args, expected_epoch=None,
@@ -397,6 +862,8 @@ async def execute_action(db, *, action_id, claims, executor, args, expected_epoc
     # Idempotent short-circuit — never re-run a terminal/in-flight action.
     if action.status in _NO_REEXEC:
         return action
+    if action.status == "executing":
+        raise ApprovalInvalid("already_executing")
     if action.status == "denied":
         raise ActionDenied(_reason_of(action), action=action)
     if action.status == "cancelled":
@@ -411,7 +878,22 @@ async def execute_action(db, *, action_id, claims, executor, args, expected_epoc
     async def _deny_now(reason, *, decision=None, hard=False):
         action.status = "denied"
         action.result_json = {"reason": reason}
-        await db.commit()
+        if action.approval_id is not None:
+            approval = await db.scalar(
+                select(LabApproval)
+                .where(LabApproval.id == action.approval_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if approval is not None and approval.consumed_at is None:
+                approval.decision = "denied"
+                approval.decided_at = approval.decided_at or now
+        try:
+            await _release_action_reservations(db, action)
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
         await _emit(on_event, action)
         raise ActionDenied(reason, decision=decision, action=action, hard=hard)
 
@@ -441,14 +923,46 @@ async def execute_action(db, *, action_id, claims, executor, args, expected_epoc
 
     # Atomic one-shot consumption of the gating approval (if any).
     if action.approval_id is not None:
-        approval = await db.get(LabApproval, action.approval_id)
+        approval_id = action.approval_id
+        approval = await db.scalar(
+            select(LabApproval)
+            .where(LabApproval.id == approval_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
         if approval is None:
             raise ApprovalInvalid("missing_approval")
         if approval.decision == "denied":
-            raise ActionDenied("approval_denied", action=action)
+            await _deny_now("approval_denied")
         if approval.decision == "pending":
             raise ApprovalRequired(action_id=action.id, approval_id=approval.id)
         if approval.decision == "expired":
+            try:
+                action.status = "denied"
+                action.result_json = {"reason": "approval_timeout"}
+                await _release_action_reservations(db, action)
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
+            raise ApprovalInvalid("expired")
+        if _aware(approval.expires_at) <= now:
+            try:
+                approval.decision = "expired"
+                approval.decided_at = approval.decided_at or now
+                action.status = "denied"
+                action.result_json = {"reason": "approval_timeout"}
+                await _release_action_reservations(db, action)
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
+            telemetry.emit_alert(
+                telemetry.LabAlert.APPROVAL_TIMEOUT,
+                run_id=approval.run_id,
+                approval_id=approval.id,
+                reason="expired",
+            )
             raise ApprovalInvalid("expired")
         # decision == "approved": the conditional UPDATE + rowcount check is the
         # real gate — exactly one caller can flip consumed_at from NULL. The
@@ -472,6 +986,21 @@ async def execute_action(db, *, action_id, claims, executor, args, expected_epoc
         result = await db.execute(stmt)
         if result.rowcount != 1:
             await db.rollback()
+            approval = await db.get(LabApproval, approval_id)
+            if (
+                approval is not None
+                and approval.consumed_at is None
+                and _aware(approval.expires_at) <= _now()
+            ):
+                action = await db.get(LabToolAction, action_id)
+                if action is not None and action.status == "approved":
+                    approval.decision = "expired"
+                    approval.decided_at = approval.decided_at or _now()
+                    action.status = "denied"
+                    action.result_json = {"reason": "approval_timeout"}
+                    await _release_action_reservations(db, action)
+                    await db.commit()
+                    raise ApprovalInvalid("expired")
             raise ApprovalInvalid("not_consumable")
 
     # 7. Atomically claim the action for execution: approved -> executing via a
@@ -524,41 +1053,52 @@ async def execute_action(db, *, action_id, claims, executor, args, expected_epoc
         await _emit(on_event, action)
         return action
     except Exception as exc:  # includes protocol.ProtocolError
-        action.status = "failed"
-        action.result_json = {"error": guard.redact_text(str(exc))}
-        await db.commit()
+        is_egress = _is_egress_action(decision.tool, args)
+        try:
+            action.status = "failed"
+            action.result_json = {"error": guard.redact_text(str(exc))}
+            await budgets.stage_action_settlement(
+                db,
+                run_id=claims.run_id,
+                succeeded=False,
+                is_egress=is_egress,
+            )
+            await db.commit()
+        except BaseException:
+            await db.rollback()
+            raise
         await _emit(on_event, action)
-        # Deterministic failure — refund the tool_calls reservation (and the
-        # egress_requests reservation for a network action). (No-op if the run
-        # has no budget row.)
-        await budgets.release(db, run_id=claims.run_id, dimension="tool_calls")
-        if _is_egress_action(decision.tool, args):
-            await budgets.release(db, run_id=claims.run_id, dimension="egress_requests")
         return action
 
-    action.status = "succeeded"
-    if isinstance(result, (dict, list)):
-        action.result_json = guard.redact_payload(result)
-    else:
-        action.result_json = {"result": guard.redact_payload(result)}
-    await db.commit()
-    await _emit(on_event, action)
-    # Settle the tool_calls reservation as real spend. (No-op if the run has
-    # no budget row.)
-    await budgets.confirm(db, run_id=claims.run_id, dimension="tool_calls")
-    # Egress accounting for a network-target action: confirm the request unit,
-    # then debit the response size. egress_bytes is a direct spend of the raw
-    # executor result's canonical byte length. The effect already happened, but
-    # an over-limit spend does NOT bill this final chunk — budgets.spend leaves
-    # the counter untouched, marks the dimension exhausted, and raises
-    # BudgetExhausted, which the orchestrator turns into the standard budget
-    # termination (no further steps execute). tool_calls/egress_requests are
-    # already settled above, so the counters are consistent when the run tears
-    # down.
-    if _is_egress_action(decision.tool, args):
-        await budgets.confirm(db, run_id=claims.run_id, dimension="egress_requests")
-        await budgets.spend(
-            db, run_id=claims.run_id, dimension="egress_bytes",
-            amount=len(protocol.canonical_json(result).encode("utf-8")),
+    is_egress = _is_egress_action(decision.tool, args)
+    egress_bytes = (
+        len(protocol.canonical_json(result).encode("utf-8")) if is_egress else 0
+    )
+    try:
+        action.status = "succeeded"
+        if isinstance(result, (dict, list)):
+            action.result_json = guard.redact_payload(result)
+        else:
+            action.result_json = {"result": guard.redact_payload(result)}
+        exhausted = await budgets.stage_action_settlement(
+            db,
+            run_id=claims.run_id,
+            succeeded=True,
+            is_egress=is_egress,
+            egress_bytes=egress_bytes,
         )
+        await db.commit()
+    except BaseException:
+        await db.rollback()
+        raise
+    await _emit(on_event, action)
+    if exhausted is not None:
+        telemetry.emit_alert(
+            telemetry.LabAlert.BUDGET_EXHAUSTED,
+            run_id=claims.run_id,
+            tenant_id=claims.tenant_id,
+            dimension=exhausted,
+            reason="limit",
+        )
+        raise budgets.BudgetExhausted(exhausted)
     return action

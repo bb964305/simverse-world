@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, UTC
 
-from sqlalchemy import String, Integer, Text, DateTime, JSON
+from sqlalchemy import CheckConstraint, String, Integer, Text, DateTime, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -16,6 +16,12 @@ class WorldChangeProposal(Base):
     """
 
     __tablename__ = "world_change_proposals"
+    __table_args__ = (
+        CheckConstraint(
+            "global_fencing_epoch >= 0",
+            name="ck_world_change_proposals_global_epoch",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     origin: Mapped[str] = mapped_column(String(20), default="lab_run")  # lab_run|resident|admin
@@ -30,6 +36,9 @@ class WorldChangeProposal(Base):
     risk_level: Mapped[str] = mapped_column(String(10), default="low")  # low|medium|high
     reviewer_id: Mapped[str | None] = mapped_column(String, nullable=True)
     review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    global_fencing_epoch: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
     applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reverted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))

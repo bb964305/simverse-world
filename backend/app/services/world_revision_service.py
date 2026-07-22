@@ -27,7 +27,7 @@ import copy
 import uuid
 from datetime import datetime, UTC
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from app.agent.map_data import LOCATIONS
 from app.models.dynamic_location import DynamicLocation
@@ -144,7 +144,9 @@ async def record_apply(
     return revision
 
 
-async def latest_applied_revision(db, *, proposal_id: str) -> WorldRevision | None:
+async def latest_applied_revision(
+    db, *, proposal_id: str, for_update: bool = False
+) -> WorldRevision | None:
     """The most recent still-``applied`` revision this proposal authored, or
     None if it never got one (e.g. a legacy proposal predating T6)."""
     stmt = (
@@ -153,6 +155,8 @@ async def latest_applied_revision(db, *, proposal_id: str) -> WorldRevision | No
         .order_by(WorldRevision.created_at.desc(), WorldRevision.id.desc())
         .limit(1)
     )
+    if for_update:
+        stmt = stmt.with_for_update()
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
@@ -179,9 +183,19 @@ async def revert_revision(db, *, revision: WorldRevision, reverted_by: str | Non
         row.data_json = dict(revision.before_state_json or {})
     else:
         raise RevisionError(f"revert not supported for change_kind '{revision.change_kind}'")
-    revision.status = "reverted"
-    revision.reverted_by = reverted_by
-    revision.reverted_at = datetime.now(UTC)
+    reverted_at = datetime.now(UTC)
+    result = await db.execute(
+        update(WorldRevision)
+        .where(WorldRevision.id == revision.id, WorldRevision.status == "applied")
+        .values(
+            status="reverted",
+            reverted_by=reverted_by,
+            reverted_at=reverted_at,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if (result.rowcount or 0) != 1:
+        raise RevisionError("world revision is no longer applied")
 
 
 def world_changed_event(*, revision: WorldRevision, action: str, seq: int, event_id: str, occurred_at: datetime) -> dict:
@@ -212,7 +226,12 @@ async def build_world_changed_envelope(db, *, revision: WorldRevision, action: s
     flushed, so it's inserted with a placeholder payload first, then updated
     in place — both statements land in the caller's transaction (not
     committed here)."""
-    event_id = str(uuid.uuid4())
+    event_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"simverse:world-change:{revision.proposal_id}:{action}",
+        )
+    )
     outbox = OutboxEvent(
         event_id=event_id, tenant_id=tenant_id, run_id=None,
         topic="world_changed", payload_json={},

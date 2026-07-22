@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import socket
 from collections.abc import Awaitable, Callable
 from datetime import datetime, UTC
 from uuid import uuid4
@@ -29,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 RunHandler = Callable[[str], Awaitable[None]]
 PROTOCOL_V2_ADAPTER = "simverse_ref"
+_RUNNER_OWNER_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid4()}"
 
 
 class ProtocolConsumerUnavailable(ValueError):
@@ -68,6 +71,11 @@ def require_protocol_handler(
     if type(protocol_version) is not int or protocol_version not in (1, 2):
         raise ProtocolConsumerUnavailable(
             f"unsupported Lab protocol_version: {protocol_version!r}"
+        )
+    if protocol_version == 2 and not settings.lab_runtime_v2_canary_enabled:
+        raise ProtocolConsumerUnavailable(
+            "Lab protocol_version 2 requires "
+            "lab_runtime_v2_canary_enabled=true"
         )
     handler = _PROTOCOL_HANDLERS.get(protocol_version)
     if handler is None:
@@ -292,28 +300,35 @@ async def run_one(run_id: str) -> None:
             # run terminal or draft a proposal for a dead task (recovery plan
             # Phase 2, gap #2). The legacy path has no lease epoch to fence it, so
             # this return value is its revival guard.
-            reviewed = await mark_review(db, task, run, result_summary=summary)
+            reviewed = await mark_review(
+                db,
+                task,
+                run,
+                result_summary=summary,
+                commit=False,
+            )
             if reviewed:
+                if task.deliverable_kind == "world_change":
+                    from app.services.proposal_service import create_proposal
+
+                    await create_proposal(
+                        db,
+                        kind="add_lore",
+                        title=f"探索产出：{task.title}"[:200],
+                        rationale=(summary or "研究员在实验楼的一段冒险"),
+                        patch={
+                            "location_id": "experiment_building",
+                            "text": (summary or "研究员在实验楼的一段冒险"),
+                        },
+                        origin="lab_run",
+                        origin_ref=run.id,
+                        author_slug=run.researcher_slug,
+                        cost_sc=0,
+                        commit=False,
+                    )
                 run.status = "succeeded"
                 run.ended_at = datetime.now(UTC)
                 run.cost_usd_cents = cost_cents
-
-                # P3: an exploration-type task (deliverable_kind=world_change) yields
-                # a pending WorldChangeProposal for admin review — never auto-applied.
-                if task.deliverable_kind == "world_change":
-                    try:
-                        from app.services.proposal_service import create_proposal
-                        await create_proposal(
-                            db, kind="add_lore",
-                            title=f"探索产出：{task.title}"[:200],
-                            rationale=(summary or "研究员在实验楼的一段冒险"),
-                            patch={"location_id": "experiment_building",
-                                   "text": (summary or "研究员在实验楼的一段冒险")},
-                            origin="lab_run", origin_ref=run.id, author_slug=run.researcher_slug,
-                            cost_sc=0,
-                        )
-                    except Exception:
-                        logger.warning("proposal creation from run %s failed", run.id, exc_info=True)
 
                 await db.commit()
                 await _ws_task_update(task)
@@ -322,6 +337,11 @@ async def run_one(run_id: str) -> None:
                             "leaving cancel terminal intact", run.id, task.id)
         except Exception as e:
             logger.warning("lab run %s failed: %s", run.id, e, exc_info=True)
+            await db.rollback()
+            await db.refresh(run)
+            await db.refresh(task)
+            if run.status == "cancelled" or task.status == "cancelled":
+                return
             run.status = "failed"
             run.ended_at = datetime.now(UTC)
             run.error = str(e)[:500]
@@ -343,6 +363,15 @@ async def _run_v1(run_id: str) -> None:
 register_protocol_handler(1, _run_v1)
 
 
+async def _run_v2(run_id: str) -> None:
+    from app.lab import orchestrator
+
+    await orchestrator.run_one_v2(run_id)
+
+
+register_protocol_handler(2, _run_v2)
+
+
 async def _reconcile_slots_safe() -> None:
     """Heal any concurrency slot leaked by a prior crashed Runner (re-sync the
     Redis counters to the DB's true active-run count) and refresh the content-free
@@ -355,6 +384,91 @@ async def _reconcile_slots_safe() -> None:
             await slo.collect_snapshot(db)
     except Exception:
         logger.warning("lab concurrency/slo reconcile failed", exc_info=True)
+
+
+async def _reconcile_v2_processing_safe() -> None:
+    """Recover processing entries whose durable owner and execution lease died."""
+    try:
+        from app.lab import control_plane
+
+        async with async_session() as db:
+            await control_plane.reconcile_v2_processing(db)
+    except Exception:
+        logger.warning("lab v2 processing reconcile failed", exc_info=True)
+
+
+async def _claim_v2_queue_run(run_id: str, *, owner_id: str) -> str | None:
+    from app.lab import control_plane
+
+    async with async_session() as db:
+        return await control_plane.claim_queue_run(
+            db,
+            run_id=run_id,
+            protocol_version=2,
+            owner_id=owner_id,
+        )
+
+
+async def _settle_v2_queue_run(
+    run_id: str,
+    *,
+    claim_token: str,
+    owner_id: str,
+    disposition: str,
+) -> None:
+    from app.lab import control_plane
+
+    async with async_session() as db:
+        settled = await control_plane.settle_queue_claim(
+            db,
+            run_id=run_id,
+            claim_token=claim_token,
+            owner_id=owner_id,
+            disposition=disposition,
+        )
+    if not settled:
+        logger.warning("lab v2 queue claim lost before %s: %s", disposition, run_id)
+
+
+async def _heartbeat_v2_queue_run(
+    run_id: str, *, claim_token: str, owner_id: str
+) -> None:
+    from app.lab import control_plane
+
+    interval_s = max(1.0, control_plane.QUEUE_CLAIM_S / 3)
+    while True:
+        await asyncio.sleep(interval_s)
+        try:
+            async with async_session() as db:
+                alive = await control_plane.heartbeat_queue_claim(
+                    db,
+                    run_id=run_id,
+                    claim_token=claim_token,
+                    owner_id=owner_id,
+                )
+            if not alive:
+                logger.warning("lab v2 queue claim heartbeat lost: %s", run_id)
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("lab v2 queue claim heartbeat failed: %s", run_id, exc_info=True)
+
+
+async def _process_v2_with_claim_heartbeat(
+    run_id: str, *, claim_token: str, owner_id: str
+) -> str:
+    heartbeat = asyncio.create_task(
+        _heartbeat_v2_queue_run(
+            run_id, claim_token=claim_token, owner_id=owner_id
+        ),
+        name=f"lab-v2-queue-heartbeat:{run_id}",
+    )
+    try:
+        return await _process_run(run_id, protocol_version=2)
+    finally:
+        heartbeat.cancel()
+        await asyncio.gather(heartbeat, return_exceptions=True)
 
 
 async def _process_run(run_id: str, *, protocol_version: int) -> str:
@@ -380,7 +494,12 @@ async def _process_run(run_id: str, *, protocol_version: int) -> str:
             return "skipped"
         require_protocol_handler(protocol_version, adapter=run.adapter)
         slug, status = run.researcher_slug, run.status
-    if status != "queued":
+    resumable_states = (
+        {"queued"}
+        if protocol_version == 1
+        else {"queued", "running", "needs_approval"}
+    )
+    if status not in resumable_states:
         return "skipped"  # cancelled / already terminal before a Runner picked it up
     if not await concurrency.try_reserve(researcher_slug=slug):
         return "full"
@@ -391,12 +510,17 @@ async def _process_run(run_id: str, *, protocol_version: int) -> str:
         await concurrency.release(researcher_slug=slug)
 
 
-async def runner_loop(*, protocol_version: int = 1) -> None:
+async def runner_loop(
+    *, protocol_version: int = 1, owner_id: str | None = None
+) -> None:
     """Long-lived consume loop for the standalone Lab Runner process."""
     require_protocol_handler(protocol_version)
     await lab_queue.require_legacy_queues_drained()
+    queue_owner = owner_id or _RUNNER_OWNER_ID
     logger.info("lab runner loop started (adapter default=%s)", settings.lab_adapter)
     await _reconcile_slots_safe()  # heal a slot leaked by a prior crashed runner
+    if protocol_version == 2:
+        await _reconcile_v2_processing_safe()
     i = 0
     while True:
         try:
@@ -404,36 +528,82 @@ async def runner_loop(*, protocol_version: int = 1) -> None:
                 protocol_version=protocol_version, timeout=5
             )
             if run_id is None:
+                i += 1
+                if protocol_version == 2 and i % 10 == 0:
+                    await _reconcile_v2_processing_safe()
                 continue
+            claim_token = None
+            if protocol_version == 2:
+                claim_token = await _claim_v2_queue_run(
+                    run_id, owner_id=queue_owner
+                )
+                if claim_token is None:
+                    # A live durable owner already has this run. Its ACK (or the
+                    # expiry reconciler) will clear duplicate Redis entries.
+                    continue
             from app.lab import is_lab_runtime_enabled
             if not await is_lab_runtime_enabled():
                 # Kill switch on: put it back and back off so we don't hot-spin.
                 await lab_queue.requeue_run(
                     run_id, protocol_version=protocol_version
                 )
+                if claim_token is not None:
+                    await _settle_v2_queue_run(
+                        run_id,
+                        claim_token=claim_token,
+                        owner_id=queue_owner,
+                        disposition="released",
+                    )
                 await asyncio.sleep(2.0)
                 continue
             try:
-                outcome = await _process_run(
-                    run_id, protocol_version=protocol_version
-                )
+                if claim_token is None:
+                    outcome = await _process_run(
+                        run_id, protocol_version=protocol_version
+                    )
+                else:
+                    outcome = await _process_v2_with_claim_heartbeat(
+                        run_id,
+                        claim_token=claim_token,
+                        owner_id=queue_owner,
+                    )
             except Exception:
                 logger.warning("lab run %s processing error; continuing", run_id, exc_info=True)
                 outcome = "error"
-            if outcome == "full":
+            if outcome == "full" or (
+                outcome == "error" and protocol_version == 2
+            ):
                 # Global/per-researcher cap reached: requeue and back off so a
-                # freed slot lets it in later. Do NOT ack (it stays queued).
+                # freed slot lets it in later. A v2 processing/delivery failure
+                # is also replayable from durable cursor/command state. Keep the
+                # legacy v1 error disposition unchanged (ACK).
                 await lab_queue.requeue_run(
                     run_id, protocol_version=protocol_version
                 )
+                if claim_token is not None:
+                    await _settle_v2_queue_run(
+                        run_id,
+                        claim_token=claim_token,
+                        owner_id=queue_owner,
+                        disposition="released",
+                    )
                 await asyncio.sleep(1.0)
             else:
                 await lab_queue.ack_run(
                     run_id, protocol_version=protocol_version
                 )
+                if claim_token is not None:
+                    await _settle_v2_queue_run(
+                        run_id,
+                        claim_token=claim_token,
+                        owner_id=queue_owner,
+                        disposition="completed",
+                    )
             i += 1
             if i % 50 == 0:
                 await _reconcile_slots_safe()
+                if protocol_version == 2:
+                    await _reconcile_v2_processing_safe()
         except asyncio.CancelledError:
             break
         except Exception:

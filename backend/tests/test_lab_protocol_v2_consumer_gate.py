@@ -25,6 +25,7 @@ def factory(db_engine, monkeypatch):
     for name, value in {
         "lab_enabled": True,
         "lab_agent_v2_enabled": True,
+        "lab_runtime_v2_canary_enabled": True,
         "lab_terminalizer_v2_enabled": False,
         "lab_adapter": "mock",
         "lab_platform_fee_rate": 0.1,
@@ -107,6 +108,9 @@ async def test_v2_task_creation_fails_before_domain_or_queue_side_effect(
 async def test_runner_service_rejects_v2_before_starting_any_child(
     monkeypatch,
 ):
+    monkeypatch.setattr(
+        settings, "lab_runtime_v2_canary_enabled", True, raising=False
+    )
     runner = _without_v2_handler(monkeypatch)
     from app.lab.main import RunnerService
 
@@ -216,3 +220,87 @@ async def test_registered_v2_handler_is_the_only_v2_execution_path(
 
     v2_handler.assert_awaited_once_with("run-v2")
     v1_handler.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_v2_canary_off_rejects_task_before_domain_or_queue_side_effect(
+    factory, monkeypatch
+):
+    from app.lab import runner
+
+    await _seed(factory)
+    monkeypatch.setattr(settings, "lab_adapter", "simverse_ref", raising=False)
+    monkeypatch.setattr(
+        settings, "lab_runtime_v2_canary_enabled", False, raising=False
+    )
+    monkeypatch.setattr(settings, "lab_agent_v1_enabled", True, raising=False)
+    enqueue = AsyncMock()
+
+    assert runner.configured_protocol_version() == 2
+    with patch("app.lab.queue.enqueue_run", enqueue), patch(
+        "app.services.lab_task_service.emit", new_callable=AsyncMock
+    ):
+        async with factory() as db:
+            with pytest.raises(
+                service.LabTaskError,
+                match="lab_runtime_v2_canary_enabled=true",
+            ):
+                await service.create_task(
+                    db,
+                    issuer_id="issuer",
+                    title="v2 canary is mandatory",
+                    brief="reject before every domain mutation",
+                    scopes=["web_search"],
+                    reward_sc=100,
+                    researcher_slug="sage",
+                )
+
+    enqueue.assert_not_awaited()
+    async with factory() as db:
+        for model in (LabTask, CoinHold, LabRun, OutboxEvent):
+            count = (await db.execute(select(func.count()).select_from(model))).scalar()
+            assert count == 0
+        assert await coin_service.get_balance(db, "issuer") == 1000
+
+
+@pytest.mark.anyio
+async def test_v2_canary_off_rejects_runner_before_queue_or_child_start(
+    monkeypatch,
+):
+    from app.lab import runner
+    from app.lab.main import RunnerService
+
+    monkeypatch.setattr(settings, "lab_agent_v2_enabled", True, raising=False)
+    monkeypatch.setattr(
+        settings, "lab_runtime_v2_canary_enabled", False, raising=False
+    )
+    monkeypatch.setattr(settings, "lab_agent_v1_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "lab_adapter", "simverse_ref", raising=False)
+    drain = AsyncMock()
+    run_loop = AsyncMock()
+    world_loop = AsyncMock()
+    dispatcher_loop = AsyncMock()
+    terminalizer_loop = AsyncMock()
+    instance = RunnerService(
+        session_factory=object(),
+        protocol_version=2,
+        runner_loop=run_loop,
+        world_reload_loop=world_loop,
+        dispatcher_loop=dispatcher_loop,
+        terminalizer_loop=terminalizer_loop,
+    )
+
+    assert runner.configured_protocol_version() == 2
+    with patch("app.lab.main.lab_queue.require_legacy_queues_drained", drain):
+        with pytest.raises(
+            runner.ProtocolConsumerUnavailable,
+            match="lab_runtime_v2_canary_enabled=true",
+        ):
+            await instance.run(stop_event=asyncio.Event())
+
+    assert instance.ready is False
+    drain.assert_not_awaited()
+    run_loop.assert_not_awaited()
+    world_loop.assert_not_awaited()
+    dispatcher_loop.assert_not_awaited()
+    terminalizer_loop.assert_not_awaited()

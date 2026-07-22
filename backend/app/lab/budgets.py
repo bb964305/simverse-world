@@ -43,7 +43,7 @@ callers that don't opt into budgets see no behaviour change.
 """
 from __future__ import annotations
 
-from sqlalchemy import case, or_, update
+from sqlalchemy import case, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
@@ -192,6 +192,100 @@ async def release(db, *, run_id: str, dimension: str, amount: int = 1) -> None:
         await _touch(db, run_id)
     # rowcount == 0: no budget row for this run (legacy bypass). Nothing was
     # changed, so there is nothing to roll back — just return.
+
+
+async def stage_action_reservation(
+    db, *, run_id: str, is_egress: bool
+) -> str | None:
+    """Stage one action's request-side reservations as a single transaction.
+
+    The caller commits this together with the action (and approval, when one is
+    required). Returning a dimension means neither reservation was taken; the
+    caller persists the denied action and the exhaustion marker atomically.
+    """
+    row = await db.scalar(
+        select(LabRunBudget)
+        .where(LabRunBudget.run_id == run_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if row is None:
+        return None
+
+    dimensions = ["tool_calls"]
+    if is_egress:
+        dimensions.append("egress_requests")
+    for dimension in dimensions:
+        limit = getattr(row, f"limit_{dimension}")
+        used = getattr(row, f"used_{dimension}")
+        reserved = getattr(row, f"reserved_{dimension}")
+        if limit and used + reserved + 1 > limit:
+            row.exhausted_dimension = dimension
+            await db.flush()
+            return dimension
+
+    row.reserved_tool_calls += 1
+    if is_egress:
+        row.reserved_egress_requests += 1
+    await db.flush()
+    return None
+
+
+async def stage_action_settlement(
+    db,
+    *,
+    run_id: str,
+    succeeded: bool,
+    is_egress: bool,
+    egress_bytes: int = 0,
+) -> str | None:
+    """Stage one tool action's budget settlement without committing.
+
+    The Broker composes this with the action's terminal status so a crash can
+    never leave a reusable terminal result whose reservations or egress bytes
+    were not accounted. The locked budget row serializes concurrent actions.
+    Returns the exhausted dimension, if the completed effect exceeded the byte
+    limit; the caller commits the truth before raising ``BudgetExhausted``.
+    """
+    if type(egress_bytes) is not int or egress_bytes < 0:
+        raise BudgetError("egress_bytes settlement must be a non-negative integer")
+    row = await db.scalar(
+        select(LabRunBudget)
+        .where(LabRunBudget.run_id == run_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if row is None:
+        return None
+
+    row.reserved_tool_calls = max(0, row.reserved_tool_calls - 1)
+    if not succeeded:
+        if is_egress:
+            row.reserved_egress_requests = max(
+                0, row.reserved_egress_requests - 1
+            )
+        await db.flush()
+        return None
+
+    row.used_tool_calls += 1
+    if is_egress:
+        row.reserved_egress_requests = max(
+            0, row.reserved_egress_requests - 1
+        )
+        row.used_egress_requests += 1
+        if (
+            row.limit_egress_bytes
+            and row.used_egress_bytes
+            + row.reserved_egress_bytes
+            + egress_bytes
+            > row.limit_egress_bytes
+        ):
+            row.exhausted_dimension = "egress_bytes"
+            await db.flush()
+            return "egress_bytes"
+        row.used_egress_bytes += egress_bytes
+    await db.flush()
+    return None
 
 
 async def spend(db, *, run_id: str, dimension: str, amount: int) -> None:

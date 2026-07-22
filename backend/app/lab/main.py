@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
+import socket
 from collections.abc import Awaitable, Callable
+from uuid import uuid4
 
 import app.models  # noqa: F401
 from app.config import settings
@@ -23,6 +26,7 @@ logger = logging.getLogger(__name__)
 RunnerLoop = Callable[[], Awaitable[None]]
 DispatcherLoop = Callable[..., Awaitable[None]]
 TerminalizerLoop = Callable[..., Awaitable[None]]
+ControlLoop = Callable[..., Awaitable[None]]
 
 
 class RunnerService:
@@ -37,6 +41,9 @@ class RunnerService:
         terminalizer_loop: TerminalizerLoop | None = None,
         terminalizer_session_factory=None,
         terminalizer_engine=None,
+        control_loop: ControlLoop | None = None,
+        control_controllers: dict | None = None,
+        control_owner_id: str | None = None,
     ) -> None:
         from app.lab.apply import world_reload_subscriber
 
@@ -60,6 +67,11 @@ class RunnerService:
         self.terminalizer_loop = terminalizer_loop
         self.terminalizer_session_factory = terminalizer_session_factory
         self.terminalizer_engine = terminalizer_engine
+        self.control_loop = control_loop
+        self.control_controllers = dict(control_controllers or {})
+        self.control_owner_id = control_owner_id or (
+            f"{socket.gethostname()}:{os.getpid()}:{uuid4()}"
+        )
         self.ready = False
         self.failure: str | None = None
         self._ready_event = asyncio.Event()
@@ -80,6 +92,13 @@ class RunnerService:
         # matching consumer implementation is absent.
         runner_module.require_protocol_handler(self.protocol_version)
         await lab_queue.require_legacy_queues_drained()
+        if self.control_loop is not None and set(self.control_controllers) != {
+            "runtime",
+            "executor",
+        }:
+            raise RuntimeError(
+                "durable control requires exact runtime and executor controllers"
+            )
         tasks: dict[str, asyncio.Task] = {
             "runner": asyncio.create_task(self.runner_loop(), name="runner"),
             "world_reload": asyncio.create_task(
@@ -104,6 +123,16 @@ class RunnerService:
                     stop_event=stop_event,
                 ),
                 name="terminalizer",
+            )
+        if self.control_loop is not None:
+            tasks["control_plane"] = asyncio.create_task(
+                self.control_loop(
+                    self.session_factory,
+                    owner_id=self.control_owner_id,
+                    controllers=self.control_controllers,
+                    stop_event=stop_event,
+                ),
+                name="control_plane",
             )
 
         stop_task = asyncio.create_task(stop_event.wait(), name="stop_signal")
@@ -132,7 +161,7 @@ class RunnerService:
             await self.aclose()
 
 
-def build_runner_service() -> RunnerService:
+def build_runner_service(*, control_controllers: dict | None = None) -> RunnerService:
     protocol_version = runner_module.configured_protocol_version()
     runner_module.require_protocol_handler(protocol_version)
     terminalizer_factory = None
@@ -157,6 +186,21 @@ def build_runner_service() -> RunnerService:
         terminalizer_engine = dedicated.engine
         terminalizer_factory = dedicated.session_factory
 
+    control_loop = None
+    if settings.lab_global_admission_enabled:
+        if protocol_version != 2:
+            raise RuntimeError(
+                "lab_global_admission_enabled requires protocol_version 2"
+            )
+        if set(control_controllers or {}) != {"runtime", "executor"}:
+            raise RuntimeError(
+                "lab_global_admission_enabled requires D0-provisioned Runtime "
+                "and Executor controllers"
+            )
+        from app.lab import control_plane
+
+        control_loop = control_plane.run_control_loop
+
     return RunnerService(
         session_factory=async_session,
         protocol_version=protocol_version,
@@ -168,6 +212,8 @@ def build_runner_service() -> RunnerService:
         terminalizer_loop=terminalizer_loop,
         terminalizer_session_factory=terminalizer_factory,
         terminalizer_engine=terminalizer_engine,
+        control_loop=control_loop,
+        control_controllers=control_controllers,
     )
 
 

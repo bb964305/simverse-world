@@ -20,10 +20,11 @@ project's Anthropic-compatible endpoint via ``app.llm.client``).
 """
 from __future__ import annotations
 
+import copy
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable, Literal
 
 from app.lab.sandbox.base import ArtifactSpec, StepEvent
 
@@ -57,6 +58,25 @@ class AgentResult:
     model_tokens: int = 0
 
 
+@dataclass(frozen=True)
+class AgentTurn:
+    """One protocol-v2 model turn.
+
+    An ``intent`` turn is a hard pause point. The caller must persist the
+    checkpoint and wait for a real Broker result before invoking
+    :meth:`RefAgent.resume_turn`. Only a ``final`` turn carries an artifact.
+    """
+
+    state: Literal["intent", "final", "failed"]
+    steps: tuple[StepEvent, ...]
+    checkpoint: dict[str, Any]
+    tool_intent: tuple[str, dict] | None = None
+    artifact: ArtifactSpec | None = None
+
+
+CHECKPOINT_VERSION = 1
+
+
 def _granted_tools(scopes: list[str]) -> list[str]:
     return [_SCOPE_TOOL[s] for s in scopes if s in _SCOPE_TOOL]
 
@@ -67,7 +87,8 @@ def _extract_json(text: str) -> dict:
     if not m:
         return {}
     try:
-        return json.loads(m.group(0))
+        value = json.loads(m.group(0))
+        return value if isinstance(value, dict) else {}
     except Exception:
         return {}
 
@@ -79,6 +100,188 @@ class RefAgent:
     complete: Completer
     max_steps: int = 3
     tokens: int = field(default=0, init=False)
+
+    @staticmethod
+    def initial_checkpoint(*, brief: str, scopes: list[str]) -> dict[str, Any]:
+        if not isinstance(brief, str) or not brief.strip():
+            raise ValueError("brief is required")
+        if any(not isinstance(scope, str) or not scope for scope in scopes):
+            raise ValueError("scopes must contain non-empty strings")
+        granted = _granted_tools(scopes)
+        return {
+            "version": CHECKPOINT_VERSION,
+            "scopes": list(scopes),
+            "rounds_completed": 0,
+            "model_tokens": 0,
+            "transcript": [
+                {
+                    "role": "user",
+                    "content": (
+                        f"Brief: {brief}\nGranted tools: {granted or ['(none)']}\n"
+                        "Produce your next action as the strict JSON object."
+                    ),
+                }
+            ],
+        }
+
+    @staticmethod
+    def _validated_checkpoint(checkpoint: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(checkpoint, dict) or checkpoint.get("version") != CHECKPOINT_VERSION:
+            raise ValueError("unsupported agent checkpoint")
+        scopes = checkpoint.get("scopes")
+        if not isinstance(scopes, list) or any(
+            not isinstance(scope, str) or not scope for scope in scopes
+        ):
+            raise ValueError("agent checkpoint has invalid scopes")
+        rounds = checkpoint.get("rounds_completed")
+        tokens = checkpoint.get("model_tokens")
+        if type(rounds) is not int or rounds < 0:
+            raise ValueError("agent checkpoint has invalid round count")
+        if type(tokens) is not int or tokens < 0:
+            raise ValueError("agent checkpoint has invalid token count")
+        transcript = checkpoint.get("transcript")
+        if not isinstance(transcript, list) or not transcript:
+            raise ValueError("agent checkpoint has no transcript")
+        for message in transcript:
+            if (
+                not isinstance(message, dict)
+                or set(message) != {"role", "content"}
+                or message["role"] not in {"user", "assistant"}
+                or not isinstance(message["content"], str)
+            ):
+                raise ValueError("agent checkpoint has an invalid message")
+        return copy.deepcopy(checkpoint)
+
+    async def start_turn(self, *, brief: str, scopes: list[str]) -> AgentTurn:
+        """Run only until the first real intent or terminal model answer."""
+
+        return await self._advance(
+            self.initial_checkpoint(brief=brief, scopes=scopes)
+        )
+
+    async def advance_turn(self, checkpoint: dict[str, Any]) -> AgentTurn:
+        """Continue a checkpoint saved before a model call."""
+
+        return await self._advance(checkpoint)
+
+    async def resume_turn(
+        self,
+        *,
+        checkpoint: dict[str, Any],
+        tool: str,
+        outcome: Literal["succeeded", "denied", "failed"],
+        payload: dict[str, Any],
+    ) -> AgentTurn:
+        """Resume from one exact Broker result without fabricating observation."""
+
+        restored = self._validated_checkpoint(checkpoint)
+        if not isinstance(tool, str) or not tool:
+            raise ValueError("tool is required")
+        if outcome not in {"succeeded", "denied", "failed"}:
+            raise ValueError("invalid Broker outcome")
+        if not isinstance(payload, dict):
+            raise ValueError("Broker result payload must be an object")
+        result_json = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        restored["transcript"].append({
+            "role": "user",
+            "content": (
+                f"The Broker result for {tool} has outcome={outcome}. "
+                f"Result payload: {result_json}\n"
+                "Continue or conclude using the strict JSON object."
+            ),
+        })
+        return await self._advance(restored)
+
+    async def _advance(self, checkpoint: dict[str, Any]) -> AgentTurn:
+        restored = self._validated_checkpoint(checkpoint)
+        if restored["rounds_completed"] >= self.max_steps:
+            failed = StepEvent(
+                phase="message",
+                summary="model step limit reached before a final answer",
+            )
+            return AgentTurn(
+                state="failed", steps=(failed,), checkpoint=restored
+            )
+
+        messages = [
+            {"role": "system", "content": _SYSTEM},
+            *copy.deepcopy(restored["transcript"]),
+        ]
+        text, raw_tokens = await self.complete(messages)
+        if not isinstance(text, str):
+            raise ValueError("model response must be text")
+        if raw_tokens is None:
+            tokens = 0
+        elif type(raw_tokens) is int:
+            tokens = raw_tokens
+        else:
+            raise ValueError("model token count must be an integer")
+        if tokens < 0:
+            raise ValueError("model token count must be non-negative")
+        self.tokens = restored["model_tokens"] + tokens
+        restored["model_tokens"] = self.tokens
+        restored["rounds_completed"] += 1
+        restored["transcript"].append({"role": "assistant", "content": text})
+
+        action = _extract_json(text)
+        plan = str(action.get("plan") or "").strip()
+        tool = action.get("tool")
+        query = str(action.get("query") or "").strip()
+        conclusion = str(action.get("conclusion") or "").strip()
+        think = StepEvent(
+            phase="think",
+            summary=plan or "planning",
+            model_tokens=tokens,
+        )
+
+        if tool:
+            granted = _granted_tools(restored["scopes"])
+            if not isinstance(tool, str) or tool not in granted:
+                failed = StepEvent(
+                    phase="message",
+                    summary="model requested a tool outside the granted scopes",
+                )
+                return AgentTurn(
+                    state="failed",
+                    steps=(think, failed),
+                    checkpoint=restored,
+                )
+            args = {"query": query} if query else {}
+            intent = StepEvent(
+                phase="tool_call",
+                tool=tool,
+                summary=f"intend {tool}",
+                payload=args,
+            )
+            return AgentTurn(
+                state="intent",
+                steps=(think, intent),
+                checkpoint=restored,
+                tool_intent=(tool, args),
+            )
+
+        if not conclusion:
+            failed = StepEvent(
+                phase="message", summary="model returned no final conclusion"
+            )
+            return AgentTurn(
+                state="failed", steps=(think, failed), checkpoint=restored
+            )
+        final = StepEvent(phase="message", summary=conclusion)
+        return AgentTurn(
+            state="final",
+            steps=(think, final),
+            checkpoint=restored,
+            artifact=ArtifactSpec(
+                kind="text", title="research summary", text_md=conclusion
+            ),
+        )
 
     async def run(self, *, brief: str, scopes: list[str], on_step=None,
                   should_cancel=None) -> AgentResult:

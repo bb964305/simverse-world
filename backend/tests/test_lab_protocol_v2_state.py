@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import ForeignKeyConstraint, UniqueConstraint, func, select
+from sqlalchemy import CheckConstraint, ForeignKeyConstraint, UniqueConstraint, func, select
 
 from app.lab import queue, runtime_sessions
 from app.models.lab_run import LabRun
@@ -210,6 +210,17 @@ def test_gateway_state_cross_row_bindings_are_database_constraints():
     )
 
 
+def test_runtime_result_receipt_and_ack_are_one_database_state():
+    checks = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in LabRuntimeResult.__table__.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    expression = checks["ck_lab_runtime_results_receipt_ack_pair"]
+    assert "receipt_id IS NULL AND runtime_acked_at IS NULL" in expression
+    assert "receipt_id IS NOT NULL AND runtime_acked_at IS NOT NULL" in expression
+
+
 @pytest.mark.anyio
 async def test_provider_registration_commits_then_exact_retry_is_local(db_session):
     await _add_v2_run_with_lease(
@@ -239,6 +250,80 @@ async def test_provider_registration_commits_then_exact_retry_is_local(db_sessio
     assert same.id == ready.id
     assert provider.create_calls == [(ready.client_run_id, 7)]
     assert provider.reattach_calls == [(ready.client_run_id, 7)]
+
+
+@pytest.mark.anyio
+async def test_completed_session_reattaches_for_same_epoch_finalization(db_session):
+    await _add_v2_run_with_lease(
+        db_session, run_id="runtime-completed-recovery-run", epoch=8
+    )
+    provider = RecordingProvider()
+    ready = await runtime_sessions.create_or_reattach(
+        db_session,
+        run_id="runtime-completed-recovery-run",
+        epoch=8,
+        owner_id="runner-owner",
+        provider=provider,
+        durability_class="session_affine",
+    )
+    ready.status = "completed"
+    ready.ended_at = datetime.now(UTC)
+    await db_session.commit()
+
+    recovered = await runtime_sessions.create_or_reattach(
+        db_session,
+        run_id="runtime-completed-recovery-run",
+        epoch=8,
+        owner_id="runner-owner",
+        provider=provider,
+        durability_class="session_affine",
+    )
+
+    assert recovered.id == ready.id
+    assert recovered.status == "completed"
+    assert len(provider.create_calls) == 1
+    assert provider.reattach_calls == []
+
+
+@pytest.mark.anyio
+async def test_ready_session_takeover_transfers_authority_without_provider_recreate(
+    db_session,
+):
+    run_id = "runtime-ready-takeover-run"
+    await _add_v2_run_with_lease(db_session, run_id=run_id, epoch=7)
+    provider = RecordingProvider()
+    ready = await runtime_sessions.create_or_reattach(
+        db_session,
+        run_id=run_id,
+        epoch=7,
+        owner_id="runner-owner",
+        provider=provider,
+        durability_class="session_affine",
+    )
+    ready_id = ready.id
+    lease = await db_session.get(LabRunLease, run_id)
+    lease.owner_id = "takeover-owner"
+    lease.fencing_epoch = 8
+    lease.heartbeat_at = datetime.now(UTC)
+    lease.expires_at = datetime.now(UTC) + timedelta(minutes=5)
+    await db_session.commit()
+
+    recovered = await runtime_sessions.recover_existing_for_new_authority(
+        db_session,
+        run_id=run_id,
+        authority_epoch=8,
+        owner_id="takeover-owner",
+        provider=provider,
+        durability_class="session_affine",
+    )
+
+    assert recovered.id == ready_id
+    assert recovered.status == "ready"
+    assert recovered.fencing_epoch == 7
+    assert recovered.authority_epoch == 8
+    assert provider.handshake_calls == 2
+    assert len(provider.create_calls) == 1
+    assert provider.reattach_calls == []
 
 
 @pytest.mark.anyio

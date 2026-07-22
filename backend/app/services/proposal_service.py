@@ -23,7 +23,7 @@ from app.services import world_revision_service
 
 logger = logging.getLogger(__name__)
 
-OPEN_KINDS = ("add_lore", "edit_location", "add_location", "add_mechanic")  # add_npc deferred (P4)
+ENABLED_KINDS = ("add_lore", "edit_location")
 
 
 class ProposalError(Exception):
@@ -53,19 +53,78 @@ def serialize(p: WorldChangeProposal) -> dict:
         "risk_level": p.risk_level,
         "reviewer_id": p.reviewer_id,
         "review_note": p.review_note,
+        "global_fencing_epoch": p.global_fencing_epoch,
         "applied_at": p.applied_at.isoformat() if p.applied_at else None,
         "reverted_at": p.reverted_at.isoformat() if p.reverted_at else None,
         "created_at": p.created_at.isoformat() if p.created_at else None,
     }
 
 
+def _assert_kind_enabled(kind: str) -> None:
+    if kind not in ENABLED_KINDS:
+        raise ProposalError(f"proposal kind '{kind}' is not enabled")
+
+
+async def _current_global_control(db):
+    """Load the singleton without importing the P4 control plane at module load.
+
+    The delayed import keeps model registration acyclic. P4 owns the singleton;
+    World Governor only binds drafts to its epoch and consumes its lock/check API.
+    """
+    from app.lab import control_plane
+
+    return await control_plane.ensure_global_control(db)
+
+
+async def _lock_apply_authority(db, proposal: WorldChangeProposal) -> None:
+    """Serialize apply with global kill and reject an old-epoch draft."""
+    from app.lab import control_plane
+
+    try:
+        await control_plane.assert_effect_epoch(
+            db,
+            run_id=proposal.origin_ref or proposal.id,
+            expected_global_epoch=proposal.global_fencing_epoch,
+            effect="world",
+        )
+    except control_plane.GlobalEffectFenced as exc:
+        raise ProposalError(f"stale global epoch: {exc}") from exc
+
+
+async def _lock_revert_authority(db, proposal: WorldChangeProposal) -> None:
+    """A revert is a fresh admin effect, not replay of the proposal's old epoch.
+
+    It still locks the global-control row and is denied while admission is closed,
+    but after admission reopens an operator can revert a change that predates the
+    latest kill epoch.
+    """
+    from app.lab import control_plane
+
+    state = await _current_global_control(db)
+    try:
+        await control_plane.assert_effect_epoch(
+            db,
+            run_id=proposal.origin_ref or proposal.id,
+            expected_global_epoch=state.fencing_epoch,
+            effect="world",
+        )
+    except control_plane.GlobalEffectFenced as exc:
+        raise ProposalError(f"world revert fenced: {exc}") from exc
+
+
 async def create_proposal(
     db, *, kind: str, title: str, rationale: str, patch: dict,
     origin: str = "lab_run", origin_ref: str | None = None, author_slug: str | None = None,
-    cost_sc: int = 0, risk_level: str | None = None,
+    cost_sc: int = 0, risk_level: str | None = None, commit: bool = True,
 ) -> WorldChangeProposal:
-    if kind not in OPEN_KINDS:
-        raise ProposalError(f"proposal kind '{kind}' is not open")
+    _assert_kind_enabled(kind)
+    global_control = await _current_global_control(db)
+    if not global_control.admission_open:
+        raise ProposalError("world proposal admission is closed")
+    if not commit and cost_sc > 0:
+        raise ProposalError(
+            "transaction-owned proposal creation does not support treasury fuel"
+        )
     # Freeze treasury fuel (refunded on reject / failed apply).
     if cost_sc > 0 and author_slug:
         ok = await coin_service.treasury_debit(db, author_slug, cost_sc, f"proposal_fuel:{title}")
@@ -75,10 +134,14 @@ async def create_proposal(
         origin=origin, origin_ref=origin_ref, author_slug=author_slug, kind=kind,
         title=title[:200], rationale_md=rationale or "", patch_json=patch or {},
         cost_sc=cost_sc, risk_level=risk_level or assess_risk(kind, patch or {}), status="pending",
+        global_fencing_epoch=global_control.fencing_epoch,
     )
     db.add(p)
-    await db.commit()
-    await db.refresh(p)
+    if commit:
+        await db.commit()
+        await db.refresh(p)
+    else:
+        await db.flush()
     return p
 
 
@@ -101,86 +164,87 @@ async def _fail_apply(db, p: WorldChangeProposal, note: str, reason: str) -> Non
 
 
 async def approve_proposal(db, proposal_id: str, reviewer_id: str, note: str = "") -> WorldChangeProposal:
-    p = await db.get(WorldChangeProposal, proposal_id)
+    p = await db.scalar(
+        select(WorldChangeProposal)
+        .where(WorldChangeProposal.id == proposal_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if p is None:
         raise ProposalError("proposal not found")
     if p.status != "pending":
         raise ProposalError("proposal is not pending")
-    # CAS pending -> approved so two racing admins cannot both proceed to apply
-    # the same proposal (which would double-write the overlay). The loser sees
-    # rowcount 0 and is rejected.
-    won = await transitions.cas_proposal_status(
-        db, proposal_id=proposal_id, expected=("pending",), new="approved",
-        reviewer_id=reviewer_id, review_note=(note or p.review_note),
-    )
-    await db.commit()
-    if not won:
-        raise ProposalError("proposal is not pending")
-    await db.refresh(p)
+    _assert_kind_enabled(p.kind)
+    await _lock_apply_authority(db, p)
 
-    # v1 world-revision tracking is scoped to add_lore/edit_location
-    # (global-constraints.md #4); add_location/add_mechanic keep the
-    # pre-T6 apply/broadcast path byte-for-byte (test_world_governance.py).
-    revisioned = p.kind in world_revision_service.REVISIONED_KINDS
-    before_state = base_revision_id = None
-    if revisioned:
-        location_slug = world_revision_service.location_slug_for(p.kind, p.patch_json or {})
-        base_revision_id = await world_revision_service.current_revision_id(db, location_slug)
-        requested_base = (p.patch_json or {}).get("base_world_revision")
-        if requested_base is not None and requested_base != base_revision_id:
-            await _fail_apply(db, p, note, "stale base revision")
-            raise ProposalError("stale base revision")
-        try:
-            before_state = await world_revision_service.capture_before_state(
-                db, kind=p.kind, patch=p.patch_json or {},
-            )
-        except world_revision_service.RevisionError as e:
-            await _fail_apply(db, p, note, str(e))
-            raise ProposalError(f"apply failed: {e}")
+    # Win ownership before touching the overlay. PostgreSQL row locks already
+    # serialize this path, but the explicit CAS also protects SQLite tests and
+    # any caller that reaches this service without a lock-preserving wrapper.
+    won = await transitions.cas_proposal_status(
+        db,
+        proposal_id=p.id,
+        expected=("pending",),
+        new="approved",
+        reviewer_id=reviewer_id,
+        review_note=(note or p.review_note),
+    )
+    if not won:
+        await db.rollback()
+        raise ProposalError("proposal is not pending")
+    p.status = "approved"
+    p.reviewer_id = reviewer_id
+    p.review_note = note or p.review_note
+
+    location_slug = world_revision_service.location_slug_for(
+        p.kind, p.patch_json or {}
+    )
+    base_revision_id = await world_revision_service.current_revision_id(
+        db, location_slug
+    )
+    requested_base = (p.patch_json or {}).get("base_world_revision")
+    if requested_base is not None and requested_base != base_revision_id:
+        await _fail_apply(db, p, note, "stale base revision")
+        raise ProposalError("stale base revision")
 
     try:
-        # Revisioned kinds flush-only (commit=False): the single commit below is
-        # the atomic boundary. Non-revisioned kinds keep the legacy commit-inside
-        # + own reload/broadcast.
+        before_state = await world_revision_service.capture_before_state(
+            db, kind=p.kind, patch=p.patch_json or {},
+        )
         await apply_engine.apply_proposal(
-            db, p, broadcast=not revisioned, commit=not revisioned)
-    except apply_engine.ApplyError as e:
-        # A validation/conflict failure precedes any overlay flush, but roll back
-        # defensively so no partially-flushed overlay can ride the _fail_apply
-        # commit, then re-load the (expired) proposal to mark it failed.
-        await db.rollback()
-        p = await db.get(WorldChangeProposal, proposal_id)
-        await _fail_apply(db, p, note, str(e))
-        raise ProposalError(f"apply failed: {e}")
-
-    envelope = None
-    if revisioned:
-        # Same read as before_state, taken again now that the write landed (still
-        # in-session, visible via the flush) — "the target's current state" is the
-        # after-image this time.
+            db, p, broadcast=False, commit=False
+        )
         after_state = await world_revision_service.capture_before_state(
             db, kind=p.kind, patch=p.patch_json or {},
         )
         revision = await world_revision_service.record_apply(
-            db, proposal=p, before_state=before_state, after_state=after_state,
-            base_revision_id=base_revision_id, applied_by=reviewer_id,
+            db,
+            proposal=p,
+            before_state=before_state,
+            after_state=after_state,
+            base_revision_id=base_revision_id,
+            applied_by=reviewer_id,
         )
         envelope = await world_revision_service.build_world_changed_envelope(
             db, revision=revision, action="applied", tenant_id=revision.tenant_id,
         )
+        p.status = "applied"
+        p.applied_at = datetime.now(UTC)
+        await db.commit()
+    except (apply_engine.ApplyError, world_revision_service.RevisionError) as e:
+        await db.rollback()
+        p = await db.get(WorldChangeProposal, proposal_id)
+        await _fail_apply(db, p, note, str(e))
+        raise ProposalError(f"apply failed: {e}")
+    except BaseException:
+        await db.rollback()
+        raise
 
-    p.status = "applied"
-    p.applied_at = datetime.now(UTC)
-    # ONE transaction: the flushed overlay + immutable revision + outbox record +
-    # proposal terminal status commit together, so a crash before here leaves no
-    # overlay split from its audit. Reload/broadcast happen AFTER the commit — a
-    # separate-session reload can only see the committed overlay.
-    await db.commit()
-    if revisioned:
-        await apply_engine.reload_world()
-        await apply_engine.publish_world_reload()
-    if envelope is not None:
-        await apply_engine.broadcast_world_changed(payload=envelope)
+    # Reload and delivery are strictly post-commit. A fault here leaves one
+    # canonical applied transaction; retry is rejected by the proposal CAS and
+    # the deterministic world outbox event id cannot duplicate.
+    await apply_engine.reload_world()
+    await apply_engine.publish_world_reload()
+    await apply_engine.broadcast_world_changed(payload=envelope)
     await emit(db, "world_proposal_applied", proposal_id=p.id, author_slug=p.author_slug, kind=p.kind)
     await db.refresh(p)
     return p
@@ -203,28 +267,31 @@ async def reject_proposal(db, proposal_id: str, reviewer_id: str, note: str = ""
 
 
 async def revert_proposal(db, proposal_id: str, reviewer_id: str) -> WorldChangeProposal:
-    p = await db.get(WorldChangeProposal, proposal_id)
+    p = await db.scalar(
+        select(WorldChangeProposal)
+        .where(WorldChangeProposal.id == proposal_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if p is None:
         raise ProposalError("proposal not found")
     if p.status != "applied":
         raise ProposalError("only applied proposals can be reverted")
+    _assert_kind_enabled(p.kind)
+    await _lock_revert_authority(db, p)
 
-    revision = None
-    if p.kind in world_revision_service.REVISIONED_KINDS:
-        revision = await world_revision_service.latest_applied_revision(db, proposal_id=p.id)
+    revision = await world_revision_service.latest_applied_revision(
+        db, proposal_id=p.id, for_update=True
+    )
+    if revision is None:
+        await db.rollback()
+        raise ProposalError("applied proposal has no active world revision")
 
-    if revision is not None:
-        # Before-state restore path (T6): exact-slug data_json/lore rollback,
-        # not the pre-T6 soft-delete. The restore, the revision->reverted flip,
-        # the outbox row, and the proposal status commit in ONE transaction so a
-        # crash cannot revert the audit without the overlay (or vice versa);
-        # reload_world (its own session) only runs AFTER the commit.
+    try:
         await world_revision_service.revert_revision(db, revision=revision, reverted_by=reviewer_id)
         envelope = await world_revision_service.build_world_changed_envelope(
             db, revision=revision, action="reverted", tenant_id=revision.tenant_id,
         )
-        # CAS applied -> reverted: two racing reverts cannot both land; the loser
-        # rolls back its duplicate restore/outbox and is rejected.
         won = await transitions.cas_proposal_status(
             db, proposal_id=p.id, expected=("applied",), new="reverted",
             reverted_at=datetime.now(UTC), reviewer_id=reviewer_id,
@@ -232,23 +299,17 @@ async def revert_proposal(db, proposal_id: str, reviewer_id: str) -> WorldChange
         if not won:
             await db.rollback()
             raise ProposalError("only applied proposals can be reverted")
-        await db.commit()  # overlay restore + revision + outbox + status="reverted" together
-        await apply_engine.reload_world()
-        await apply_engine.publish_world_reload()
-        await apply_engine.broadcast_world_changed(payload=envelope)
-    else:
-        # No revision on record (add_location/add_mechanic, or a legacy
-        # proposal predating T6) — unchanged soft-delete compatibility path,
-        # gated by the same CAS so two admins cannot both revert.
-        won = await transitions.cas_proposal_status(
-            db, proposal_id=p.id, expected=("applied",), new="reverted",
-            reverted_at=datetime.now(UTC), reviewer_id=reviewer_id,
-        )
         await db.commit()
-        if not won:
-            raise ProposalError("only applied proposals can be reverted")
-        await apply_engine.revert_proposal(db, p)
+    except world_revision_service.RevisionError as exc:
+        await db.rollback()
+        raise ProposalError(f"revert failed: {exc}") from exc
+    except BaseException:
+        await db.rollback()
+        raise
 
+    await apply_engine.reload_world()
+    await apply_engine.publish_world_reload()
+    await apply_engine.broadcast_world_changed(payload=envelope)
     await db.refresh(p)
     return p
 

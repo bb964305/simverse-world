@@ -92,6 +92,28 @@ async def cancel_run(run_id: str, admin: User = Depends(require_admin),
     run = await db.get(LabRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
+
+    # Protocol-v2 control is a durable Runner-owned intent. The API must never
+    # reconstruct a provider handle, report a stop receipt, or terminalize the
+    # task before the Runtime and Executor targets have actually converged.
+    if run.protocol_version == 2:
+        if run.status in ("succeeded", "failed", "cancelled"):
+            raise HTTPException(status_code=409, detail="run already terminal")
+        from app.lab import control_plane
+
+        request = await control_plane.submit_run_control(
+            db,
+            run_id=run.id,
+            requested_by=admin.id,
+            action="cancel",
+        )
+        return {
+            "ok": True,
+            "run_id": run.id,
+            "status": request.status,
+            "control_request_id": request.id,
+        }
+
     task = await db.get(LabTask, run.task_id)
     task_needs_terminalization = (
         task is not None

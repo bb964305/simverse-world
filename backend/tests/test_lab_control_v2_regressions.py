@@ -87,7 +87,7 @@ async def _seed_run(factory, run_id: str, *, status: str = "running") -> User:
                 task_id=f"task-{run_id}",
                 researcher_slug="sage",
                 adapter="hermes",
-                protocol_version="v2",
+                protocol_version=2,
                 status=status,
                 scopes_json=["web_search"],
             )
@@ -260,6 +260,53 @@ async def test_durable_cancel_is_polled_after_redis_loss_and_runner_restart(
     assert again["claimed"] == 0
     assert len(runtime.commands) == 1
     assert len(executor.commands) == 1
+
+
+async def test_running_cancel_without_runtime_inventory_is_quarantined(
+    control_factory,
+):
+    """Missing durable provider truth can never be reported as stopped."""
+    from app.lab import control_plane
+    from app.models.lab_control import LabControlTarget, LabRunControlRequest
+
+    factory = control_factory
+    await _seed_run(factory, "run-missing-runtime", status="running")
+    now = datetime.now(UTC)
+    async with factory() as db:
+        request = await control_plane.submit_run_control(
+            db,
+            run_id="run-missing-runtime",
+            requested_by="admin",
+            deadline_at=now + timedelta(seconds=30),
+            now=now,
+        )
+
+    async with factory() as db:
+        stats = await control_plane.process_pending_controls(
+            db,
+            owner_id="runner-missing-runtime",
+            controllers={"runtime": _RecordingController(), "executor": _RecordingController()},
+            now=now,
+        )
+
+    async with factory() as db:
+        stored = await db.get(LabRunControlRequest, request.id)
+        run = await db.get(LabRun, "run-missing-runtime")
+        targets = (
+            await db.execute(
+                select(LabControlTarget).where(
+                    LabControlTarget.request_id == request.id
+                )
+            )
+        ).scalars().all()
+
+    assert stats["completed"] == 0
+    assert stats["quarantined"] == 1
+    assert stored.status == "quarantined"
+    assert run.status == "running"
+    assert len(targets) == 1
+    assert targets[0].status == "quarantined"
+    assert targets[0].last_error == "runtime target inventory missing"
 
 
 async def test_global_kill_state_and_target_materialization_are_one_transaction(

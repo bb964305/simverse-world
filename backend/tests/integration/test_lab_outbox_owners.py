@@ -54,10 +54,7 @@ async def test_owner_dispatchers_cannot_cross_claim_and_unknown_is_never_publish
             )
 
     stats = await asyncio.gather(
-        drain("lab_runner"),
-        drain("realtime_relay"),
-        drain("world_relay"),
-        drain("artifact_cleanup"),
+        *(drain(owner) for owner in sorted(set(outbox_dispatcher.TOPIC_OWNERS.values())))
     )
 
     async with factory() as db:

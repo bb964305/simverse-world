@@ -67,7 +67,15 @@ RUN_ALL_STEPS: tuple[Step, ...] = (
         "run-all:ac05-protocol-migration",
         ("AC05",),
         (
-            Command("backend", PYTEST + ("tests/test_lab_protocol_v2_regressions.py", "-q")),
+            Command(
+                "backend",
+                PYTEST
+                + (
+                    "tests/test_lab_protocol_v2_regressions.py",
+                    "tests/test_lab_protocol_v2_consumer_gate.py",
+                    "-q",
+                ),
+            ),
             Command("backend", PYTEST + ("-m", "lab_postgres", "tests/integration/test_lab_migration_v2_postgres.py", "-q")),
         ),
         ("LAB_POSTGRES_REQUIRED", "LAB_TEST_DATABASE_URL"),
@@ -84,10 +92,27 @@ RUN_ALL_STEPS: tuple[Step, ...] = (
         "run-all:ac07-runtime-result-loop",
         ("AC07", "AC08", "AC09"),
         (
-            Command("backend", PYTEST + ("tests/test_lab_protocol_v2_regressions.py", "-q")),
+            Command(
+                "backend",
+                PYTEST
+                + (
+                    "tests/test_lab_protocol_v2_regressions.py",
+                    "tests/test_lab_runtime_contract.py",
+                    "tests/test_lab_runtime_ref.py",
+                    "tests/test_lab_runtime_ref_server.py",
+                    "tests/test_lab_runtime_v2_http_auth.py",
+                    "tests/test_lab_runtime_v2_loop.py",
+                    "tests/test_lab_runtime_v2_store_auth.py",
+                    "tests/test_lab_runtime_v2_supervision_contract.py",
+                    "tests/test_lab_gateway_v2_supervision.py",
+                    "-k",
+                    "not real_llm",
+                    "-q",
+                ),
+            ),
             Command("backend", PYTEST + ("-m", "lab_postgres", "tests/integration/test_lab_supervision_v2_postgres.py", "-q")),
         ),
-        ("LAB_POSTGRES_REQUIRED", "LAB_TEST_DATABASE_URL", "LAB_RUNTIME_BASE_URL"),
+        ("LAB_POSTGRES_REQUIRED", "LAB_TEST_DATABASE_URL"),
         1200,
     ),
     Step(

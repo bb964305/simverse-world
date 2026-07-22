@@ -244,6 +244,15 @@ class Settings(BaseSettings):
     lab_outbox_v2_enabled: bool = False
     lab_runtime_v2_canary_enabled: bool = False
     lab_global_admission_enabled: bool = False
+    # Gateway-only Runtime audience signing material. These never fall back to
+    # the legacy adapter API key or the application JWT secret.
+    lab_runtime_auth_issuer: str = ""
+    lab_runtime_auth_audience: str = "lab-runtime"
+    lab_runtime_auth_current_kid: str = ""
+    lab_runtime_auth_current_key: str = ""
+    lab_runtime_auth_next_kid: str = ""
+    lab_runtime_auth_next_key: str = ""
+    lab_runtime_auth_token_ttl_s: int = 300
 
     model_config = {"env_file": ".env"}
 

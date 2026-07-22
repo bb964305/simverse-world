@@ -1,9 +1,23 @@
-# Lab P7 — real runtime adapter selected (Simverse reference runtime)
+# Historical Lab P7 v1 adapter evidence (superseded)
 
-Recovery plan Phase 7. A REAL, self-hosted, LLM-backed agent runtime was built,
-run through the executable conformance gate with a real LLM-driven agent loop,
-and **SELECTED** (100/100, every mandatory dimension satisfied). This is genuine
-real-runtime evidence — not Mock, not fabricated.
+> **Invalid for Approved-v10 P3 or release approval.** This directory is retained
+> unchanged as historical v1 evidence. Its 100/100 scores exercised a buffered
+> loop that could finish before the Broker's real result returned; they do not
+> prove same-turn result resume, commit-before-ACK, replay/backpressure, or
+> Artifact provenance and must not enable a Runtime or satisfy AC07-AC09.
+
+Current authority is `docs/adr/ADR-lab-runtime-adapter.md` plus the Approved-v10
+blocker-resolution plan. The protocol-v2 P3/P4 proof and P4b world boundary are
+deterministic and default-off; D0, production topology, staging, visual/assets,
+and release push remain blocked.
+
+## Archived v1 record
+
+Under the superseded recovery-plan Phase 7 gate, a real, self-hosted, LLM-backed
+agent runtime was built, run through the then-current conformance gate, and
+scored 100/100. The files below are genuine records of that historical run, but
+the score no longer represents selection under the current protocol or release
+criteria.
 
 ## What was built
 
@@ -91,5 +105,5 @@ gitignored; a pydantic `extra_forbidden` validation leak was caught and the temp
 file deleted; `agent_*` are now declared Settings fields so no validation error
 echoes the secret).
 
-Net: two real candidates now pass the gate (the reference runtime on the default
-endpoint, and the commercial qwen endpoint), both 100/100.
+Historical result only: two model-backed v1 runs passed the former gate at
+100/100. Neither score is a current protocol-v2 selection or release verdict.

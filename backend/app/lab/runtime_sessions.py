@@ -447,6 +447,7 @@ async def _register_or_claim(
                 run_id=run_id,
                 client_run_id=stable_client_id,
                 fencing_epoch=epoch,
+                authority_epoch=epoch,
                 protocol_version=2,
                 provider_name=provider_name,
                 durability_class=durability_class,
@@ -490,6 +491,9 @@ async def _register_or_claim(
         if session.status == "ready":
             await db.commit()
             return session, "verify"
+        if session.status == "completed":
+            await db.commit()
+            return session, "finalize"
         if session.status != "creating":
             await db.rollback()
             if session.status == "quarantined":
@@ -615,6 +619,108 @@ async def _verify_ready(
     return ready
 
 
+async def recover_existing_for_new_authority(
+    db,
+    *,
+    run_id: str,
+    authority_epoch: int,
+    owner_id: str,
+    provider: Any,
+    durability_class: str,
+) -> LabRuntimeSession:
+    """Transfer Gateway authority without changing the Runtime epoch.
+
+    No provider create/reattach call is allowed here. The caller can only use
+    the persisted Runtime binding after proving the current Gateway lease.
+    """
+    if durability_class != "session_affine":
+        raise RuntimeSessionError(
+            "only the verified session_affine durability class is supported"
+        )
+    run = await db.get(LabRun, run_id)
+    if run is None or run.protocol_version != 2 or run.adapter != "simverse_ref":
+        raise RuntimeSessionError(
+            "Runtime authority recovery requires a protocol-v2 simverse_ref run"
+        )
+    await _assert_live_lease(
+        db, run_id=run_id, owner_id=owner_id, epoch=authority_epoch
+    )
+    await db.commit()
+    manifest = await _provider_handshake(
+        provider, expected_durability=durability_class
+    )
+    session_id = await db.scalar(
+        select(LabRuntimeSession.id).where(LabRuntimeSession.run_id == run_id)
+    )
+    if session_id is None:
+        await db.rollback()
+        raise RuntimeSessionError("Runtime recovery binding is missing")
+    await _lock_live_lease(
+        db, run_id=run_id, owner_id=owner_id, epoch=authority_epoch
+    )
+    session = await _lock_runtime_session(db, session_id)
+    if (
+        session is None
+        or session.status not in {"ready", "completed"}
+        or session.authority_epoch > authority_epoch
+        or session.client_run_id != client_run_id(run_id, session.fencing_epoch)
+        or session.durability_class != durability_class
+        or not session.provider_session_id
+        or not session.locator_json
+    ):
+        await db.rollback()
+        raise RuntimeSessionError(
+            "cross-epoch recovery requires an older live Runtime binding"
+        )
+    if session.provider_name != manifest.provider_name:
+        await db.rollback()
+        raise RuntimeSessionError("runtime session provider binding changed")
+    session.authority_epoch = authority_epoch
+    await _assert_live_lease(
+        db, run_id=run_id, owner_id=owner_id, epoch=authority_epoch
+    )
+    await db.commit()
+    db.expire_all()
+    recovered = await db.get(LabRuntimeSession, session_id)
+    if (
+        recovered is None
+        or recovered.status not in {"ready", "completed"}
+        or recovered.authority_epoch != authority_epoch
+    ):
+        raise RuntimeSessionError(
+            "Runtime vanished during authority recovery"
+        )
+    return recovered
+
+
+async def quarantine_recovered_session(
+    db,
+    *,
+    session_id: str,
+    run_id: str,
+    authority_epoch: int,
+    owner_id: str,
+    reason: str,
+) -> None:
+    """Quarantine a recovered binding only while the caller owns the run."""
+    await _lock_live_lease(
+        db, run_id=run_id, owner_id=owner_id, epoch=authority_epoch
+    )
+    session = await _lock_runtime_session(db, session_id)
+    if session.run_id != run_id or session.status not in {"ready", "completed"}:
+        await db.rollback()
+        raise RuntimeSessionError(
+            "Runtime recovery quarantine binding changed"
+        )
+    session.status = "quarantined"
+    session.last_error = reason[:500]
+    session.ended_at = session.ended_at or datetime.now(UTC)
+    await _assert_live_lease(
+        db, run_id=run_id, owner_id=owner_id, epoch=authority_epoch
+    )
+    await db.commit()
+
+
 async def create_or_reattach(
     db,
     *,
@@ -662,6 +768,13 @@ async def create_or_reattach(
         owner=owner,
     )
     session_id = session.id
+
+    if mode == "finalize":
+        await _assert_live_lease(
+            db, run_id=run_id, owner_id=owner_id, epoch=epoch
+        )
+        await db.commit()
+        return session
 
     create = _provider_method(provider, "create_session", "create")
     reattach = _provider_method(provider, "reattach_session", "reattach")

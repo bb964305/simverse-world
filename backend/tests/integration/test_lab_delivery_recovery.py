@@ -76,10 +76,14 @@ async def delivery_factory():
             await connection.execute(text(f'CREATE SCHEMA "{schema}"'))
         test_engine = create_async_engine(
             database_url,
-            connect_args={"server_settings": {"search_path": f'"{schema}"'}},
+            connect_args={
+                "server_settings": {"search_path": f'"{schema}", public'}
+            },
         )
         async with test_engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(
+                Base.metadata.create_all, checkfirst=False
+            )
         if await redis.ping() is not True:
             pytest.fail("AC11 Redis ping did not return true")
         yield (
@@ -114,7 +118,7 @@ async def _seed_control_run(factory, run_id: str) -> User:
                 task_id="delivery-task",
                 researcher_slug="sage",
                 adapter="hermes",
-                protocol_version="v2",
+                protocol_version=2,
                 status="running",
                 scopes_json=[],
             )

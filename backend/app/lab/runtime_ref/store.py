@@ -15,15 +15,22 @@ import re
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterable
 
 import aiosqlite
 
+from app.lab.protocol import (
+    MAX_EVENT_BYTES,
+    MAX_UNACKED_BYTES,
+    MAX_UNACKED_EVENTS,
+    RuntimeEvent,
+)
 from app.lab.runtime_ref.service_auth import MAX_REQUEST_BYTES, canonical_json_bytes
 
 
-STORE_VERSION = 1
+STORE_VERSION = 2
 SESSION_STATES = frozenset({
     "created", "running", "intent_pending", "resuming", "completed", "failed",
     "cancelled", "fenced", "quarantined",
@@ -51,6 +58,10 @@ class CrossBindingReplay(RuntimeStoreConflict):
     """A jti or command id was reused outside its original exact binding."""
 
 
+class RuntimeStoreBackpressure(RuntimeStoreConflict):
+    """The Runtime must wait for a committed Gateway event ACK."""
+
+
 @dataclass(frozen=True)
 class StoredSession:
     session_id: str
@@ -63,6 +74,7 @@ class StoredSession:
     state: str
     checkpoint: Any | None
     next_event_cursor: int
+    acked_event_cursor: int
 
 
 @dataclass(frozen=True)
@@ -74,8 +86,12 @@ class StoredEvent:
     turn_id: str | None
     intent_id: str | None
     outcome: str | None
+    tool_name: str | None
+    tool_args: Any | None
+    tool_args_digest: str | None
     payload: Any
     dedupe_key: str | None
+    occurred_at: datetime
 
 
 @dataclass(frozen=True)
@@ -89,6 +105,8 @@ class StoredIntent:
     result_digest: str | None
     result_outcome: str | None
     result_payload: Any | None
+    result_command_id: str | None
+    result_action_id: str | None
 
 
 @dataclass(frozen=True)
@@ -144,6 +162,7 @@ _SCHEMA_STATEMENTS = (
         )),
         checkpoint_json TEXT,
         next_event_cursor INTEGER NOT NULL DEFAULT 1 CHECK (next_event_cursor >= 1),
+        acked_event_cursor INTEGER NOT NULL DEFAULT 0 CHECK (acked_event_cursor >= 0),
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         UNIQUE (client_run_id, epoch),
@@ -159,8 +178,12 @@ _SCHEMA_STATEMENTS = (
         turn_id TEXT,
         intent_id TEXT,
         outcome TEXT,
+        tool_name TEXT,
+        tool_args_json TEXT,
+        tool_args_digest TEXT,
         payload_json TEXT NOT NULL,
         event_digest TEXT NOT NULL,
+        event_bytes INTEGER NOT NULL CHECK (event_bytes > 0),
         dedupe_key TEXT,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (session_id, cursor),
@@ -180,6 +203,8 @@ _SCHEMA_STATEMENTS = (
             result_outcome IS NULL OR result_outcome IN ('succeeded', 'denied', 'failed')
         ),
         result_payload_json TEXT,
+        result_command_id TEXT,
+        result_action_id TEXT,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (session_id, intent_id),
@@ -229,6 +254,18 @@ _SCHEMA_STATEMENTS = (
 )
 
 
+_V1_TO_V2_STATEMENTS = (
+    "ALTER TABLE runtime_sessions ADD COLUMN acked_event_cursor "
+    "INTEGER NOT NULL DEFAULT 0 CHECK (acked_event_cursor >= 0)",
+    "ALTER TABLE runtime_events ADD COLUMN tool_name TEXT",
+    "ALTER TABLE runtime_events ADD COLUMN tool_args_json TEXT",
+    "ALTER TABLE runtime_events ADD COLUMN tool_args_digest TEXT",
+    "ALTER TABLE runtime_events ADD COLUMN event_bytes INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE runtime_intents ADD COLUMN result_command_id TEXT",
+    "ALTER TABLE runtime_intents ADD COLUMN result_action_id TEXT",
+)
+
+
 def _canonical_text(value: Any) -> str:
     return canonical_json_bytes(value, max_bytes=MAX_REQUEST_BYTES).decode("utf-8")
 
@@ -239,6 +276,34 @@ def _load(value: str | None) -> Any | None:
 
 def _digest(value: Any) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def _stored_datetime(value: Any) -> datetime:
+    occurred_at = datetime.fromisoformat(str(value).replace(" ", "T"))
+    if occurred_at.tzinfo is None:
+        occurred_at = occurred_at.replace(tzinfo=UTC)
+    return occurred_at
+
+
+def _migrated_event_bytes(row: aiosqlite.Row) -> int:
+    envelope = RuntimeEvent.model_construct(
+        schema_version=2,
+        event_id=row["event_id"],
+        run_id=row["run_id"],
+        session_id=row["session_id"],
+        cursor=row["cursor"],
+        epoch=row["epoch"],
+        event_kind=row["event_kind"],
+        turn_id=row["turn_id"],
+        intent_id=row["intent_id"],
+        outcome=row["outcome"],
+        tool_name=row["tool_name"],
+        tool_args=_load(row["tool_args_json"]),
+        tool_args_digest=row["tool_args_digest"],
+        payload=_load(row["payload_json"]),
+        occurred_at=_stored_datetime(row["created_at"]),
+    ).model_dump(mode="json")
+    return len(canonical_json_bytes(envelope, max_bytes=MAX_UNACKED_BYTES))
 
 
 def _require_text(name: str, value: str) -> None:
@@ -282,16 +347,40 @@ class RuntimeStore:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
             self._prepare_main_file()
             db = await aiosqlite.connect(self.path, isolation_level=None)
+            db.row_factory = aiosqlite.Row
             try:
                 await db.execute("PRAGMA foreign_keys = ON")
                 await db.execute("PRAGMA journal_mode = WAL")
                 await db.execute("PRAGMA busy_timeout = 5000")
                 await db.execute("BEGIN IMMEDIATE")
                 version = (await (await db.execute("PRAGMA user_version")).fetchone())[0]
-                if version not in {0, STORE_VERSION}:
+                if version not in {0, 1, STORE_VERSION}:
                     raise RuntimeStoreError(
-                        f"unsupported runtime store version {version}; expected {STORE_VERSION}"
+                        f"unsupported runtime store version {version}; expected 1 or "
+                        f"{STORE_VERSION}"
                     )
+                if version == 1:
+                    for statement in _V1_TO_V2_STATEMENTS:
+                        await db.execute(statement)
+                    migrated_events = await (
+                        await db.execute(
+                            "SELECT event.*, session.run_id, session.epoch "
+                            "FROM runtime_events AS event "
+                            "JOIN runtime_sessions AS session "
+                            "ON session.session_id = event.session_id "
+                            "WHERE event.event_bytes = 0"
+                        )
+                    ).fetchall()
+                    for event in migrated_events:
+                        await db.execute(
+                            "UPDATE runtime_events SET event_bytes = ? "
+                            "WHERE session_id = ? AND cursor = ?",
+                            (
+                                _migrated_event_bytes(event),
+                                event["session_id"],
+                                event["cursor"],
+                            ),
+                        )
                 for statement in _SCHEMA_STATEMENTS:
                     await db.execute(statement)
                 await db.execute(f"PRAGMA user_version = {STORE_VERSION}")
@@ -338,6 +427,7 @@ class RuntimeStore:
             egress_allowlist=tuple(_load(row["egress_allowlist_json"]) or []),
             checkpoint=_load(row["checkpoint_json"]),
             next_event_cursor=row["next_event_cursor"],
+            acked_event_cursor=row["acked_event_cursor"],
         )
 
     async def create_or_get_session(
@@ -437,7 +527,13 @@ class RuntimeStore:
         expected = {expected_states} if isinstance(expected_states, str) else set(expected_states)
         if not expected or not expected <= SESSION_STATES or new_state not in SESSION_STATES:
             raise ValueError("unknown session state")
-        checkpoint_json = None if checkpoint is _UNSET else _canonical_text(checkpoint)
+        checkpoint_json = (
+            None
+            if checkpoint is _UNSET
+            else canonical_json_bytes(
+                checkpoint, max_bytes=MAX_UNACKED_BYTES
+            ).decode("utf-8")
+        )
         async with self._transaction() as db:
             row = await (
                 await db.execute(
@@ -475,7 +571,10 @@ class RuntimeStore:
             session_id=row["session_id"], cursor=row["cursor"], event_id=row["event_id"],
             event_kind=row["event_kind"], turn_id=row["turn_id"],
             intent_id=row["intent_id"], outcome=row["outcome"],
+            tool_name=row["tool_name"], tool_args=_load(row["tool_args_json"]),
+            tool_args_digest=row["tool_args_digest"],
             payload=_load(row["payload_json"]), dedupe_key=row["dedupe_key"],
+            occurred_at=_stored_datetime(row["created_at"]),
         )
 
     async def append_event(
@@ -487,15 +586,28 @@ class RuntimeStore:
         turn_id: str | None = None,
         intent_id: str | None = None,
         outcome: str | None = None,
+        tool_name: str | None = None,
+        tool_args: Any | None = None,
+        tool_args_digest: str | None = None,
+        encoded_size: int | None = None,
         event_id: str | None = None,
         dedupe_key: str | None = None,
     ) -> StoredEvent:
         _require_text("event_kind", event_kind)
         payload_json = _canonical_text(payload)
+        tool_args_json = None if tool_args is None else _canonical_text(tool_args)
         content = {
             "event_kind": event_kind, "turn_id": turn_id, "intent_id": intent_id,
-            "outcome": outcome, "payload": payload,
+            "outcome": outcome, "tool_name": tool_name, "tool_args": tool_args,
+            "tool_args_digest": tool_args_digest, "payload": payload,
         }
+        event_bytes = (
+            len(canonical_json_bytes(content, max_bytes=MAX_EVENT_BYTES))
+            if encoded_size is None
+            else encoded_size
+        )
+        if type(event_bytes) is not int or not 1 <= event_bytes <= MAX_EVENT_BYTES:
+            raise ValueError("event encoded size is invalid")
         event_digest = _digest(content)
         async with self._transaction() as db:
             if dedupe_key is not None:
@@ -511,21 +623,40 @@ class RuntimeStore:
                     return self._event(existing)
             session = await (
                 await db.execute(
-                    "SELECT next_event_cursor FROM runtime_sessions WHERE session_id = ?",
+                    "SELECT next_event_cursor, acked_event_cursor FROM runtime_sessions "
+                    "WHERE session_id = ?",
                     (session_id,),
                 )
             ).fetchone()
             if session is None:
                 raise RuntimeStoreNotFound("session not found")
+            unacked_events = (
+                session["next_event_cursor"] - 1 - session["acked_event_cursor"]
+            )
+            if unacked_events >= MAX_UNACKED_EVENTS:
+                raise RuntimeStoreBackpressure("unacked event count limit reached")
+            unacked_bytes = (
+                await (
+                    await db.execute(
+                        "SELECT coalesce(sum(event_bytes), 0) "
+                        "FROM runtime_events WHERE session_id = ? AND cursor > ?",
+                        (session_id, session["acked_event_cursor"]),
+                    )
+                ).fetchone()
+            )[0]
+            if int(unacked_bytes) + event_bytes > MAX_UNACKED_BYTES:
+                raise RuntimeStoreBackpressure("unacked event byte limit reached")
             cursor = session["next_event_cursor"]
             stored_event_id = event_id or str(uuid.uuid4())
             await db.execute(
                 "INSERT INTO runtime_events "
                 "(session_id, cursor, event_id, event_kind, turn_id, intent_id, outcome, "
-                "payload_json, event_digest, dedupe_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "tool_name, tool_args_json, tool_args_digest, payload_json, event_digest, "
+                "event_bytes, dedupe_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     session_id, cursor, stored_event_id, event_kind, turn_id, intent_id,
-                    outcome, payload_json, event_digest, dedupe_key,
+                    outcome, tool_name, tool_args_json, tool_args_digest, payload_json,
+                    event_digest, event_bytes, dedupe_key,
                 ),
             )
             await db.execute(
@@ -540,6 +671,34 @@ class RuntimeStore:
                 )
             ).fetchone()
             return self._event(row)
+
+    async def acknowledge_events(self, session_id: str, *, cursor: int) -> StoredSession:
+        if type(cursor) is not int or cursor < 0:
+            raise ValueError("event ACK cursor must be non-negative")
+        async with self._transaction() as db:
+            row = await (
+                await db.execute(
+                    "SELECT * FROM runtime_sessions WHERE session_id = ?", (session_id,)
+                )
+            ).fetchone()
+            if row is None:
+                raise RuntimeStoreNotFound("session not found")
+            latest = row["next_event_cursor"] - 1
+            if cursor > latest:
+                raise RuntimeStoreConflict("event ACK exceeds emitted cursor")
+            if cursor < row["acked_event_cursor"]:
+                raise RuntimeStoreConflict("event ACK cursor regressed")
+            await db.execute(
+                "UPDATE runtime_sessions SET acked_event_cursor = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE session_id = ?",
+                (cursor, session_id),
+            )
+            updated = await (
+                await db.execute(
+                    "SELECT * FROM runtime_sessions WHERE session_id = ?", (session_id,)
+                )
+            ).fetchone()
+            return self._session(updated)
 
     async def list_events(
         self, session_id: str, *, after: int = 0, limit: int = 1000
@@ -572,6 +731,8 @@ class RuntimeStore:
             state=row["state"], result_digest=row["result_digest"],
             result_outcome=row["result_outcome"],
             result_payload=_load(row["result_payload_json"]),
+            result_command_id=row["result_command_id"],
+            result_action_id=row["result_action_id"],
         )
 
     async def record_intent(
@@ -646,6 +807,10 @@ class RuntimeStore:
         result_digest: str,
         outcome: str,
         payload: Any,
+        turn_id: str | None = None,
+        command_id: str | None = None,
+        action_id: str | None = None,
+        stored_payload: Any = _UNSET,
     ) -> StoredIntent:
         if not _DIGEST_RE.fullmatch(result_digest):
             raise ValueError("result_digest must be lowercase sha256")
@@ -653,7 +818,15 @@ class RuntimeStore:
             raise ValueError("unknown result outcome")
         if _digest(payload) != result_digest:
             raise RuntimeStoreConflict("result digest does not match payload")
-        payload_json = _canonical_text(payload)
+        value_to_store = payload if stored_payload is _UNSET else stored_payload
+        payload_json = _canonical_text(value_to_store)
+        for name, value in (
+            ("turn_id", turn_id),
+            ("command_id", command_id),
+            ("action_id", action_id),
+        ):
+            if value is not None:
+                _require_text(name, value)
         async with self._transaction() as db:
             row = await (
                 await db.execute(
@@ -664,19 +837,27 @@ class RuntimeStore:
             if row is None:
                 raise RuntimeStoreNotFound("intent not found")
             existing = self._intent(row)
+            if turn_id is not None and existing.turn_id != turn_id:
+                raise RuntimeStoreConflict("result turn binding mismatch")
             if existing.state != "pending":
                 if (
                     existing.result_digest == result_digest
                     and existing.result_outcome == outcome
-                    and existing.result_payload == payload
+                    and existing.result_payload == value_to_store
+                    and existing.result_command_id == command_id
+                    and existing.result_action_id == action_id
                 ):
                     return existing
                 raise RuntimeStoreConflict("intent already has a different result")
             await db.execute(
                 "UPDATE runtime_intents SET state = 'result_recorded', result_digest = ?, "
-                "result_outcome = ?, result_payload_json = ?, updated_at = CURRENT_TIMESTAMP "
+                "result_outcome = ?, result_payload_json = ?, result_command_id = ?, "
+                "result_action_id = ?, updated_at = CURRENT_TIMESTAMP "
                 "WHERE session_id = ? AND intent_id = ?",
-                (result_digest, outcome, payload_json, session_id, intent_id),
+                (
+                    result_digest, outcome, payload_json, command_id, action_id,
+                    session_id, intent_id,
+                ),
             )
             updated = await (
                 await db.execute(
@@ -804,6 +985,36 @@ class RuntimeStore:
             raise ValueError("epoch must be non-negative")
         if not _DIGEST_RE.fullmatch(binding.request_digest):
             raise ValueError("request_digest must be lowercase sha256")
+
+    async def inspect_command(
+        self, binding: CommandBinding
+    ) -> StoredCommandReceipt | None:
+        """Reject a known cross-binding before any session existence lookup."""
+
+        self._validate_binding(binding)
+        db = await self._connect()
+        try:
+            by_jti = await (
+                await db.execute(
+                    "SELECT * FROM runtime_command_receipts WHERE jti = ?",
+                    (binding.jti,),
+                )
+            ).fetchone()
+            by_command = await (
+                await db.execute(
+                    "SELECT * FROM runtime_command_receipts "
+                    "WHERE audience = ? AND command_id = ?",
+                    (binding.audience, binding.command_id),
+                )
+            ).fetchone()
+            existing_rows = [row for row in (by_jti, by_command) if row is not None]
+            if not existing_rows:
+                return None
+            if any(self._command(row).binding != binding for row in existing_rows):
+                raise CrossBindingReplay("command token binding mismatch")
+            return self._command(existing_rows[0])
+        finally:
+            await db.close()
 
     async def claim_command(self, binding: CommandBinding) -> CommandClaim:
         """Persist the first binding or return its exact durable retry receipt."""

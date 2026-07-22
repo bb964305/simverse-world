@@ -7,7 +7,7 @@ Governor owns all world effects, PRD §Data and API Evolution).
 import uuid
 from datetime import datetime, UTC
 
-from sqlalchemy import String, DateTime, JSON
+from sqlalchemy import String, DateTime, JSON, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -17,6 +17,9 @@ class WorldRevision(Base):
     """status: applied | reverted. change_kind (v1): add_lore | edit_location."""
 
     __tablename__ = "world_revisions"
+    __table_args__ = (
+        UniqueConstraint("proposal_id", name="uq_world_revisions_proposal"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     tenant_id: Mapped[str] = mapped_column(String)

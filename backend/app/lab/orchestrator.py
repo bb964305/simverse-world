@@ -40,25 +40,52 @@ Design resolutions (landed interfaces win over the brief sketch):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import time
 import uuid
+import weakref
 from datetime import datetime, UTC
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.database import async_session
-from app.lab import broker, budgets, compiler, grants, guard, leases, ledger, workers
+from app.lab import (
+    broker,
+    budgets,
+    compiler,
+    grants,
+    guard,
+    leases,
+    ledger,
+    runtime_sessions,
+    supervision,
+    workers,
+)
 from app.lab.protocol import RunEventEnvelope
 from app.lab.runner import _ws_run_approval, _ws_run_step, _ws_task_update
 from app.lab.sandbox import get_adapter
-from app.lab.sandbox.base import RunSpec
+from app.lab.sandbox.base import (
+    ArtifactSpec,
+    RunSpec,
+    RuntimeV2NonRetryableError,
+)
 from app.models.lab_action import LabApproval
 from app.models.lab_artifact import LabArtifact
+from app.models.lab_budget import LabRunBudget
+from app.models.lab_event import LabRunEvent
+from app.models.lab_lease import LabRunLease
 from app.models.lab_run import LabRun, LabRunStep
+from app.models.lab_runtime import (
+    LabRuntimeIntent,
+    LabRuntimeResult,
+    LabRuntimeSession,
+)
 from app.models.lab_task import LabTask
+from app.models.world_change_proposal import WorldChangeProposal
 from app.services import lab_artifact_service, lab_task_service
 
 logger = logging.getLogger(__name__)
@@ -67,8 +94,14 @@ logger = logging.getLogger(__name__)
 # default-deny, per legacy ``_await_decision``); this is just how often we
 # re-read while waiting, releasing the shared connection on each pass.
 _POLL_INTERVAL_S = 0.2
+_V2_IDLE_TIMEOUT_S = leases.HEARTBEAT_INTERVAL_S * 3
 _WORLD_LOCATION_ID = "experiment_building"
 _SUMMARY_FALLBACK = "研究完成"
+_V2_ARTIFACT_FINALIZATION_KEY = "_simverse_runtime_v2_finalization"
+_V2_PROCESS_NAMESPACE = uuid.uuid4()
+_V2_RUN_LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
 
 
 def _now_ms() -> int:
@@ -76,6 +109,14 @@ def _now_ms() -> int:
     A module-level indirection so tests can patch the clock and drive the
     ``wall_clock_ms`` dimension deterministically without real sleeps."""
     return int(time.monotonic() * 1000)
+
+
+def _v2_owner_id(
+    run_id: str, *, process_namespace: uuid.UUID | None = None
+) -> str:
+    """Stable within one process/run, unique across process boots and replicas."""
+    namespace = process_namespace or _V2_PROCESS_NAMESPACE
+    return str(uuid.uuid5(namespace, run_id))
 
 
 class _RunFailed(Exception):
@@ -165,7 +206,7 @@ class _Orchestrator:
         self._worker_reserved = False
         # wall_clock_ms is billed as the growing delta of a monotonic clock; the
         # start stamp is taken when the step loop begins.
-        self._wall_start_ms = 0
+        self._wall_start_ms: int | None = None
         self._wall_spent_ms = 0
 
     # ── lifecycle ─────────────────────────────────────────────────────
@@ -360,6 +401,8 @@ class _Orchestrator:
         """Bill the wall-clock elapsed since the last checkpoint (monotonic
         delta, never negative). The checkpoint advances before the spend so a
         subsequent step bills only the new increment."""
+        if getattr(self, "_wall_start_ms", None) is None:
+            return
         elapsed = _now_ms() - self._wall_start_ms
         delta = elapsed - self._wall_spent_ms
         if delta > 0:
@@ -534,6 +577,67 @@ class _Orchestrator:
 
     # ── terminal paths ────────────────────────────────────────────────
 
+    async def _collect_success_artifacts(self):
+        return await self.adapter.collect_artifacts(self.handle)
+
+    async def _stop_after_success(self) -> None:
+        await self.adapter.stop(self.handle)
+
+    async def _ensure_world_change_proposal(
+        self, *, summary: str
+    ) -> WorldChangeProposal:
+        """Return the run's one exact draft or fail the world deliverable.
+
+        Proposal creation commits independently so a retry must converge on the
+        same row. A missing, duplicate, or divergent draft is not compatible with
+        a successful ``world_change`` run.
+        """
+        proposals = (
+            await self.db.execute(
+                select(WorldChangeProposal)
+                .where(
+                    WorldChangeProposal.origin == "lab_run",
+                    WorldChangeProposal.origin_ref == self.run_id,
+                )
+                .order_by(
+                    WorldChangeProposal.created_at,
+                    WorldChangeProposal.id,
+                )
+            )
+        ).scalars().all()
+        expected_text = guard.redact_text(summary) or ""
+        expected_patch = {
+            "location_id": _WORLD_LOCATION_ID,
+            "text": expected_text,
+        }
+        if proposals:
+            if len(proposals) != 1:
+                raise _RunFailed("world_change_proposal_conflict")
+            proposal = proposals[0]
+            if (
+                proposal.kind != "add_lore"
+                or proposal.author_slug != self.actor
+                or (proposal.patch_json or {}) != expected_patch
+            ):
+                raise _RunFailed("world_change_proposal_conflict")
+            return proposal
+
+        try:
+            return await compiler.compile_draft(
+                self.db,
+                draft={
+                    "kind": "add_lore",
+                    "patch": expected_patch,
+                    "title": f"探索产出：{self.task.title}"[:200],
+                    "rationale": expected_text,
+                },
+                origin_ref=self.run_id,
+                author_slug=self.actor,
+            )
+        except Exception as exc:  # noqa: BLE001 - deliverable creation is mandatory
+            await self.db.rollback()
+            raise _RunFailed("world_change_proposal_failed") from exc
+
     async def _succeed(self) -> None:
         db = self.db
         # Epoch gate: never write a terminal state / settle the task if a takeover
@@ -547,7 +651,7 @@ class _Orchestrator:
             self.fenced = True
             return
 
-        artifacts = await self.adapter.collect_artifacts(self.handle)
+        artifacts = await self._collect_success_artifacts()
         built = []
         for a in artifacts:
             artifact = LabArtifact(
@@ -579,11 +683,19 @@ class _Orchestrator:
         await db.commit()
         for _ in built:
             await budgets.confirm(db, run_id=self.run_id, dimension="artifact_count")
-        await self.adapter.stop(self.handle)
+        await self._stop_after_success()
 
         summary = "; ".join(a.title for a in artifacts) if artifacts else _SUMMARY_FALLBACK
         await self._emit(type="artifact.emitted",
                          payload={"count": len(artifacts), "summary": guard.redact_text(summary) or ""})
+
+        proposal = None
+        if self.task.deliverable_kind == "world_change":
+            proposal = await self._ensure_world_change_proposal(summary=summary)
+            await self._emit(
+                type="proposal.drafted",
+                payload={"proposal_id": proposal.id, "kind": proposal.kind},
+            )
 
         # Advance the task first (CAS-guarded). If it was cancelled/finalized
         # concurrently, mark_review is a no-op and returns False: do NOT emit a
@@ -604,27 +716,6 @@ class _Orchestrator:
         self.run.ended_at = datetime.now(UTC)
         self.run.cost_usd_cents = self.cost_cents
         await db.commit()
-
-        # An exploration task (deliverable_kind=world_change) drafts a pending
-        # proposal through the Compiler — the only sanctioned path into the world
-        # (never the legacy hard-coded add_lore). A compile failure is a warning,
-        # not a run failure (legacy try/except parity).
-        if self.task.deliverable_kind == "world_change":
-            try:
-                proposal = await compiler.compile_draft(
-                    db,
-                    draft={
-                        "kind": "add_lore",
-                        "patch": {"location_id": _WORLD_LOCATION_ID, "text": summary},
-                        "title": f"探索产出：{self.task.title}"[:200],
-                        "rationale": summary,
-                    },
-                    origin_ref=self.run_id, author_slug=self.actor,
-                )
-                await self._emit(type="proposal.drafted",
-                                 payload={"proposal_id": proposal.id, "kind": proposal.kind})
-            except Exception:  # noqa: BLE001 — a bad draft must not fail a completed run
-                logger.warning("proposal draft from run %s failed", self.run_id, exc_info=True)
 
         await self._emit(type="run.completed", payload={"summary": guard.redact_text(summary) or ""})
         await _ws_task_update(self.task)
@@ -691,3 +782,1079 @@ class _Orchestrator:
             )).scalar_one_or_none()
             if step is not None:
                 await _ws_run_step(self.task, self.run, step)
+
+
+async def run_one_v2(run_id: str) -> None:
+    """Resume one protocol-v2 run through the durable Runtime result loop."""
+    lock = _V2_RUN_LOCKS.get(run_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _V2_RUN_LOCKS[run_id] = lock
+    async with lock:
+        async with async_session() as db:
+            run = await db.get(LabRun, run_id)
+            if run is None:
+                logger.warning("lab v2 run %s vanished before execution", run_id)
+                return
+            if run.protocol_version != 2 or run.adapter != "simverse_ref":
+                raise supervision.RuntimeProtocolConflict(
+                    "protocol-v2 handler received an incompatible run"
+                )
+            if run.status not in {"queued", "running", "needs_approval"}:
+                return
+            task = await db.get(LabTask, run.task_id)
+            if task is None:
+                run.status = "failed"
+                run.error = "task missing"
+                run.ended_at = datetime.now(UTC)
+                await db.commit()
+                return
+            await _V2Orchestrator(db, run, task).execute()
+
+
+class _V2Orchestrator(_Orchestrator):
+    """Lease-owned Gateway driver for Runtime protocol-v2."""
+
+    def __init__(self, db, run: LabRun, task: LabTask):
+        super().__init__(db, run, task)
+        self.owner_id = _v2_owner_id(run.id)
+        self.runtime_session_id: str | None = None
+        self.provider_session_id: str | None = None
+        self.runtime_epoch: int | None = None
+        self._completion_bridge = False
+        self._recovery_session_id: str | None = None
+        self._heartbeat_task: asyncio.Task | None = None
+
+    def _run_spec(self) -> RunSpec:
+        return RunSpec(
+            run_id=self.run_id,
+            task_id=self.task_id,
+            researcher_slug=self.actor,
+            brief=(self.task.brief_md or self.task.title or ""),
+            scopes=list(self.run.scopes_json or []),
+            budget_usd=(self.run.budget_usd_cents or 0) / 100.0,
+            deadline=self.task.deadline_at,
+            egress_allowlist=list(
+                getattr(settings, "lab_egress_allowlist", []) or []
+            ),
+            secrets={},
+            deliverable_kind=self.task.deliverable_kind,
+        )
+
+    async def _lock_current_authority(self) -> LabRunLease:
+        lease = await self.db.scalar(
+            select(LabRunLease)
+            .where(LabRunLease.run_id == self.run_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        expires_at = None if lease is None else lease.expires_at
+        if expires_at is not None and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if (
+            lease is None
+            or lease.owner_id != self.owner_id
+            or lease.fencing_epoch != self.epoch
+            or expires_at is None
+            or expires_at <= datetime.now(UTC)
+        ):
+            await self.db.rollback()
+            self.fenced = True
+            raise leases.StaleEpoch(
+                f"protocol-v2 owner lost authority for run {self.run_id}"
+            )
+        return lease
+
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            await asyncio.sleep(leases.HEARTBEAT_INTERVAL_S)
+            try:
+                async with async_session() as heartbeat_db:
+                    await leases.heartbeat(
+                        heartbeat_db,
+                        run_id=self.run_id,
+                        owner_id=self.owner_id,
+                        epoch=self.epoch,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except leases.StaleEpoch:
+                self.fenced = True
+                return
+            except Exception:  # noqa: BLE001 - the next DB authority gate decides
+                logger.warning(
+                    "lab v2 lease heartbeat failed for %s",
+                    self.run_id,
+                    exc_info=True,
+                )
+
+    async def execute(self) -> None:
+        db = self.db
+        try:
+            lease = await leases.acquire_lease(
+                db, run_id=self.run_id, owner_id=self.owner_id
+            )
+            self.epoch = lease.fencing_epoch
+            if self.epoch > 0:
+                await grants.revoke_grants_before_epoch(
+                    db, run_id=self.run_id, epoch=self.epoch
+                )
+            cross_epoch_completed = (
+                await self._quarantine_cross_epoch_runtime_session()
+            )
+            if cross_epoch_completed is not None:
+                self._recovery_session_id = cross_epoch_completed.id
+            await budgets.init_run_budget(
+                db, run_id=self.run_id, tenant_id=self.tenant_id
+            )
+            self._wall_start_ms = _now_ms()
+            self._wall_spent_ms = 0
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+            adapter = get_adapter(self.run.adapter)
+            spec = self._run_spec()
+            runtime_epoch = (
+                cross_epoch_completed.fencing_epoch
+                if cross_epoch_completed is not None
+                else self.epoch
+            )
+            stable_client_id = (
+                cross_epoch_completed.client_run_id
+                if cross_epoch_completed is not None
+                else runtime_sessions.client_run_id(self.run_id, runtime_epoch)
+            )
+            prepare = getattr(adapter, "prepare_protocol_v2", None)
+            if not callable(prepare):
+                raise supervision.HandshakeRejected(
+                    "real adapter has no protocol-v2 preparation hook"
+                )
+            prepare(
+                spec=spec,
+                epoch=runtime_epoch,
+                client_run_id=stable_client_id,
+            )
+            proof = await supervision.validate_runtime_provider(adapter)
+            if cross_epoch_completed is None:
+                runtime_session = await runtime_sessions.create_or_reattach(
+                    db,
+                    run_id=self.run_id,
+                    epoch=self.epoch,
+                    owner_id=self.owner_id,
+                    provider=adapter,
+                    durability_class="session_affine",
+                )
+            else:
+                runtime_session = (
+                    await runtime_sessions.recover_existing_for_new_authority(
+                        db,
+                        run_id=self.run_id,
+                        authority_epoch=self.epoch,
+                        owner_id=self.owner_id,
+                        provider=adapter,
+                        durability_class="session_affine",
+                    )
+                )
+            if (
+                runtime_session.provider_name != proof.manifest.provider_name
+                or not runtime_session.provider_session_id
+            ):
+                raise supervision.RuntimeProtocolConflict(
+                    "Runtime registration diverged from its supervision proof"
+                )
+            self.adapter = adapter
+            self.handle = runtime_session.provider_session_id
+            self.runtime_session_id = runtime_session.id
+            self._recovery_session_id = runtime_session.id
+            self.provider_session_id = runtime_session.provider_session_id
+            self.runtime_epoch = runtime_session.fencing_epoch
+            self._completion_bridge = self.runtime_epoch != self.epoch
+            self._runtime_was_completed = runtime_session.status == "completed"
+
+            self.run = await db.scalar(
+                select(LabRun)
+                .where(LabRun.id == self.run_id)
+                .execution_options(populate_existing=True)
+            )
+            self.task = await db.scalar(
+                select(LabTask)
+                .where(LabTask.id == self.task_id)
+                .execution_options(populate_existing=True)
+            )
+            if self._runtime_was_completed:
+                recoverable_task = self.task.status in {"assigned", "running"} or (
+                    self.task.status in {"review", "completed", "rejected"}
+                    and self.task.accepted_run_id == self.run_id
+                )
+                if not recoverable_task:
+                    await db.commit()
+                    return
+            else:
+                if self.task.status not in {"assigned", "running"}:
+                    await db.commit()
+                    return
+                self.run.status = "running"
+                self.run.started_at = self.run.started_at or datetime.now(UTC)
+                self.run.heartbeat_at = datetime.now(UTC)
+                if self.task.status in {"assigned", "running"}:
+                    self.task.status = "running"
+                    self.task.updated_at = datetime.now(UTC)
+            await db.commit()
+            if not self._runtime_was_completed:
+                await _ws_task_update(self.task)
+
+            if self._runtime_was_completed:
+                self.policy_version = settings.lab_policy_version
+                await self._recover_provider_ack()
+                await self._charge_wall_clock()
+                await self._finalize_success_v2_bounded()
+                return
+
+            await grants.revoke_run_grants(db, self.run_id)
+            self.token, self.claims = await grants.issue_run_grant(
+                db,
+                tenant_id=self.tenant_id,
+                task_id=self.task_id,
+                run_id=self.run_id,
+                agent_id=self.actor,
+                capabilities=list(self.run.scopes_json or []),
+                egress=list(getattr(settings, "lab_egress_allowlist", []) or []),
+                fencing_epoch=self.epoch,
+            )
+            self.policy_version = self.claims.policy_version
+            started = await db.scalar(
+                select(LabRunEvent.event_id).where(
+                    LabRunEvent.run_id == self.run_id,
+                    LabRunEvent.type == "run.started",
+                )
+            )
+            if started is None:
+                await self._emit(
+                    type="run.started",
+                    payload={
+                        "adapter": self.run.adapter,
+                        "scopes": list(self.run.scopes_json or []),
+                        "runtime_session_id": self.runtime_session_id,
+                    },
+                )
+            await self._reserve_worker()
+            await self._drive_runtime_v2_bounded()
+            await self._finalize_success_v2_bounded()
+        except leases.LeaseError:
+            self.fenced = True
+            raise
+        except runtime_sessions.RuntimeSessionInProgress:
+            await self._charge_wall_clock()
+            raise
+        except (
+            _RunFailed,
+            supervision.HandshakeRejected,
+            supervision.RuntimeProtocolConflict,
+            broker.RuntimeResultConflict,
+            RuntimeV2NonRetryableError,
+            runtime_sessions.RuntimeSessionError,
+        ) as exc:
+            reason = exc.reason if isinstance(exc, _RunFailed) else str(exc)
+            if (
+                isinstance(exc, RuntimeV2NonRetryableError)
+                and self._recovery_session_id is not None
+            ):
+                await runtime_sessions.quarantine_recovered_session(
+                    db,
+                    session_id=self._recovery_session_id,
+                    run_id=self.run_id,
+                    authority_epoch=self.epoch,
+                    owner_id=self.owner_id,
+                    reason=reason,
+                )
+            try:
+                await self._charge_wall_clock()
+            except _RunFailed as budget_failure:
+                reason = budget_failure.reason
+            await self._fail(reason)
+        except Exception:
+            try:
+                await self._charge_wall_clock()
+            except _RunFailed as budget_failure:
+                await self._fail(budget_failure.reason)
+                return
+            logger.warning(
+                "lab v2 run %s hit a recoverable delivery failure",
+                self.run_id,
+                exc_info=True,
+            )
+            raise
+        finally:
+            if self._heartbeat_task is not None:
+                self._heartbeat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._heartbeat_task
+            if self._worker_reserved:
+                await budgets.release(
+                    db, run_id=self.run_id, dimension="active_workers"
+                )
+            if not self.fenced:
+                await grants.revoke_run_grants(db, self.run_id)
+
+    async def _quarantine_cross_epoch_runtime_session(
+        self,
+    ) -> LabRuntimeSession | None:
+        existing = await self.db.scalar(
+            select(LabRuntimeSession)
+            .where(LabRuntimeSession.run_id == self.run_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if existing is None:
+            await self.db.commit()
+            return None
+        if existing.fencing_epoch == self.epoch:
+            if existing.authority_epoch != self.epoch:
+                await self.db.rollback()
+                raise supervision.RuntimeProtocolConflict(
+                    "Runtime authority epoch diverged from its initial binding"
+                )
+            await self.db.commit()
+            return None
+        recoverable = existing.status == "ready"
+        if existing.status == "completed":
+            recoverable = await supervision.runtime_final_ready(
+                self.db,
+                session_id=existing.id,
+                require_real_result=True,
+                require_succeeded=True,
+            )
+        if (
+            recoverable
+            and existing.fencing_epoch < self.epoch
+            and existing.authority_epoch <= self.epoch
+        ):
+            await self.db.commit()
+            return existing
+        existing.status = "quarantined"
+        existing.last_error = (
+            "runtime session belongs to a fenced epoch; takeover requires "
+            "explicit reconciliation"
+        )
+        existing.ended_at = datetime.now(UTC)
+        await self.db.commit()
+        raise supervision.RuntimeProtocolConflict(existing.last_error)
+
+    async def _runtime_timeout_seconds(self) -> float:
+        snapshot = await budgets.snapshot(self.db, self.run_id)
+        wall = snapshot.get("wall_clock_ms")
+        if wall:
+            durable_limit_ms = int(wall["limit"] or settings.lab_budget_wall_clock_ms)
+            remaining_ms = (
+                durable_limit_ms
+                - int(wall["used"])
+                - int(wall["reserved"])
+            )
+        else:
+            remaining_ms = int(settings.lab_budget_wall_clock_ms)
+        await self.db.commit()
+        wall_clock_seconds = remaining_ms / 1000.0
+        deadline = self.task.deadline_at
+        if deadline is not None:
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=UTC)
+            deadline_seconds = (deadline.astimezone(UTC) - datetime.now(UTC)).total_seconds()
+            wall_clock_seconds = min(wall_clock_seconds, deadline_seconds)
+        if wall_clock_seconds <= 0:
+            raise _RunFailed("runtime_timeout")
+        return wall_clock_seconds
+
+    async def _drive_runtime_v2_bounded(self) -> None:
+        if getattr(self, "_wall_start_ms", None) is None:
+            self._wall_start_ms = _now_ms()
+            self._wall_spent_ms = 0
+
+        async def drive() -> None:
+            if not getattr(self, "_runtime_was_completed", False):
+                await self.adapter.submit_goal_v2(
+                    provider_session_id=self.provider_session_id
+                )
+            await self._event_loop_v2()
+
+        try:
+            timeout = await self._runtime_timeout_seconds()
+            await asyncio.wait_for(
+                drive(), timeout=timeout
+            )
+        except TimeoutError as exc:
+            raise _RunFailed("runtime_timeout") from exc
+        finally:
+            # A transport/status failure can requeue this run before the event
+            # loop reaches its next accounting checkpoint. Persist the final
+            # interval on every attempt so repeated retryable failures cannot
+            # reset and bypass the durable wall-clock budget.
+            await self._charge_wall_clock()
+
+    async def _finalize_success_v2_bounded(self) -> None:
+        if getattr(self, "_wall_start_ms", None) is None:
+            self._wall_start_ms = _now_ms()
+            self._wall_spent_ms = 0
+        try:
+            timeout = await self._runtime_timeout_seconds()
+            await asyncio.wait_for(self._succeed(), timeout=timeout)
+        except TimeoutError as exc:
+            raise _RunFailed("runtime_timeout") from exc
+        finally:
+            # Finalization includes durable artifact, task, event and proposal
+            # writes. Charge that tail on success and on every retryable failure.
+            await self._charge_wall_clock()
+
+    async def _recover_provider_ack(self) -> None:
+        assert self.runtime_session_id and self.provider_session_id
+        session = await self.db.get(LabRuntimeSession, self.runtime_session_id)
+        committed = session.provider_cursor_committed
+        acked = session.provider_cursor_acked
+        await self.db.commit()
+        if committed <= acked:
+            return
+        await self.adapter.ack_runtime_events(
+            provider_session_id=self.provider_session_id,
+            cursor=committed,
+        )
+        assert self.runtime_epoch is not None
+        await supervision.record_provider_ack(
+            self.db,
+            run_id=self.run_id,
+            session_id=self.provider_session_id,
+            epoch=self.runtime_epoch,
+            owner_id=self.owner_id,
+            acked_through=committed,
+        )
+
+    async def _deliver_pending_results(self) -> None:
+        assert self.runtime_session_id
+        commands = await broker.pending_runtime_result_commands(
+            self.db, session_id=self.runtime_session_id
+        )
+        await self.db.commit()
+        for command in commands:
+            receipt = await self.adapter.send_runtime_result(command)
+            await supervision.record_runtime_result_receipt(
+                self.db,
+                command=command,
+                receipt=receipt,
+                owner_id=self.owner_id,
+            )
+
+    async def _event_loop_v2(self) -> None:
+        assert self.runtime_session_id and self.provider_session_id
+        exhausted = await budgets.is_exhausted(self.db, self.run_id)
+        if exhausted is not None:
+            await self._terminate_budget(exhausted)
+        await self._recover_provider_ack()
+        await self._deliver_pending_results()
+        idle_polls = 0
+        idle_started = time.monotonic()
+        while True:
+            if self.fenced:
+                raise leases.StaleEpoch("protocol-v2 owner lost its lease")
+            after, event_limit, byte_limit = await supervision.runtime_read_window(
+                self.db, session_id=self.runtime_session_id
+            )
+            await self.db.commit()
+            batch = await self.adapter.read_runtime_events(
+                provider_session_id=self.provider_session_id,
+                after=after,
+                limit=event_limit,
+                max_bytes=byte_limit,
+            )
+            if not batch.events:
+                await self._charge_wall_clock()
+                if time.monotonic() - idle_started >= _V2_IDLE_TIMEOUT_S:
+                    raise _RunFailed("runtime_idle_timeout")
+                if batch.done:
+                    session = await self.db.get(
+                        LabRuntimeSession, self.runtime_session_id
+                    )
+                    if session.status == "completed" and await supervision.runtime_final_ready(
+                        self.db,
+                        session_id=self.runtime_session_id,
+                        require_real_result=True,
+                        require_succeeded=True,
+                    ):
+                        await self.db.commit()
+                        return
+                    reason = session.last_error or (
+                        "Runtime ended without a successful, fully-acked result"
+                    )
+                    await self.db.commit()
+                    raise _RunFailed(reason)
+                idle_polls += 1
+                await asyncio.sleep(min(0.05 * idle_polls, 0.5))
+                continue
+            idle_polls = 0
+            idle_started = time.monotonic()
+            for event in batch.events:
+                committed = await supervision.commit_runtime_event(
+                    self.db, event=event, owner_id=self.owner_id
+                )
+                if not committed.duplicate:
+                    await leases.heartbeat(
+                        self.db,
+                        run_id=self.run_id,
+                        owner_id=self.owner_id,
+                        epoch=self.epoch,
+                    )
+                    self.run.heartbeat_at = datetime.now(UTC)
+                    await self._charge_wall_clock()
+                if committed.budget_exhausted_dimension is not None:
+                    await self._terminate_budget(
+                        committed.budget_exhausted_dimension
+                    )
+                if event.event_kind == "tool_intent":
+                    await self._handle_v2_intent(event, committed)
+                if committed.committed_through:
+                    await self.adapter.ack_runtime_events(
+                        provider_session_id=self.provider_session_id,
+                        cursor=committed.committed_through,
+                    )
+                    assert self.runtime_epoch is not None
+                    await supervision.record_provider_ack(
+                        self.db,
+                        run_id=self.run_id,
+                        session_id=self.provider_session_id,
+                        epoch=self.runtime_epoch,
+                        owner_id=self.owner_id,
+                        acked_through=committed.committed_through,
+                    )
+                await self._deliver_pending_results()
+
+    async def _handle_v2_intent(self, event, committed) -> None:
+        if committed.intent_row_id is None:
+            raise supervision.RuntimeProtocolConflict(
+                "tool intent commit has no durable intent row"
+            )
+        args = dict(event.tool_args or {})
+        idem = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"simverse:v2-intent:{self.runtime_session_id}:{event.intent_id}",
+            )
+        )
+        action = None
+        try:
+            action = await broker.request_action(
+                self.db,
+                claims=self.claims,
+                token=self.token,
+                tool_name=event.tool_name,
+                args=args,
+                idempotency_key=idem,
+                expected_epoch=self.epoch,
+            )
+        except broker.ActionDenied as exc:
+            action = exc.action
+        except budgets.BudgetExhausted as exc:
+            await self._terminate_budget(exc.dimension)
+        if action is None:
+            raise supervision.RuntimeProtocolConflict(
+                "Broker denial did not persist an action"
+            )
+        if action.fencing_epoch != self.epoch:
+            action = await broker.recover_action_authority(
+                self.db,
+                action_id=action.id,
+                claims=self.claims,
+                token=self.token,
+                tool_name=event.tool_name,
+                args=args,
+                expected_epoch=self.epoch,
+            )
+
+        is_egress = broker.is_egress_action(event.tool_name, args)
+        if action.status == "waiting_approval":
+            approved = await self._await_approval(
+                action,
+                guard.redact_text(str((event.payload or {}).get("summary", "")))
+                or "",
+            )
+            await self.db.refresh(action)
+            if not approved and action.status == "waiting_approval":
+                action = await broker.expire_pending_approval(
+                    self.db,
+                    action_id=action.id,
+                    expected_epoch=self.epoch,
+                )
+            if action.status == "denied":
+                await self._release_reservations(is_egress)
+
+        if action.status == "approved":
+            try:
+                action = await broker.execute_action(
+                    self.db,
+                    action_id=action.id,
+                    claims=self.claims,
+                    executor=self._select_executor(event.tool_name),
+                    args=args,
+                    expected_epoch=self.epoch,
+                )
+            except broker.ActionDenied as exc:
+                action = exc.action
+                await self._release_reservations(is_egress)
+            except budgets.BudgetExhausted as exc:
+                await self._terminate_budget(exc.dimension)
+            except (broker.ApprovalInvalid, broker.ApprovalRequired) as exc:
+                raise supervision.RuntimeProtocolConflict(str(exc)) from exc
+        await broker.persist_runtime_result(
+            self.db,
+            session_id=self.runtime_session_id,
+            intent_row_id=committed.intent_row_id,
+            action=action,
+            owner_id=self.owner_id,
+        )
+
+    async def _collect_success_artifacts(self) -> list[ArtifactSpec]:
+        assert self.runtime_session_id and self.provider_session_id
+        if not await supervision.runtime_final_ready(
+            self.db,
+            session_id=self.runtime_session_id,
+            require_real_result=True,
+            require_succeeded=True,
+        ):
+            raise supervision.RuntimeProtocolConflict(
+                "Runtime artifacts are blocked by pending or unsuccessful results"
+            )
+        rows = (
+            await self.db.execute(
+                select(LabRuntimeResult)
+                .where(LabRuntimeResult.session_id == self.runtime_session_id)
+                .order_by(LabRuntimeResult.created_at, LabRuntimeResult.id)
+            )
+        ).scalars().all()
+        await self.db.commit()
+        artifacts = await self.adapter.collect_artifacts_v2(
+            provider_session_id=self.provider_session_id
+        )
+        if not artifacts:
+            raise supervision.RuntimeProtocolConflict(
+                "Runtime completed without a deliverable artifact"
+            )
+        provenance = [
+            {
+                "command_id": row.command_id,
+                "intent_id": row.intent_id,
+                "action_id": row.action_id,
+                "outcome": row.outcome,
+                "result_digest": row.result_digest,
+            }
+            for row in rows
+        ]
+        latest = rows[-1]
+        sentinel = latest.payload_json.get("sentinel")
+        for artifact in artifacts:
+            if (
+                isinstance(sentinel, str)
+                and sentinel
+                and sentinel not in (artifact.text_md or "")
+            ):
+                raise supervision.RuntimeProtocolConflict(
+                    "Runtime artifact omitted the Broker sentinel"
+                )
+            meta = dict(artifact.meta or {})
+            meta.update(
+                broker_result_digest=latest.result_digest,
+                broker_result_provenance={
+                    "command_id": latest.command_id,
+                    "intent_id": latest.intent_id,
+                    "action_id": latest.action_id,
+                },
+                broker_results=provenance,
+            )
+            artifact.meta = meta
+        return artifacts
+
+    def _v2_artifact_id(self, provider_artifact_id: str) -> str:
+        return str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                "simverse:v2-artifact:"
+                f"{self.runtime_session_id}:{provider_artifact_id}",
+            )
+        )
+
+    async def _load_persisted_v2_artifacts(self) -> list[LabArtifact] | None:
+        """Load an atomically completed artifact batch without Runtime I/O."""
+        rows = (
+            await self.db.execute(
+                select(LabArtifact).where(LabArtifact.run_id == self.run_id)
+            )
+        ).scalars().all()
+        await self.db.commit()
+        marked = [
+            row
+            for row in rows
+            if isinstance(
+                (row.meta_json or {}).get(_V2_ARTIFACT_FINALIZATION_KEY),
+                dict,
+            )
+            and (row.meta_json or {})[_V2_ARTIFACT_FINALIZATION_KEY].get(
+                "runtime_session_id"
+            )
+            == self.runtime_session_id
+        ]
+        if not marked:
+            return None
+        count = len(marked)
+        by_index: dict[int, LabArtifact] = {}
+        for row in marked:
+            marker = (row.meta_json or {})[_V2_ARTIFACT_FINALIZATION_KEY]
+            provider_artifact_id = marker.get("provider_artifact_id")
+            index = marker.get("artifact_index")
+            if (
+                type(marker.get("artifact_count")) is not int
+                or marker["artifact_count"] != count
+                or type(index) is not int
+                or not 0 <= index < count
+                or not isinstance(provider_artifact_id, str)
+                or not provider_artifact_id
+                or row.id != self._v2_artifact_id(provider_artifact_id)
+                or row.task_id != self.task_id
+                or row.tenant_id != self.tenant_id
+                or index in by_index
+            ):
+                raise supervision.RuntimeProtocolConflict(
+                    "persisted Runtime artifact finalization marker is invalid"
+                )
+            by_index[index] = row
+        if set(by_index) != set(range(count)):
+            raise supervision.RuntimeProtocolConflict(
+                "persisted Runtime artifact batch is incomplete"
+            )
+        return [by_index[index] for index in range(count)]
+
+    @staticmethod
+    def _v2_artifact_matches(actual: LabArtifact, expected: LabArtifact) -> bool:
+        return all(
+            getattr(actual, field) == getattr(expected, field)
+            for field in (
+                "id",
+                "run_id",
+                "task_id",
+                "kind",
+                "title",
+                "uri",
+                "text_md",
+                "meta_json",
+                "tenant_id",
+                "sha256",
+                "byte_size",
+                "producer_action_id",
+                "provenance",
+            )
+        )
+
+    async def _persist_v2_artifacts(
+        self, artifacts: list[ArtifactSpec]
+    ) -> list[LabArtifact]:
+        artifacts = sorted(
+            artifacts,
+            key=lambda artifact: artifact.provider_artifact_id or "",
+        )
+        count = len(artifacts)
+        provider_ids = [artifact.provider_artifact_id for artifact in artifacts]
+        if any(
+            not isinstance(provider_id, str) or not provider_id
+            for provider_id in provider_ids
+        ) or len(set(provider_ids)) != count:
+            raise supervision.RuntimeProtocolConflict(
+                "Runtime artifact ids are missing or duplicated"
+            )
+        built: list[LabArtifact] = []
+        for index, artifact_spec in enumerate(artifacts):
+            provider_artifact_id = artifact_spec.provider_artifact_id
+            assert provider_artifact_id is not None
+            meta = dict(artifact_spec.meta or {})
+            meta[_V2_ARTIFACT_FINALIZATION_KEY] = {
+                "runtime_session_id": self.runtime_session_id,
+                "artifact_count": count,
+                "artifact_index": index,
+                "provider_artifact_id": provider_artifact_id,
+            }
+            artifact = LabArtifact(
+                id=self._v2_artifact_id(provider_artifact_id),
+                run_id=self.run_id,
+                task_id=self.task_id,
+                kind=artifact_spec.kind,
+                title=artifact_spec.title,
+                uri=artifact_spec.uri,
+                text_md=artifact_spec.text_md,
+                meta_json=meta,
+            )
+            await lab_artifact_service.finalize_artifact(
+                self.db,
+                artifact=artifact,
+                tenant_id=self.tenant_id,
+                producer_action_id=None,
+                scanned_clean=False,
+            )
+            built.append(artifact)
+
+        existing = await self._load_persisted_v2_artifacts()
+        if existing is not None:
+            if len(existing) != count or any(
+                not self._v2_artifact_matches(actual, expected)
+                for actual, expected in zip(existing, built, strict=True)
+            ):
+                raise supervision.RuntimeProtocolConflict(
+                    "Runtime artifact replay changed the committed batch"
+                )
+            return existing
+
+        await self._lock_current_authority()
+        budget = await self.db.scalar(
+            select(LabRunBudget)
+            .where(LabRunBudget.run_id == self.run_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        byte_count = sum(artifact.byte_size or 0 for artifact in built)
+        if budget is not None:
+            charges = (
+                ("artifact_count", count),
+                ("artifact_bytes", byte_count),
+            )
+            for dimension, amount in charges:
+                limit = getattr(budget, f"limit_{dimension}")
+                used = getattr(budget, f"used_{dimension}")
+                reserved = getattr(budget, f"reserved_{dimension}")
+                if limit and used + reserved + amount > limit:
+                    budget.exhausted_dimension = dimension
+                    await self.db.commit()
+                    await self._terminate_budget(dimension)
+            budget.used_artifact_count += count
+            budget.used_artifact_bytes += byte_count
+        self.db.add_all(built)
+        try:
+            await self.db.commit()
+        except IntegrityError:
+            await self.db.rollback()
+            existing = await self._load_persisted_v2_artifacts()
+            if (
+                existing is None
+                or len(existing) != count
+                or any(
+                    not self._v2_artifact_matches(actual, expected)
+                    for actual, expected in zip(existing, built, strict=True)
+                )
+            ):
+                raise supervision.RuntimeProtocolConflict(
+                    "Runtime artifact finalization raced with divergent data"
+                ) from None
+            return existing
+        return built
+
+    def _v2_finalization_event_id(self, type: str) -> str:
+        return str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"simverse:v2-finalization:{self.runtime_session_id}:{type}",
+            )
+        )
+
+    async def _append_v2_finalization_event_locked(
+        self, *, type: str, payload: dict
+    ) -> RunEventEnvelope | None:
+        """Stage one exact finalization event in the caller's lease transaction."""
+        existing = (
+            await self.db.execute(
+                select(LabRunEvent).where(
+                    LabRunEvent.run_id == self.run_id,
+                    LabRunEvent.type == type,
+                )
+            )
+        ).scalars().all()
+        expected_payload = guard.redact_payload(payload or {})
+        event_id = self._v2_finalization_event_id(type)
+        if existing:
+            if len(existing) != 1 or any(
+                event.event_id != event_id
+                or event.task_id != self.task_id
+                or event.tenant_id != self.tenant_id
+                or event.provider_event_id is not None
+                or event.payload_json != expected_payload
+                for event in existing
+            ):
+                raise supervision.RuntimeProtocolConflict(
+                    f"Gateway finalization event {type} replay diverged"
+                )
+            return None
+
+        envelope = RunEventEnvelope(
+            event_id=event_id,
+            tenant_id=self.tenant_id,
+            run_id=self.run_id,
+            task_id=self.task_id,
+            seq=await ledger.next_seq(self.db, self.run_id),
+            type=type,
+            actor=self.actor,
+            fencing_epoch=self.epoch,
+            policy_version=self.policy_version,
+            occurred_at=datetime.now(UTC),
+            payload=payload or {},
+        )
+        appended = await ledger.append_event(
+            self.db,
+            envelope=envelope,
+            expected_epoch=self.epoch,
+            outbox_topic="lab_run_event",
+            commit=False,
+        )
+        if appended is None:
+            raise supervision.RuntimeProtocolConflict(
+                f"Gateway finalization event {type} lost its exact append"
+            )
+        return envelope
+
+    async def _publish_v2_step(self, envelope: RunEventEnvelope | None) -> None:
+        if envelope is None or ledger.project_step(envelope) is None:
+            return
+        step = (
+            await self.db.execute(
+                select(LabRunStep)
+                .where(LabRunStep.run_id == self.run_id)
+                .order_by(LabRunStep.seq.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if step is not None:
+            await _ws_run_step(self.task, self.run, step)
+
+    async def _emit_v2_finalization_once(
+        self, *, type: str, payload: dict
+    ) -> None:
+        envelope = None
+        try:
+            await self._lock_current_authority()
+            envelope = await self._append_v2_finalization_event_locked(
+                type=type, payload=payload
+            )
+            await self.db.commit()
+        except BaseException:
+            await self.db.rollback()
+            raise
+        await self._publish_v2_step(envelope)
+
+    async def _commit_v2_success(self, *, summary: str) -> bool:
+        """Atomically bind task review, run success and run.completed."""
+        envelope = None
+        try:
+            await self._lock_current_authority()
+            run = await self.db.scalar(
+                select(LabRun)
+                .where(LabRun.id == self.run_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            task = await self.db.scalar(
+                select(LabTask)
+                .where(LabTask.id == self.task_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if run is None or task is None or run.task_id != task.id:
+                raise supervision.RuntimeProtocolConflict(
+                    "Runtime finalization task/run binding vanished"
+                )
+
+            reviewed = False
+            if task.status in {"assigned", "running"}:
+                reviewed = await lab_task_service.mark_review(
+                    self.db,
+                    task,
+                    run,
+                    result_summary=summary,
+                    commit=False,
+                )
+            elif task.status in {"review", "completed", "rejected"}:
+                if (
+                    task.accepted_run_id != self.run_id
+                    or task.result_summary_md != summary
+                ):
+                    raise supervision.RuntimeProtocolConflict(
+                        "completed Runtime artifact does not match task review truth"
+                    )
+                reviewed = True
+            if not reviewed:
+                await self.db.rollback()
+                logger.info(
+                    "run %s finished but task %s no longer reviewable; "
+                    "skipping completion",
+                    self.run_id,
+                    self.task_id,
+                )
+                return False
+            if run.status not in {
+                "queued",
+                "running",
+                "needs_approval",
+                "succeeded",
+            }:
+                raise supervision.RuntimeProtocolConflict(
+                    f"Runtime finalization conflicts with run state {run.status}"
+                )
+
+            envelope = await self._append_v2_finalization_event_locked(
+                type="run.completed",
+                payload={"summary": guard.redact_text(summary) or ""},
+            )
+            run.status = "succeeded"
+            run.ended_at = run.ended_at or datetime.now(UTC)
+            run.cost_usd_cents = self.cost_cents
+            await self.db.commit()
+        except BaseException:
+            await self.db.rollback()
+            raise
+
+        self.run = run
+        self.task = task
+        await self._publish_v2_step(envelope)
+        return True
+
+    async def _succeed(self) -> None:
+        """Finalize protocol-v2 success idempotently across process retries."""
+        try:
+            await self._lock_current_authority()
+            await self.db.commit()
+        except leases.StaleEpoch:
+            self.fenced = True
+            return
+
+        persisted = await self._load_persisted_v2_artifacts()
+        if persisted is None:
+            artifacts = await self._collect_success_artifacts()
+            await self._charge_wall_clock()
+            persisted = await self._persist_v2_artifacts(artifacts)
+        await self._stop_after_success()
+
+        summary = (
+            "; ".join(artifact.title for artifact in persisted)
+            or _SUMMARY_FALLBACK
+        )
+        await self._emit_v2_finalization_once(
+            type="artifact.emitted",
+            payload={
+                "count": len(persisted),
+                "summary": guard.redact_text(summary) or "",
+            },
+        )
+
+        if self.task.deliverable_kind == "world_change":
+            await self._lock_current_authority()
+            proposal = await self._ensure_world_change_proposal(summary=summary)
+            await self._emit_v2_finalization_once(
+                type="proposal.drafted",
+                payload={"proposal_id": proposal.id, "kind": proposal.kind},
+            )
+
+        await self._charge_wall_clock()
+        if await self._commit_v2_success(summary=summary):
+            await _ws_task_update(self.task)
+
+    async def _stop_after_success(self) -> None:
+        # A successful Runtime session is already terminal. Durable control is
+        # owned by Phase 4; P3 must not send an unauthenticated legacy stop.
+        return None

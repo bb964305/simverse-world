@@ -125,8 +125,12 @@ async def run_nightly_jobs() -> None:
 
 
 async def sweep_orphan_lab_runs() -> int:
-    """Reap runs whose heartbeat went stale (runner crashed): mark the run
-    failed and refund the task's escrow. Returns the number reaped."""
+    """Reap stale legacy runs and refund their task escrow.
+
+    Protocol-v2 recovery is lease/session/claim driven. A v2 Runtime may have
+    committed its final result while the Gateway process died before terminal
+    projection, so heartbeat age alone must never fail or refund it.
+    """
     from sqlalchemy import select
     from app.models.lab_run import LabRun
     from app.models.lab_task import LabTask
@@ -138,6 +142,7 @@ async def sweep_orphan_lab_runs() -> int:
     async with async_session() as db:
         stale = (await db.execute(
             select(LabRun).where(
+                LabRun.protocol_version == 1,
                 LabRun.status.in_(["queued", "running", "needs_approval"]),
                 LabRun.heartbeat_at.isnot(None),
                 LabRun.heartbeat_at <= cutoff,

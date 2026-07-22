@@ -47,6 +47,23 @@ EXPECTED_RUN_ALL_STEP_IDS = [
     "run-all:capacity",
 ]
 
+EXPECTED_AC05_UNIT_TEST_PATHS = (
+    "tests/test_lab_protocol_v2_regressions.py",
+    "tests/test_lab_protocol_v2_consumer_gate.py",
+)
+
+EXPECTED_AC07_UNIT_TEST_PATHS = (
+    "tests/test_lab_protocol_v2_regressions.py",
+    "tests/test_lab_runtime_contract.py",
+    "tests/test_lab_runtime_ref.py",
+    "tests/test_lab_runtime_ref_server.py",
+    "tests/test_lab_runtime_v2_http_auth.py",
+    "tests/test_lab_runtime_v2_loop.py",
+    "tests/test_lab_runtime_v2_store_auth.py",
+    "tests/test_lab_runtime_v2_supervision_contract.py",
+    "tests/test_lab_gateway_v2_supervision.py",
+)
+
 
 def test_manifest_is_the_unique_ac01_to_ac21_execution_source():
     result = validate_manifest()
@@ -58,6 +75,34 @@ def test_manifest_is_the_unique_ac01_to_ac21_execution_source():
     assert PREPUSH_STEP.step_id not in result["step_ids"]
     assert all(command.cwd in {"backend", "frontend"} for step in RUN_ALL_STEPS for command in step.commands)
     assert all(isinstance(command.argv, tuple) for step in RUN_ALL_STEPS for command in step.commands)
+
+
+def test_ac05_manifest_covers_v2_admission_and_consumer_canary_gates():
+    step = next(step for step in RUN_ALL_STEPS if step.step_id == "run-all:ac05-protocol-migration")
+
+    unit_command, _postgres_command = step.commands
+    assert tuple(arg for arg in unit_command.argv if arg.startswith("tests/")) == EXPECTED_AC05_UNIT_TEST_PATHS
+
+
+def test_ac07_manifest_covers_the_complete_deterministic_p3_result_loop():
+    step = next(step for step in RUN_ALL_STEPS if step.step_id == "run-all:ac07-runtime-result-loop")
+
+    assert step.acs == ("AC07", "AC08", "AC09")
+    assert step.required_env == (
+        "LAB_POSTGRES_REQUIRED",
+        "LAB_TEST_DATABASE_URL",
+    )
+    assert tuple(command.cwd for command in step.commands) == ("backend", "backend")
+
+    unit_command, postgres_command = step.commands
+    assert tuple(arg for arg in unit_command.argv if arg.startswith("tests/")) == EXPECTED_AC07_UNIT_TEST_PATHS
+    assert unit_command.argv[-3:] == ("-k", "not real_llm", "-q")
+    assert postgres_command.argv[-4:] == (
+        "-m",
+        "lab_postgres",
+        "tests/integration/test_lab_supervision_v2_postgres.py",
+        "-q",
+    )
 
 
 def test_every_release_run_requires_disposable_and_image_identity_inputs():

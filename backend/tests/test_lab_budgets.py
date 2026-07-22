@@ -6,6 +6,7 @@ streamed usage (model tokens) with no prior reservation. Exhaustion is
 terminal for the run: the Broker revokes every grant and leaves a denied
 audit row.
 """
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -13,7 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.lab import broker, budgets, grants
-from app.models.lab_action import LabToolAction
+from app.models.lab_action import LabApproval, LabToolAction
 from app.models.lab_budget import LabRunBudget
 
 
@@ -244,3 +245,425 @@ async def test_uncertain_outcome_does_not_release_reservation(db_session):
     snap = await budgets.snapshot(db_session, "run-h")
     assert snap["tool_calls"]["reserved"] == 1
     assert snap["tool_calls"]["used"] == 0
+
+
+@pytest.mark.anyio
+async def test_action_terminal_state_rolls_back_with_budget_settlement_failure(
+    db_session, monkeypatch
+):
+    token, claims = await grants.issue_run_grant(
+        db_session,
+        tenant_id="owner-1",
+        task_id="task-atomic-settlement",
+        run_id="run-atomic-settlement",
+        agent_id="agent-1",
+        capabilities=["browse"],
+        egress=["*.example.org"],
+    )
+    await budgets.init_run_budget(
+        db_session,
+        run_id="run-atomic-settlement",
+        tenant_id="owner-1",
+        limits={
+            "tool_calls": 5,
+            "egress_requests": 5,
+            "egress_bytes": 10_000,
+        },
+    )
+    args = {"url": "https://docs.example.org/result"}
+    action = await broker.request_action(
+        db_session,
+        claims=claims,
+        token=token,
+        tool_name="browser.navigate",
+        args=args,
+    )
+    action_id = action.id
+    effects = 0
+
+    async def executor(tool_name, received_args):
+        nonlocal effects
+        effects += 1
+        return {"body": "broker result"}
+
+    original_settlement = budgets.stage_action_settlement
+
+    async def fail_after_staging(*args, **kwargs):
+        await original_settlement(*args, **kwargs)
+        raise RuntimeError("injected settlement transaction failure")
+
+    monkeypatch.setattr(budgets, "stage_action_settlement", fail_after_staging)
+    with pytest.raises(RuntimeError, match="settlement transaction failure"):
+        await broker.execute_action(
+            db_session,
+            action_id=action_id,
+            claims=claims,
+            executor=executor,
+            args=args,
+        )
+
+    db_session.expire_all()
+    stored = await db_session.get(LabToolAction, action_id)
+    budget = await db_session.get(LabRunBudget, "run-atomic-settlement")
+    assert stored.status == "executing"
+    assert stored.result_json is None
+    assert budget.used_tool_calls == 0
+    assert budget.reserved_tool_calls == 1
+    assert budget.used_egress_requests == 0
+    assert budget.reserved_egress_requests == 1
+    assert budget.used_egress_bytes == 0
+
+    with pytest.raises(broker.ApprovalInvalid, match="already_executing"):
+        await broker.execute_action(
+            db_session,
+            action_id=action_id,
+            claims=claims,
+            executor=executor,
+            args=args,
+        )
+    assert effects == 1
+
+
+@pytest.mark.anyio
+async def test_broker_action_reservation_is_atomic_on_partial_exhaustion(db_session):
+    token, claims = await grants.issue_run_grant(
+        db_session,
+        tenant_id="owner-1",
+        task_id="task-partial-reservation",
+        run_id="run-partial-reservation",
+        agent_id="agent-1",
+        capabilities=["browse"],
+        egress=["*.example.org"],
+    )
+    await budgets.init_run_budget(
+        db_session,
+        run_id="run-partial-reservation",
+        tenant_id="owner-1",
+        limits={"tool_calls": 5, "egress_requests": 1},
+    )
+    await budgets.reserve(
+        db_session,
+        run_id="run-partial-reservation",
+        dimension="egress_requests",
+    )
+
+    with pytest.raises(budgets.BudgetExhausted) as exc_info:
+        await broker.request_action(
+            db_session,
+            claims=claims,
+            token=token,
+            tool_name="browser.navigate",
+            args={"url": "https://docs.example.org/blocked"},
+        )
+
+    assert exc_info.value.dimension == "egress_requests"
+    budget = await db_session.get(LabRunBudget, "run-partial-reservation")
+    assert budget.reserved_tool_calls == 0
+    assert budget.reserved_egress_requests == 1
+
+
+@pytest.mark.anyio
+async def test_approval_denial_settles_reservations_in_decision_transaction(db_session):
+    token, claims = await grants.issue_run_grant(
+        db_session,
+        tenant_id="owner-1",
+        task_id="task-approval-denial",
+        run_id="run-approval-denial",
+        agent_id="agent-1",
+        capabilities=["http"],
+        egress=["*.example.org"],
+    )
+    await budgets.init_run_budget(
+        db_session,
+        run_id="run-approval-denial",
+        tenant_id="owner-1",
+    )
+    action = await broker.request_action(
+        db_session,
+        claims=claims,
+        token=token,
+        tool_name="http.request",
+        args={"url": "https://api.example.org/data"},
+    )
+    approval = await db_session.scalar(
+        select(LabApproval).where(LabApproval.action_id == action.id)
+    )
+    action_id = action.id
+
+    await broker.decide_approval(
+        db_session,
+        approval_id=approval.id,
+        decider_user_id="owner-1",
+        approve=False,
+        task_owner_id="owner-1",
+    )
+
+    db_session.expire_all()
+    stored = await db_session.get(LabToolAction, action_id)
+    budget = await db_session.get(LabRunBudget, "run-approval-denial")
+    assert stored.status == "denied"
+    assert stored.result_json == {"reason": "approval_denied"}
+    assert budget.reserved_tool_calls == 0
+    assert budget.reserved_egress_requests == 0
+
+
+@pytest.mark.anyio
+async def test_approval_timeout_settles_reservations_atomically(db_session):
+    token, claims = await grants.issue_run_grant(
+        db_session,
+        tenant_id="owner-1",
+        task_id="task-approval-timeout",
+        run_id="run-approval-timeout",
+        agent_id="agent-1",
+        capabilities=["http"],
+        egress=["*.example.org"],
+    )
+    await budgets.init_run_budget(
+        db_session,
+        run_id="run-approval-timeout",
+        tenant_id="owner-1",
+    )
+    action = await broker.request_action(
+        db_session,
+        claims=claims,
+        token=token,
+        tool_name="http.request",
+        args={"url": "https://api.example.org/data"},
+    )
+    approval = await db_session.scalar(
+        select(LabApproval).where(LabApproval.action_id == action.id)
+    )
+    action_id = action.id
+    approval_id = approval.id
+    approval.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    await db_session.commit()
+
+    with pytest.raises(broker.ApprovalInvalid, match="expired"):
+        await broker.decide_approval(
+            db_session,
+            approval_id=approval.id,
+            decider_user_id="owner-1",
+            approve=True,
+            task_owner_id="owner-1",
+        )
+
+    db_session.expire_all()
+    stored = await db_session.get(LabToolAction, action_id)
+    stored_approval = await db_session.get(LabApproval, approval_id)
+    budget = await db_session.get(LabRunBudget, "run-approval-timeout")
+    assert stored.status == "denied"
+    assert stored_approval.decision == "expired"
+    assert budget.reserved_tool_calls == 0
+    assert budget.reserved_egress_requests == 0
+
+
+@pytest.mark.anyio
+async def test_execute_time_denial_settles_reservations_with_action(db_session):
+    token, claims = await grants.issue_run_grant(
+        db_session,
+        tenant_id="owner-1",
+        task_id="task-execute-denial",
+        run_id="run-execute-denial",
+        agent_id="agent-1",
+        capabilities=["browse"],
+        egress=["*.example.org"],
+    )
+    await budgets.init_run_budget(
+        db_session,
+        run_id="run-execute-denial",
+        tenant_id="owner-1",
+    )
+    args = {"url": "https://docs.example.org/revoked"}
+    action = await broker.request_action(
+        db_session,
+        claims=claims,
+        token=token,
+        tool_name="browser.navigate",
+        args=args,
+    )
+    action_id = action.id
+    await grants.revoke_run_grants(db_session, claims.run_id)
+
+    with pytest.raises(broker.ActionDenied, match="grant_inactive"):
+        await broker.execute_action(
+            db_session,
+            action_id=action.id,
+            claims=claims,
+            executor=AsyncMock(),
+            args=args,
+        )
+
+    db_session.expire_all()
+    stored = await db_session.get(LabToolAction, action_id)
+    budget = await db_session.get(LabRunBudget, "run-execute-denial")
+    assert stored.status == "denied"
+    assert budget.reserved_tool_calls == 0
+    assert budget.reserved_egress_requests == 0
+
+
+@pytest.mark.anyio
+async def test_approved_but_expired_action_settles_reservations(db_session):
+    token, claims = await grants.issue_run_grant(
+        db_session,
+        tenant_id="owner-1",
+        task_id="task-approved-expired",
+        run_id="run-approved-expired",
+        agent_id="agent-1",
+        capabilities=["http"],
+        egress=["*.example.org"],
+    )
+    await budgets.init_run_budget(
+        db_session,
+        run_id="run-approved-expired",
+        tenant_id="owner-1",
+    )
+    args = {"url": "https://api.example.org/expired"}
+    action = await broker.request_action(
+        db_session,
+        claims=claims,
+        token=token,
+        tool_name="http.request",
+        args=args,
+    )
+    approval = await db_session.scalar(
+        select(LabApproval).where(LabApproval.action_id == action.id)
+    )
+    action_id = action.id
+    approval_id = approval.id
+    await broker.decide_approval(
+        db_session,
+        approval_id=approval.id,
+        decider_user_id="owner-1",
+        approve=True,
+        task_owner_id="owner-1",
+    )
+    approval.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    await db_session.commit()
+
+    with pytest.raises(broker.ApprovalInvalid, match="expired"):
+        await broker.execute_action(
+            db_session,
+            action_id=action.id,
+            claims=claims,
+            executor=AsyncMock(),
+            args=args,
+        )
+
+    db_session.expire_all()
+    stored = await db_session.get(LabToolAction, action_id)
+    stored_approval = await db_session.get(LabApproval, approval_id)
+    budget = await db_session.get(LabRunBudget, "run-approved-expired")
+    assert stored.status == "denied"
+    assert stored_approval.decision == "expired"
+    assert budget.reserved_tool_calls == 0
+    assert budget.reserved_egress_requests == 0
+
+
+@pytest.mark.anyio
+async def test_approval_denial_rolls_back_with_settlement_failure(
+    db_session, monkeypatch
+):
+    token, claims = await grants.issue_run_grant(
+        db_session,
+        tenant_id="owner-1",
+        task_id="task-denial-rollback",
+        run_id="run-denial-rollback",
+        agent_id="agent-1",
+        capabilities=["http"],
+        egress=["*.example.org"],
+    )
+    await budgets.init_run_budget(
+        db_session,
+        run_id="run-denial-rollback",
+        tenant_id="owner-1",
+    )
+    action = await broker.request_action(
+        db_session,
+        claims=claims,
+        token=token,
+        tool_name="http.request",
+        args={"url": "https://api.example.org/rollback"},
+    )
+    approval = await db_session.scalar(
+        select(LabApproval).where(LabApproval.action_id == action.id)
+    )
+    action_id = action.id
+    approval_id = approval.id
+    original_settlement = budgets.stage_action_settlement
+
+    async def fail_after_staging(*args, **kwargs):
+        await original_settlement(*args, **kwargs)
+        raise RuntimeError("injected approval settlement failure")
+
+    monkeypatch.setattr(budgets, "stage_action_settlement", fail_after_staging)
+    with pytest.raises(RuntimeError, match="approval settlement failure"):
+        await broker.decide_approval(
+            db_session,
+            approval_id=approval_id,
+            decider_user_id="owner-1",
+            approve=False,
+            task_owner_id="owner-1",
+        )
+
+    stored = await db_session.get(LabToolAction, action_id)
+    stored_approval = await db_session.get(LabApproval, approval_id)
+    budget = await db_session.get(LabRunBudget, "run-denial-rollback")
+    assert stored.status == "waiting_approval"
+    assert stored.result_json is None
+    assert stored_approval.decision == "pending"
+    assert budget.reserved_tool_calls == 1
+    assert budget.reserved_egress_requests == 1
+
+
+@pytest.mark.anyio
+async def test_execute_denial_rolls_back_with_settlement_failure(
+    db_session, monkeypatch
+):
+    token, claims = await grants.issue_run_grant(
+        db_session,
+        tenant_id="owner-1",
+        task_id="task-execute-denial-rollback",
+        run_id="run-execute-denial-rollback",
+        agent_id="agent-1",
+        capabilities=["browse"],
+        egress=["*.example.org"],
+    )
+    await budgets.init_run_budget(
+        db_session,
+        run_id="run-execute-denial-rollback",
+        tenant_id="owner-1",
+    )
+    args = {"url": "https://docs.example.org/rollback"}
+    action = await broker.request_action(
+        db_session,
+        claims=claims,
+        token=token,
+        tool_name="browser.navigate",
+        args=args,
+    )
+    action_id = action.id
+    await grants.revoke_run_grants(db_session, claims.run_id)
+    original_settlement = budgets.stage_action_settlement
+
+    async def fail_after_staging(*args, **kwargs):
+        await original_settlement(*args, **kwargs)
+        raise RuntimeError("injected execute denial settlement failure")
+
+    monkeypatch.setattr(budgets, "stage_action_settlement", fail_after_staging)
+    executor = AsyncMock()
+    with pytest.raises(RuntimeError, match="execute denial settlement failure"):
+        await broker.execute_action(
+            db_session,
+            action_id=action_id,
+            claims=claims,
+            executor=executor,
+            args=args,
+        )
+
+    stored = await db_session.get(LabToolAction, action_id)
+    budget = await db_session.get(LabRunBudget, "run-execute-denial-rollback")
+    assert stored.status == "approved"
+    assert stored.result_json is None
+    assert budget.reserved_tool_calls == 1
+    assert budget.reserved_egress_requests == 1
+    executor.assert_not_called()

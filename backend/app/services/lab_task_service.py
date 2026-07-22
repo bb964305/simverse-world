@@ -339,7 +339,14 @@ async def dispatch_open_tasks(db) -> int:
 
 # ── review / settle / fail / accept / reject / cancel ─────────────────
 
-async def mark_review(db, task: LabTask, run: LabRun, result_summary: str = "") -> bool:
+async def mark_review(
+    db,
+    task: LabTask,
+    run: LabRun,
+    result_summary: str = "",
+    *,
+    commit: bool = True,
+) -> bool:
     """Runner success hook: task → review with a 72h auto-release window.
 
     Guarded by a compare-and-set from a live (``assigned``/``running``) state so a
@@ -354,7 +361,10 @@ async def mark_review(db, task: LabTask, run: LabRun, result_summary: str = "") 
         result_summary_md=result_summary or task.result_summary_md,
         review_deadline_at=datetime.now(UTC) + timedelta(hours=settings.lab_auto_release_hours),
     )
-    await db.commit()
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
     if moved:
         await db.refresh(task)
     else:

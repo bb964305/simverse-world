@@ -83,14 +83,17 @@ services:
   # the Redis run queue and executes sandbox adapters in a process SEPARATE from
   # the API and agent-worker, so a long-lived, isolation-heavy, possibly-crashing
   # run never blocks request handling or resident ticks. Independently scalable
-  # (LAB_RUNNER_REPLICAS). Two kill switches: deploy-level (LAB_ENABLED=false →
-  # main.py stays dormant) and runtime (the Redis sv:lab:enabled flag the loop
-  # checks each iteration). Least-privilege: it needs DB + Redis only; keep any
+  # (LAB_RUNNER_REPLICAS). It is excluded from the default Compose graph by the
+  # opt-in `lab` profile. Two further kill switches are deploy-level
+  # (LAB_ENABLED=false → main.py stays dormant) and runtime (the Redis
+  # sv:lab:enabled flag the loop checks each iteration). Least-privilege: it needs
+  # DB + Redis only; keep any
   # real-runtime/OCI credentials out of the API/agent-worker env and scoped here
   # once a real Adapter is selected (Phase 7). NOTE: real OCI execution requires a
   # dedicated rootless-Linux host (Phase 8 blocked) — this service runs the Mock
   # adapter until then.
   lab-runner:
+    profiles: ["lab"]
     build:
       context: ../backend
       dockerfile: ../deploy/Dockerfile

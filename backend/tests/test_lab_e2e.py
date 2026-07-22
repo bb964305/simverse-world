@@ -450,6 +450,43 @@ async def test_flag_off_legacy_regression(lab_env, monkeypatch):
         assert await s.get(LabRunLease, run_id) is None
 
 
+@pytest.mark.anyio
+async def test_flag_off_world_proposal_failure_cannot_commit_review(
+    lab_env, monkeypatch
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "lab_agent_v1_enabled", False)
+    monkeypatch.setattr(
+        "app.services.proposal_service.create_proposal",
+        AsyncMock(side_effect=RuntimeError("injected proposal failure")),
+    )
+    factory = lab_env
+    await _seed(factory)
+    task_id, run_id = await _make_task(
+        factory,
+        scopes=["web_search"],
+        deliverable_kind="world_change",
+        title="失败的世界探索",
+    )
+
+    await run_one(run_id)
+
+    async with factory() as s:
+        run = await s.get(LabRun, run_id)
+        task = await s.get(LabTask, task_id)
+        proposals = (
+            await s.execute(
+                select(WorldChangeProposal).where(
+                    WorldChangeProposal.origin_ref == run_id
+                )
+            )
+        ).scalars().all()
+    assert run.status == "failed"
+    assert task.status != "review"
+    assert proposals == []
+
+
 # ── 7. budget termination v1: tool_calls exhausted → run failed ───────
 
 @pytest.mark.anyio

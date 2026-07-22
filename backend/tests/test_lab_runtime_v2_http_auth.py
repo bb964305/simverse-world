@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import json
 import time
 from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import jwt
 import pytest
 
 from app.lab.runtime_ref import server as runtime_server
-from app.lab.runtime_ref.service_auth import canonical_request_digest
+from app.lab.protocol import ControlCommand
+from app.lab.runtime_ref.service_auth import (
+    ServiceTokenIssuer,
+    canonical_request_digest,
+)
 from app.lab.runtime_ref.server import create_app, create_entrypoint_app
+from app.lab.sandbox.base import HttpAgentAdapter
 
 
 ISSUER = "simverse-gateway"
@@ -284,7 +291,14 @@ async def test_run_routes_authenticate_and_bind_before_session_lookup(tmp_path):
             f"/runs/{sid}/events", headers=_auth(event_token)
         )
         assert events.status_code == 200, events.text
-        assert events.json() == {"events": [], "done": False}
+        stream = events.json()
+        assert stream["done"] is False
+        assert stream["has_more"] is False
+        assert stream["acked_through"] == 0
+        assert stream["latest_cursor"] == 1
+        assert [event["event_kind"] for event in stream["events"]] == [
+            "session_started"
+        ]
 
         unauthenticated_bad_cursor = await client.get(
             f"/runs/{sid}/events", params={"after": "not-an-integer"}
@@ -363,12 +377,33 @@ async def test_run_routes_authenticate_and_bind_before_session_lookup(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_goal_and_result_scaffolds_validate_auth_and_binding_without_model(tmp_path):
-    def forbidden_completer():
-        raise AssertionError("Phase 2 scaffold must not construct a model completer")
+async def test_goal_and_result_loop_preserves_auth_before_lookup(tmp_path):
+    replies = iter((
+        {
+            "plan": "ask the Broker",
+            "tool": "web.search",
+            "query": "auth sentinel",
+            "conclusion": "",
+        },
+        {
+            "plan": "finish from the Broker result",
+            "tool": None,
+            "query": "",
+            "conclusion": "broker-backed final",
+        },
+    ))
+    calls = 0
+
+    def completer_factory():
+        async def complete(_messages):
+            nonlocal calls
+            calls += 1
+            return json.dumps(next(replies)), 7
+
+        return complete
 
     app = _app(
-        tmp_path / "runtime.db", completer_factory=forbidden_completer
+        tmp_path / "runtime.db", completer_factory=completer_factory
     )
     create_body = _create_body("scaffold")
     async with _client(app) as client:
@@ -397,7 +432,9 @@ async def test_goal_and_result_scaffolds_validate_auth_and_binding_without_model
         goal = await client.post(
             f"/runs/{sid}/goal", json=goal_body, headers=_auth(goal_token)
         )
-        assert goal.status_code == 501
+        assert goal.status_code == 200, goal.text
+        assert goal.json()["state"] == "intent_pending"
+        assert calls == 1
 
         missing_goal = await client.post(f"/runs/{sid}/goal", json=goal_body)
         assert missing_goal.status_code == 401
@@ -406,14 +443,25 @@ async def test_goal_and_result_scaffolds_validate_auth_and_binding_without_model
         )
         assert wrong_goal_path.status_code == 403
 
+        events_token = _token(
+            run_id=run_id, session_id=sid, epoch=epoch,
+            action="events.read", jti="goal-events-jti",
+        )
+        events = await client.get(
+            f"/runs/{sid}/events", headers=_auth(events_token)
+        )
+        intent = next(
+            event for event in events.json()["events"]
+            if event["event_kind"] == "tool_intent"
+        )
         payload = {"sentinel": "BROKER-SENTINEL"}
         result_body = {
             "schema_version": 2,
             "command_id": "result-scaffold",
             "run_id": run_id,
             "session_id": sid,
-            "turn_id": "turn-1",
-            "intent_id": "intent-1",
+            "turn_id": intent["turn_id"],
+            "intent_id": intent["intent_id"],
             "action_id": "action-1",
             "outcome": "succeeded",
             "payload": payload,
@@ -428,7 +476,9 @@ async def test_goal_and_result_scaffolds_validate_auth_and_binding_without_model
             f"/runs/{sid}/results", json=result_body,
             headers=_auth(result_token),
         )
-        assert result.status_code == 501
+        assert result.status_code == 200, result.text
+        assert result.json()["state"] == "runtime_acked"
+        assert calls == 2
 
         wrong_result_epoch = deepcopy(result_body)
         wrong_result_epoch["epoch"] = epoch + 1
@@ -456,10 +506,12 @@ async def test_control_surfaces_require_runtime_control_before_lookup(tmp_path):
         for action in ("stop", "cancel", "terminate", "kill"):
             missing = await client.post(f"/runs/{sid}/{action}")
             assert missing.status_code == 401
-            scaffold = await client.post(
-                f"/runs/{sid}/{action}", headers=_auth(token)
-            )
-            assert scaffold.status_code == 501
+        stop = await client.post(f"/runs/{sid}/stop", headers=_auth(token))
+        assert stop.status_code == 501
+        malformed = await client.post(
+            f"/runs/{sid}/cancel", content=b'{', headers=_auth(token)
+        )
+        assert malformed.status_code == 422
 
         health_missing = await client.get(f"/runs/{sid}/health")
         assert health_missing.status_code == 401
@@ -468,6 +520,121 @@ async def test_control_surfaces_require_runtime_control_before_lookup(tmp_path):
         )
         assert health.status_code == 200
         assert health.json() == {"alive": True, "cancelled": False}
+
+
+@pytest.mark.anyio
+async def test_runtime_control_is_durable_idempotent_and_cross_bound(tmp_path):
+    path = tmp_path / "runtime.db"
+    body = _create_body("durable-control")
+    app = _app(path)
+    async with _client(app) as client:
+        created = await client.post(
+            "/runs", json=body, headers=_auth(_create_token(body))
+        )
+        assert created.status_code == 201, created.text
+        sid = created.json()["session_id"]
+
+        control = {
+            "schema_version": 2,
+            "command_id": "runtime-control-command",
+            "request_id": "gateway-control-request",
+            "run_id": body["run_id"],
+            "session_id": sid,
+            "target_kind": "runtime",
+            "target_id": sid,
+            "action": "cancel",
+            "epoch": body["epoch"] + 1,
+            "deadline_at": (datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
+        }
+        token = _token(
+            run_id=body["run_id"],
+            session_id=sid,
+            epoch=control["epoch"],
+            action="runtime.control",
+            jti="runtime-control-jti",
+        )
+        first = await client.post(
+            f"/runs/{sid}/cancel", json=control, headers=_auth(token)
+        )
+        assert first.status_code == 200, first.text
+        receipt = first.json()
+        assert receipt["status"] == "confirmed_stopped"
+        assert receipt["runtime_state"] == "cancelled"
+        assert receipt["request_id"] == control["request_id"]
+        assert receipt["epoch"] == control["epoch"]
+
+        retry = await client.post(
+            f"/runs/{sid}/cancel", json=control, headers=_auth(token)
+        )
+        assert retry.status_code == 200
+        assert retry.json() == receipt
+
+        changed = {**control, "request_id": "different-request"}
+        replay = await client.post(
+            f"/runs/{sid}/cancel", json=changed, headers=_auth(token)
+        )
+        assert replay.status_code == 403
+
+        stale = {**control, "command_id": "stale-control", "epoch": body["epoch"] - 1}
+        stale_token = _token(
+            run_id=body["run_id"],
+            session_id=sid,
+            epoch=stale["epoch"],
+            action="runtime.control",
+            jti="stale-control-jti",
+        )
+        denied = await client.post(
+            f"/runs/{sid}/cancel", json=stale, headers=_auth(stale_token)
+        )
+        assert denied.status_code == 403
+
+    async with _client(_app(path)) as restarted:
+        durable_retry = await restarted.post(
+            f"/runs/{sid}/cancel", json=control, headers=_auth(token)
+        )
+        assert durable_retry.status_code == 200
+        assert durable_retry.json() == receipt
+
+
+@pytest.mark.anyio
+async def test_http_adapter_validates_runtime_control_receipt(tmp_path, monkeypatch):
+    app = _app(tmp_path / "runtime.db")
+    start = _create_body("adapter-control")
+    adapter = HttpAgentAdapter(
+        base_url="http://runtime.test",
+        service_token_issuer=ServiceTokenIssuer(
+            {
+                "issuer": ISSUER,
+                "audience": AUDIENCE,
+                "current_kid": CURRENT_KID,
+                "current_key": CURRENT_KEY,
+                "token_ttl_seconds": 300,
+            }
+        ),
+    )
+    async with _client(app) as client:
+        created = await client.post(
+            "/runs", json=start, headers=_auth(_create_token(start))
+        )
+        sid = created.json()["session_id"]
+        monkeypatch.setattr("app.http.get_client", lambda: client)
+        receipt = await adapter.control_runtime_v2(
+            ControlCommand(
+                command_id="adapter-control-command",
+                request_id="adapter-control-request",
+                run_id=start["run_id"],
+                session_id=sid,
+                target_kind="runtime",
+                target_id=sid,
+                action="terminate",
+                epoch=start["epoch"] + 1,
+                deadline_at=datetime.now(UTC) + timedelta(seconds=30),
+            )
+        )
+
+    assert receipt["status"] == "confirmed_stopped"
+    assert receipt["runtime_state"] == "cancelled"
+    assert receipt["action"] == "terminate"
 
 
 @pytest.mark.anyio
@@ -536,3 +703,47 @@ async def test_body_routes_authenticate_before_reading_or_validating_json(tmp_pa
             "/runs", json=string_epoch, headers=_auth(create_token)
         )
         assert strict.status_code == 422
+
+        depth_session = "depth-session"
+        depth_token = _token(
+            run_id=create_body["run_id"],
+            session_id=depth_session,
+            epoch=create_body["epoch"],
+            action="tool_result.submit",
+            jti="deep-json",
+        )
+        nested: object = "leaf"
+        for _ in range(40):
+            nested = {"child": nested}
+        deep_payload = {"nested": nested}
+        deep_result = {
+            "schema_version": 2,
+            "command_id": "deep-json-result",
+            "run_id": create_body["run_id"],
+            "session_id": depth_session,
+            "turn_id": "deep-turn",
+            "intent_id": "deep-intent",
+            "action_id": "deep-action",
+            "outcome": "succeeded",
+            "payload": deep_payload,
+            "result_digest": canonical_request_digest(deep_payload),
+            "epoch": create_body["epoch"],
+        }
+        depth_rejected = await client.post(
+            f"/runs/{depth_session}/results",
+            json=deep_result,
+            headers=_auth(depth_token),
+        )
+        assert depth_rejected.status_code == 422
+        assert depth_rejected.json()["detail"] == "invalid_request_body"
+
+        recursive_json = (
+            b'{"payload":' + b"[" * 1500 + b"0" + b"]" * 1500 + b"}"
+        )
+        recursion_rejected = await client.post(
+            f"/runs/{depth_session}/results",
+            content=recursive_json,
+            headers=_auth(depth_token),
+        )
+        assert recursion_rejected.status_code == 422
+        assert recursion_rejected.json()["detail"] == "invalid_request_body"

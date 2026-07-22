@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -134,6 +136,107 @@ class ServiceAuthConfig:
 
 
 @dataclass(frozen=True)
+class ServiceTokenIssuerConfig:
+    """The one active signing key for a dedicated service audience."""
+
+    issuer: str
+    audience: str
+    current_kid: str
+    current_key: str
+    token_ttl_seconds: int = 300
+
+    def __post_init__(self) -> None:
+        if any(
+            not isinstance(value, str) or not value
+            for value in (self.issuer, self.audience, self.current_kid)
+        ):
+            raise ValueError("service token issuer, audience, and kid are required")
+        if (
+            not isinstance(self.current_key, str)
+            or len(self.current_key.encode("utf-8")) < 32
+        ):
+            raise ValueError("service token signing key must be at least 32 bytes")
+        if (
+            isinstance(self.token_ttl_seconds, bool)
+            or not isinstance(self.token_ttl_seconds, int)
+            or not 1 <= self.token_ttl_seconds <= 900
+        ):
+            raise ValueError("service token TTL must be between 1 and 900 seconds")
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ServiceTokenIssuerConfig":
+        return cls(
+            issuer=value.get("issuer"),
+            audience=value.get("audience"),
+            current_kid=value.get("current_kid"),
+            current_key=value.get("current_key"),
+            token_ttl_seconds=value.get("token_ttl_seconds", 300),
+        )
+
+
+class ServiceTokenIssuer:
+    """Issue short-lived, single-action JWTs bound to one runtime session."""
+
+    def __init__(
+        self, config: ServiceTokenIssuerConfig | Mapping[str, Any]
+    ) -> None:
+        self.config = (
+            config
+            if isinstance(config, ServiceTokenIssuerConfig)
+            else ServiceTokenIssuerConfig.from_mapping(config)
+        )
+
+    def issue(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        epoch: int,
+        action: str,
+        command_id: str | None = None,
+        jti: str | None = None,
+        issued_at: int | None = None,
+    ) -> str:
+        """Sign one action token; command retries derive the same stable jti."""
+
+        if command_id is not None and jti is not None:
+            raise ValueError("provide command_id or jti, not both")
+        if command_id is not None:
+            if not isinstance(command_id, str) or not command_id:
+                raise ValueError("command_id must be a non-empty string")
+            jti = "cmd-" + hashlib.sha256(canonical_json_bytes({
+                "issuer": self.config.issuer,
+                "audience": self.config.audience,
+                "run_id": run_id,
+                "session_id": session_id,
+                "epoch": epoch,
+                "action": action,
+                "command_id": command_id,
+            })).hexdigest()
+        elif jti is None:
+            jti = str(uuid.uuid4())
+
+        now = int(time.time()) if issued_at is None else issued_at
+        claims = ServiceClaims.model_validate({
+            "iss": self.config.issuer,
+            "aud": self.config.audience,
+            "run_id": run_id,
+            "session_id": session_id,
+            "epoch": epoch,
+            "actions": [action],
+            "jti": jti,
+            "nbf": now,
+            "exp": now + self.config.token_ttl_seconds,
+        })
+        return jwt.encode(
+            claims.model_dump(),
+            self.config.current_key,
+            algorithm=_ALGORITHM,
+            headers={"kid": self.config.current_kid},
+        )
+
+
+@dataclass(frozen=True)
 class ServiceBinding:
     run_id: str
     session_id: str
@@ -236,7 +339,7 @@ class ServiceTokenValidator:
 
         if claims.exp - claims.nbf > self.config.max_lifetime_seconds:
             raise ServiceAuthenticationError("invalid_token")
-        if required_action not in claims.actions:
+        if claims.actions != [required_action]:
             raise ServiceAuthorizationError("action_not_allowed")
         if expected_binding is not None and (
             claims.run_id != expected_binding.run_id

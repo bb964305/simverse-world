@@ -1,17 +1,18 @@
 # ADR: Simverse Lab Runtime Adapter Selection
 
-- **Status: Conditionally accepted for the default-off P2 session boundary.
-  Real execution and release selection remain pending P3 result-loop evidence.**
+- **Status: Accepted for the default-off P3/P4 protocol-v2 local boundary.
+  Production enablement and release selection remain blocked.**
 - **Gate scope:** This selection gate blocks **real-runtime enablement and any
-  production-capability claim** — not Mock-backed control-plane correctness work.
-  Enabling a real Adapter or OCI path still requires a recorded ≥80/100 selection
-  with every mandatory dimension ≥0.6.
-- Date: 2026-07-18 (updated 2026-07-20)
-- Context tasks: P2-F (executable adapter gate + this ADR), building on P2-D
-  (supervision) and P2-E (OCI executor); recovery plan Phase 7.
+  production-capability claim** — not default-off local protocol correctness work.
+  Local evidence does not satisfy D0, P5, staging, visual, asset, or release
+  gates.
+- Date: 2026-07-18 (updated 2026-07-22)
+- Context tasks: Approved-v10 P2 protocol/session boundary, P3 real
+  result/supervision loop, and P4 durable control, retaining the earlier
+  recovery-plan selection record only as historical evidence.
 - Decision owners: Lab platform (Jimmy + agents).
 
-## Approved-v10 protocol-v2 override (2026-07-21)
+## Approved-v10 protocol-v2 decision (2026-07-21)
 
 This section supersedes the v1 scoring and completion language retained below as
 historical evidence. The earlier 100/100 runs exercised the buffered v1 protocol,
@@ -19,8 +20,8 @@ which could complete the model loop before Broker execution and therefore did
 not prove real result resume, ACK/replay, or Artifact provenance. Those scores
 must not be used to enable a real Runtime or satisfy the P3/release gate.
 
-The Simverse reference Runtime remains the only admitted P2 implementation, but
-only for its protocol-v2 session boundary:
+The Simverse reference Runtime remains the only admitted local protocol-v2
+implementation. P2 established its session boundary:
 
 - handshake is strict v2, `broker_only`, `session_affine`, and requires
   deterministic create/reattach capability;
@@ -30,9 +31,43 @@ only for its protocol-v2 session boundary:
 - Runtime state and command receipts use a durable hardened SQLite file;
 - all run routes authenticate a short-lived, action-scoped `lab-runtime` JWT
   before session lookup, with current/next key rotation and exact retry binding;
-- v2 `goal`, `results`, and control endpoints remain 501 scaffolds in P2, and no
-  v2 Runner handler is registered. This is intentional fail-closed behavior until
-  P3 supplies the real intent/result/supervision loop.
+- the P2 checkpoint exposed no v2 execution handler, so admission failed closed
+  before side effects until the P3 loop was present.
+
+P3 now supplies the default-off, deterministic result loop without using the
+historical buffered `step_stream` path:
+
+- the Runtime durably pauses the same model turn at `tool_intent`; only an exact,
+  bounded `succeeded|denied|failed` Broker result can resume it;
+- the Gateway commits canonical event/turn/intent state before provider ACK,
+  accepts exact replay idempotently, rejects divergent bindings or cursor
+  regression, and enforces the 128-event plus byte backpressure window;
+- Broker result and command identity are durable before delivery. A lost Gateway
+  receipt is recovered by resending the same command and CAS-recording the
+  Runtime's idempotent receipt;
+- finalization requires zero pending intents and every result to be
+  `runtime_acked`. Success additionally requires a real succeeded result, and
+  Artifact metadata is rebuilt from Gateway-owned Broker result rows; and
+- the v2 HTTP adapter uses authenticated handshake, goal, event poll/ACK, result,
+  and Artifact endpoints. The v2 orchestrator never consumes `step_stream`.
+
+The canonical local evidence is release step
+`run-all:ac07-runtime-result-loop`. Its deterministic unit set covers the frozen
+protocol, legacy compatibility, Runtime HTTP/store/restart, result recovery,
+Gateway supervision, replay/backpressure, denial/failure, and the full sentinel
+round trip; a separate required real-Postgres suite covers commit-before-ACK,
+durable backpressure, and result-receipt/finalization recovery. The opt-in live
+LLM check is deliberately not part of this P3 oracle: model randomness cannot
+replace the deterministic Broker-result proof.
+
+P4 completes the default-off control boundary. Run cancel and global kill are
+durable requests owned by the Runner, not provider calls from the API. Runtime
+control uses action-scoped JWTs bound to run, session, epoch, and action; exact
+receipts survive restart, while stale or divergent commands fail closed.
+Runtime and Executor targets are fenced independently, missing inventory is
+quarantined, and v2 queue claims are reclaimed without duplicate execution.
+Lifecycle startup refuses global admission unless both D0-provisioned Runtime
+and Executor controllers are present.
 
 The standalone development entrypoint is now explicit. Running
 `python -m app.lab.runtime_ref.server` requires
@@ -43,9 +78,11 @@ exits; importing `module:app` exposes no `/runs` route. Version 1 is available
 only when explicitly requested for legacy compatibility.
 
 All rollout flags remain false. No Runtime service, image, production network,
-TLS/mTLS identity, or durable volume is authorized while D0 is absent. P3 must
-replace the historical score with sentinel success/deny/fail/replay and reattach
-evidence before this ADR can become an execution selection record.
+TLS/mTLS identity, or production durable volume is authorized while D0 is
+absent. P4b world fencing is verified separately for the default-off source
+checkpoint, but P5 production topology, staging, and release push remain
+blocked. This ADR records a local P3/P4 implementation selection only, not
+production or release approval.
 
 ## Historical v1 selection evidence (superseded for protocol v2)
 
@@ -177,6 +214,6 @@ that is exactly what the missing endpoints block.
 - Positive: the gate is executable and trusted (proven to score + eliminate on
   fakes); selection becomes a mechanical, evidence-backed step once endpoints
   exist. Reproduction is documented.
-- Negative / open: no P3-qualified Runtime result loop is available yet, so the
-  meta-game's real sandbox path stays disabled/Mock. This is a deliberate,
+- Negative / open: the P3/P4-qualified Runtime remains default-off while D0/P5,
+  staging, visual, asset, and release gates are open. This is a deliberate
   fail-closed hold rather than a production selection.
