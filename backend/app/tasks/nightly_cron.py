@@ -163,6 +163,18 @@ async def run_nightly_jobs() -> None:
                 logger.info("Realism P2: decayed %d idle relations", n)
         except Exception:
             logger.error("Realism relation decay failed", exc_info=True)
+
+    # Realism P2-4: nightly circle detection (independent gate, runs daily).
+    # Connected components over strong ties → meta_json.circle_id + snapshot.
+    if _rel_settings.realism_relations_enabled:
+        try:
+            from app.services import circle_service
+            async with async_session() as db:
+                snap = await circle_service.refresh_circles(db)
+            if snap.get("count"):
+                logger.info("Realism P2: detected %d social circles", snap["count"])
+        except Exception:
+            logger.error("Realism circle detection failed", exc_info=True)
     # Future: E2 dreams, E7 capsule delivery — each own try/except.
 
 

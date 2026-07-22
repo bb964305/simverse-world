@@ -31,6 +31,22 @@ from app.models.resident import Resident
 logger = logging.getLogger(__name__)
 
 
+async def _resolve_secret_targets(db, slug: str) -> list[Resident]:
+    """Resolve a secret's ``resident_slug`` to target residents. P2 §7.2: the
+    special form ``circle:<id>`` expands to every resident in that social circle
+    (a plot seed festers inside a clique); a plain slug resolves to one resident."""
+    if slug.startswith("circle:"):
+        from app.services import circle_service
+        targets: list[Resident] = []
+        for rid in await circle_service.expand_circle(db, slug[len("circle:"):]):
+            res = await db.get(Resident, rid)
+            if res is not None:
+                targets.append(res)
+        return targets
+    res = (await db.execute(select(Resident).where(Resident.slug == slug))).scalar_one_or_none()
+    return [res] if res is not None else []
+
+
 class PollError(Exception):
     """Invalid poll/vote request (router maps to 400)."""
 
@@ -85,14 +101,12 @@ async def fire_due_scripts(db) -> list[dict]:
             content = sec.get("memory_content")
             if not slug or not content:
                 continue
-            res = (await db.execute(select(Resident).where(Resident.slug == slug))).scalar_one_or_none()
-            if res is None:
-                continue
             from app.memory.service import MemoryService
-            await MemoryService(db).add_memory(
-                res.id, "event", content, importance=float(sec.get("importance", 0.7)), source="script",
-            )
-            injected += 1
+            for res in await _resolve_secret_targets(db, slug):
+                await MemoryService(db).add_memory(
+                    res.id, "event", content, importance=float(sec.get("importance", 0.7)), source="script",
+                )
+                injected += 1
 
         s.status = "fired"
         await db.commit()

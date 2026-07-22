@@ -331,6 +331,8 @@ class Settings(BaseSettings):
     realism_rel_encounter_fam_coef: float = 2.0  # encounter weight = 1 + coef×familiarity
     realism_rel_chat_epsilon: float = 0.1        # ε uniform mix in CHAT target sampling
     realism_rel_gossip_fam_floor: float = 0.1    # gossip candidate weight = floor + familiarity(subject)
+    # P2 Task 4 — circle detection (connected components over strong ties).
+    realism_circle_threshold: float = 0.3        # familiarity ≥ this = a "strong" edge
 
     model_config = {"env_file": ".env"}
 
