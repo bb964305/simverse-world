@@ -65,6 +65,18 @@ describe('public and authenticated routes', () => {
     expect(screen.queryByRole('heading', { name: '进入 Simverse' })).not.toBeInTheDocument()
   })
 
+  it('shows the game at /play when authenticated', async () => {
+    useGameStore.setState({ user, token: 'token' })
+    renderRoute('/play')
+    expect(await screen.findByTestId('game-page')).toBeInTheDocument()
+  })
+
+  it('redirects /play to login when logged out', async () => {
+    renderRoute('/play')
+    expect(await screen.findByRole('heading', { name: '进入 Simverse' })).toBeInTheDocument()
+    expect(screen.queryByTestId('game-page')).not.toBeInTheDocument()
+  })
+
   it('shows encounter cards only on the authenticated game route', async () => {
     useGameStore.setState({
       user,

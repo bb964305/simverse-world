@@ -65,7 +65,7 @@ function AuthenticatedOverlays() {
     <>
       <ConnectionBanner />
       <AchievementToast />
-      {pathname === '/' && <EncounterCard />}
+      {(pathname === '/' || pathname === '/play') && <EncounterCard />}
     </>
   )
 }
@@ -81,6 +81,10 @@ export function AppRoutes() {
             <Route path="/auth/callback" element={<AuthCallbackPage />} />
             <Route path="/onboarding" element={<ProtectedRoute><OnboardingPage /></ProtectedRoute>} />
             <Route path="/" element={<HomeRoute />} />
+            {/* The game also lives at /play — many entry points (landing CTA,
+                onboarding redirect, Admin/Forge/ErrorBoundary) navigate here.
+                Without this route React Router matches nothing → blank screen. */}
+            <Route path="/play" element={<ProtectedRoute><GamePage /></ProtectedRoute>} />
             <Route path="/forge" element={<ProtectedRoute><ForgePage /></ProtectedRoute>} />
             <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
             <Route path="/admin" element={<ProtectedRoute><AdminPage /></ProtectedRoute>} />
