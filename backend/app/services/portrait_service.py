@@ -1,4 +1,5 @@
-"""AI portrait generation via Gemini image model (Vertex AI proxy)."""
+"""AI portrait generation via an OpenAI-compatible image model, then pixel-art
+post-processing (generate the image first, then snap it onto a pixel grid)."""
 import base64
 import logging
 from pathlib import Path
@@ -62,7 +63,7 @@ async def generate_portrait(
 
     base_url = settings.portrait_llm_base_url
     api_key = settings.portrait_llm_api_key
-    model = settings.portrait_llm_model or "gemini-3-pro-image-preview"
+    model = settings.portrait_llm_model or "gpt-image-2"
     timeout = settings.portrait_llm_timeout or 60
 
     if not base_url or not api_key:
@@ -70,62 +71,54 @@ async def generate_portrait(
         return None
 
     try:
+        # gpt-image-2 (and the other image models on this OpenAI-compatible
+        # endpoint) are native image models — they answer the Images
+        # Generations API, not chat/completions. Generate the raw image with
+        # the configured `model` here; the pixel-grid conversion is the
+        # separate post-processing step below ("先生成图像，再转像素图").
         response = await get_client().post(
-            f"{base_url}/chat/completions",
+            f"{base_url}/images/generations",
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             json={
                 "model": model,
-                "messages": [
-                    {"role": "user", "content": prompt},
-                ],
-                "max_tokens": 1,
-                "response_format": {"type": "image_url"},
+                "prompt": prompt,
+                "n": 1,
+                "size": "1024x1024",
             },
             timeout=timeout,
         )
 
         if response.status_code != 200:
             logger.error(
-                "Gemini API returned %d: %s",
+                "Portrait image API returned %d: %s",
                 response.status_code,
-                response.text[:200],
+                response.text[:300],
             )
             return None
 
         data = response.json()
 
-        # Parse Gemini image response
-        # The proxy may return in OpenAI-compatible format or Gemini native format
+        # OpenAI Images API shape: {"data": [{"b64_json": ...}]} or
+        # {"data": [{"url": ...}]}. Prefer inline base64; fall back to fetching
+        # the URL when the proxy returns a link instead of bytes.
         image_data = None
-
-        # Try Gemini native format (candidates -> inlineData)
-        candidates = data.get("candidates", [])
-        if candidates:
-            parts = candidates[0].get("content", {}).get("parts", [])
-            for part in parts:
-                inline = part.get("inlineData", {})
-                if inline.get("data"):
-                    image_data = base64.b64decode(inline["data"])
-                    break
-
-        # Try OpenAI chat completion format
-        if not image_data:
-            choices = data.get("choices", [])
-            if choices:
-                content = choices[0].get("message", {}).get("content", "")
-                # Content might be base64 encoded image
-                if content and not content.startswith("{"):
-                    try:
-                        image_data = base64.b64decode(content)
-                    except Exception:
-                        pass
+        items = data.get("data") or []
+        if items:
+            item = items[0]
+            b64 = item.get("b64_json")
+            if b64:
+                image_data = base64.b64decode(b64)
+            elif item.get("url"):
+                img_resp = await get_client().get(item["url"], timeout=timeout)
+                if img_resp.status_code == 200:
+                    image_data = img_resp.content
 
         if not image_data:
             logger.error(
-                "Could not extract image from Gemini response: %s",
+                "Could not extract image from portrait response: %s",
                 str(data)[:300],
             )
             return None

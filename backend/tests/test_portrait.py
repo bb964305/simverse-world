@@ -31,23 +31,15 @@ def test_build_portrait_prompt_no_persona():
 
 @pytest.mark.anyio
 async def test_generate_portrait_success():
-    """Should call Gemini API and save image."""
+    """Should call the Images Generations API and save the (pixelated) image."""
     import base64
     fake_image_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100  # fake PNG header
 
     mock_response = MagicMock()
     mock_response.status_code = 200
+    # OpenAI Images API shape: {"data": [{"b64_json": ...}]}
     mock_response.json.return_value = {
-        "candidates": [{
-            "content": {
-                "parts": [{
-                    "inlineData": {
-                        "mimeType": "image/png",
-                        "data": base64.b64encode(fake_image_bytes).decode(),
-                    }
-                }]
-            }
-        }]
+        "data": [{"b64_json": base64.b64encode(fake_image_bytes).decode()}]
     }
 
     # generate_portrait now short-circuits to None when the portrait LLM is
