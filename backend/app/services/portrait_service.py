@@ -10,7 +10,14 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-PORTRAIT_DIR = Path("static/portraits")
+
+def _portrait_dir() -> Path:
+    """Portraits live under the served static root (see app.main /static mount)."""
+    return Path(settings.static_dir) / "portraits"
+
+
+# Kept as a module-level alias for backwards compatibility with tests/imports.
+PORTRAIT_DIR = _portrait_dir()
 
 
 def build_portrait_prompt(name: str, persona_md: str) -> str:
@@ -46,9 +53,10 @@ def build_portrait_prompt(name: str, persona_md: str) -> str:
 
 def save_portrait_image(resident_id: str, image_bytes: bytes) -> str:
     """Save portrait image to disk and return URL path."""
-    PORTRAIT_DIR.mkdir(parents=True, exist_ok=True)
+    portrait_dir = _portrait_dir()
+    portrait_dir.mkdir(parents=True, exist_ok=True)
     filename = f"{resident_id}.png"
-    filepath = PORTRAIT_DIR / filename
+    filepath = portrait_dir / filename
     filepath.write_bytes(image_bytes)
     return f"/static/portraits/{filename}"
 

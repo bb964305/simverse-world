@@ -23,7 +23,9 @@ async def current_season(db: AsyncSession = Depends(get_db)):
 async def current_leaderboard(request: Request, around_me: bool = False, db: AsyncSession = Depends(get_db)):
     season = await get_active_season(db)
     if not season:
-        raise HTTPException(status_code=404, detail="No active season")
+        # No active season is a normal state, not an error: return an empty
+        # board (P2 fix — the 404 forced clients to special-case it).
+        return {"top": [], "season": None}
     user_id = None
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):

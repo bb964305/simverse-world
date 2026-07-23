@@ -19,7 +19,11 @@ class Resident(Base):
     pinned_heat: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     model_tier: Mapped[str] = mapped_column(String(20), default="standard")
     token_cost_per_turn: Mapped[int] = mapped_column(Integer, default=1)
-    creator_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), index=True)
+    # Nullable: account deletion orphans owned residents (creator_id → NULL,
+    # migration 040) instead of deleting them from the world.
+    creator_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("users.id"), index=True, nullable=True
+    )
     ability_md: Mapped[str] = mapped_column(Text, default="")
     persona_md: Mapped[str] = mapped_column(Text, default="")
     soul_md: Mapped[str] = mapped_column(Text, default="")

@@ -1,0 +1,600 @@
+{
+ "run_at": "2026-07-23T09:49:44.006199+00:00",
+ "duration_s": 838.1,
+ "api": "https://simverse-api.proxypool.eu.org",
+ "front": "https://simverse.world",
+ "summary": {
+  "PASS": 81,
+  "FAIL": 4,
+  "SKIP": 8,
+  "WARN": 4
+ },
+ "accounts": [
+  "svtest_07230935_cxjloa@sv-test.dev",
+  "svtest_07230935_cxjlob@sv-test.dev"
+ ],
+ "results": [
+  {
+   "id": "M0-1",
+   "name": "API 健康检查",
+   "status": "PASS",
+   "detail": "200 {\"status\":\"ok\"}"
+  },
+  {
+   "id": "M0-2",
+   "name": "前端首页可达",
+   "status": "PASS",
+   "detail": "200, 2218B"
+  },
+  {
+   "id": "M0-2b",
+   "name": "前端 JS/CSS 资产加载",
+   "status": "PASS",
+   "detail": "/assets/index-DOIJVSwA.js → 200"
+  },
+  {
+   "id": "M0-3",
+   "name": "TLS 证书 simverse.world",
+   "status": "PASS",
+   "detail": "剩余 29 天 (至 2026-08-22)"
+  },
+  {
+   "id": "M0-3",
+   "name": "TLS 证书 simverse-api.proxypool.eu.org",
+   "status": "PASS",
+   "detail": "剩余 29 天 (至 2026-08-22)"
+  },
+  {
+   "id": "M0-4",
+   "name": "OpenAPI 可用",
+   "status": "PASS",
+   "detail": "146 paths"
+  },
+  {
+   "id": "M0-5",
+   "name": "CORS 预检",
+   "status": "PASS",
+   "detail": "200 ACAO='https://simverse.world'"
+  },
+  {
+   "id": "M0-6",
+   "name": "/metrics 鉴权保护",
+   "status": "PASS",
+   "detail": "401 需要 token"
+  },
+  {
+   "id": "M1-1",
+   "name": "注册账号A",
+   "status": "PASS",
+   "detail": "200 keys=['access_token', 'user']"
+  },
+  {
+   "id": "M1-2",
+   "name": "重复注册被拒",
+   "status": "PASS",
+   "detail": "409 {\"detail\":\"Email already registered\"}"
+  },
+  {
+   "id": "M1-1b",
+   "name": "注册账号B",
+   "status": "PASS",
+   "detail": "200"
+  },
+  {
+   "id": "M1-3",
+   "name": "登录",
+   "status": "PASS",
+   "detail": "200"
+  },
+  {
+   "id": "M1-3b",
+   "name": "GET /users/me",
+   "status": "PASS",
+   "detail": "200 keys=['id', 'name', 'email', 'avatar', 'soul_coin_balance', 'is_admin']"
+  },
+  {
+   "id": "M1-4",
+   "name": "错误密码 401",
+   "status": "PASS",
+   "detail": "401"
+  },
+  {
+   "id": "M1-5",
+   "name": "无 token 访问受保护接口",
+   "status": "PASS",
+   "detail": "10 个接口全部 401/403"
+  },
+  {
+   "id": "M1-6",
+   "name": "伪造 token 401",
+   "status": "PASS",
+   "detail": "401"
+  },
+  {
+   "id": "M1-7",
+   "name": "OAuth 端点 github",
+   "status": "PASS",
+   "detail": "307 loc=https://github.com/login/oauth/authorize?client_id=Ov23lipx1"
+  },
+  {
+   "id": "M1-7",
+   "name": "OAuth 端点 linuxdo",
+   "status": "PASS",
+   "detail": "307 loc=https://connect.linux.do/oauth2/authorize?client_id=ar4GXG85"
+  },
+  {
+   "id": "M2-1",
+   "name": "onboarding check",
+   "status": "PASS",
+   "detail": "200 {\"needs_onboarding\":true,\"player_resident_id\":null}"
+  },
+  {
+   "id": "M2-2",
+   "name": "精灵模板列表",
+   "status": "PASS",
+   "detail": "20 个模板"
+  },
+  {
+   "id": "M2-3",
+   "name": "创建玩家角色A",
+   "status": "PASS",
+   "detail": "200 {'id': '7c57e2e0-eeab-451d-b33b-6159f2342b67', 'slug': 'p-测试员小柯-1a106a', 'name': '测试员小柯', 'sprite_key': '伊莎贝拉', 'tile_x'"
+  },
+  {
+   "id": "M2-5",
+   "name": "账号B 跳过引导",
+   "status": "PASS",
+   "detail": "200 {\"id\":\"a4a33128-646d-4314-b7c8-5fe0930596fb\",\"slug\":\"p-新居民-d97d9c\",\"name\":\"新居民\","
+  },
+  {
+   "id": "M3-1",
+   "name": "居民列表",
+   "status": "PASS",
+   "detail": "19 个居民"
+  },
+  {
+   "id": "M3-2",
+   "name": "居民详情",
+   "status": "PASS",
+   "detail": "200 keys=['id', 'slug', 'name', 'district', 'status', 'heat', 'sprite_key', 'tile_x', 'tile_y', 'home_location_id']"
+  },
+  {
+   "id": "M3-3",
+   "name": "角色卡",
+   "status": "PASS",
+   "detail": "200"
+  },
+  {
+   "id": "M3-4c",
+   "name": "导出他人角色被拒",
+   "status": "PASS",
+   "detail": "403"
+  },
+  {
+   "id": "M3-4a",
+   "name": "导出自己角色",
+   "status": "PASS",
+   "detail": "200 188B"
+  },
+  {
+   "id": "M3-5",
+   "name": "版本历史(自己角色)",
+   "status": "PASS",
+   "detail": "200 []"
+  },
+  {
+   "id": "M3-7",
+   "name": "居民目标",
+   "status": "PASS",
+   "detail": "200 0 个目标"
+  },
+  {
+   "id": "M3-6b",
+   "name": "编辑他人角色被拒",
+   "status": "PASS",
+   "detail": "403"
+  },
+  {
+   "id": "M3-6a",
+   "name": "编辑自己角色",
+   "status": "PASS",
+   "detail": "200 {\"id\":\"7c57e2e0-eeab-451d-b33b-6159f2342b67\",\"slug\":\"p-测试员小柯-1a106a\",\"name\":\"测试员"
+  },
+  {
+   "id": "M3-10",
+   "name": "家装读取",
+   "status": "PASS",
+   "detail": "200"
+  },
+  {
+   "id": "M3-8",
+   "name": "世界位置",
+   "status": "PASS",
+   "detail": "33 个位置"
+  },
+  {
+   "id": "M3-9",
+   "name": "搜索居民",
+   "status": "PASS",
+   "detail": "q=克劳斯 → 1 命中"
+  },
+  {
+   "id": "M4-2",
+   "name": "WS 伪 token 拒绝",
+   "status": "PASS",
+   "detail": "close code=4001"
+  },
+  {
+   "id": "M4-1",
+   "name": "WS 鉴权+出生点",
+   "status": "PASS",
+   "detail": "types=['auth_ok', 'daily_reward', 'spawn_position']"
+  },
+  {
+   "id": "M4-3",
+   "name": "每日登录奖励",
+   "status": "PASS",
+   "detail": "daily_reward=10"
+  },
+  {
+   "id": "M4-4",
+   "name": "移动广播同步",
+   "status": "PASS",
+   "detail": "B 收到 {'type': 'player_moved', 'player_id': 'eb3d2091-3987-45b5-acd4-523000ad7dec', 'name': '冒烟测试A_cxjlo',"
+  },
+  {
+   "id": "M4-5",
+   "name": "在线玩家互见",
+   "status": "PASS",
+   "detail": "B types=['auth_ok', 'daily_reward', 'spawn_position', 'online_players', 'player_moved']"
+  },
+  {
+   "id": "M5-7",
+   "name": "玩家间私聊",
+   "status": "PASS",
+   "detail": "B 收到 types=['player_chat_auto_sent']"
+  },
+  {
+   "id": "M5-1",
+   "name": "开始 NPC 对话",
+   "status": "PASS",
+   "detail": "types=['online_players', 'player_joined', 'notification', 'player_chat_reply', 'chat_started']"
+  },
+  {
+   "id": "M5-2",
+   "name": "NPC LLM 回复",
+   "status": "PASS",
+   "detail": "3.2s 回复[79字]: 我是克劳斯，一个追求真理的理性主义者，目前正在分析中央广场的星尘粒子波动数据与居民情绪状态的关联性——数据表明，云层变化似乎与某些情绪波动存在微妙的耦合关系。"
+  },
+  {
+   "id": "M5-1b",
+   "name": "结束对话",
+   "status": "PASS",
+   "detail": "types=['notification', 'achievement_unlocked', 'chat_ended']"
+  },
+  {
+   "id": "M5-4",
+   "name": "对话评分",
+   "status": "PASS",
+   "detail": "conversation_id=e7134095-0d00-441d-b6dd-d9ff1f3256af"
+  },
+  {
+   "id": "M5-3",
+   "name": "三层记忆回忆",
+   "status": "PASS",
+   "detail": "回复: \"蓝色的猫头鹰在钟楼下睡觉。\" 我快速调出记录，但依然保持谨慎，\"暗号中提到猫头鹰，但钟楼在这个区域并不存在。这种地理逻辑矛盾令人困扰。你是在测试我的记忆，还是在暗示什么？\""
+  },
+  {
+   "id": "M6-1",
+   "name": "快速锻造(轮询至完成)",
+   "status": "PASS",
+   "detail": "200 status=done persona=# 人格档案\n\n## Layer 0: 核心性格\n- **冷静沉着**：无论面对爆炸预告还是持枪威胁，语气始终平稳，手指不会颤抖，行动节奏不会改变。\n- **毒"
+  },
+  {
+   "id": "M6-2",
+   "name": "引导锻造 start/status/answer",
+   "status": "PASS",
+   "detail": "start=200 status_keys=['forge_id', 'status', 'step', 'name', 'answers', 'ability_md', 'persona_md', 'soul_md'] answer=200"
+  },
+  {
+   "id": "M6-3a",
+   "name": "深度蒸馏启动",
+   "status": "PASS",
+   "detail": "200 {'forge_id': '3afd7fa4-0399-4abf-879b-cd4fac35d9b8', 'mode': 'quick', 'status': 'routed'}"
+  },
+  {
+   "id": "M6-5",
+   "name": "AI 头像生成",
+   "status": "PASS",
+   "detail": "200 {'portrait_url': '/static/portraits/eb3d2091-3987-45b5-acd4-523000ad7dec.png'}"
+  },
+  {
+   "id": "M6-6",
+   "name": "精灵智能匹配",
+   "status": "PASS",
+   "detail": "200 [{\"key\":\"伊莎贝拉\",\"gender\":\"female\",\"age_group\":\"adult\",\"vibe\":\"elegant\",\"tags\":[\"graceful\",\"noble\"]},{"
+  },
+  {
+   "id": "M5-5a",
+   "name": "媒体上传(图片)",
+   "status": "FAIL",
+   "detail": "422 url=None"
+  },
+  {
+   "id": "M5-5b",
+   "name": "拍照留档",
+   "status": "PASS",
+   "detail": "200 {\"resident_slug\":\"klaus\",\"quip\":\"太开心啦，这张一定要好好留着！\"}"
+  },
+  {
+   "id": "M5-9",
+   "name": "TTS",
+   "status": "SKIP",
+   "detail": "400(未配置/配额): {\"detail\":\"TTS not configured\"}"
+  },
+  {
+   "id": "M5-10",
+   "name": "会话历史",
+   "status": "PASS",
+   "detail": "2 条会话"
+  },
+  {
+   "id": "M5-11",
+   "name": "我的角色列表",
+   "status": "PASS",
+   "detail": "200"
+  },
+  {
+   "id": "M7-1",
+   "name": "Soul Coin 余额",
+   "status": "PASS",
+   "detail": "余额=196"
+  },
+  {
+   "id": "M7-2",
+   "name": "商店目录",
+   "status": "PASS",
+   "detail": "10 件商品"
+  },
+  {
+   "id": "M7-3",
+   "name": "购买商品",
+   "status": "SKIP",
+   "detail": "无可负担商品(余额 196)"
+  },
+  {
+   "id": "M7-4",
+   "name": "余额不足拒绝",
+   "status": "SKIP",
+   "detail": "无超额商品可测"
+  },
+  {
+   "id": "M7-5",
+   "name": "交易流水",
+   "status": "PASS",
+   "detail": "9 条"
+  },
+  {
+   "id": "M7-6",
+   "name": "目标投资",
+   "status": "SKIP",
+   "detail": "NPC 无目标或余额不足"
+  },
+  {
+   "id": "M7-7",
+   "name": "辩论押注/投票",
+   "status": "SKIP",
+   "detail": "debates 接口 200,无进行中辩论"
+  },
+  {
+   "id": "M7-8",
+   "name": "委托",
+   "status": "SKIP",
+   "detail": "200,0 条,无 open 委托"
+  },
+  {
+   "id": "M8-1",
+   "name": "动态流(世界有事件)",
+   "status": "WARN",
+   "detail": "0 条"
+  },
+  {
+   "id": "M8-2",
+   "name": "关注/取关",
+   "status": "PASS",
+   "detail": "follow=200 unfollow=200"
+  },
+  {
+   "id": "M8-3a",
+   "name": "公告栏读取",
+   "status": "PASS",
+   "detail": "200"
+  },
+  {
+   "id": "M8-3b",
+   "name": "公告发帖+可见",
+   "status": "FAIL",
+   "detail": "post=403 visible=False"
+  },
+  {
+   "id": "M8-4",
+   "name": "时间胶囊",
+   "status": "WARN",
+   "detail": "post=400 list=0 条"
+  },
+  {
+   "id": "M8-5",
+   "name": "投票",
+   "status": "SKIP",
+   "detail": "200 无开放投票"
+  },
+  {
+   "id": "M8-6",
+   "name": "关系图谱",
+   "status": "PASS",
+   "detail": "24 条关系边"
+  },
+  {
+   "id": "M8-7",
+   "name": "赛季+排行榜",
+   "status": "FAIL",
+   "detail": "season=200 board=404"
+  },
+  {
+   "id": "M8-8",
+   "name": "日报/周报",
+   "status": "PASS",
+   "detail": "latest=200 weekly=200"
+  },
+  {
+   "id": "M8-9",
+   "name": "通知+已读",
+   "status": "PASS",
+   "detail": "3 条, read=200"
+  },
+  {
+   "id": "M8-10",
+   "name": "成就列表",
+   "status": "PASS",
+   "detail": "12 项"
+  },
+  {
+   "id": "M8-11",
+   "name": "每日任务",
+   "status": "PASS",
+   "detail": "200 {\"quest\":{\"id\":\"17d9e616-0bd4-463a-89ed-9f961488436c\",\"date\":\"2026-07-23\",\"quest"
+  },
+  {
+   "id": "M8-12",
+   "name": "探索图鉴",
+   "status": "PASS",
+   "detail": "200"
+  },
+  {
+   "id": "M8-13",
+   "name": "创作者统计",
+   "status": "PASS",
+   "detail": "200"
+  },
+  {
+   "id": "M12-5",
+   "name": "活动事件接口",
+   "status": "PASS",
+   "detail": "200 {\"events\":[{\"id\":\"ebb1641c-5aab-4a0b-b0ff-fb97d2fc29f3\",\"type\":\"weather\",\"title\""
+  },
+  {
+   "id": "M9-1",
+   "name": "读取全部设置",
+   "status": "PASS",
+   "detail": "分区: ['account', 'character', 'interaction', 'privacy', 'llm', 'economy']"
+  },
+  {
+   "id": "M9-2",
+   "name": "PATCH interaction 并回读",
+   "status": "PASS",
+   "detail": "200 回读生效=True"
+  },
+  {
+   "id": "M9-3",
+   "name": "人设编辑",
+   "status": "PASS",
+   "detail": "200 {\"resident_id\":\"7c57e2e0-eeab-451d-b33b-6159f2342b67\",\"name\":\"测试员小柯\",\"sprite_key"
+  },
+  {
+   "id": "M9-4",
+   "name": "自定义 LLM 测试端点",
+   "status": "PASS",
+   "detail": "200 {\"success\":false,\"latency_ms\":null,\"model_response\":null,\"error\":\"Blocked URL: Cannot resolve host '"
+  },
+  {
+   "id": "M1-9",
+   "name": "改密码闭环(账号B)",
+   "status": "PASS",
+   "detail": "change=200 new_login=200 old_login=401"
+  },
+  {
+   "id": "M10-1",
+   "name": "普通账号访问 /admin/* 全部被拒",
+   "status": "PASS",
+   "detail": "16 个接口全部 401/403"
+  },
+  {
+   "id": "M10-1b",
+   "name": "普通账号 admin 写接口被拒",
+   "status": "PASS",
+   "detail": "economy=403 kill-switch=403"
+  },
+  {
+   "id": "M11-1",
+   "name": "研究员列表",
+   "status": "PASS",
+   "detail": "200 0 位"
+  },
+  {
+   "id": "M11-0",
+   "name": "任务列表",
+   "status": "PASS",
+   "detail": "200"
+  },
+  {
+   "id": "M11-2",
+   "name": "创建 Lab 任务+冻结赏金",
+   "status": "FAIL",
+   "detail": "503 task=None 余额 196→196"
+  },
+  {
+   "id": "M6-3",
+   "name": "深度蒸馏全流程",
+   "status": "WARN",
+   "detail": "阶段链: building | {'forge_id': '3afd7fa4-0399-4abf-879b-cd4fac35d9b8', 'status': 'building', 'current_stage': 'build', 'mode': 'quick', 'character_name': '阿达·洛芙莱斯'}"
+  },
+  {
+   "id": "M12-1",
+   "name": "NPC 状态/位置变化(AgentLoop 存活)",
+   "status": "WARN",
+   "detail": "0/19 个居民有变化: []"
+  },
+  {
+   "id": "M12-3",
+   "name": "对话后 NPC 热度",
+   "status": "PASS",
+   "detail": "heat=62"
+  },
+  {
+   "id": "M14-1a",
+   "name": "/health 时延",
+   "status": "PASS",
+   "detail": "p50=144ms p95=148ms"
+  },
+  {
+   "id": "M14-1b",
+   "name": "/residents 时延",
+   "status": "PASS",
+   "detail": "min=0.15s p~90=0.15s"
+  },
+  {
+   "id": "M14-2",
+   "name": "404 错误结构化",
+   "status": "PASS",
+   "detail": "404 {\"detail\":\"Resident not found\"}"
+  },
+  {
+   "id": "M14-3",
+   "name": "响应无敏感字段",
+   "status": "PASS",
+   "detail": "users/me 干净"
+  },
+  {
+   "id": "M14-4",
+   "name": "并发购买一致性",
+   "status": "SKIP",
+   "detail": "账号B 无可负担商品(余额 110)"
+  },
+  {
+   "id": "M1-8",
+   "name": "注册限流 5/min",
+   "status": "PASS",
+   "detail": "codes=[200, 200, 200, 200, 200, 429]"
+  }
+ ]
+}

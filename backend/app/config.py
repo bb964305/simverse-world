@@ -139,8 +139,15 @@ class Settings(BaseSettings):
     user_llm_max_retries: int = 3
     user_llm_concurrency: int = 5
 
-    # --- Media Upload (P2) ---
-    media_upload_dir: str = "backend/static/uploads"
+    # --- Static files & Media Upload (P2) ---
+    # Root directory served at GET /static (portraits, uploaded media). Relative
+    # paths resolve against the process CWD: `backend/` in dev (uvicorn runs
+    # there), `/app` in the Docker image — both yield <cwd>/static.
+    static_dir: str = "static"
+    # Media uploads live UNDER static_dir so they are reachable at
+    # /static/uploads/... . (The old default "backend/static/uploads" pointed
+    # outside the served root in Docker, so every upload URL 404'd.)
+    media_upload_dir: str = "static/uploads"
     media_max_image_size: int = 5 * 1024 * 1024   # 5 MB
     media_max_video_size: int = 50 * 1024 * 1024  # 50 MB
     video_llm_model: str = "kimi-k2.5"

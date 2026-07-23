@@ -108,6 +108,24 @@ async def lifespan(app):
 
 app = FastAPI(title="Simverse World API", lifespan=lifespan)
 
+# --- Static files (P1 fix: uploaded media & AI portraits 404'd in prod) ---
+# Serves /static/* (portraits, uploads) from settings.static_dir. The media
+# service and portrait service both write beneath this root; mounting here is
+# what makes their returned /static/... URLs actually resolvable.
+from pathlib import Path as _Path  # noqa: E402
+from fastapi.staticfiles import StaticFiles  # noqa: E402
+
+_static_root = _Path(settings.static_dir)
+for _sub in ("uploads", "portraits"):
+    (_static_root / _sub).mkdir(parents=True, exist_ok=True)
+if not _Path(settings.media_upload_dir).resolve().is_relative_to(_static_root.resolve()):
+    logger.warning(
+        "MEDIA_UPLOAD_DIR (%s) is outside STATIC_DIR (%s) — uploaded media "
+        "URLs will 404. Fix the deployment env.",
+        settings.media_upload_dir, settings.static_dir,
+    )
+app.mount("/static", StaticFiles(directory=str(_static_root)), name="static")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,

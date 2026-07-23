@@ -111,6 +111,7 @@ export interface MeResponse {
   avatar: string | null
   soul_coin_balance: number
   is_admin: boolean
+  lab_enabled?: boolean
 }
 
 export function getMe(): Promise<MeResponse> {
