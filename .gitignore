@@ -55,3 +55,4 @@ seed_local.py
 .claude/
 .omo/
 *.db-journal
+tmp/
