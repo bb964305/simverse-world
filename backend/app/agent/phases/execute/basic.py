@@ -5,11 +5,39 @@ import logging
 from typing import Any
 
 from app.agent.actions import ActionType
+from app.config import settings
 from app.agent.map_data import get_valid_target_tile
 from app.agent.pathfinder import get_walkable_tiles, find_path
 from app.agent.schemas import TickContext
 
 logger = logging.getLogger(__name__)
+
+
+def _weather_kind(world_events) -> str | None:
+    for e in world_events or []:
+        if e.get("type") == "weather":
+            return (e.get("payload_json") or {}).get("kind")
+    return None
+
+
+def _energy_critical(resident) -> bool:
+    from app.agent.needs import get_needs
+    return get_needs(resident).get("energy", 1.0) < settings.realism_needs_critical
+
+
+def _effective_speed(base: int, weather_kind: str | None, arousal: float | None) -> int:
+    """Realism P1-7: tiles walked per tick = base × weather × arousal (min 1).
+    rain 0.75 / storm 0.5 / snow 0.6; arousal>0.7 ×1.2 (in a hurry)."""
+    factor = 1.0
+    if weather_kind == "rain":
+        factor *= settings.realism_move_rain
+    elif weather_kind == "storm":
+        factor *= settings.realism_move_storm
+    elif weather_kind == "snow":
+        factor *= settings.realism_move_snow
+    if arousal is not None and arousal > settings.realism_move_arousal_threshold:
+        factor *= settings.realism_move_arousal_boost
+    return max(1, round(base * factor))
 
 
 class BasicExecutePlugin:
@@ -44,14 +72,32 @@ class BasicExecutePlugin:
                         walkable,
                     )
                     if path and len(path) >= 2:
-                        next_tile = path[1]
+                        # Realism P1-7: advance up to `speed` path tiles per tick
+                        # (weather/arousal-modulated), instead of a single tile.
+                        if settings.realism_enabled:
+                            arousal = (ctx.resident.mood_json or {}).get("arousal")
+                            speed = _effective_speed(
+                                settings.realism_move_speed,
+                                _weather_kind(getattr(ctx, "world_events", None)),
+                                arousal,
+                            )
+                        else:
+                            speed = 1
+                        idx = min(speed, len(path) - 1)
+                        next_tile = path[idx]
                         ctx.resident.tile_x = next_tile[0]
                         ctx.resident.tile_y = next_tile[1]
                         ctx.resident.status = "walking"
                         ctx.new_tile = next_tile
                     else:
-                        # Already at destination or unreachable — reset to idle
-                        ctx.resident.status = "idle"
+                        # Already at destination or unreachable — reset to idle.
+                        # Realism P1-10: arriving home exhausted → sleep (energy
+                        # recovers overnight; loop wakes within the schedule window).
+                        if (settings.realism_enabled and action == ActionType.GO_HOME
+                                and _energy_critical(ctx.resident)):
+                            ctx.resident.status = "sleeping"
+                        else:
+                            ctx.resident.status = "idle"
                         ctx.new_tile = (ctx.resident.tile_x, ctx.resident.tile_y)
                     await ctx.db.commit()
                 else:
@@ -77,6 +123,17 @@ class BasicExecutePlugin:
                 if ctx.resident.status not in ("chatting", "socializing"):
                     ctx.resident.status = "researching"
                     await ctx.db.commit()
+            elif action == ActionType.EAT:
+                # Realism P1-10: pure state change — restore satiety (must be in a
+                # dining location, enforced by get_available_actions).
+                if ctx.resident.status not in ("chatting", "socializing"):
+                    ctx.resident.status = "idle"
+                if settings.realism_enabled:
+                    from app.agent.needs import get_needs, write_needs
+                    needs = get_needs(ctx.resident)
+                    needs["satiety"] = min(1.0, needs["satiety"] + settings.realism_eat_restore)
+                    write_needs(ctx.resident, needs)
+                await ctx.db.commit()
         except Exception as e:
             logger.warning("Execute failed for %s: %s", ctx.resident.slug, e)
 

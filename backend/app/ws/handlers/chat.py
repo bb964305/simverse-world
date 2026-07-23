@@ -86,8 +86,14 @@ async def handle_start_chat(ctx: ConnectionContext, data: dict) -> None:
                 "reason": f"wake:{slug}",
             })
             # Keep NPC awake: bump heat and update last_conversation_at
-            # so heat_cron won't put them back to sleep for at least 7 days
-            resident.heat = max(resident.heat, 10)
+            # so heat_cron won't put them back to sleep for at least 7 days.
+            # Realism P0-5a: the wake floor is a *pin* (display), keeping real
+            # heat free to reflect actual conversations; last_conversation_at is
+            # what actually blocks re-sleeping. Off → legacy heat bump.
+            if settings.realism_enabled:
+                resident.pinned_heat = max(resident.pinned_heat or 0, 10)
+            else:
+                resident.heat = max(resident.heat, 10)
             resident.last_conversation_at = datetime.now(UTC)
             # Broadcast wake-up to all players (including self)
             await manager.broadcast(
@@ -203,6 +209,20 @@ async def handle_chat_msg(ctx: ConnectionContext, data: dict) -> None:
             recent_dream = await get_recent_dream(db, ctx.resident.id)
         except Exception:
             recent_dream = None
+
+        # Realism P0-2: refresh this resident's event memories via scored vector
+        # retrieval keyed on the recent conversation (last 3 messages incl. the
+        # one just sent). Off → keep the start-time static context (no change).
+        if settings.realism_enabled:
+            try:
+                recent = [m.get("content", "") for m in ctx.chat_messages[-2:]]
+                query_text = " ".join([*recent, text]).strip()[-500:]
+                ctx.memory_context = await MemoryService(db).retrieve_context(
+                    resident_id=ctx.resident.id, user_id=ctx.user_id,
+                    query_text=query_text,
+                )
+            except Exception:
+                logger.debug("realism memory refresh failed", exc_info=True)
     # Session closed — no DB connection held during LLM streaming below.
 
     await manager.send(ctx.user_id, {
@@ -331,6 +351,21 @@ async def handle_end_chat(ctx: ConnectionContext, data: dict) -> None:
             fresh_conv.ended_at = datetime.now(UTC)
 
         await db.commit()
+
+        # Realism P2-2: a completed player↔resident conversation bumps
+        # familiarity (+0.05). Affinity for this path rides the rating
+        # (handle_rate_chat) — the P1-established player-sentiment carrier.
+        # Reuses the existing end-chat event; no-op when the gate is off.
+        if settings.realism_relations_enabled:
+            try:
+                from app.services import relation_service
+                await relation_service.bump(
+                    db, resident_id, ctx.user_id,
+                    d_familiarity=settings.realism_rel_familiarity_chat,
+                    type1="resident", type2="player",
+                )
+            except Exception:
+                logger.warning("player-chat relation bump failed", exc_info=True)
 
         prev_status = fresh_resident.status if fresh_resident else "idle"
         fresh_resident_name = fresh_resident.name if fresh_resident else ""

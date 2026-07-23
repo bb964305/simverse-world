@@ -338,3 +338,89 @@
 - **P1-1 限流子项已完成，主体仍未做（2026-07-08）**：本次只做 §P1-1 的"限流"子项（WS 频控 + REST slowapi）。§P1-1 主体——**LLM 计量（llm_usage 表）+ 每小时预算熔断器 + 分级模型路由**——未开工，这是 🔥 功能（A1/B1/C3/A5 等）的硬闸门。成本优化研究的 E-31（计量字段设计）/E-32（预算熔断稿）已在 `docs/research/DIRECTOR_ROADMAP.md` 备好，下次单独立项。本次限流用的进程内滑窗在 P0-3b Redis 化后应迁 Redis，使多 worker 共享计数。**（2026-07-08 更新：已在 P0-3b `94cdb8a` 迁 Redis ZSET 滑窗，多 worker 共享计数。）**
 - **前端 `npm run build` 在 Node v25 下失败（2026-07-08 发现）**：rolldown 原生 binding `MODULE_NOT_FOUND`，master 基线同样复现（非本次改动引入）。lint 回到基线（7 errors/3 warnings 均为预先存在）、`tsc --noEmit` 通过。需降 Node 至 v22/v20 或换 vite 原生构建解决——记入待办，不在限流 scope 内
 - **Cowork 沙箱 FUSE mount 偶发 unlink EPERM 卡死 git 锁（2026-07-09 E9 提交时遇到）**：一次崩溃的 `git commit` 残留 `.git/HEAD.lock`+`.git/index.lock`，之后 mount 拒绝 unlink（`Operation not permitted`，即便文件属主是自己），令后续所有 `git commit` 死锁。绕过办法：`GIT_INDEX_FILE=/tmp/svidx git read-tree HEAD && git add … && git write-tree` 用 /tmp 索引避开 mount 锁 → `git commit-tree` 造 commit 对象（对象写入正常，仅清理临时对象报 EPERM 无害）→ 用文件工具直接覆写 `.git/refs/heads/<branch>` 松散 ref（覆写/新建不需 unlink）→ `git log` 经 HEAD symref 指向新 SHA。残留 `.lock` 只要不再请求 git 去锁同名 ref 就无害。**后续提交若再遇到需重复此法**；根因是 mount 层限制，非仓库损坏
+
+## Kickoff REALISM — P0 一致性修复（2026-07-22）
+
+- **目标**：按 `docs/KICKOFF_PROMPT_REALISM.md` + `docs/REALISM_OPTIMIZATION_PLAN.md` 完成 P0（任务 1–6）后再进 P1（任务 7–13）。纯规则、零新增 LLM 调用，行为改变门控 `REALISM_ENABLED`（代码默认 False）。
+- **基线（改动前绿，回滚基准）**：`cd backend && ./.venv/bin/python -m pytest` = **1106 passed / 1 skipped / 11 deselected（lab_oci）/ exit 0（89s）**。collect=1107/1118。远超 kickoff "基线 711+"。
+- **计划**：`docs/superpowers/plans/2026-07-22-realism-p0.md`（TDD bite-sized，Task 0 config 基础设施 + 任务 1–6）。P1 计划待 P0 全绿后写。
+- **偏差登记（kickoff 授权"以代码为准记偏差"）**：
+  1. **分支从 `feat/lab-agent-v1` 切 `feat/realism-p0`**（非 master）：当前分支领先 master 78 commits，含 Lab 迁移链头 037 + 被 Task 5b 引用的 `sweep_orphan_lab_runs` 回收范式；回退 master 会丢迁移链且与 Explore 分析的工作树不一致。
+  2. **Task 1 `plan.target` 语义漂移**：PLAN prompt 现让 LLM 把入口坐标 `[x,y]` 塞进 `target`、`location` 存地点名（`plan/basic.py:42,50`），故 `_force_execute_plan` 拿 `plan.target` 当 slug + `target_tile=None` 导致计划移动永远原地。修复=改 prompt 让 target 输出地点 id + 服务端从 id/名称解析 tile（忽略模型坐标）。
+  3. **Task 3 玩家聊天 mood 不接**：方案称"两条路径都接"，但玩家聊天路径当前**无 positive/neutral/negative 输出**（`extract_events` prompt 无 mood 字段）；玩家侧情绪已由 `rating.py:54-58` 评分钩子承载。只接居民互聊路径；玩家 in-line mood 需给 LLM 输出加字段，超出"唯一例外=梦境 tone"授权，故不实现。
+  4. **Task 1 放弃改 PLAN prompt**：原计划改 prompt 让 target 输出地点 id，评估后改为纯靠 `resolve_target_tile` 的 id/名称双路解析（plan.location 已可靠存地点名，decide LLM target_slug 按 id+name 双试），避免 prompt-content 测试风险，收益等价。
+
+### P0 完成（全绿，2026-07-22）
+
+- **验收门全绿**：`cd backend && ./.venv/bin/python -m pytest` = **1145 passed / 1 skipped / 11 deselected（lab_oci 既有）/ 0 failed / exit 0（152s）**。基线 1106 → +39 新测试，**只增不减、零新增排除**。
+- **提交链**（`feat/realism-p0`）：`70a6a3d` docs → `d446701` p0-0 config → `1d9cf61` p0-1 移动 → `145760f` p0-2 检索+遗忘 → `83c8911` p0-3 情绪 → `bf25fc1` p0-4 剧本 → `2c7f8d3` p0-5a heat → `4115c83` p0-5b 回收 → `6e135ec` p0-5c Redis → `0272c0a` p0-5d coin → `81bfeea` p0-6 探针。
+- **新机制全部门控 `REALISM_ENABLED`（默认 False）**：off 时行为 == 现状（1106 既有测试零改动通过）；纯基础设施重构（5c Redis 迁移、5d coin 原子化）语义等价、不门控。
+- **迁移 038**（`archived_at`/`pinned_heat`/`approved_at`）链尾单头（down_revision=037，`grep` 计数=1）；测试走 sqlite `create_all`，PG 待部署时 `alembic upgrade`。
+- **两个 P0 探针出数**（seeded fixture 演示，非真 agent burn-in——真 burn-in 需开 loop+时间，按"不部署/等拍板"延后）：
+  - **计划到达率 = 75.0%**（4 个 VISIT_DISTRICT trip 中 3 个到达；修复前≈0，目标 >70% ✅）
+  - **行为-记忆一致率 = 100.0%**（8 条移动记忆文本全部匹配真实位移；目标 >95% ✅）
+  - 探针纯函数 `plan_arrival_rate`/`behavior_memory_consistency`/`fetch_move_records`/`render_probes` 已带单测（`test_burnin_report.py` +4）。
+- **下一步**：进 P1（任务 7–13），新开 `feat/realism-p1`。不部署。
+
+### P1 进展（feat/realism-p1，2026-07-22）
+
+- `e286fed` p1-0 config（weather/needs/emotion/calibration 全部 REALISM_* + .env.example）
+- `dac3a49` p1-7 移动提速（execute 走 speed 格，天气/唤醒调制；plan 附通勤分钟）+ 前端四连（tsc/eslint/vitest 绿，build 因 Node v25 rolldown 既有失败）
+- `05d6bde` p1-8 天气影响（活动概率乘子 + 躲雨改道 + 天气心情）
+- `29d7e72` p1-9 星期/节日（周末作息 + 节日社交 +0.2；festival 地点×3 权重因无候选权重层简化为社交时段加成，记偏差）
+
+#### Task 10 三需求底座 — 设计小结（动手前）
+- **状态**：`resident.meta_json.needs = {energy, satiety, social}`（0–1，init 0.8）。纯函数模块 `app/agent/needs.py`：`get_needs/write_needs/metabolize(needs,status,sbti)/most_critical(needs)`。
+- **代谢挂点**：`resident_tick` 顶部（daily-limit 后、phase chain 前）对活跃居民代谢（清醒-0.004/walking-0.006、satiety-0.005、social 按 So1 内外向 -0.001/-0.006/-0.003）——**不计每日行动数**（在 phase chain 外）。睡眠恢复+唤醒：loop 改为 realism 时**不排除 sleeping** 居民，在 guarded_tick 里对 sleeping 居民 energy+0.02、恢复到阈值且在作息窗内→醒（status idle），否则续睡（不跑完整 tick）。
+- **EAT 动作**：`ActionType.EAT`（纯状态：satiety+=0.5）；`get_available_actions` 在餐饮类地点（`map_data` 地点加 `category`，cafe/tavern→dining）加 EAT；execute 处理 EAT。
+- **裁决层**（decide，Case 1 高重要度计划之下、plan-skip 之上）：energy<0.25→GO_HOME（到家 execute 置 sleeping）；satiety<0.25→在餐饮地点则 EAT，否则 VISIT_DISTRICT 最近餐饮；social<0.25→软提升 CHAT 权重（非硬 force，按方案表格）。
+- **prompt**：decide/chat 注入一行需求摘要（"你有点饿了"）。
+- **偏差**：睡眠恢复/唤醒需 loop 纳入 sleeping 居民（原 loop 显式排除）——realism on 才纳入，off 时行为与现状完全一致。
+
+### P1 完成（全绿，2026-07-22）
+
+- **验收门全绿**：`cd backend && ./.venv/bin/python -m pytest` = **1181 passed / 1 skipped / 11 deselected（lab_oci 既有）/ 0 failed / exit 0（143s）**。基线 1106 → +75 新测试，只增不减、零新增排除。
+- **前端四连**：`tsc --noEmit` rc=0、`eslint .` rc=0、`vitest run` 77 passed；**build 因 Node v25 rolldown 原生 binding 缺失失败（既有基线问题，PROGRESS 早有记录，本次未改任何前端代码，WS payload 形状不变）**。3/4 绿，第 4 项被已知环境问题阻塞。
+- **提交链**（`feat/realism-p1`，接 P0 之后）：`e286fed` p1-0 config → `dac3a49` p1-7 移动 → `05d6bde` p1-8 天气 → `29d7e72` p1-9 星期节日 → `21a02f1` p1-10 三需求 → `289446d` p1-11 情绪环 → `4ff9480` p1-12 校准 → `c578dd2` p1-13 探针 → `<fixup>` EAT append-only 末位。
+- **四个探针出数**（seeded fixture 演示，非真 agent burn-in；真 burn-in 待开 loop+时间，按"不部署/等拍板"延后）：
+  - **计划到达率 = 83.3%**（P0，>70% ✅）
+  - **行为-记忆一致率 = 100.0%**（P0，>95% ✅）
+  - **地点小时人流 = dining{12:2, 19:1}, other{9:1,10:1}**（P1，dining 呈午/晚双峰 ✅）
+  - **需求健康度 = energy(均0.667/低0.4) satiety(均0.517/低0.15) social(均0.533/低0.3)，饥饿 1/3 人**（P1，无持续死锁 ✅）
+- **新机制全部门控 `REALISM_ENABLED`（默认 False）**：off 时 1106 既有测试零改动通过。
+- **P1 偏差登记**：
+  1. Task 8 `location_is_indoor` 据 `type` 派生（不逐地点手标 indoor）；`location_category` dining 用 cafe/tavern 白名单（不逐地点手标 category）——行为等价，显式键仍可覆盖。
+  2. Task 9 festival 地点 VISIT_DISTRICT ×3 权重未实现（无候选权重层），社交时段 +0.2 为实装效果。
+  3. Task 11 valence<-0.4 的 CHAT×0.5/REFLECT×2 硬权重 + 对话轮数随 valence 未升为硬机制（无动作候选权重层），保留现有 mood-label 软 prompt 提示。
+  4. Task 12 归一化对 gossip(≥0.6)/检索排序有连带影响（realism on 时的预期校准效应）；<10 条历史跳过归一化避免冷启动失真。
+- **交付状态**：双分支 CI 绿 —— `feat/realism-p0`（P0，1145 passed）+ `feat/realism-p1`（P0+P1，1181 passed）+ 四探针出数。**不部署，等 Jimmy 拍板真实 burn-in。**
+
+### P2 完成（feat/realism-p2，从 feat/realism-p1 切，2026-07-22）
+
+- **验收门全绿**：`cd backend && python -m pytest` = **1243 passed / 1 skipped / 11 deselected（lab_oci 既有）/ 0 failed**。基线 1181 → +62 新测试，只增不减、零新增排除。
+- **三个独立开关默认 False**：`REALISM_RELATIONS_ENABLED` / `REALISM_INFO_GRADIENT_ENABLED` / `REALISM_CROWD_ENABLED`（互相独立、且独立于 `REALISM_ENABLED`）。任一关闭时对应路径行为与现状完全一致；全关时 1181 既有测试零改动通过。数值参数续 `REALISM_` 前缀进 config + `.env.example`。
+- **提交链**（每任务独立提交、带任务号，串行门：1→2、5→6 已守）：
+  - `realism-p2-1` resident_relations 表 + RelationService（原子 upsert + 规范化无向键 + 周衰减）+ 迁移 039（单头）
+  - `realism-p2-2` 写入面接线（互聊/玩家聊天/目击/送礼/投资 四触发点，复用既有输出零新增 LLM）
+  - `realism-p2-3` 读取面加权采样（偶遇/招呼/八卦/CHAT 目标/对话轮数 五处，注入 RNG + seeded 断言）
+  - `realism-p2-4` 圈子检测（连通分量）+ 三消费端（日报行 / `GET /admin/social-graph` / 剧本 `circle:<id>`）
+  - `realism-p2-5` 废除全知广播（信息梯度：地理相关+20% 灵通样本，天气全员例外，一手带 event_id）
+  - `realism-p2-6` 八卦成为二手通道（event_id 记忆进候选池、二手继承 event_id+hops，链路成立）
+  - `realism-p2-7` 人流聚集（节日地点 VISIT_DISTRICT ×3 抽签 + 从众 prompt 微提示）
+  - `realism-p2-8` 两探针（度分布偏度 + 信息扩散半衰期）出数
+- **两个新探针出数**（seeded fixture 演示，非真 agent burn-in；真 burn-in 待开 loop+时间，按"不部署/等拍板"延后）：
+  - **社交网络度分布偏度 = 1.775**（星形图 hub+6 spoke：节点 7、均度 2.0、度 1–6、直方图 {1:4, 2:2, 6:1}）——**右偏>0 = 存在社交明星与边缘者 ✅**；关闭开关的对照组（均匀随机）应近 0/近对称（`test_skewness_regular_graph_is_symmetric` 演示规则图 skew=0）。
+  - **信息扩散半衰期**：非天气事件 `ev1` 知情 5/7（71%）、**到 50% = 2.0h（数小时量级、非瞬时 ✅）**；对照组全知广播所有一手同刻写入 → t50≈0（`test_half_life_control_instant` 演示）。
+  - **知情顺序×关系强度 Pearson < 0**（信息沿强关系先流动，`test_diffusion_relation_correlation_negative_along_ties` 演示）。
+- **P2 偏差登记**：
+  1. **P2-1 clamp 可移植**：`familiarity/affinity` 增量封顶用 SQLAlchemy `CASE` 而非方案示例的 `LEAST/GREATEST`（SQLite 无此函数）——同一语句在测试 SQLite 与生产 Postgres 都跑，语义等价（原子 UPDATE 不变）。读取面加 `populate_existing` 避免同 session `synchronize_session=False` 写后读到身份映射旧值（coin_service 同类坑）。
+  2. **P2-2 玩家路径拆两点**：玩家↔居民 familiarity 记在 `handle_end_chat`（对话完成、无关评分），affinity 记在 `handle_rate_chat`（4-5★+0.03 / 1-2★−0.03）——玩家侧无 wrapup 情绪信号,续 P1「玩家聊天 mood 由 rating 承载」惯例。送礼 affinity 直接消费 item `relationship_boost`（0.08–0.15，接通诊断点名的"未见消费端"）,非固定 +0.1。
+  3. **P2-3 轮数确定式**：`turns_for_familiarity` 纯确定式插值（无 RNG，完全可复现），familiarity→[3,8]（<0.2≈3–4、>0.7≈6–8）。关系批量取进 `TickContext.relations`（每 tick +1 查询、非每候选，守性能红线）。CHAT 目标混入 ε=0.1 均匀分量（硬要求,防圈子僵化）。
+  4. **P2-4 圈子**：`circle_id = 最小成员 id`（成员稳定则跨夜稳定）；JSON 快照进 Redis；管理端只交付 JSON 端点，前端可视化不做（按方案；rolldown build 既有问题延续）。剧本 `circle:<id>` 靠 nightly 已 stamp 的 `meta_json.circle_id` 展开（关系关时 circle_id 不写 → 自然空展开）。
+  5. **P2-5 地理相关**：`location_visits` 是**玩家**访问表（非居民），故"近 7 天到访者"对居民不可用——地理相关改用**居民当前位置**在事件地点半径内（`payload_json.location_id`；现有节日 payload 无地点 → 默认只走 20% 灵通样本,仍 <50% 知情）。天气全员例外保留。
+  6. **P2-6 候选分类挪到 Python**：八卦候选池的 event_id 判定在 Python 做（metadata JSON 无法可移植 SQL 过滤）；事件类记忆 floor 降到 0.3 让 ×0.8/跳的 importance 撑过几跳（"朋友的朋友"）。关闭梯度时回落经典过滤（≥0.6+related_resident）,与 P1 字节一致。
+  7. **P2-7 补完 P1-9 偏差**：节日地点 ×3 权重以 decide 级**加权抽签重定向**实现（在计划/需求/躲雨之下、LLM 之上；抽中事件地点才重定向,故是 ×3 拉力非硬赶人）——补上 P1 记录的"无候选权重层"。从众提示为 decide-prompt 软注入；地点人数计数缓存 ~30s（每 tick 批一次查询、非每居民）。
+  8. **测试隔离硬化（非 app/lab 源码）**：全量套件里 `test_lab_e2e::test_approval_chain_v1_approve` 是既有的事件循环时序 flake（审批行与 `run.status='needs_approval'` 分两次提交,poll helper 抢跑读到瞬时 'running'）——本次新增测试文件改变了调度时序使其确定复现,遂**只**硬化其 poll helper（等 status 提交落定再返回）,未碰 `app/lab/` 任何源码。
+- **选做项不做**：世界时钟（§3.1B）与记忆失真（§6.3，唯一有 LLM 成本项）本次明确排除,按 kickoff 完成 8 项后停下等 Jimmy 拍板。
+- **交付状态**：`feat/realism-p2` CI 绿（1243 passed）+ 两探针出数 + PROGRESS 更新。**不合并、不部署,等 Jimmy 拍板真实 burn-in 与 REALISM_* 生产默认值。**
+

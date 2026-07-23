@@ -4,7 +4,6 @@ Hooked into the LocationTracker consumer (on location enter). Pure rule + a
 probability roll (no LLM). Cooldown is in-memory (1h per user+location, ≤5/day).
 """
 
-import time
 import random
 import logging
 from datetime import datetime, UTC
@@ -12,7 +11,9 @@ from datetime import datetime, UTC
 from sqlalchemy import select
 
 from app.agent.map_data import get_location_by_id
+from app.config import settings
 from app.models.resident import Resident
+from app.redis_client import get_redis
 from app.ws.manager import manager
 
 logger = logging.getLogger(__name__)
@@ -20,9 +21,17 @@ logger = logging.getLogger(__name__)
 ENCOUNTER_COOLDOWN_SECONDS = 3600
 ENCOUNTER_DAILY_CAP = 5
 ENCOUNTER_BASE_PROB = 0.3
+_DAILY_TTL_SECONDS = 2 * 86400
 
-_cooldown: dict[tuple[str, str], float] = {}
-_daily: dict[tuple[str, str], int] = {}
+
+# Realism P0-5c: cooldown/daily count live in Redis (cross-worker, survives
+# restart) instead of process-local dicts.
+def _cooldown_key(user_id: str, location_id: str) -> str:
+    return f"sv:enc_cd:{user_id}:{location_id}"
+
+
+def _daily_key(user_id: str, today: str) -> str:
+    return f"sv:enc_daily:{user_id}:{today}"
 
 # Situational openers by location id; fallback used otherwise.
 OPENERS: dict[str, str] = {
@@ -39,22 +48,19 @@ DEFAULT_OPENER = "{name}正好也在这里"
 
 
 def _reset_for_tests() -> None:  # pragma: no cover
-    _cooldown.clear()
-    _daily.clear()
+    # Redis-backed now; fakeredis is installed fresh per test (conftest), so
+    # there is no process-local state left to clear. Kept for call-site compat.
+    pass
 
 
-async def maybe_encounter(db, user_id: str, location_id: str) -> dict | None:
+async def maybe_encounter(db, user_id: str, location_id: str, rng=random) -> dict | None:
     """Maybe surface an encounter with a nearby idle resident. Returns the payload if sent."""
-    now = time.monotonic()
     today = datetime.now(UTC).date().isoformat()
+    r = get_redis()
 
-    # Membership check, not a 0.0 default: time.monotonic() is seconds since
-    # boot, so on a machine up < 1h the 0.0 default made the first encounter
-    # look "on cooldown" and killed it (same bug as witness dedup, 45be03f).
-    last = _cooldown.get((user_id, location_id))
-    if last is not None and now - last < ENCOUNTER_COOLDOWN_SECONDS:
+    if await r.exists(_cooldown_key(user_id, location_id)):
         return None
-    if _daily.get((user_id, today), 0) >= ENCOUNTER_DAILY_CAP:
+    if int(await r.get(_daily_key(user_id, today)) or 0) >= ENCOUNTER_DAILY_CAP:
         return None
 
     loc = get_location_by_id(location_id)
@@ -72,10 +78,23 @@ async def maybe_encounter(db, user_id: str, location_id: str) -> dict | None:
     if not residents:
         return None
 
-    if random.random() >= ENCOUNTER_BASE_PROB:
+    if rng.random() >= ENCOUNTER_BASE_PROB:
         return None
 
-    resident = random.choice(residents)
+    # P2-3: familiar residents are likelier to "happen to" be the one you run
+    # into — weight 1 + coef×familiarity(player, resident). Uniform when off.
+    if settings.realism_relations_enabled:
+        from app.services import relation_service
+        rels = await relation_service.relations_for(db, user_id, party_type="player")
+        coef = settings.realism_rel_encounter_fam_coef
+
+        def _w(r):
+            v = rels.get(r.id)
+            return 1.0 + coef * (v.familiarity if v else 0.0)
+
+        resident = relation_service.weighted_pick(residents, _w, rng)
+    else:
+        resident = rng.choice(residents)
     opener = OPENERS.get(location_id, DEFAULT_OPENER).format(name=resident.name)
     payload = {
         "type": "encounter_prompt",
@@ -90,6 +109,8 @@ async def maybe_encounter(db, user_id: str, location_id: str) -> dict | None:
         logger.warning("encounter_prompt send failed", exc_info=True)
         return None
 
-    _cooldown[(user_id, location_id)] = now
-    _daily[(user_id, today)] = _daily.get((user_id, today), 0) + 1
+    await r.set(_cooldown_key(user_id, location_id), "1", ex=ENCOUNTER_COOLDOWN_SECONDS)
+    cnt = await r.incr(_daily_key(user_id, today))
+    if cnt == 1:  # first encounter today — set the midnight-ish cleanup TTL once
+        await r.expire(_daily_key(user_id, today), _DAILY_TTL_SECONDS)
     return payload

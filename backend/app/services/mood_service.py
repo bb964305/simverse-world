@@ -107,3 +107,31 @@ async def decay_all(db: AsyncSession) -> int:
     if n:
         await db.commit()
     return n
+
+
+async def apply_weather_mood(db: AsyncSession, *, hour: int | None = None) -> int:
+    """Realism P1-8: a weak, long-running weather nudge on mood (hourly via
+    heat_cron). rain/storm depress; a sunny morning lifts a little. Off = no-op."""
+    from app.config import settings
+    if not settings.realism_enabled:
+        return 0
+    from app.tasks.weather import get_current_weather
+    kind = (await get_current_weather(db) or {}).get("kind")
+    if hour is None:
+        hour = datetime.now().hour
+    if kind in ("rain", "storm"):
+        dv = settings.realism_weather_mood_rain_valence
+        da = settings.realism_weather_mood_rain_arousal
+    elif kind == "sunny" and 6 <= hour < 10:
+        dv = settings.realism_weather_mood_sunny_valence
+        da = 0.0
+    else:
+        return 0
+    residents = (await db.execute(
+        select(Resident).where(Resident.status != "sleeping")
+    )).scalars().all()
+    for r in residents:
+        r.mood_json = _apply(get_mood(r), dv, da)
+    if residents:
+        await db.commit()
+    return len(residents)

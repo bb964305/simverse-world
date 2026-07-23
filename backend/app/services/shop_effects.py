@@ -14,6 +14,8 @@ import logging
 import re
 from typing import Awaitable, Callable
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 EffectHandler = Callable[..., Awaitable[dict | None]]
@@ -208,6 +210,19 @@ async def _gift_effect(db, user_id, item, qty, context):
         await apply_mood_event(db, resident, dv=0.25, da=0.1)
     except Exception:
         logger.warning("gift mood bump failed", exc_info=True)
+
+    # Realism P2-2: a gift raises affinity (player→resident) by the item's
+    # relationship_boost — this is the consumer the diagnosis report flagged as
+    # missing ("未见消费端"). No-op when the relations gate is off.
+    if settings.realism_relations_enabled:
+        try:
+            from app.services import relation_service
+            await relation_service.bump(
+                db, resident.id, user_id, d_affinity=boost,
+                type1="resident", type2="player",
+            )
+        except Exception:
+            logger.warning("gift relation bump failed", exc_info=True)
 
     return {"gift": item.code, "resident_slug": slug, "relationship_boost": boost, "creator_share": share}
 

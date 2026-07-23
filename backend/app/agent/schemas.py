@@ -53,6 +53,10 @@ class TickContext:
     schedule_phase: str
     nearby_residents: list[Resident] = field(default_factory=list)
     nearby_known: dict[str, str] = field(default_factory=dict)  # resident_id -> relationship text
+    # P2-3: batched numeric relations for read-path weighted sampling
+    # (other_id -> RelationView), loaded once per tick (perf: +1 query, never
+    # per-candidate). None until first loaded; {} means "loaded, no relations".
+    relations: dict | None = None
     current_plan: HourlyPlan | None = None
     daily_goal: DailyGoal | None = None
     # A1: the resident's active life goal {"title", "progress"}, fetched

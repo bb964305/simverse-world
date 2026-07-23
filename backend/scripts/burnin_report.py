@@ -32,7 +32,7 @@ from datetime import datetime, timedelta, UTC
 # `python scripts/burnin_report.py` 直接跑时保证 `app` 可导入
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import select, func  # noqa: E402
 
 from app.models.llm_usage import LLMUsage  # noqa: E402
 
@@ -232,6 +232,317 @@ def render_report(
 
 
 # ---------------------------------------------------------------------------
+# 拟真探针（realism P0-6 验收）：读移动记忆的 move 面包屑（memorize 写入的
+# metadata_json["move"] = {intent, target, moved, arrived}），纯函数聚合。
+# ---------------------------------------------------------------------------
+async def fetch_move_records(session, since: datetime) -> list[dict]:
+    """拉窗口内带 move 面包屑的动作记忆，规约为 probe 用的扁平 dict 列表。"""
+    from app.models.memory import Memory
+    stmt = (
+        select(Memory.resident_id, Memory.content, Memory.metadata_json, Memory.created_at)
+        .where(Memory.source == "agent_action", Memory.created_at >= since)
+    )
+    records: list[dict] = []
+    for rid, content, meta, created in (await session.execute(stmt)).all():
+        mv = meta.get("move") if isinstance(meta, dict) else None
+        if not isinstance(mv, dict):
+            continue
+        ts = created.astimezone(UTC) if created.tzinfo else created
+        records.append({
+            "resident_id": rid,
+            "content": content or "",
+            "day": _day_key(created),
+            "hour": ts.hour,
+            "target": mv.get("target"),
+            "intent": mv.get("intent"),
+            "moved": bool(mv.get("moved")),
+            "arrived": bool(mv.get("arrived")),
+        })
+    return records
+
+
+async def fetch_resident_needs(session) -> list[dict]:
+    """当前全体居民的三需求快照（realism P1-13 需求健康度探针）。"""
+    from app.models.resident import Resident
+    rows = (await session.execute(select(Resident.meta_json))).all()
+    out: list[dict] = []
+    for (meta,) in rows:
+        needs = meta.get("needs") if isinstance(meta, dict) else None
+        if isinstance(needs, dict):
+            out.append(needs)
+    return out
+
+
+def location_hourly_traffic(records: list[dict]) -> dict[str, dict[int, int]]:
+    """地点小时人流曲线：按 category 地点 × 小时统计到达计数（读到达记忆的
+    target→category + hour）。期望餐饮出现午晚双峰。"""
+    from app.agent.map_data import location_category
+    traffic: dict[str, dict[int, int]] = {}
+    for r in records:
+        if not r["arrived"] or not r["target"]:
+            continue
+        cat = location_category(r["target"]) or "other"
+        traffic.setdefault(cat, {})
+        traffic[cat][r["hour"]] = traffic[cat].get(r["hour"], 0) + 1
+    return traffic
+
+
+def needs_health(needs_list: list[dict]) -> dict | None:
+    """需求健康度：全体三需求的均值/最低值 + 持续饥饿（satiety<临界）人数。
+    死锁信号 = starving 人数高居不下。无居民返回 None。"""
+    if not needs_list:
+        return None
+    from app.config import settings
+    keys = ("energy", "satiety", "social")
+    stats: dict = {}
+    for k in keys:
+        vals = [float(n.get(k, 1.0)) for n in needs_list if isinstance(n.get(k), (int, float))]
+        if vals:
+            stats[k] = {"mean": round(sum(vals) / len(vals), 3), "min": round(min(vals), 3)}
+    starving = sum(1 for n in needs_list
+                   if isinstance(n.get("satiety"), (int, float))
+                   and n["satiety"] < settings.realism_needs_critical)
+    stats["starving_count"] = starving
+    stats["residents"] = len(needs_list)
+    return stats
+
+
+def plan_arrival_rate(records: list[dict]) -> float | None:
+    """计划到达率：VISIT_DISTRICT 计划-地点 trip（resident+target+day 去重）中实际
+    到达的比例。修复前 ≈0（计划移动不动），目标 >70%。无 trip 返回 None。"""
+    trips: dict[tuple, bool] = {}
+    for r in records:
+        if r["intent"] != "VISIT_DISTRICT" or not r["target"]:
+            continue
+        key = (r["resident_id"], r["target"], r["day"])
+        trips[key] = trips.get(key, False) or r["arrived"]
+    if not trips:
+        return None
+    return sum(1 for v in trips.values() if v) / len(trips)
+
+
+def behavior_memory_consistency(records: list[dict]) -> float | None:
+    """行为-记忆一致率：移动记忆文本与真实位移状态一致的比例（arrived⇒含"到达"、
+    moved⇒含"前往"、未移动⇒不含"到达/前往"）。目标 >95%。无样本返回 None。"""
+    if not records:
+        return None
+    ok = 0
+    for r in records:
+        c = r["content"]
+        if r["arrived"]:
+            consistent = "到达" in c
+        elif r["moved"]:
+            consistent = "前往" in c
+        else:
+            consistent = ("到达" not in c and "前往" not in c)
+        ok += 1 if consistent else 0
+    return ok / len(records)
+
+
+def render_probes(records: list[dict]) -> str:
+    out = ["== 拟真探针（P0 验收）=="]
+    out.append(f"  计划到达率        = {_pct(plan_arrival_rate(records))}"
+               "（VISIT_DISTRICT 计划-地点 trip 到达比例；修复前≈0，目标 >70%）")
+    out.append(f"  行为-记忆一致率   = {_pct(behavior_memory_consistency(records))}"
+               "（移动记忆文本匹配真实位移；目标 >95%）")
+    out.append(f"  样本 = {len(records)} 条移动记忆"
+               "（realism 关或无 agent 移动时为 0，探针显示 '-'）")
+    return "\n".join(out)
+
+
+def render_probes_p1(records: list[dict], needs_list: list[dict]) -> str:
+    out = ["== 拟真探针（P1 验收）=="]
+    traffic = location_hourly_traffic(records)
+    if traffic:
+        out.append("  地点小时人流（category → {小时:到访数}）：")
+        for cat in sorted(traffic):
+            hours = ", ".join(f"{h}:{traffic[cat][h]}" for h in sorted(traffic[cat]))
+            out.append(f"    {cat:<8} {{{hours}}}")
+        out.append("    （期望：dining 午/晚双峰、雨天户外下降）")
+    else:
+        out.append("  地点小时人流 = -（无到达记忆）")
+    nh = needs_health(needs_list)
+    if nh:
+        parts = ", ".join(
+            f"{k}(均{nh[k]['mean']}/低{nh[k]['min']})" for k in ("energy", "satiety", "social") if k in nh)
+        out.append(f"  需求健康度 = {parts}")
+        out.append(f"    饥饿(satiety<临界)={nh['starving_count']}/{nh['residents']} 人"
+                   "（持续高企=需求死锁信号）")
+    else:
+        out.append("  需求健康度 = -（无居民 needs 数据；realism 关或未起 tick）")
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# P2 验收探针（社会结构）：社交网络度分布偏度 + 信息扩散半衰期
+# ---------------------------------------------------------------------------
+async def fetch_relation_edges(session) -> list[tuple[str, str, float]]:
+    """resident_relations 中 familiarity>0.1 的居民-居民边 (a, b, familiarity)。"""
+    from app.models.resident_relation import ResidentRelation
+    rows = (await session.execute(
+        select(ResidentRelation.party_a, ResidentRelation.party_b, ResidentRelation.familiarity,
+               ResidentRelation.party_a_type, ResidentRelation.party_b_type)
+    )).all()
+    return [(a, b, float(fam)) for a, b, fam, at, bt in rows
+            if fam is not None and fam > 0.1 and at == "resident" and bt == "resident"]
+
+
+async def fetch_event_diffusion(session) -> dict:
+    """事件记忆（一手 world_event + 二手 gossip，带 event_id）+ 事件类型 + 居民总数。"""
+    from app.models.memory import Memory
+    from app.models.world_event import WorldEvent
+    from app.models.resident import Resident
+    ev_type = {eid: t for eid, t in (await session.execute(
+        select(WorldEvent.id, WorldEvent.type))).all()}
+    records = []
+    for rid, meta, created in (await session.execute(
+        select(Memory.resident_id, Memory.metadata_json, Memory.created_at)
+        .where(Memory.source.in_(("world_event", "gossip")))
+    )).all():
+        eid = (meta or {}).get("event_id")
+        if eid:
+            records.append({"event_id": eid, "resident_id": rid, "created_at": created})
+    total = (await session.execute(select(func.count()).select_from(Resident))).scalar_one()
+    return {"records": records, "event_type": ev_type, "total_residents": total or 0}
+
+
+def degree_distribution_skewness(edges: list[tuple[str, str, float]]) -> dict | None:
+    """居民对话/关系图的度分布 + 偏度（Fisher-Pearson g1，纯 Python）。右偏(>0) =
+    存在社交明星与边缘者；关闭开关的对照组因均匀随机应近 0/近对称。无边返回 None。"""
+    if not edges:
+        return None
+    from collections import Counter
+    deg: Counter = Counter()
+    for a, b, _ in edges:
+        deg[a] += 1
+        deg[b] += 1
+    degrees = list(deg.values())
+    n = len(degrees)
+    mean = sum(degrees) / n
+    var = sum((d - mean) ** 2 for d in degrees) / n
+    std = var ** 0.5
+    skew = 0.0 if std == 0 else (sum((d - mean) ** 3 for d in degrees) / n) / (std ** 3)
+    return {
+        "skewness": round(skew, 3),
+        "n_nodes": n,
+        "mean_degree": round(mean, 2),
+        "max_degree": max(degrees),
+        "min_degree": min(degrees),
+        "histogram": dict(sorted(Counter(degrees).items())),
+    }
+
+
+def _ts(x):
+    return x if x is not None else datetime.min.replace(tzinfo=UTC)
+
+
+def info_diffusion_half_life(diffusion: dict, exclude_weather: bool = True) -> dict:
+    """每个非天气事件：知情居民比例随模拟时间的终值 + 到 50% 的时长（小时）。
+    梯度开启时应为数小时量级；对照组(全知广播)所有一手记忆同刻写入 → t50≈0。"""
+    from collections import defaultdict
+    records = diffusion["records"]
+    ev_type = diffusion["event_type"]
+    total = diffusion["total_residents"] or 1
+    per_event: dict[str, list] = defaultdict(list)
+    for r in records:
+        if exclude_weather and ev_type.get(r["event_id"]) == "weather":
+            continue
+        per_event[r["event_id"]].append((r["created_at"], r["resident_id"]))
+
+    events = []
+    for eid, entries in per_event.items():
+        entries.sort(key=lambda e: _ts(e[0]))
+        start = entries[0][0]
+        seen: set[str] = set()
+        t50 = None
+        for ts, rid in entries:
+            seen.add(rid)
+            if t50 is None and len(seen) / total >= 0.5:
+                t50 = ((ts - start).total_seconds() / 3600.0) if (ts and start) else 0.0
+        events.append({
+            "event_id": eid,
+            "informed_count": len(seen),
+            "informed_ratio": round(len(seen) / total, 3),
+            "time_to_50pct_hours": (round(t50, 3) if t50 is not None else None),
+        })
+    events.sort(key=lambda e: -e["informed_ratio"])
+    return {"events": events, "total_residents": total}
+
+
+def diffusion_relation_correlation(diffusion: dict, edges: list[tuple[str, str, float]]) -> float | None:
+    """抽样验证「知情顺序与关系强度正相关」：取扩散最广的非天气事件，计算被通知
+    次序 rank 与该居民对已知情集合的最大 familiarity 的 Pearson 相关。信息若沿强关系
+    流动,越晚知情者与先知情者的关系越弱 → 期望负相关。样本不足返回 None。"""
+    from collections import defaultdict
+    ev_type = diffusion["event_type"]
+    per_event: dict[str, list] = defaultdict(list)
+    for r in diffusion["records"]:
+        if ev_type.get(r["event_id"]) == "weather":
+            continue
+        per_event[r["event_id"]].append((r["created_at"], r["resident_id"]))
+    if not per_event:
+        return None
+    eid = max(per_event, key=lambda k: len({r for _, r in per_event[k]}))
+    entries = sorted(per_event[eid], key=lambda e: _ts(e[0]))
+    fam = {}
+    for a, b, f in edges:
+        fam[(a, b)] = f
+        fam[(b, a)] = f
+    ranks, strengths = [], []
+    informed: list[str] = []
+    for i, (_, rid) in enumerate(entries):
+        if rid in informed:
+            continue
+        if informed:  # skip the very first (no prior informed set)
+            best = max((fam.get((rid, o), 0.0) for o in informed), default=0.0)
+            ranks.append(float(i))
+            strengths.append(best)
+        informed.append(rid)
+    if len(ranks) < 3:
+        return None
+    n = len(ranks)
+    mr, ms = sum(ranks) / n, sum(strengths) / n
+    cov = sum((ranks[i] - mr) * (strengths[i] - ms) for i in range(n))
+    vr = sum((r - mr) ** 2 for r in ranks) ** 0.5
+    vs = sum((s - ms) ** 2 for s in strengths) ** 0.5
+    if vr == 0 or vs == 0:
+        return None
+    return round(cov / (vr * vs), 3)
+
+
+def render_probes_p2(edges: list[tuple[str, str, float]], diffusion: dict) -> str:
+    out = ["== 拟真探针（P2 验收：社会结构）=="]
+    skew = degree_distribution_skewness(edges)
+    if skew:
+        out.append(f"  社交网络度分布偏度 = {skew['skewness']}"
+                   f"（节点 {skew['n_nodes']}, 均度 {skew['mean_degree']}, "
+                   f"度 {skew['min_degree']}–{skew['max_degree']}；目标右偏>0=有社交明星，"
+                   "对照组近 0）")
+        out.append(f"    度直方图 = {skew['histogram']}")
+    else:
+        out.append("  社交网络度分布偏度 = -（无 familiarity>0.1 的关系边；"
+                   "REALISM_RELATIONS_ENABLED 关或未起 tick）")
+
+    hl = info_diffusion_half_life(diffusion)
+    if hl["events"]:
+        out.append(f"  信息扩散半衰期（非天气事件，共 {len(hl['events'])} 个，"
+                   f"居民 {hl['total_residents']}）：")
+        for e in hl["events"][:5]:
+            t50 = "未达50%" if e["time_to_50pct_hours"] is None else f"{e['time_to_50pct_hours']}h"
+            out.append(f"    {e['event_id'][:12]:<12} 知情 {e['informed_count']} 人"
+                       f"（{e['informed_ratio']*100:.0f}%）| 到50%={t50}")
+        corr = diffusion_relation_correlation(diffusion, edges)
+        if corr is not None:
+            out.append(f"    知情顺序×关系强度 Pearson = {corr}"
+                       "（负=信息沿强关系先流动，抽样最广事件）")
+        out.append("    （目标：t50 数小时量级；对照组全知广播 t50≈0）")
+    else:
+        out.append("  信息扩散半衰期 = -（无带 event_id 的事件记忆；"
+                   "REALISM_INFO_GRADIENT_ENABLED 关或无世界事件）")
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 async def _run(days_window: int, residents: int, budget: float | None) -> str:
@@ -243,9 +554,16 @@ async def _run(days_window: int, residents: int, budget: float | None) -> str:
     since = datetime.now(UTC) - timedelta(days=days_window)
     async with async_session() as session:
         rows = await fetch_rows(session, since)
-    return render_report(
+        move_records = await fetch_move_records(session, since)
+        resident_needs = await fetch_resident_needs(session)
+        rel_edges = await fetch_relation_edges(session)
+        diffusion = await fetch_event_diffusion(session)
+    report = render_report(
         aggregate(rows), residents=residents, budget=budget, window_days=days_window
     )
+    return (report + "\n\n" + render_probes(move_records)
+            + "\n\n" + render_probes_p1(move_records, resident_needs)
+            + "\n\n" + render_probes_p2(rel_edges, diffusion))
 
 
 def main(argv: list[str] | None = None) -> None:

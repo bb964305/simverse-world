@@ -21,6 +21,7 @@ dependencies = [
     "slowapi>=0.1.9",
     "prometheus-fastapi-instrumentator>=7.0",
     "sentry-sdk>=2.0",
+    "pillow>=10.4",
 ]
 
 [project.optional-dependencies]

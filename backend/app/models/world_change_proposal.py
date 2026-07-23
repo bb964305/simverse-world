@@ -39,6 +39,10 @@ class WorldChangeProposal(Base):
     global_fencing_epoch: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0
     )
+    # Realism P0-5b: set atomically with the pending→approved commit so a
+    # reclaim sweep can detect proposals stuck in `approved` (crash before the
+    # applied commit) by age.
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reverted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))

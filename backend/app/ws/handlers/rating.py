@@ -1,11 +1,16 @@
 """rate_chat handler: save a conversation rating and update resident scores."""
+import logging
+
 from sqlalchemy import select, func
 
+from app.config import settings
 from app.database import async_session
 from app.models.resident import Resident
 from app.models.conversation import Conversation
 from app.ws.manager import manager
 from app.ws.handlers.context import ConnectionContext
+
+logger = logging.getLogger(__name__)
 
 
 async def handle_rate_chat(ctx: ConnectionContext, data: dict) -> None:
@@ -30,6 +35,25 @@ async def handle_rate_chat(ctx: ConnectionContext, data: dict) -> None:
 
         conv.rating = rating_value
         await db.commit()
+
+        # Realism P2-2: the rating carries player sentiment for the player↔resident
+        # path (familiarity rides handle_end_chat). affinity ±0.03: 4-5★ positive,
+        # 1-2★ negative, 3★ neutral. Reuses the rating event; no-op when gated off.
+        if settings.realism_relations_enabled and conv.resident_id:
+            d_aff = 0.0
+            if rating_value >= 4:
+                d_aff = settings.realism_rel_affinity_chat
+            elif rating_value <= 2:
+                d_aff = -settings.realism_rel_affinity_chat
+            if d_aff:
+                try:
+                    from app.services import relation_service
+                    await relation_service.bump(
+                        db, conv.resident_id, ctx.user_id, d_affinity=d_aff,
+                        type1="resident", type2="player",
+                    )
+                except Exception:
+                    logger.warning("rating relation bump failed", exc_info=True)
 
         # Recalculate resident avg_rating
         avg_result = await db.execute(

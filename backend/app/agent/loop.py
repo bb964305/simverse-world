@@ -41,6 +41,34 @@ logger = logging.getLogger(__name__)
 # route/filter behavior replay separately from app logs.
 events_logger = logging.getLogger("agent.events")
 
+# Realism P1-10: energy that lets a sleeping resident wake.
+_WAKE_ENERGY = 0.5
+
+
+async def _metabolize_sleepers(current_hour: int, current_weekday: int) -> int:
+    """Recover sleeping residents' energy and wake those rested + in-window.
+
+    Sleeping residents are excluded from the main tick round, so their energy is
+    metabolized here (own session). Returns the number woken."""
+    from app.agent.needs import get_needs, metabolize, write_needs
+    woke = 0
+    async with async_session() as db:
+        sleepers = (await db.execute(
+            select(Resident).where(Resident.status == "sleeping")
+        )).scalars().all()
+        for r in sleepers:
+            sbti = (r.meta_json or {}).get("sbti")
+            needs = metabolize(get_needs(r), status="sleeping", sbti=sbti)
+            write_needs(r, needs)
+            sched = build_schedule(sbti, weekday=current_weekday)
+            in_window = sched.wake_hour <= current_hour < sched.sleep_hour
+            if needs["energy"] >= _WAKE_ENERGY and in_window:
+                r.status = "idle"
+                woke += 1
+        if sleepers:
+            await db.commit()
+    return woke
+
 
 class AgentLoop:
     """Centralized agent loop — runs as a FastAPI background task.
@@ -93,7 +121,7 @@ class AgentLoop:
                 # calls (WS chat) keep running on their own path.
                 return tier
             result = await db.execute(
-                select(Resident.id, Resident.meta_json).where(
+                select(Resident.id, Resident.meta_json, Resident.mood_json).where(
                     Resident.status.not_in(["sleeping"])
                 )
             )
@@ -105,21 +133,38 @@ class AgentLoop:
                 weather = await get_current_weather(db)
             except Exception:
                 weather = None
+            # Realism P1-9: is a festival world event active this round?
+            festival_active = False
+            try:
+                from app.services.world_event_service import get_active_events_cached
+                festival_active = any(
+                    e.get("type") == "festival" for e in await get_active_events_cached(db)
+                )
+            except Exception:
+                festival_active = False
         if not rows:
             return tier
 
         force_plan_only = tier == BudgetTier.RULE_ONLY
         suppress_chat = tier == BudgetTier.RULE_ONLY
         current_hour = datetime.now().hour
+        current_weekday = datetime.now().weekday()
+        # Realism P1-10: sleeping residents (excluded from the tick round) recover
+        # energy and wake within their schedule window once rested.
+        if settings.realism_enabled:
+            try:
+                await _metabolize_sleepers(current_hour, current_weekday)
+            except Exception:
+                logger.warning("sleeper metabolism failed", exc_info=True)
         semaphore = asyncio.Semaphore(settings.agent_max_concurrent)
 
         async def guarded_tick(
-            resident_id: str, meta_json: dict | None
+            resident_id: str, meta_json: dict | None, mood_json: dict | None = None
         ) -> ActionResult | None:
             """Run one resident's tick in its own session, bounded by semaphore."""
             # Evaluate schedule before acquiring semaphore (no DB needed)
             sbti_data = (meta_json or {}).get("sbti")
-            schedule = build_schedule(sbti_data, weather=weather)
+            schedule = build_schedule(sbti_data, weather=weather, weekday=current_weekday)
 
             if get_activity_probability(schedule, current_hour) <= 0.0:
                 # 作息门关闭：夜间归巢（零 LLM，一 tick 一步），不计日行动数
@@ -142,7 +187,9 @@ class AgentLoop:
                             })
                 return None
 
-            if not should_tick(schedule, current_hour):
+            weather_kind = (weather or {}).get("kind")
+            valence = (mood_json or {}).get("valence") if settings.realism_enabled else None
+            if not should_tick(schedule, current_hour, weather_kind, festival_active, valence):
                 return None
 
             async with semaphore:
@@ -166,7 +213,7 @@ class AgentLoop:
 
         # Run all ticks concurrently, bounded by semaphore
         await asyncio.gather(
-            *(guarded_tick(row.id, row.meta_json) for row in rows),
+            *(guarded_tick(row.id, row.meta_json, row.mood_json) for row in rows),
             return_exceptions=True,
         )
         return tier

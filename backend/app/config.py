@@ -104,6 +104,9 @@ class Settings(BaseSettings):
     portrait_llm_base_url: str = ""
     portrait_llm_api_key: str = ""
     portrait_llm_timeout: int = 180
+    # Pixel-art post-processing (Image-to-Pixel style grid snap)
+    portrait_pixel_grid: int = 64
+    portrait_pixel_colors: int = 32
 
     # --- TTS (E5) ---
     tts_base_url: str = ""
@@ -351,6 +354,114 @@ class Settings(BaseSettings):
     lab_artifact_cleanup_receipt_issuer: str = ""
     lab_artifact_receipt_algorithm: str = "EdDSA"
     lab_artifact_receipt_keys_json: str = "{}"
+
+    # --- Realism (world simulation; REALISM_*, master switch below) ---
+    # Master switch. Default False → behavior identical to pre-realism. Deploys
+    # opt in via REALISM_ENABLED=true for burn-in A/B and easy rollback.
+    realism_enabled: bool = False
+    # P1 movement (defined now so REALISM_MOVE_SPEED env parses; used in P1).
+    realism_move_speed: int = 8
+    # Task 2 retrieval scoring (Generative-Agents weights; must sum to 1.0).
+    realism_retrieval_relevance_weight: float = 0.45
+    realism_retrieval_recency_weight: float = 0.30
+    realism_retrieval_importance_weight: float = 0.25
+    realism_recency_tau_hours: float = 72.0   # τ base; τ = this × (1 + importance)
+    # Task 2 eviction (soft-archive) thresholds.
+    realism_evict_importance_floor: float = 0.35
+    realism_evict_idle_days: int = 90
+    # Task 5b recycling: approved proposal stuck longer than this → fail+refund.
+    realism_proposal_stuck_minutes: int = 10
+    # Task 3 mood write-back deltas (positive / negative chat outcome).
+    realism_mood_positive_valence: float = 0.15
+    realism_mood_positive_arousal: float = 0.05
+    realism_mood_negative_valence: float = -0.2
+    realism_mood_negative_arousal: float = 0.1
+    # Task 3 flashbulb: importance += coef × |valence| × arousal.
+    realism_flashbulb_coef: float = 0.2
+
+    # --- Realism P1 (rule-based realism; still gated by realism_enabled) ---
+    # Task 7 movement modulation (multiplicative on base speed).
+    realism_move_rain: float = 0.75
+    realism_move_storm: float = 0.5
+    realism_move_snow: float = 0.6
+    realism_move_arousal_boost: float = 1.2   # applied when arousal > threshold
+    realism_move_arousal_threshold: float = 0.7
+    # Task 8 weather → activity probability multiplier.
+    realism_weather_sunny: float = 1.0
+    realism_weather_cloudy: float = 0.95
+    realism_weather_rain: float = 0.7
+    realism_weather_storm: float = 0.4
+    realism_weather_snow: float = 0.75
+    realism_shelter_prob: float = 0.6         # P(outdoor resident reroutes indoors in rain/storm)
+    realism_weather_mood_rain_valence: float = -0.02
+    realism_weather_mood_rain_arousal: float = -0.01
+    realism_weather_mood_sunny_valence: float = 0.02
+    # Task 9 weekday/festival.
+    realism_weekend_wake_delay: int = 1       # weekend wake_hour += this
+    realism_weekend_rest_boost: float = 0.1
+    realism_festival_social_boost: float = 0.2
+    realism_festival_weight: float = 3.0
+    # Task 10 needs metabolism (per tick unless noted).
+    realism_needs_initial: float = 0.8
+    realism_needs_critical: float = 0.25
+    realism_energy_awake: float = -0.004
+    realism_energy_walking: float = -0.006
+    realism_energy_sleep: float = 0.02
+    realism_satiety_decay: float = -0.005
+    realism_eat_restore: float = 0.5
+    realism_social_introvert: float = -0.001
+    realism_social_extravert: float = -0.006
+    realism_social_default: float = -0.003
+    realism_social_chat: float = 0.4
+    realism_social_greet: float = 0.1
+    # Task 11 emotion loop.
+    realism_goal_achieved_valence: float = 0.4
+    realism_goal_achieved_arousal: float = 0.2
+    realism_goal_failed_valence: float = -0.3
+    realism_goal_failed_arousal: float = 0.1
+    realism_gossip_victim_valence: float = -0.1
+    realism_gossip_victim_arousal: float = 0.15
+    realism_dream_tone_delta: float = 0.1
+    realism_valence_activity_coef: float = 0.2   # activity ×= (1 + coef×valence)
+    realism_contagion_rate: float = 0.1          # v += rate × (mean − v)
+    # Task 12 importance calibration.
+    realism_importance_window: int = 100
+    realism_shift_percentile: float = 0.95       # shift gate: normalized ≥ P95 ...
+    realism_shift_valence_gate: float = 0.5      # ... AND |valence| > this
+
+
+    # --- Realism P2 (social structure; three INDEPENDENT switches, all False) ---
+    # Each gate is independent of realism_enabled and of each other, so relations,
+    # information gradient and crowd can be A/B'd separately during burn-in. Any
+    # one False → the corresponding path behaves exactly as pre-P2.
+    realism_relations_enabled: bool = False
+    realism_info_gradient_enabled: bool = False
+    realism_crowd_enabled: bool = False
+    # P2 Task 1 — relation write deltas (reused, zero new LLM calls) + decay.
+    realism_rel_familiarity_chat: float = 0.05
+    realism_rel_affinity_chat: float = 0.03      # ± by wrapup mood (positive/negative)
+    realism_rel_familiarity_witness: float = 0.01
+    realism_rel_affinity_gift: float = 0.1
+    realism_rel_affinity_invest: float = 0.1
+    realism_rel_decay_idle_days: int = 30        # no interaction for this long → decay
+    realism_rel_familiarity_decay: float = 0.95  # ×/week on idle relations
+    realism_rel_affinity_decay: float = 0.98     # ×/week (2% regression toward 0)
+    # P2 Task 3 — read-path weighted sampling.
+    realism_rel_encounter_fam_coef: float = 2.0  # encounter weight = 1 + coef×familiarity
+    realism_rel_chat_epsilon: float = 0.1        # ε uniform mix in CHAT target sampling
+    realism_rel_gossip_fam_floor: float = 0.1    # gossip candidate weight = floor + familiarity(subject)
+    # P2 Task 4 — circle detection (connected components over strong ties).
+    realism_circle_threshold: float = 0.3        # familiarity ≥ this = a "strong" edge
+    # P2 Task 5 — information gradient (differentiated event awareness).
+    realism_info_geo_radius: int = 15            # tiles: residents within this of the event location
+    realism_info_sample_frac: float = 0.2        # random "well-informed" first-hand sample of the rest
+    realism_info_geo_importance: float = 0.6     # first-hand importance for geo-related residents
+    realism_info_sample_importance: float = 0.5  # first-hand importance for the random sample
+    # P2 Task 7 — crowd / 人流聚集 (festival draw + herd micro-rule).
+    realism_festival_location: str = "central_plaza"  # default gathering place for a location-less festival
+    realism_crowd_threshold: int = 5             # a location with ≥ this many residents reads as "lively"
+    realism_crowd_social_max: float = 0.5        # herd hint only when own social need < this
+    # (festival ×3 draw reuses realism_festival_weight defined above)
 
     model_config = {"env_file": ".env"}
 

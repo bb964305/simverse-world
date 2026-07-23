@@ -13,6 +13,10 @@ class Resident(Base):
     district: Mapped[str] = mapped_column(String(50), default="free")
     status: Mapped[str] = mapped_column(String(20), default="idle", index=True)  # P1-3: hot filter
     heat: Mapped[int] = mapped_column(Integer, default=0)
+    # Realism P0-5a: manual/pinned heat floor. `heat` is the real value (may fall
+    # as the 7-day conversation window slides); display = max(heat, pinned_heat);
+    # state decisions use the real value only.
+    pinned_heat: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     model_tier: Mapped[str] = mapped_column(String(20), default="standard")
     token_cost_per_turn: Mapped[int] = mapped_column(Integer, default=1)
     creator_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), index=True)
@@ -69,3 +73,8 @@ class Resident(Base):
     def mood_label(self) -> str:
         """Current mood word (E1 label set); residents without mood are calm."""
         return str((self.mood_json or {}).get("label") or "calm")
+
+    @property
+    def display_heat(self) -> int:
+        """Realism P0-5a: shown heat = max(real heat, pinned floor)."""
+        return max(self.heat or 0, self.pinned_heat or 0)

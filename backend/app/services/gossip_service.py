@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 GOSSIP_PROBABILITY = 0.3
 MAX_HOPS = 4
 IMPORTANCE_CAP = 0.7
+EVENT_GOSSIP_MIN_IMPORTANCE = 0.3  # P2-6: low floor so event info survives a few ×0.8 hops
 
 DISTORT_SYSTEM = "把下面这条传闻改写：夸大或改错一个细节，但保留主干。只输出改写后的一句话。"
 
@@ -45,41 +46,92 @@ async def _distort(content: str) -> str:
     return _extract_text(resp).strip() or content
 
 
-async def maybe_gossip(db, speaker: Resident, listener: Resident) -> Memory | None:
+async def maybe_gossip(db, speaker: Resident, listener: Resident, rng=random) -> Memory | None:
     """Maybe pass a third-party memory from speaker to listener. Returns the new memory."""
     if random.random() >= GOSSIP_PROBABILITY:
         return None
 
-    candidates = (await db.execute(
+    # Candidate rumors the speaker could pass on. Fetch a superset (JSON event_id
+    # can't be filtered in portable SQL) then classify in Python:
+    #   classic  = a third-party memory about a real resident (importance ≥ 0.6);
+    #   P2-6     = ANY memory carrying an event_id (first-hand world_event OR an
+    #              already-relayed gossip), so a partially-known world event
+    #              propagates "知情者→朋友→朋友的朋友" second-hand. Only when the
+    #              info gradient is on. Gate off → the classic filter alone, i.e.
+    #              behavior is byte-identical to pre-P2.
+    fetched = (await db.execute(
         select(Memory).where(
             Memory.resident_id == speaker.id,
             Memory.type == "event",
-            Memory.importance >= 0.6,
-            Memory.related_resident_id.is_not(None),
-            Memory.related_resident_id != listener.id,
-        ).order_by(Memory.importance.desc()).limit(20)
+            Memory.importance >= EVENT_GOSSIP_MIN_IMPORTANCE,
+        ).order_by(Memory.importance.desc()).limit(40)
     )).scalars().all()
 
-    origin = None
-    for m in candidates:
-        if (m.metadata_json or {}).get("hops", 0) < MAX_HOPS:  # hops>=4 terminates
-            origin = m
-            break
-    if origin is None:
+    def _is_candidate(m: Memory) -> bool:
+        meta = m.metadata_json or {}
+        if meta.get("hops", 0) >= MAX_HOPS:  # hops>=4 terminates the chain
+            return False
+        classic = (
+            (m.importance or 0) >= 0.6
+            and m.related_resident_id is not None
+            and m.related_resident_id != listener.id
+        )
+        event_class = settings.realism_info_gradient_enabled and bool(meta.get("event_id"))
+        return classic or event_class
+
+    usable = [m for m in fetched if _is_candidate(m)]
+    if not usable:
         return None
+
+    if settings.realism_relations_enabled:
+        # P2-3: gossip flows along strong ties — weight each rumor by the speaker's
+        # familiarity with its *subject* (floor + familiarity so a stranger's rumor
+        # is still possible). Batched: one relations query, not one per candidate.
+        from app.services import relation_service
+        rmap = await relation_service.relations_for(db, speaker.id)
+        floor = settings.realism_rel_gossip_fam_floor
+
+        def _w(m):
+            v = rmap.get(m.related_resident_id)
+            return floor + (v.familiarity if v else 0.0)
+
+        origin = relation_service.weighted_pick(usable, _w, rng)
+    else:
+        origin = usable[0]  # importance-ordered first (pre-P2 behavior)
 
     origin_hops = (origin.metadata_json or {}).get("hops", 0)
     new_hops = origin_hops + 1
     distorted = random.random() < min(0.2 * new_hops, 0.8)
     content = await _distort(origin.content) if distorted else origin.content
     importance = min((origin.importance or 0.0) * 0.8, IMPORTANCE_CAP)
-    origin_id = (origin.metadata_json or {}).get("origin_memory_id") or origin.id
+    origin_meta = origin.metadata_json or {}
+    origin_id = origin_meta.get("origin_memory_id") or origin.id
 
-    return await MemoryService(db).add_memory(
+    new_meta = {"origin_memory_id": origin_id, "hops": new_hops, "distorted": distorted}
+    # P2-6: second-hand memories inherit the source event_id so the diffusion
+    # probe can follow "知情者→朋友→朋友的朋友" across hops (field must not drop).
+    if origin_meta.get("event_id"):
+        new_meta["event_id"] = origin_meta["event_id"]
+
+    mem = await MemoryService(db).add_memory(
         listener.id, "event", content, importance=importance, source="gossip",
         related_resident_id=origin.related_resident_id,
-        metadata_json={"origin_memory_id": origin_id, "hops": new_hops, "distorted": distorted},
+        metadata_json=new_meta,
     )
+
+    # Realism P1-11: being gossiped about (a distorted rumor, hops≥2, subject is a
+    # real resident) is quietly unsettling — nudge the subject's mood.
+    if settings.realism_enabled and new_hops >= 2 and origin.related_resident_id:
+        try:
+            from app.services.mood_service import apply_mood_event_by_id
+            await apply_mood_event_by_id(
+                db, origin.related_resident_id,
+                settings.realism_gossip_victim_valence,
+                settings.realism_gossip_victim_arousal)
+        except Exception:
+            logger.warning("gossip victim mood write-back failed", exc_info=True)
+
+    return mem
 
 
 async def get_rumor_chain(db, origin_memory_id: str) -> list[dict]:

@@ -67,12 +67,23 @@ async def gather_material(db: AsyncSession, day: date_type) -> dict:
         "event_count": len(events),
         "heat_top": [{"name": n, "heat": h} for n, h in heat_top],
     }
+    # P2 §7.2: one line of circle dynamics (zero new LLM — augments the existing
+    # digest prompt material). Only when the relations gate is on.
+    circle_line = None
+    if settings.realism_relations_enabled:
+        try:
+            from app.services import circle_service
+            circle_line = await circle_service.digest_circle_line(db)
+        except Exception:
+            logger.warning("digest circle line failed", exc_info=True)
+
     has_material = bool(chats or shifts or events)
     return {
         "chats": list(chats),
         "shifts": [f"{o}→{n}" for o, n in shifts],
         "events": [f"{t}：{d}" for t, d in events],
         "heat_top": [f"{n}(热度{h})" for n, h in heat_top],
+        "circle_line": circle_line,
         "stats": stats,
         "has_material": has_material,
     }
@@ -88,6 +99,8 @@ def _build_prompt(day: date_type, material: dict) -> str:
         parts.append("今日人格变化：\n" + "\n".join(f"- {s}" for s in material["shifts"]))
     if material["heat_top"]:
         parts.append("人气居民：" + "、".join(material["heat_top"]))
+    if material.get("circle_line"):
+        parts.append("社交圈子：" + material["circle_line"])
     return "\n\n".join(parts)
 
 

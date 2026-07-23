@@ -5,11 +5,75 @@ import logging
 from typing import Any
 
 from app.agent.actions import ActionType
-from app.agent.map_data import get_location_at
+from app.agent.map_data import get_location_at, get_location_by_id, get_valid_target_tile
 from app.agent.schemas import TickContext
+from app.config import settings
 from app.memory.service import MemoryService
 
 logger = logging.getLogger(__name__)
+
+# Movement actions get realism-aware, displacement-truthful memory text.
+_MOVEMENT_ACTIONS = {ActionType.WANDER, ActionType.VISIT_DISTRICT, ActionType.GO_HOME}
+
+
+def _flashbulb_boost(mood_json: dict | None) -> float:
+    """Realism P0-3 flashbulb effect: strong emotion burns memories in harder.
+    importance += coef × |valence| × arousal."""
+    m = mood_json or {}
+    return settings.realism_flashbulb_coef * abs(float(m.get("valence", 0.0))) * float(m.get("arousal", 0.0))
+
+
+def _target_name(slug) -> str | None:
+    if not isinstance(slug, str):
+        return None
+    loc = get_location_by_id(slug)
+    return loc.get("name") if loc else None
+
+
+def _movement_memory(ctx) -> tuple[str, dict]:
+    """Realism P0-1: memory text reflecting the *actual* displacement + a move
+    breadcrumb for the burn-in probes (Task 6).
+
+    - arrived at the resolved target  -> "到达了X"
+    - moved this tick but not arrived  -> "正在前往X"
+    - no movement happened             -> "在X停留" (never claims a move)
+    """
+    from app.agent.plan_target import resolve_target_tile
+    ar = ctx.action_result
+    res = ctx.resident
+    action = ar.action
+
+    if action == ActionType.GO_HOME:
+        home_id = getattr(res, "home_location_id", None)
+        if home_id:
+            target_tile = get_valid_target_tile(home_id)
+        elif res.home_tile_x is not None:
+            target_tile = (res.home_tile_x, res.home_tile_y)
+        else:
+            target_tile = None
+        dest = "家"
+    else:
+        target_tile = ar.target_tile or resolve_target_tile(ar.target_slug, ar.target_slug)
+        dest = _target_name(ar.target_slug) or "某处"
+
+    cur = (res.tile_x, res.tile_y)
+    arrived = target_tile is not None and cur == tuple(target_tile)
+    moved = res.status == "walking"
+
+    if arrived:
+        text = f"到达了{dest}"
+    elif moved:
+        text = f"正在前往{dest}"
+    else:
+        loc = get_location_at(res.tile_x, res.tile_y)
+        text = f"在{loc['name'] if loc else '户外'}停留"
+
+    return text, {
+        "intent": action.value,
+        "target": ar.target_slug if isinstance(ar.target_slug, str) else None,
+        "moved": bool(moved),
+        "arrived": bool(arrived),
+    }
 
 
 def format_action_memory(action_result, resident) -> str:
@@ -64,8 +128,19 @@ class BasicMemorizePlugin:
         if not ctx.plan_followed:
             importance += self.plan_deviation_boost
 
-        try:
+        action = ctx.action_result.action
+        move_meta = None
+        if settings.realism_enabled and action in _MOVEMENT_ACTIONS:
+            memory_content, move_meta = _movement_memory(ctx)
+        else:
             memory_content = format_action_memory(ctx.action_result, ctx.resident)
+
+        if settings.realism_enabled:
+            importance += _flashbulb_boost(ctx.resident.mood_json)
+
+        importance = min(importance, 1.0)
+
+        try:
             memory_svc = MemoryService(ctx.db)
             await memory_svc.add_memory(
                 resident_id=ctx.resident.id,
@@ -73,6 +148,7 @@ class BasicMemorizePlugin:
                 content=memory_content,
                 importance=importance,
                 source="agent_action",
+                metadata_json=({"move": move_meta} if move_meta else None),
             )
             ctx.memory_created = True
         except Exception as e:

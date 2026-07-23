@@ -140,7 +140,14 @@ async def _wait_for_pending_approval(factory, run_id, tries=200):
                 select(LabApproval).where(LabApproval.run_id == run_id, LabApproval.decision == "pending")
             )).scalar_one_or_none()
             if appr is not None:
-                return appr.id
+                # Also wait for the run.status='needs_approval' commit: the runner
+                # writes the approval row and the status in separate commits, so
+                # the row can become visible a scheduler-tick before the status.
+                # Callers assert run.status right after — return only once both
+                # have landed, closing a pre-existing timing race (test-only).
+                run = await s.get(LabRun, run_id)
+                if run is not None and run.status == "needs_approval":
+                    return appr.id
     return None
 
 

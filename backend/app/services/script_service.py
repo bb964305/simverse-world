@@ -22,12 +22,29 @@ from datetime import datetime, UTC, timedelta
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 
+from app.config import settings
 from app.models.season import Season, SeasonScript, Poll, Vote
 from app.models.world_event import WorldEvent
 from app.models.bulletin_post import BulletinPost
 from app.models.resident import Resident
 
 logger = logging.getLogger(__name__)
+
+
+async def _resolve_secret_targets(db, slug: str) -> list[Resident]:
+    """Resolve a secret's ``resident_slug`` to target residents. P2 §7.2: the
+    special form ``circle:<id>`` expands to every resident in that social circle
+    (a plot seed festers inside a clique); a plain slug resolves to one resident."""
+    if slug.startswith("circle:"):
+        from app.services import circle_service
+        targets: list[Resident] = []
+        for rid in await circle_service.expand_circle(db, slug[len("circle:"):]):
+            res = await db.get(Resident, rid)
+            if res is not None:
+                targets.append(res)
+        return targets
+    res = (await db.execute(select(Resident).where(Resident.slug == slug))).scalar_one_or_none()
+    return [res] if res is not None else []
 
 
 class PollError(Exception):
@@ -54,14 +71,17 @@ async def fire_due_scripts(db) -> list[dict]:
             continue
 
         p = s.event_payload_json or {}
-        # 1. World event — active immediately, description flows into prompts.
+        # 1. World event. Realism P0-4: start inactive with starts_at=now so the
+        # event_cron flip_active_events emits a "start" transition next pass —
+        # driving the WS broadcast + collective memory the direct is_active=True
+        # path skipped (diagnosis §2.6). Off → keep the legacy immediate-active.
         we = WorldEvent(
             type="script",
             title=p.get("title", f"剧本 · 第{s.act}幕"),
             description=p.get("description", ""),
             starts_at=now,
             ends_at=now + timedelta(hours=int(p.get("duration_hours", 24))),
-            is_active=True,
+            is_active=(False if settings.realism_enabled else True),
             payload_json={"season_id": s.season_id, "act": s.act},
         )
         db.add(we)
@@ -81,14 +101,12 @@ async def fire_due_scripts(db) -> list[dict]:
             content = sec.get("memory_content")
             if not slug or not content:
                 continue
-            res = (await db.execute(select(Resident).where(Resident.slug == slug))).scalar_one_or_none()
-            if res is None:
-                continue
             from app.memory.service import MemoryService
-            await MemoryService(db).add_memory(
-                res.id, "event", content, importance=float(sec.get("importance", 0.7)), source="script",
-            )
-            injected += 1
+            for res in await _resolve_secret_targets(db, slug):
+                await MemoryService(db).add_memory(
+                    res.id, "event", content, importance=float(sec.get("importance", 0.7)), source="script",
+                )
+                injected += 1
 
         s.status = "fired"
         await db.commit()

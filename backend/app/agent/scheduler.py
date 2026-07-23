@@ -3,6 +3,8 @@ import math
 import random
 from dataclasses import dataclass, field
 
+from app.config import settings
+
 
 @dataclass
 class DailySchedule:
@@ -24,7 +26,27 @@ def _dim(sbti_data: dict, key: str) -> int:
     return _LEVEL.get(dims.get(key, "M"), 1)
 
 
-def build_schedule(sbti_data: dict | None, weather: dict | None = None) -> DailySchedule:
+def _apply_weekend(sched: DailySchedule, weekday: int | None) -> DailySchedule:
+    """Realism P1-9: on Sat/Sun sleep in (wake_hour+1), rest more (+0.1), and add
+    one extra social slot. Off / weekday → unchanged."""
+    if not settings.realism_enabled or weekday is None or weekday < 5:
+        return sched
+    new_wake = min(sched.wake_hour + settings.realism_weekend_wake_delay, sched.sleep_hour - 1)
+    new_rest = min(1.0, sched.rest_ratio + settings.realism_weekend_rest_boost)
+    slots = list(sched.social_slots)
+    for cand in (new_wake + 6, new_wake + 8, new_wake + 4):
+        if new_wake <= cand < sched.sleep_hour and cand not in slots:
+            slots.append(cand)
+            break
+    return DailySchedule(
+        wake_hour=new_wake, sleep_hour=sched.sleep_hour, peak_hours=sched.peak_hours,
+        social_slots=sorted(slots), rest_ratio=round(new_rest, 3),
+    )
+
+
+def build_schedule(
+    sbti_data: dict | None, weather: dict | None = None, weekday: int | None = None,
+) -> DailySchedule:
     """Derive a DailySchedule from SBTI dimensions.
 
     Algorithm:
@@ -42,13 +64,13 @@ def build_schedule(sbti_data: dict | None, weather: dict | None = None) -> Daily
     """
     del weather  # E6: no schedule effect by design — see docstring.
     if not sbti_data:
-        return DailySchedule(
+        return _apply_weekend(DailySchedule(
             wake_hour=8,
             sleep_hour=22,
             peak_hours=[10, 14],
             social_slots=[12, 19],
             rest_ratio=0.35,
-        )
+        ), weekday)
 
     ac1 = _dim(sbti_data, "Ac1")  # motivation: 0-2
     ac3 = _dim(sbti_data, "Ac3")  # execution:  0-2
@@ -98,16 +120,32 @@ def build_schedule(sbti_data: dict | None, weather: dict | None = None) -> Daily
     # rest_ratio: Ac3=H → 0.2, M → 0.4, L → 0.6
     rest_ratio = 0.6 - (ac3 * 0.2)
 
-    return DailySchedule(
+    return _apply_weekend(DailySchedule(
         wake_hour=wake_hour,
         sleep_hour=sleep_hour,
         peak_hours=peak_hours,
         social_slots=social_slots,
         rest_ratio=rest_ratio,
-    )
+    ), weekday)
 
 
-def get_activity_probability(schedule: DailySchedule, hour: int) -> float:
+def _weather_activity_factor(weather_kind: str | None) -> float:
+    """Realism P1-8: weather multiplier on activity probability. Empty streets
+    in a storm are a glance-level realism cue."""
+    from app.config import settings
+    return {
+        "sunny": settings.realism_weather_sunny,
+        "cloudy": settings.realism_weather_cloudy,
+        "rain": settings.realism_weather_rain,
+        "storm": settings.realism_weather_storm,
+        "snow": settings.realism_weather_snow,
+    }.get(weather_kind or "", 1.0)
+
+
+def get_activity_probability(
+    schedule: DailySchedule, hour: int, weather_kind: str | None = None,
+    festival_active: bool = False, valence: float | None = None,
+) -> float:
     """Compute a 0.0-1.0 probability that a resident acts at this hour.
 
     Uses a smooth curve that:
@@ -134,18 +172,32 @@ def get_activity_probability(schedule: DailySchedule, hour: int) -> float:
 
     # Social boost
     social_boost = 0.2 if hour in schedule.social_slots else 0.0
+    # Realism P1-9: a festival lifts everyone's social-slot probability.
+    if settings.realism_enabled and festival_active and hour in schedule.social_slots:
+        social_boost += settings.realism_festival_social_boost
 
     prob = min(0.95, baseline + peak_boost + social_boost)
+    # Realism P1-8: weather scales the whole activity probability (post-cap so a
+    # storm can push the street below any baseline).
+    if settings.realism_enabled and weather_kind:
+        prob *= _weather_activity_factor(weather_kind)
+    # Realism P1-11: mood scales activity — a depressed resident doesn't feel like
+    # going out (×(1+0.2×valence)); an upbeat one is a bit more active.
+    if settings.realism_enabled and valence is not None:
+        prob *= max(0.0, 1.0 + settings.realism_valence_activity_coef * valence)
     return prob
 
 
-def should_tick(schedule: DailySchedule, hour: int) -> bool:
+def should_tick(
+    schedule: DailySchedule, hour: int, weather_kind: str | None = None,
+    festival_active: bool = False, valence: float | None = None,
+) -> bool:
     """Roll against activity probability with ±15 minute jitter.
 
     The jitter means residents don't all wake up at exactly the same second,
     and slightly different residents will tick at different wall-clock moments.
     """
-    prob = get_activity_probability(schedule, hour)
+    prob = get_activity_probability(schedule, hour, weather_kind, festival_active, valence)
     if prob <= 0.0:
         return False
     # Jitter: add small random noise to prob (±0.1)

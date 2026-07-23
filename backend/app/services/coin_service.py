@@ -519,19 +519,19 @@ async def reward_creator_passive(db: AsyncSession, creator_id: str, resident_slu
     if creator_id == "system":
         return None
 
-    result = await db.execute(select(User).where(User.id == creator_id))
-    user = result.scalar_one_or_none()
-    if not user:
+    # Realism P0-5d: reuse the atomic UPDATE reward() instead of the old
+    # SELECT-then-`user.soul_coin_balance += 1`, which read a possibly-stale
+    # identity-mapped User (after an atomic charge earlier in the session) and
+    # silently overwrote the real balance. reward() returns 0 iff no row updated
+    # (creator gone) — otherwise the fresh post-credit balance (≥1).
+    new_balance = await reward(db, creator_id, 1, f"creator_passive:{resident_slug}")
+    if new_balance == 0:
         return None
-
-    user.soul_coin_balance += 1
-    db.add(Transaction(user_id=creator_id, amount=1, reason=f"creator_passive:{resident_slug}"))
-    await db.commit()
 
     return {
         "type": "coin_earned",
         "amount": 1,
         "reason": "creator_passive",
         "resident_slug": resident_slug,
-        "new_balance": user.soul_coin_balance,
+        "new_balance": new_balance,
     }

@@ -133,7 +133,113 @@ async def run_nightly_jobs() -> None:
             await run_weekly_goal_eval()
         except Exception:
             logger.error("Weekly goal eval failed", exc_info=True)
+
+    # Realism P0-2: soft-archive stale, low-importance event memories so the
+    # world forgets old small talk (score-floor eviction). Gated on realism.
+    from app.config import settings
+    if settings.realism_enabled:
+        try:
+            await run_memory_eviction()
+        except Exception:
+            logger.error("Realism memory eviction failed", exc_info=True)
+
+        # Realism P0-5b: reclaim proposals stuck in `approved` (crash between the
+        # approve-commit and the applied-commit) and orphaned Lab budget
+        # reservations left by runs that reached a terminal state.
+        try:
+            from app.services.proposal_service import reclaim_stuck_proposals
+            async with async_session() as db:
+                n = await reclaim_stuck_proposals(db)
+            if n:
+                logger.info("Realism: reclaimed %d stuck approved proposals", n)
+        except Exception:
+            logger.error("Realism proposal reclaim failed", exc_info=True)
+        try:
+            n = await sweep_orphan_lab_reservations()
+            if n:
+                logger.info("Realism: released %d orphan lab reservations", n)
+        except Exception:
+            logger.error("Realism lab reservation sweep failed", exc_info=True)
+
+    # Realism P2-1: weekly relationship decay (INDEPENDENT gate). Ties idle for
+    # 30 days lose familiarity (×0.95/week) and drift affinity toward 0
+    # (×0.98/week). Run once a week (Mondays) so the daily cron doesn't
+    # over-decay — the rate is per-week.
+    from app.config import settings as _rel_settings
+    if _rel_settings.realism_relations_enabled and datetime.now(UTC).weekday() == 0:
+        try:
+            from app.services import relation_service
+            async with async_session() as db:
+                n = await relation_service.decay(db)
+            if n:
+                logger.info("Realism P2: decayed %d idle relations", n)
+        except Exception:
+            logger.error("Realism relation decay failed", exc_info=True)
+
+    # Realism P2-4: nightly circle detection (independent gate, runs daily).
+    # Connected components over strong ties → meta_json.circle_id + snapshot.
+    if _rel_settings.realism_relations_enabled:
+        try:
+            from app.services import circle_service
+            async with async_session() as db:
+                snap = await circle_service.refresh_circles(db)
+            if snap.get("count"):
+                logger.info("Realism P2: detected %d social circles", snap["count"])
+        except Exception:
+            logger.error("Realism circle detection failed", exc_info=True)
     # Future: E2 dreams, E7 capsule delivery — each own try/except.
+
+
+async def run_memory_eviction() -> int:
+    """Realism P0-2: per-resident soft-archive of stale low-importance events."""
+    from sqlalchemy import select
+    from app.memory.service import MemoryService
+    from app.models.resident import Resident
+    total = 0
+    async with async_session() as db:
+        rids = (await db.execute(select(Resident.id))).scalars().all()
+        svc = MemoryService(db)
+        for rid in rids:
+            total += await svc.evict_memories(rid)
+    if total:
+        logger.info("Realism: archived %d stale event memories", total)
+    return total
+
+
+_RESERVED_BUDGET_COLS = (
+    "reserved_model_tokens", "reserved_tool_calls", "reserved_wall_clock_ms",
+    "reserved_egress_requests", "reserved_egress_bytes", "reserved_artifact_count",
+    "reserved_artifact_bytes", "reserved_active_workers",
+)
+
+
+async def sweep_orphan_lab_reservations() -> int:
+    """Realism P0-5b: release budget reservations left non-zero on runs that
+    already reached a terminal state (the docstring-acknowledged orphan in
+    app/lab/budgets.py). Read of the Lab models from the tasks layer — no
+    app/lab code touched."""
+    from sqlalchemy import select
+    from app.models.lab_run import LabRun
+    from app.models.lab_budget import LabRunBudget
+    _TERMINAL = ("succeeded", "failed", "cancelled")
+    released = 0
+    async with async_session() as db:
+        rows = (await db.execute(
+            select(LabRunBudget)
+            .join(LabRun, LabRun.id == LabRunBudget.run_id)
+            .where(LabRun.status.in_(_TERMINAL))
+        )).scalars().all()
+        for b in rows:
+            changed = False
+            for col in _RESERVED_BUDGET_COLS:
+                if (getattr(b, col, 0) or 0) > 0:
+                    setattr(b, col, 0)
+                    changed = True
+            if changed:
+                released += 1
+        if released:
+            await db.commit()
+    return released
 
 
 async def sweep_orphan_lab_runs() -> int:

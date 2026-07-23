@@ -153,21 +153,29 @@ async def test_count_recent_events(db_session, resident):
 
 @pytest.mark.anyio
 async def test_evict_old_memories(db_session, resident):
+    """Realism P0-2: evict is now score-floor soft-archive (was hard count cap):
+    only low-importance AND stale event memories get archived_at; rows are kept."""
     svc = MemoryService(db_session)
-    # Create 5 event memories with varying importance
-    for i in range(5):
-        mem = await svc.add_memory(resident.id, "event", f"Event {i}", 0.1 * (i + 1), "chat_player")
-        # Manually set older timestamps for lower importance ones
-        mem.created_at = datetime.now(UTC) - timedelta(days=30 - i)
-        mem.last_accessed_at = datetime.now(UTC) - timedelta(days=30 - i)
+    stale_low = await svc.add_memory(resident.id, "event", "old chat", 0.2, "chat_player")
+    stale_low.created_at = datetime.now(UTC) - timedelta(days=120)
+    stale_low.last_accessed_at = datetime.now(UTC) - timedelta(days=120)
+    fresh_low = await svc.add_memory(resident.id, "event", "recent chat", 0.2, "chat_player")
+    stale_high = await svc.add_memory(resident.id, "event", "old important", 0.9, "chat_player")
+    stale_high.created_at = datetime.now(UTC) - timedelta(days=120)
+    stale_high.last_accessed_at = datetime.now(UTC) - timedelta(days=120)
     await db_session.commit()
 
-    # Evict down to max 3
-    evicted = await svc.evict_memories(resident.id, max_events=3)
-    assert evicted == 2
+    archived = await svc.evict_memories(resident.id)   # defaults floor=0.35, idle=90d
+    assert archived == 1
 
-    remaining = await svc.get_memories(resident.id, type="event")
-    assert len(remaining) == 3
+    await db_session.refresh(stale_low)
+    await db_session.refresh(fresh_low)
+    await db_session.refresh(stale_high)
+    assert stale_low.archived_at is not None    # low + stale → archived
+    assert fresh_low.archived_at is None        # low but fresh → kept
+    assert stale_high.archived_at is None       # stale but important → kept
+    # soft-archive keeps the rows for provenance
+    assert len(await svc.get_memories(resident.id, type="event")) == 3
 
 
 from unittest.mock import AsyncMock, patch

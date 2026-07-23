@@ -1,6 +1,5 @@
 """Inter-resident conversation engine with memory generation and broadcasting."""
 import logging
-import time
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,27 +10,92 @@ from app.llm.client import chat as llm_chat
 from app.llm.metering import Meter
 from app.memory.service import MemoryService
 from app.models.resident import Resident
+from app.redis_client import get_redis
+from app.services.mood_service import apply_mood_event, get_mood
 
 logger = logging.getLogger(__name__)
 
-# Cooldown tracking: {frozenset(id1, id2): last_chat_timestamp}
-_chat_cooldowns: dict[tuple[str, str], float] = {}
+# Realism P0-5c: resident-pair chat cooldown lives in Redis (cross-worker,
+# survives restart) instead of a process-local dict.
+
+# Realism P0-3: map the wrap-up mood judgement to a (valence, arousal) nudge.
+_CHAT_MOOD_DELTA = {
+    "positive": ("realism_mood_positive_valence", "realism_mood_positive_arousal"),
+    "negative": ("realism_mood_negative_valence", "realism_mood_negative_arousal"),
+}
 
 
-def _pair_key(a: Resident, b: Resident) -> tuple[str, str]:
-    return tuple(sorted([a.id, b.id]))  # type: ignore[return-value]
+async def _apply_chat_mood(db, initiator, target, mood: str | None) -> None:
+    """Write the resident-chat wrap-up mood back to both residents' mood_json
+    (realism P0-3, main emotion-loop input source). Neutral / realism-off = no-op.
+    Player-chat mood is intentionally not wired here (no such signal on that
+    path; player sentiment flows via ratings — see PROGRESS deviation)."""
+    if not settings.realism_enabled:
+        return
+    keys = _CHAT_MOOD_DELTA.get(mood or "")
+    if keys is None:
+        return
+    dv = getattr(settings, keys[0])
+    da = getattr(settings, keys[1])
+    for res in (initiator, target):
+        try:
+            await apply_mood_event(db, res, dv, da)
+        except Exception:
+            logger.warning("chat mood write-back failed", exc_info=True)
 
 
-def _is_on_cooldown(initiator: Resident, target: Resident) -> bool:
-    key = _pair_key(initiator, target)
-    last = _chat_cooldowns.get(key)
-    if last is None:
-        return False
-    return (time.time() - last) < settings.agent_chat_cooldown
+async def _apply_chat_relations(db, a, b, mood: str | None) -> None:
+    """Realism P2-2: a resident-resident conversation bumps the numeric relation.
+
+    familiarity += 0.05 always (they spent time together); affinity ±0.03 by the
+    wrap-up mood (positive/negative; neutral = no affinity change). Reuses the
+    existing wrap-up mood judgement — zero new LLM. No-op when the relations gate
+    is off, so the pre-P2 path is byte-for-byte unchanged."""
+    if not settings.realism_relations_enabled:
+        return
+    d_aff = 0.0
+    if mood == "positive":
+        d_aff = settings.realism_rel_affinity_chat
+    elif mood == "negative":
+        d_aff = -settings.realism_rel_affinity_chat
+    try:
+        from app.services import relation_service
+        await relation_service.bump(
+            db, a.id, b.id,
+            d_familiarity=settings.realism_rel_familiarity_chat,
+            d_affinity=d_aff,
+        )
+    except Exception:
+        logger.warning("chat relation bump failed", exc_info=True)
 
 
-def _set_cooldown(initiator: Resident, target: Resident) -> None:
-    _chat_cooldowns[_pair_key(initiator, target)] = time.time()
+async def _apply_contagion(db, a, b) -> None:
+    """Realism P1-11: emotion contagion — after a conversation both residents'
+    valence moves toward their shared mean (a bad day ripples out)."""
+    if not settings.realism_enabled:
+        return
+    va = float(get_mood(a).get("valence", 0.0))
+    vb = float(get_mood(b).get("valence", 0.0))
+    mean = (va + vb) / 2.0
+    rate = settings.realism_contagion_rate
+    try:
+        await apply_mood_event(db, a, rate * (mean - va), 0.0)
+        await apply_mood_event(db, b, rate * (mean - vb), 0.0)
+    except Exception:
+        logger.warning("emotion contagion failed", exc_info=True)
+
+
+def _pair_key(a: Resident, b: Resident) -> str:
+    lo, hi = sorted([a.id, b.id])
+    return f"sv:chat_cd:{lo}:{hi}"
+
+
+async def _is_on_cooldown(initiator: Resident, target: Resident) -> bool:
+    return bool(await get_redis().exists(_pair_key(initiator, target)))
+
+
+async def _set_cooldown(initiator: Resident, target: Resident) -> None:
+    await get_redis().set(_pair_key(initiator, target), "1", ex=settings.agent_chat_cooldown)
 
 
 async def _get_relationship_text(svc: MemoryService, resident: Resident, other: Resident) -> str:
@@ -89,7 +153,7 @@ async def resident_chat(
     Returns None if skipped (cooldown, busy target, etc.)
     """
     # Pre-checks
-    if _is_on_cooldown(initiator, target):
+    if await _is_on_cooldown(initiator, target):
         logger.debug("Chat skipped: %s<->%s on cooldown", initiator.slug, target.slug)
         return {"skipped": True, "reason": "cooldown"}
 
@@ -102,6 +166,18 @@ async def resident_chat(
 
     # Clamp turns to [3, 8]
     num_turns = max(3, min(max_turns, 8))
+
+    # P2-3: old friends linger, strangers keep it short — move the turn count with
+    # familiarity within [3, 8] (≈3-4 for near-strangers, ≈6-8 for close ties).
+    # Only when the caller didn't pin max_turns and the relations gate is on.
+    if settings.realism_relations_enabled and max_turns == settings.agent_chat_max_turns:
+        try:
+            from app.services import relation_service
+            rel_row = await relation_service.get_pair(db, initiator.id, target.id)
+            fam = rel_row.familiarity if rel_row else 0.0
+            num_turns = relation_service.turns_for_familiarity(fam)
+        except Exception:
+            logger.warning("familiarity turn interpolation failed", exc_info=True)
 
     # Lock both as socializing
     initiator.status = "socializing"
@@ -150,6 +226,13 @@ async def resident_chat(
         # old five calls. It persists memories/relationships and runs evolution.
         summary_data = await svc.process_chat_wrapup(initiator, target, dialog_text)
 
+        # Realism P0-3: write the wrap-up mood back to both residents.
+        await _apply_chat_mood(svc.db, initiator, target, summary_data.get("mood"))
+        # Realism P1-11: emotion contagion toward the pair's mean valence.
+        await _apply_contagion(svc.db, initiator, target)
+        # Realism P2-2: numeric relation bump (familiarity + affinity by mood).
+        await _apply_chat_relations(svc.db, initiator, target, summary_data.get("mood"))
+
         # E3: each may pass a third-party rumor to the other (best-effort).
         try:
             from app.services.gossip_service import maybe_gossip
@@ -158,7 +241,7 @@ async def resident_chat(
         except Exception:
             logger.warning("gossip handoff failed", exc_info=True)
 
-        _set_cooldown(initiator, target)
+        await _set_cooldown(initiator, target)
 
         return {
             "initiator_slug": initiator.slug,

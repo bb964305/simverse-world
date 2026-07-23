@@ -53,3 +53,5 @@ import app.models.world_revision  # noqa: F401
 # Lab Agent protocol v2 durable Gateway state (migration 039)
 import app.models.lab_runtime  # noqa: F401
 import app.models.lab_control  # noqa: F401
+# Realism P2 — numeric two-axis relationships (§7.1)
+import app.models.resident_relation  # noqa: F401

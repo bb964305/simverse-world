@@ -250,6 +250,81 @@ def get_location_by_id(loc_id: str) -> dict | None:
     return LOCATIONS.get(loc_id)
 
 
+_DINING_LOCATIONS = {"cafe", "tavern"}
+
+
+def location_category(loc_id: str | None) -> str | None:
+    """Realism P1-10: coarse location category (e.g. "dining"). Reads an explicit
+    ``category`` key if present, else a small dining allowlist (cafe/tavern).
+    Deviation: allowlist instead of hand-tagging every location dict — same
+    behavior, and an explicit ``category`` key still wins."""
+    if not loc_id:
+        return None
+    loc = get_location_by_id(loc_id)
+    if loc and loc.get("category"):
+        return loc["category"]
+    return "dining" if loc_id in _DINING_LOCATIONS else None
+
+
+def nearest_dining_location(from_tile: tuple[int, int]) -> str | None:
+    """Nearest dining-category location entrance to ``from_tile``."""
+    best, best_d = None, None
+    for loc_id, loc in LOCATIONS.items():
+        if location_category(loc_id) != "dining":
+            continue
+        entrance = loc.get("entrance") or loc.get("center")
+        if not entrance:
+            continue
+        d = abs(from_tile[0] - entrance[0]) + abs(from_tile[1] - entrance[1])
+        if best_d is None or d < best_d:
+            best, best_d = loc_id, d
+    return best
+
+
+def location_is_indoor(loc_id: str | None) -> bool:
+    """Realism P1-8: whether a location shelters from weather. Derived from the
+    existing ``type`` (outdoor plazas/parks/streets are exposed) with an optional
+    explicit ``indoor`` override. Deviation: not hand-tagging all ~20 locations —
+    ``type`` already carries indoor/outdoor and stays in sync."""
+    loc = get_location_by_id(loc_id) if loc_id else None
+    if loc is None:
+        return False
+    if "indoor" in loc:
+        return bool(loc["indoor"])
+    return loc.get("type") != "outdoor"
+
+
+def nearest_indoor_location(from_tile: tuple[int, int]) -> str | None:
+    """Nearest public indoor location entrance to ``from_tile`` (for 躲雨)."""
+    best, best_d = None, None
+    for loc_id, loc in LOCATIONS.items():
+        if loc.get("type") in ("private", "apartment"):
+            continue
+        if not location_is_indoor(loc_id):
+            continue
+        entrance = loc.get("entrance") or loc.get("center")
+        if not entrance:
+            continue
+        d = abs(from_tile[0] - entrance[0]) + abs(from_tile[1] - entrance[1])
+        if best_d is None or d < best_d:
+            best, best_d = loc_id, d
+    return best
+
+
+def get_location_id_by_name(name: str | None) -> str | None:
+    """Reverse-lookup a location id by its display name (first match).
+
+    Used by realism plan/decision target resolution so a plan that only carries
+    the location display name (not the slug) still resolves to an entrance tile.
+    """
+    if not name:
+        return None
+    for loc_id, loc in LOCATIONS.items():
+        if loc.get("name") == name:
+            return loc_id
+    return None
+
+
 # ── Dynamic world overlay (Lab governance) ────────────────────────────
 # Slugs merged in from the ``dynamic_locations`` table so an approved
 # WorldChangeProposal can add a building without a redeploy. Tracked so a
@@ -323,19 +398,31 @@ def find_nearest_location(x: int, y: int, loc_type: str | None = None) -> tuple[
     return best_id, best_loc
 
 
-def format_location_list_for_prompt() -> str:
-    """Format public locations + outdoor areas into a string for LLM prompts."""
+def format_location_list_for_prompt(from_tile: tuple[int, int] | None = None) -> str:
+    """Format public locations + outdoor areas into a string for LLM prompts.
+
+    Realism P1-7: when ``from_tile`` is given (the resident's current tile) and
+    realism is on, each candidate is annotated with an estimated commute time
+    (manhattan distance ÷ move speed ≈ minutes) so the planner accounts for
+    travel — exactly how a real person plans a day."""
+    from app.config import settings
+    show_commute = settings.realism_enabled and from_tile is not None
+    speed = max(1, settings.realism_move_speed)
     lines = []
     for loc_id, loc in LOCATIONS.items():
         if loc["type"] in ("private", "apartment"):
             continue
-        x1, y1, x2, y2 = loc["bounds"]
         desc = loc.get("description", "")
         boosted = loc.get("boosted_actions", [])
         line = f"- {loc['name']}：{desc}"
         if boosted:
             line += f"（适合：{', '.join(boosted)}）"
-        line += f" 入口坐标=({loc['entrance'][0]},{loc['entrance'][1]})" if "entrance" in loc else ""
+        entrance = loc.get("entrance")
+        if entrance:
+            line += f" 入口坐标=({entrance[0]},{entrance[1]})"
+            if show_commute:
+                dist = abs(from_tile[0] - entrance[0]) + abs(from_tile[1] - entrance[1])
+                line += f" 约{max(1, round(dist / speed))}分钟路程"
         lines.append(line)
     return "\n".join(lines)
 
