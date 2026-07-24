@@ -12,7 +12,8 @@ import {
 } from '../services/api'
 import { resolveLabDisplay, selectLabTask, canDecideApproval, approvalId } from '../services/labState'
 import { artifactKindBadge, artifactStatusBadges } from '../services/labArtifactBadges'
-import { LabTimeline } from './LabTimeline'
+import { LabTimelineLive } from './LabTimelineLive'
+import { labInput, labTab, labChip, labPublishBtn, labTaskRow, labBtn, labClose } from './labControls'
 
 // ExperimentPanel — Lab / 实验楼 entry panel (spec §9). Self-mounted in TopNav.
 // Panel-local state (spec sanctions this over a store slice); live run steps come
@@ -36,12 +37,6 @@ const TABS: { key: LabTab; label: string }[] = [
   { key: 'live', label: '运行直播' },
   { key: 'artifacts', label: '产物 & 提案墙' },
 ]
-
-const inputStyle: CSSProperties = {
-  width: '100%', background: '#0b0b0d', color: 'var(--text)',
-  border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px',
-  fontSize: 13, boxSizing: 'border-box',
-}
 
 function errText(e: unknown): string {
   const m = e instanceof Error ? e.message : String(e)
@@ -100,16 +95,12 @@ export function ExperimentPanel() {
             发布真实委托 · 观看研究员运行 · 领取产物与世界提案
           </div>
         </div>
-        <button ref={closeButtonRef} onClick={() => setOpen(false)} className="game-dialog-close" aria-label="关闭实验楼">✕</button>
+        <button ref={closeButtonRef} onClick={() => setOpen(false)} className="game-dialog-close" style={labClose()} aria-label="关闭实验楼">✕</button>
       </div>
 
       <div style={{ display: 'flex', gap: 4, padding: '8px 20px 0', borderBottom: '1px solid var(--border)' }}>
         {TABS.map((t) => (
-          <button key={t.key} onClick={() => setTab(t.key)} style={{
-            background: 'none', border: 'none', cursor: 'pointer', padding: '8px 10px',
-            fontSize: 13, fontWeight: 600, color: tab === t.key ? ACCENT : 'var(--text-muted)',
-            borderBottom: `2px solid ${tab === t.key ? ACCENT : 'transparent'}`,
-          }}>{t.label}</button>
+          <button key={t.key} onClick={() => setTab(t.key)} style={labTab(tab === t.key)}>{t.label}</button>
         ))}
       </div>
 
@@ -160,18 +151,14 @@ function PublishTab({ onPublished }: { onPublished: () => void }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <input style={inputStyle} placeholder="任务标题" value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} />
-      <textarea style={{ ...inputStyle, minHeight: 90, resize: 'vertical' }} placeholder="任务说明（自然语言描述你想让研究员做什么）"
+      <input style={labInput} placeholder="任务标题" value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} />
+      <textarea style={{ ...labInput, minHeight: 90, resize: 'vertical' }} placeholder="任务说明（自然语言描述你想让研究员做什么）"
         value={brief} onChange={(e) => setBrief(e.target.value)} />
       <div>
         <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>能力域（scope，越多费用越高）</div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {SCOPES.map((s) => (
-            <label key={s} style={{
-              fontSize: 12, padding: '4px 10px', borderRadius: 999, cursor: 'pointer',
-              border: `1px solid ${scopes.includes(s) ? ACCENT : 'var(--border)'}`,
-              color: scopes.includes(s) ? ACCENT : 'var(--text-muted)',
-            }}>
+            <label key={s} style={labChip(scopes.includes(s))}>
               <input type="checkbox" checked={scopes.includes(s)} onChange={() => toggleScope(s)} style={{ display: 'none' }} />
               {s}
             </label>
@@ -181,7 +168,7 @@ function PublishTab({ onPublished }: { onPublished: () => void }) {
       <div style={{ display: 'flex', gap: 12 }}>
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>研究员</div>
-          <select style={inputStyle} value={researcher} onChange={(e) => setResearcher(e.target.value)}>
+          <select style={labInput} value={researcher} onChange={(e) => setResearcher(e.target.value)}>
             <option value="">公开招募（自动分派）</option>
             {researchers.map((r) => (
               <option key={r.slug} value={r.slug} disabled={r.busy}>
@@ -192,15 +179,12 @@ function PublishTab({ onPublished }: { onPublished: () => void }) {
         </div>
         <div style={{ width: 140 }}>
           <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>悬赏 🪙</div>
-          <input style={inputStyle} type="number" min={1} value={reward}
+          <input style={labInput} type="number" min={1} value={reward}
             onChange={(e) => setReward(Math.max(1, parseInt(e.target.value || '0', 10)))} />
         </div>
       </div>
       {notice && <div style={{ fontSize: 12, color: notice.ok ? ACCENT : '#ef4444' }}>{notice.text}</div>}
-      <button onClick={() => void submit()} disabled={busy} style={{
-        background: ACCENT, color: '#04110f', border: 'none', borderRadius: 8,
-        padding: '10px', fontWeight: 700, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.6 : 1,
-      }}>{busy ? '发布中…' : '发布委托'}</button>
+      <button onClick={() => void submit()} disabled={busy} style={labPublishBtn(busy)}>{busy ? '发布中…' : '发布委托'}</button>
     </div>
   )
 }
@@ -305,11 +289,7 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
         <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>我的委托</div>
         {tasks.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>还没有委托</div>}
         {tasks.map((t) => (
-          <button key={t.id} onClick={() => selectTask(t.id)} style={{
-            display: 'block', width: '100%', textAlign: 'left', background: selected === t.id ? '#14b8a614' : 'none',
-            border: 'none', borderRadius: 6, padding: '6px 8px', cursor: 'pointer', marginBottom: 4,
-            color: 'var(--text)', fontSize: 12,
-          }}>
+          <button key={t.id} onClick={() => selectTask(t.id)} style={labTaskRow(selected === t.id)}>
             <div style={{ fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
             {(() => { const b = resolveLabDisplay({ taskStatus: t.status }).task
               return <div style={{ color: b.known ? ACCENT : 'var(--text-muted)', fontSize: 11 }}>{b.label}</div> })()}
@@ -331,7 +311,7 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
                 eventPhase: latest?.phase === 'verifying' ? 'verifying' : null,
               })
               return <div style={{ marginBottom: 8 }}>
-                <LabTimeline display={d} />
+                <LabTimelineLive display={d} />
                 <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>适配器 {run.adapter}</div>
               </div>
             })()}
@@ -411,10 +391,7 @@ function TaskActions({ task, artifacts, onSettle, onCancel }: {
 }
 
 function btn(color: string): CSSProperties {
-  return {
-    background: 'none', color, border: `1px solid ${color}66`, borderRadius: 6,
-    padding: '6px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer',
-  }
+  return labBtn(color)
 }
 
 // ── Artifacts & proposal wall ─────────────────────────────────────────

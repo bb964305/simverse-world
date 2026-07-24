@@ -128,6 +128,8 @@ async def test_legacy_runner_rejects_v2_before_dequeue(monkeypatch):
     dequeue = AsyncMock()
     monkeypatch.setattr(runner.lab_queue, "dequeue_run", dequeue)
 
-    with pytest.raises(ValueError, match="only protocol_version 1"):
+    # v2 admission is gated by the default-off canary (b7e529d): require_protocol_handler
+    # raises before runner_loop reaches dequeue_run, so no v2 id is moved to processing.
+    with pytest.raises(ValueError, match="lab_runtime_v2_canary_enabled=true"):
         await runner.runner_loop(protocol_version=2)
     dequeue.assert_not_awaited()

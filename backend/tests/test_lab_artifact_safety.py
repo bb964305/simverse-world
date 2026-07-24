@@ -31,10 +31,14 @@ def test_serialize_withholds_unverified_content_even_when_released():
 
 
 def test_serialize_releases_clean_verified_content():
-    a = _art(scan_status="clean", verification_status="verified")
+    # A legacy (trusted-synthetic) artifact that is clean + verified is releasable.
+    a = _art(storage_status="legacy", scan_status="clean", verification_status="verified")
     view = svc.serialize_artifact(a, True)
     assert view["unlocked"] is True
-    assert view["text_md"] == "secret body" and view["uri"].startswith("https://")
+    # Metadata-only contract (ADR-lab-artifact-storage): a releasable artifact
+    # flips ``unlocked`` True, but body/URI still leave ONLY through /download —
+    # they are never inlined into the metadata projection.
+    assert "text_md" not in view and "uri" not in view
 
 
 def test_serialize_withholds_flagged_content():
