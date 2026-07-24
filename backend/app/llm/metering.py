@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 SCENARIOS = frozenset({
     "plan", "decide", "chat_turn", "summary", "extract", "update_rel", "reflect",
     "evolution_shift", "evolution_drift", "evolution_sync",
-    "player_chat", "player_wrapup", "video",
+    "player_chat", "player_wrapup", "video", "image",
     "sbti", "sprite", "skill_import",
     "forge_ability", "forge_persona", "forge_soul", "forge_score", "forge_district",
     "forge_quick", "forge_router", "forge_build", "forge_extract",
