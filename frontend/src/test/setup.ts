@@ -20,3 +20,23 @@ Object.defineProperty(globalThis, 'sessionStorage', {
   configurable: true,
   value: new MemoryStorage(),
 })
+
+// jsdom does not implement matchMedia. Install a benign default (matches:false,
+// no-op listeners) so components/hooks that probe media queries degrade to the
+// "no preference / desktop" branch. Individual tests override via vi.stubGlobal.
+if (typeof globalThis.matchMedia === 'undefined') {
+  Object.defineProperty(globalThis, 'matchMedia', {
+    configurable: true,
+    writable: true,
+    value: (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    }),
+  })
+}
