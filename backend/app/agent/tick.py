@@ -1,6 +1,5 @@
 """Resident tick: slim orchestrator calling plugin phases."""
 import logging
-from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,15 +14,18 @@ logger = logging.getLogger(__name__)
 
 # Per-resident daily action cap, in Redis so it is shared across the API
 # workers and the standalone agent-worker and survives process restarts
-# (P0-3b). The key is date-stamped so it "resets" at midnight automatically;
-# a 2-day TTL cleans up yesterday's keys.
+# (P0-3b). World time (agent-T): the date stamp is the WORLD date, so the cap
+# is "per WORLD day" and "resets" every world midnight (every 6 real hours at
+# k=4) — a spend guardrail scoped to the accelerated day the residents live in.
+# The TTL stays in REAL seconds (Redis housekeeping, real-time semantics): a
+# 2-real-day TTL comfortably outlives any world day and cleans up stale keys.
 _DAILY_KEY_PREFIX = "sv:daily_actions:"
 _DAILY_TTL_SECONDS = 2 * 86400
 
 
 def _daily_key(resident_id: str) -> str:
-    today = datetime.now().strftime("%Y-%m-%d")
-    return f"{_DAILY_KEY_PREFIX}{today}:{resident_id}"
+    from app.world_clock import world_date_key
+    return f"{_DAILY_KEY_PREFIX}{world_date_key()}:{resident_id}"
 
 
 async def _over_daily_limit(resident_id: str) -> bool:

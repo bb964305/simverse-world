@@ -119,3 +119,24 @@ async def test_world_week_gate_same_week_then_cross(fixed_real):
     # Immediately re-checking the same world week does not re-fire.
     assert await nc._world_week_gate(key) is False
 
+
+# ── tick: daily-action cap key resets per WORLD day ──
+
+def test_tick_daily_key_resets_per_world_day(fixed_real):
+    """The per-resident daily-action cap key is stamped with the WORLD date
+    (agent-T §4, Jimmy's call: 20 actions per world day). Two real instants in
+    the SAME real day but DIFFERENT world days must yield different keys, so the
+    quota resets at world midnight (every 6 real hours at k=4)."""
+    from app.agent.tick import _daily_key
+
+    epoch = wc.world_epoch()  # real 2026-01-01 00:00 Beijing == world midnight
+    fixed_real(epoch + timedelta(hours=1))  # world 2026-01-01 04:00
+    key_early = _daily_key("res-1")
+    # +6 real hours = +1 world day, still the SAME real calendar day (07:00 real).
+    fixed_real(epoch + timedelta(hours=7))  # world 2026-01-02 04:00
+    key_late = _daily_key("res-1")
+
+    assert key_early == "sv:daily_actions:2026-01-01:res-1"
+    assert key_late == "sv:daily_actions:2026-01-02:res-1"
+    assert key_early != key_late  # same real day, different world day → reset
+
