@@ -79,6 +79,11 @@ async def purchase(
     await precheck_effect(db, user_id, item, qty, context)
 
     total = item.price_sc * qty
+    # M1 F1.5: 集市日 discount — applied at charge time so the whole catalog is
+    # cheaper that day. Best-effort; any lookup failure falls back to full price.
+    discount = await _market_discount(db)
+    if discount < 1.0:
+        total = max(1, round(total * discount))
     ok = await charge(db, user_id, total, f"purchase:{item_code}")
     if not ok:
         raise ShopError("Insufficient Soul Coins")
@@ -91,3 +96,20 @@ async def purchase(
 
     effect = await apply_effect(db, user_id, item, qty, context)
     return {"ok": True, "item_code": item_code, "qty": qty, "total_sc": total, "effect": effect}
+
+
+async def _market_discount(db: AsyncSession) -> float:
+    """M1 F1.5: return the active 集市日 discount factor (< 1.0 on market day,
+    else 1.0). Reads the active-event cache — no schema/query cost on normal
+    days beyond the shared cache. Fail-open to no discount."""
+    from app.config import settings
+    if not settings.npc_economy_enabled:
+        return 1.0
+    try:
+        from app.services.world_event_service import get_active_events_cached
+        for e in await get_active_events_cached(db):
+            if (e.get("payload_json") or {}).get("market_day"):
+                return settings.market_day_discount
+    except Exception:
+        pass
+    return 1.0

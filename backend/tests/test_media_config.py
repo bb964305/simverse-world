@@ -4,7 +4,10 @@ from app.config import Settings
 
 def test_media_config_defaults():
     s = Settings()
-    assert s.media_upload_dir == "backend/static/uploads"
+    # P1 fix: uploads must live under the served static root (see app.main
+    # /static mount) — the old backend/static/uploads default 404'd in Docker.
+    assert s.static_dir == "static"
+    assert s.media_upload_dir == "static/uploads"
     assert s.media_max_image_size == 5 * 1024 * 1024  # 5 MB
     assert s.media_max_video_size == 50 * 1024 * 1024  # 50 MB
     assert s.video_llm_model == "kimi-k2.5"

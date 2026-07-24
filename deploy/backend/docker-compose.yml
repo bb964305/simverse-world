@@ -68,7 +68,12 @@ services:
       RUN_BACKGROUND_TASKS: "false"
       # Number of uvicorn workers; scale to CPU. Read by the Dockerfile CMD.
       UVICORN_WORKERS: "${UVICORN_WORKERS:-2}"
+    # Persist served static files (uploaded media + AI portraits) across
+    # rebuilds; /app/static is the STATIC_DIR the app mounts at GET /static.
+    # The lab_artifact_released read-only mount + receipt-trust secret come from
+    # the lab-v2 control plane (044 line) and are kept alongside media_static.
     volumes:
+      - media_static:/app/static
       - lab_artifact_released:/var/lib/simverse/artifacts/lab-artifact-released:ro
       - type: bind
         source: ${LAB_ARTIFACT_RECEIPT_TRUST_HOST_DIR:-/dev/null}
@@ -493,6 +498,7 @@ volumes:
   lab_artifact_cleanup_state:
   lab_artifact_quarantine:
   lab_artifact_released:
+  media_static:
 
 networks:
   lab-runtime-control:

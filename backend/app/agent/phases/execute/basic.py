@@ -25,6 +25,52 @@ def _energy_critical(resident) -> bool:
     return get_needs(resident).get("energy", 1.0) < settings.realism_needs_critical
 
 
+def _is_market_day(world_events) -> bool:
+    for e in world_events or []:
+        if (e.get("payload_json") or {}).get("market_day"):
+            return True
+    return False
+
+
+async def _charge_meal(db, resident) -> None:
+    """M1 F1.2: debit the meal cost from the resident's treasury. On an empty
+    wallet the resident eats on credit — recorded as a memory and a small tie to
+    the dining-location's shopkeeper. Fail-open."""
+    try:
+        from app.services import coin_service
+        from app.services.duty_service import set_wallet_cache, find_duty_resident
+        from app.agent.map_data import get_location_id_at, location_category
+
+        cost = settings.npc_meal_cost_sc
+        paid = await coin_service.treasury_debit(db, resident.slug, cost, reason="meal")
+        balance = await coin_service.treasury_balance(db, resident.slug)
+        set_wallet_cache(db, resident, balance)
+        if paid:
+            await db.commit()
+            return
+
+        # 赊账: locate the dining spot's proprietor (cafe_host / tavern_hub).
+        loc_id = get_location_id_at(resident.tile_x, resident.tile_y)
+        host = None
+        if location_category(loc_id) == "dining":
+            key = "cafe_host" if loc_id == "cafe" else "tavern_hub"
+            host = await find_duty_resident(db, key)
+        from app.memory.service import MemoryService
+        where = f"在{loc_id}" if loc_id else "在店里"
+        note = (f"{where}赊了一顿饭,{host.name}说下次一起算。" if host
+                else f"{where}赊了一顿饭,手头实在是紧。")
+        await MemoryService(db).add_memory(
+            resident.id, "event", note, 0.5, "observation",
+            related_resident_id=host.id if host else None,
+        )
+        if host is not None:
+            from app.services import relation_service
+            await relation_service.bump(db, resident.id, host.id, d_familiarity=0.02)
+        await db.commit()
+    except Exception:
+        logger.warning("meal charge failed for %s", resident.slug, exc_info=True)
+
+
 def _effective_speed(base: int, weather_kind: str | None, arousal: float | None) -> int:
     """Realism P1-7: tiles walked per tick = base × weather × arousal (min 1).
     rain 0.75 / storm 0.5 / snow 0.6; arousal>0.7 ×1.2 (in a hurry)."""
@@ -123,6 +169,16 @@ class BasicExecutePlugin:
                 if ctx.resident.status not in ("chatting", "socializing"):
                     ctx.resident.status = "researching"
                     await ctx.db.commit()
+            elif action == ActionType.WORK:
+                # Duty system: WORK at one's job produces the duty's real output
+                # (commission / bulletin / world event / sketch). on_work is
+                # internally fail-open + cooldown-limited; residents without a
+                # duty fall through as a no-op (narrative-only WORK, as before).
+                from app.services.duty_service import on_work
+                market_day = _is_market_day(getattr(ctx, "world_events", None))
+                duty_line = await on_work(ctx.db, ctx.resident, market_day=market_day)
+                if duty_line:
+                    logger.info("duty output: %s", duty_line)
             elif action == ActionType.EAT:
                 # Realism P1-10: pure state change — restore satiety (must be in a
                 # dining location, enforced by get_available_actions).
@@ -134,6 +190,11 @@ class BasicExecutePlugin:
                     needs["satiety"] = min(1.0, needs["satiety"] + settings.realism_eat_restore)
                     write_needs(ctx.resident, needs)
                 await ctx.db.commit()
+                # M1 F1.2: eating costs money — debit the treasury; if the wallet
+                # is empty the resident 赊账, which becomes a memory + a small tie
+                # to the shopkeeper (gossip fodder). Fail-open, gated on economy.
+                if settings.npc_economy_enabled:
+                    await _charge_meal(ctx.db, ctx.resident)
         except Exception as e:
             logger.warning("Execute failed for %s: %s", ctx.resident.slug, e)
 

@@ -22,8 +22,22 @@ class LLMClientFactory:
     pass
 
 
-def _make_anthropic_client(api_key: str, base_url: str | None = None) -> anthropic.AsyncAnthropic:
-    kwargs: dict = {"api_key": api_key}
+def _make_anthropic_client(
+    api_key: str,
+    base_url: str | None = None,
+    *,
+    timeout: float | None = None,
+    max_retries: int | None = None,
+) -> anthropic.AsyncAnthropic:
+    # P1 fix (deep-forge stall): the SDK default timeout is 600s with retries,
+    # so one hanging relay call could block a pipeline stage for tens of
+    # minutes with the session stuck in a non-terminal status. Bound every
+    # call with the configured user-LLM timeout instead.
+    kwargs: dict = {
+        "api_key": api_key,
+        "timeout": timeout if timeout is not None else float(settings.user_llm_timeout),
+        "max_retries": max_retries if max_retries is not None else settings.user_llm_max_retries,
+    }
     if base_url:
         kwargs["base_url"] = base_url
     return anthropic.AsyncAnthropic(**kwargs)

@@ -90,9 +90,15 @@ export function TopNav() {
   // goes stale whenever coins move outside a coin_update WS frame (stakes,
   // purchases made on other pages, or plain reloads).
   const updateBalance = useGameStore((s) => s.updateBalance)
+  // Lab entry is deploy-gated (LAB_ENABLED): hidden until /users/me confirms
+  // the feature is on, so a disabled deploy never shows a dead entry (P2 fix).
+  const [labEnabled, setLabEnabled] = useState(false)
   useEffect(() => {
     getMe()
-      .then((me) => updateBalance(me.soul_coin_balance))
+      .then((me) => {
+        updateBalance(me.soul_coin_balance)
+        setLabEnabled(me.lab_enabled ?? false)
+      })
       .catch(() => {})
   }, [updateBalance])
 
@@ -250,7 +256,9 @@ export function TopNav() {
           <button onClick={() => navigateTo('/debates')} className="game-nav-link game-nav-link--violet">⚔️ 辩论</button>
           <button onClick={() => openModal('shop')} className="game-nav-link game-nav-link--pink">🛒 商店</button>
           <button onClick={() => openModal('commission')} className="game-nav-link game-nav-link--green">🗒️ 委托</button>
-          <button onClick={() => openBridgePanel('experiment')} className="game-nav-link game-nav-link--teal">🧪 实验楼</button>
+          {labEnabled && (
+            <button onClick={() => openBridgePanel('experiment')} className="game-nav-link game-nav-link--teal">🧪 实验楼</button>
+          )}
           {user?.is_admin && (
             <button onClick={() => navigateTo('/admin')} className="game-nav-link game-nav-link--danger">🔐 管理</button>
           )}
@@ -274,7 +282,9 @@ export function TopNav() {
               <button onClick={() => navigateTo('/debates')} className="game-nav-link game-nav-link--violet" role="menuitem">⚔️ 辩论</button>
               <button onClick={() => openModal('shop')} className="game-nav-link game-nav-link--pink" role="menuitem">🛒 商店</button>
               <button onClick={() => openModal('commission')} className="game-nav-link game-nav-link--green" role="menuitem">🗒️ 委托</button>
-              <button onClick={() => openBridgePanel('experiment')} className="game-nav-link game-nav-link--teal" role="menuitem">🧪 实验楼</button>
+              {labEnabled && (
+                <button onClick={() => openBridgePanel('experiment')} className="game-nav-link game-nav-link--teal" role="menuitem">🧪 实验楼</button>
+              )}
               <button onClick={() => { setDigestUnread(false); openModal('digest') }} className="game-nav-link" role="menuitem">📰 村落日报</button>
               {user?.is_admin && (
                 <button onClick={() => navigateTo('/admin')} className="game-nav-link game-nav-link--danger" role="menuitem">🔐 管理</button>

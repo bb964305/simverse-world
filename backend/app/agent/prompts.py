@@ -75,6 +75,25 @@ def build_decision_prompt(
         current_location = f"户外 ({resident.tile_x}, {resident.tile_y})"
         location_boost_hint = ""
 
+    # Duty system: fold the resident's town-duty hint into the same slot so the
+    # decision LLM plans the day around their job (fail-open, '' without duty).
+    try:
+        from app.services.duty_service import prompt_hint as _duty_hint
+        location_boost_hint += _duty_hint(resident)
+    except Exception:
+        pass
+
+    # M1 F1.3: wallet-pressure hint — read from the meta_json['wallet'] cache
+    # (write-through on wage/meal), so this adds no tick query.
+    try:
+        from app.config import settings as _s
+        if _s.npc_economy_enabled:
+            wallet = (resident.meta_json or {}).get("wallet")
+            if wallet is not None and wallet < _s.npc_wallet_pressure_threshold:
+                location_boost_hint += "\n你最近手头很紧,想多干点活挣钱(倾向 WORK)。"
+    except Exception:
+        pass
+
     nearby_text = "\n".join(
         f"- {r.name}（{r.slug}）：{r.status}，距离约 {_tile_dist(resident, r)} 格"
         for r in nearby_residents

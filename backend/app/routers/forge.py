@@ -69,13 +69,11 @@ async def forge_answer(
 
     # Trigger LLM generation in background after final answer
     if result["next_step"] is None:
-        import asyncio
-
         async def _run_pipeline():
             async with async_session() as session:
                 await run_generation_pipeline(req.forge_id, session)
 
-        asyncio.create_task(_run_pipeline())
+        _spawn_bg(_run_pipeline())
 
     return ForgeAnswerResponse(**result)
 
@@ -153,16 +151,73 @@ async def forge_status(
 
 # ── Deep forge (pipeline) endpoints ──────────────────────────────────
 
+import logging
+from datetime import datetime, timedelta, UTC
+
+logger = logging.getLogger(__name__)
+
+# Hard ceiling for one pipeline run. Generous vs the per-call LLM timeout so it
+# only fires on true pathologies; keeps sessions from sitting non-terminal forever.
+FORGE_PIPELINE_TIMEOUT_S = 15 * 60
+# deep-status lazy sweep: a non-terminal session not updated for this long is
+# considered dead (its background task was lost, e.g. worker restart) → error.
+FORGE_STALE_AFTER = timedelta(minutes=20)
+_TERMINAL_STATUSES = {"done", "error"}
+
+# Strong references to fire-and-forget tasks: asyncio only keeps weak refs, so
+# an unreferenced task can be garbage-collected mid-await and silently vanish —
+# exactly the "stuck in building forever" failure mode (P1 fix).
+_BG_TASKS: set = set()
+
+
+def _spawn_bg(coro) -> None:
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+
+
+async def _mark_session_error(session_id: str, message: str) -> None:
+    """Force a forge session into a terminal error state (own fresh DB session)."""
+    try:
+        async with async_session() as db:
+            result = await db.execute(
+                select(ForgeSession).where(ForgeSession.id == session_id)
+            )
+            session = result.scalar_one_or_none()
+            if session and session.status not in _TERMINAL_STATUSES:
+                session.status = "error"
+                session.refinement_log = {
+                    **(session.refinement_log or {}), "error": message,
+                }
+                await db.commit()
+    except Exception:
+        logger.error("failed to mark forge session %s as error", session_id, exc_info=True)
+
 
 async def _run_pipeline_bg(session_id: str):
-    """Background task: run forge pipeline with its own DB session."""
-    async with async_session() as bg_db:
-        system_client = get_llm_client("system")
-        user_client = get_llm_client("user")
-        pipeline = ForgePipeline(
-            db=bg_db, system_client=system_client, user_client=user_client,
-        )
-        await pipeline.run_to_completion(session_id)
+    """Background task: run forge pipeline with its own DB session.
+
+    Wrapped in an overall timeout + last-resort error marker so the session
+    ALWAYS reaches a terminal status (done/error) no matter how the pipeline
+    dies (P1 fix: sessions used to sit in "building" forever).
+    """
+    try:
+        async with async_session() as bg_db:
+            system_client = get_llm_client("system")
+            user_client = get_llm_client("user")
+            pipeline = ForgePipeline(
+                db=bg_db, system_client=system_client, user_client=user_client,
+            )
+            await asyncio.wait_for(
+                pipeline.run_to_completion(session_id),
+                timeout=FORGE_PIPELINE_TIMEOUT_S,
+            )
+    except asyncio.TimeoutError:
+        logger.error("forge pipeline %s timed out after %ss", session_id, FORGE_PIPELINE_TIMEOUT_S)
+        await _mark_session_error(session_id, f"pipeline timed out after {FORGE_PIPELINE_TIMEOUT_S}s")
+    except Exception as e:
+        logger.error("forge pipeline %s crashed: %s", session_id, e, exc_info=True)
+        await _mark_session_error(session_id, str(e))
 
 
 @router.post("/deep-start", response_model=DeepStartResponse)
@@ -191,8 +246,9 @@ async def deep_start(
         user_material=req.user_material,
     )
 
-    # Launch the remainder of the pipeline in a background task
-    asyncio.create_task(_run_pipeline_bg(session.id))
+    # Launch the remainder of the pipeline in a background task (strong ref —
+    # a bare create_task can be GC'd mid-flight and silently die)
+    _spawn_bg(_run_pipeline_bg(session.id))
 
     return DeepStartResponse(
         forge_id=session.id,
@@ -216,6 +272,22 @@ async def deep_status(
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Forge session not found")
+
+    # Lazy stale sweep (P1 fix): if the background task died without writing a
+    # terminal state (process restart, task GC'd), a poll after the staleness
+    # window flips the session to error instead of showing "building" forever.
+    if session.status not in _TERMINAL_STATUSES and session.updated_at is not None:
+        updated_at = session.updated_at
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=UTC)
+        if datetime.now(UTC) - updated_at > FORGE_STALE_AFTER:
+            session.status = "error"
+            session.refinement_log = {
+                **(session.refinement_log or {}),
+                "error": f"session stalled in '{session.current_stage}' — swept by staleness check",
+            }
+            await db.commit()
+            await db.refresh(session)
 
     return DeepStatusResponse(
         forge_id=session.id,

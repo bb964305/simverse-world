@@ -36,6 +36,17 @@ async def _pick_resident(db) -> Resident | None:
     )).scalars().all()
     if not residents:
         return None
+    # Duty system: a quest-magnet resident (爱打听的学生) attracts daily quests
+    # with her perk's probability — she is the town's natural "帮我找…" target.
+    try:
+        from app.services.duty_service import perk as _duty_perk
+        magnets = [r for r in residents if _duty_perk(r, "quest_magnet", 0.0) > 0]
+        if magnets:
+            magnet = magnets[0]
+            if random.random() < _duty_perk(magnet, "quest_magnet", 0.0):
+                return magnet
+    except Exception:
+        pass
     # Bias toward the low-heat end (already ordered asc) for discovery.
     return random.choice(residents[:5]) if len(residents) >= 5 else random.choice(residents)
 

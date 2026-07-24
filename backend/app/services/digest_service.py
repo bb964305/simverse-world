@@ -61,10 +61,34 @@ async def gather_material(db: AsyncSession, day: date_type) -> dict:
         select(Resident.name, Resident.heat).order_by(Resident.heat.desc()).limit(3)
     )).all()
 
+    # M2 F2.4: today's story-arc milestones — the ongoing serial. Read from the
+    # feed events the arc engine emitted (kind goal_milestone / goal_achieved),
+    # joined to the resident's name for readable lines.
+    arc_lines: list[str] = []
+    try:
+        from app.models.feed import FeedEvent
+        rows = (await db.execute(
+            select(FeedEvent.resident_slug, FeedEvent.kind, FeedEvent.payload_json).where(
+                FeedEvent.kind.in_(["goal_milestone", "goal_achieved"]),
+                FeedEvent.created_at >= start, FeedEvent.created_at < end,
+            ).order_by(FeedEvent.created_at.desc()).limit(8)
+        )).all()
+        name_by_slug = dict((await db.execute(select(Resident.slug, Resident.name))).all())
+        for slug, kind, payload in rows:
+            name = name_by_slug.get(slug, slug)
+            payload = payload or {}
+            if kind == "goal_achieved":
+                arc_lines.append(f"{name} 达成了心愿:{payload.get('goal', '')}")
+            else:
+                arc_lines.append(f"{name} 有了进展:{payload.get('milestone', '')}")
+    except Exception:
+        logger.warning("digest arc lines failed", exc_info=True)
+
     stats = {
         "chat_count": len(chats),
         "shift_count": len(shifts),
         "event_count": len(events),
+        "arc_count": len(arc_lines),
         "heat_top": [{"name": n, "heat": h} for n, h in heat_top],
     }
     # P2 §7.2: one line of circle dynamics (zero new LLM — augments the existing
@@ -77,11 +101,12 @@ async def gather_material(db: AsyncSession, day: date_type) -> dict:
         except Exception:
             logger.warning("digest circle line failed", exc_info=True)
 
-    has_material = bool(chats or shifts or events)
+    has_material = bool(chats or shifts or events or arc_lines)
     return {
         "chats": list(chats),
         "shifts": [f"{o}→{n}" for o, n in shifts],
         "events": [f"{t}：{d}" for t, d in events],
+        "arc_lines": arc_lines,
         "heat_top": [f"{n}(热度{h})" for n, h in heat_top],
         "circle_line": circle_line,
         "stats": stats,
@@ -97,6 +122,11 @@ def _build_prompt(day: date_type, material: dict) -> str:
         parts.append("今日居民对话摘录：\n" + "\n".join(f"- {c}" for c in material["chats"]))
     if material["shifts"]:
         parts.append("今日人格变化：\n" + "\n".join(f"- {s}" for s in material["shifts"]))
+    if material.get("arc_lines"):
+        parts.append(
+            "居民故事进展（这是连载剧情，请写出「上回说到」的连续感）：\n"
+            + "\n".join(f"- {a}" for a in material["arc_lines"])
+        )
     if material["heat_top"]:
         parts.append("人气居民：" + "、".join(material["heat_top"]))
     if material.get("circle_line"):
@@ -125,7 +155,8 @@ async def _pin_digest_bulletin(db: AsyncSession, digest: Digest) -> None:
     """A5→A4: pin the fresh village digest on the bulletin board.
 
     Unpins any previous digest pin first so only the latest stays pinned.
-    Author fields stay NULL (= system post; the board renders it as「系统」).
+    Duty system: if the town has a chronicle editor (图书管理员), the digest is
+    published under her name; otherwise author fields stay NULL (=「系统」).
     Called only when a *new* digest row was inserted, so it is idempotent per
     day for free (regenerating the same day's digest returns early upstream).
     """
@@ -138,7 +169,17 @@ async def _pin_digest_bulletin(db: AsyncSession, digest: Digest) -> None:
         .where(BulletinPost.kind == "digest", BulletinPost.pinned.is_(True))
         .values(pinned=False)
     )
-    await create_post(db, "digest", digest.title, digest.content_md, pinned=True)
+    author_id = None
+    try:
+        from app.services.duty_service import find_duty_resident
+        editor = await find_duty_resident(db, "chronicle_editor")
+        author_id = editor.id if editor else None
+    except Exception:
+        logger.warning("digest editor lookup failed", exc_info=True)
+    await create_post(
+        db, "digest", digest.title, digest.content_md,
+        author_resident_id=author_id, pinned=True,
+    )
 
 
 async def generate_village_digest(db: AsyncSession, day: date_type | None = None) -> Digest:

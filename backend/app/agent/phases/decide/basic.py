@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 import random
-from datetime import datetime
 from typing import Any
 
 from app.agent.actions import ActionType, ActionResult, get_available_actions
@@ -290,10 +289,15 @@ class BasicDecidePlugin:
         )
 
     async def _llm_decide(self, ctx: TickContext) -> ActionResult | None:
-        today_key = datetime.now().strftime("%Y-%m-%d")
+        # World time (agent-T): "today's actions" is a world-calendar concept.
+        # Memories store created_at in real UTC, so each is mapped to world time
+        # before its date key is compared against today's world date — otherwise
+        # a raw strftime on the UTC timestamp compares real dates to a world key.
+        from app.world_clock import world_date_key, real_to_world
+        today_key = world_date_key()
         today_actions = [
             m.content for m in ctx.memories
-            if m.created_at and m.created_at.strftime("%Y-%m-%d") == today_key
+            if m.created_at and real_to_world(m.created_at).strftime("%Y-%m-%d") == today_key
         ]
         ctx.today_actions = today_actions
 

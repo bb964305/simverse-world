@@ -78,7 +78,14 @@ async def maybe_encounter(db, user_id: str, location_id: str, rng=random) -> dic
     if not residents:
         return None
 
-    if rng.random() >= ENCOUNTER_BASE_PROB:
+    # Duty system: an explorer-type resident (好奇心过载的学生) on site makes
+    # chance encounters likelier — highest encounter_multiplier present applies.
+    # The 0.95 cap only bounds the multiplied surplus and never lowers the base,
+    # so tests/ops that pin ENCOUNTER_BASE_PROB = 1.0 stay deterministic.
+    from app.services.duty_service import max_perk as _duty_max_perk
+    multiplier = _duty_max_perk(residents, "encounter_multiplier", 1.0)
+    prob = max(ENCOUNTER_BASE_PROB, min(0.95, ENCOUNTER_BASE_PROB * multiplier))
+    if rng.random() >= prob:
         return None
 
     # P2-3: familiar residents are likelier to "happen to" be the one you run

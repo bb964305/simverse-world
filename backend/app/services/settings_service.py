@@ -125,18 +125,64 @@ async def delete_account(db: AsyncSession, user: User, confirm_email: str) -> No
     Permanently delete user account.
     Requires the user to confirm by typing their email.
     Cascading: sets creator_id=NULL on owned residents (they become orphaned NPCs).
+
+    Every table with a NOT NULL FK to users.id must be cleaned up here first,
+    otherwise the final DELETE hits an IntegrityError on Postgres and the whole
+    request 500s (P1 fix, 2026-07-23 production test round). SQLite dev doesn't
+    enforce FKs by default, which is why this only broke in production.
     """
     if confirm_email != user.email:
         raise HTTPException(
             status_code=400,
             detail="Email confirmation does not match",
         )
-    # Orphan any residents created by this user
-    result = await db.execute(
-        select(Resident).where(Resident.creator_id == user.id)
+
+    from sqlalchemy import delete as sa_delete, update as sa_update
+
+    from app.models.conversation import Conversation, Message
+    from app.models.forge_session import ForgeSession
+    from app.models.memory import Memory
+    from app.models.pending_message import PendingMessage
+    from app.models.transaction import Transaction
+
+    # 1. Chat history: messages hang off conversations, so children first.
+    conv_ids = (
+        await db.execute(
+            select(Conversation.id).where(Conversation.user_id == user.id)
+        )
+    ).scalars().all()
+    if conv_ids:
+        await db.execute(
+            sa_delete(Message).where(Message.conversation_id.in_(conv_ids))
+        )
+        await db.execute(
+            sa_delete(Conversation).where(Conversation.id.in_(conv_ids))
+        )
+
+    # 2. User-owned rows with NOT NULL FKs to users.id.
+    await db.execute(sa_delete(Transaction).where(Transaction.user_id == user.id))
+    await db.execute(sa_delete(ForgeSession).where(ForgeSession.user_id == user.id))
+    await db.execute(
+        sa_delete(PendingMessage).where(
+            (PendingMessage.sender_id == user.id)
+            | (PendingMessage.recipient_id == user.id)
+        )
     )
-    for resident in result.scalars().all():
-        resident.creator_id = None  # type: ignore[assignment]
+
+    # 3. Nullable references: detach instead of delete.
+    await db.execute(
+        sa_update(Memory)
+        .where(Memory.related_user_id == user.id)
+        .values(related_user_id=None)
+    )
+
+    # 4. Orphan any residents created by this user (creator_id is nullable
+    #    since migration 040; they stay in the world as ownerless NPCs).
+    await db.execute(
+        sa_update(Resident)
+        .where(Resident.creator_id == user.id)
+        .values(creator_id=None)
+    )
 
     await db.delete(user)
     await db.commit()

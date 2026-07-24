@@ -1,8 +1,15 @@
-"""Nightly cron (runs ~00:30 daily).
+"""Nightly cron (runs at the Beijing morning anchor, once per real day).
 
 One cron, several isolated responsibilities. A5 owns the village digest; A1 weekly
 eval / E2 dreams / E7 capsule delivery will hook in here later, each wrapped in
 its own try/except so one failing job never blocks the others.
+
+World time (agent-T): the cron keeps its true 24-REAL-hour cadence — k does not
+change how often it fires — but its anchor is a Beijing morning hour so the
+digest is ready to read when players wake up. Jobs that are "weekly" in world
+terms (A1 goal eval, relation decay) can no longer key off ``weekday()==k``:
+a world week is only 1.75 real days, so equality would misfire. They gate on the
+world-week ordinal stored in Redis and fire when it advances (§5).
 """
 
 import asyncio
@@ -10,12 +17,23 @@ import logging
 from datetime import datetime, timedelta, UTC
 
 from app.database import async_session
+from app.redis_client import get_redis
 from app.services.digest_service import generate_village_digest
+from app.world_clock import now_real, world_week_index
 
 logger = logging.getLogger(__name__)
 
-RUN_HOUR = 0
-RUN_MINUTE = 30
+# Beijing-morning anchor (real time): the digest lands in the early Beijing
+# morning, readable at breakfast. Real 24h cadence is unchanged by k.
+RUN_HOUR = 7
+RUN_MINUTE = 0
+
+# Redis keys holding the last world-week ordinal each weekly job ran for. A job
+# fires when the current world week is greater than the stored one, then writes
+# the new ordinal back — so it runs exactly once per world week regardless of how
+# many real days (~1.75) that spans.
+_GOAL_WEEK_KEY = "sv:nightly:last_goal_week"
+_DECAY_WEEK_KEY = "sv:nightly:last_decay_week"
 
 
 def _seconds_until_next_run(now: datetime) -> float:
@@ -23,6 +41,23 @@ def _seconds_until_next_run(now: datetime) -> float:
     if target <= now:
         target += timedelta(days=1)
     return (target - now).total_seconds()
+
+
+async def _world_week_gate(redis_key: str) -> bool:
+    """Return True at most once per world week for ``redis_key``.
+
+    Reads the last world-week ordinal this gate ran for from Redis; if the
+    current world week has advanced past it (or nothing is stored yet), records
+    the new ordinal and returns True. Two real runs inside the same world week
+    → only the first passes; a run that crosses into a new world week → passes.
+    """
+    current = world_week_index()
+    raw = await get_redis().get(redis_key)
+    last = int(raw) if raw is not None else None
+    if last is not None and current <= last:
+        return False
+    await get_redis().set(redis_key, str(current))
+    return True
 
 
 async def run_nightly_jobs() -> None:
@@ -72,6 +107,58 @@ async def run_nightly_jobs() -> None:
             logger.info("Scheduled %d world events", n)
     except Exception:
         logger.error("Event scheduling failed", exc_info=True)
+
+    # M2: advance story arcs (rule-based milestone engine).
+    try:
+        from app.services.arc_service import evaluate_arcs
+        async with async_session() as db:
+            n = await evaluate_arcs(db)
+        if n:
+            logger.info("Advanced %d story-arc milestones", n)
+    except Exception:
+        logger.error("Arc engine failed", exc_info=True)
+
+    # M3: close due civic polls and execute the winning outcome.
+    try:
+        from app.services.civic_service import close_due_polls
+        async with async_session() as db:
+            n = await close_due_polls(db)
+        if n:
+            logger.info("Closed %d civic polls", n)
+    except Exception:
+        logger.error("Civic poll close failed", exc_info=True)
+
+    # M5: open the standing building proposals (idempotent one-shot per topic —
+    # an existing world picks them up here without a re-seed).
+    try:
+        from app.services.civic_service import seed_civic_agenda
+        async with async_session() as db:
+            n = await seed_civic_agenda(db)
+        if n:
+            logger.info("Opened %d civic building proposals", n)
+    except Exception:
+        logger.error("Civic agenda seeding failed", exc_info=True)
+
+    # M6: seasonal mayor election — once per active season, else every
+    # election_interval_days; never while an election poll is already open.
+    try:
+        from app.services.election_service import maybe_open_seasonal_election
+        async with async_session() as db:
+            poll = await maybe_open_seasonal_election(db)
+        if poll is not None:
+            logger.info("Opened mayor election poll %s", poll.id)
+    except Exception:
+        logger.error("Mayor election opening failed", exc_info=True)
+
+    # M3: NPC residents cast their (rule-based) votes on open civic polls.
+    try:
+        from app.services.civic_service import run_npc_voting
+        async with async_session() as db:
+            n = await run_npc_voting(db)
+        if n:
+            logger.info("%d NPC civic votes cast", n)
+    except Exception:
+        logger.error("NPC civic voting failed", exc_info=True)
 
     # Lab: expire overdue tasks + auto-release reviewed ones (72h), and dispatch
     # any funded open-recruitment tasks that now have an idle researcher.
@@ -127,8 +214,10 @@ async def run_nightly_jobs() -> None:
     except Exception:
         logger.error("Lab artifact retention sweep failed", exc_info=True)
 
-    # A1: weekly life-goal evaluation (Sundays only).
-    if datetime.now(UTC).weekday() == 6:
+    # A1: weekly life-goal evaluation — once per WORLD week (agent-T §5). Uses
+    # the world-week gate so it fires when the world week advances, not on a
+    # real weekday (a world week is only ~1.75 real days).
+    if await _world_week_gate(_GOAL_WEEK_KEY):
         try:
             await run_weekly_goal_eval()
         except Exception:
@@ -163,10 +252,11 @@ async def run_nightly_jobs() -> None:
 
     # Realism P2-1: weekly relationship decay (INDEPENDENT gate). Ties idle for
     # 30 days lose familiarity (×0.95/week) and drift affinity toward 0
-    # (×0.98/week). Run once a week (Mondays) so the daily cron doesn't
-    # over-decay — the rate is per-week.
+    # (×0.98/week). Run once per WORLD week (agent-T §5) via the world-week gate
+    # so the daily real cron doesn't over-decay — the rate is per-week and a
+    # world week is only ~1.75 real days.
     from app.config import settings as _rel_settings
-    if _rel_settings.realism_relations_enabled and datetime.now(UTC).weekday() == 0:
+    if _rel_settings.realism_relations_enabled and await _world_week_gate(_DECAY_WEEK_KEY):
         try:
             from app.services import relation_service
             async with async_session() as db:
@@ -306,7 +396,12 @@ async def run_weekly_goal_eval() -> None:
 
 
 async def nightly_cron_loop() -> None:
-    """Sleep until the next 00:30 and run the nightly jobs, forever."""
+    """Sleep until the next Beijing-morning anchor and run the nightly jobs, forever.
+
+    World time (agent-T §5): the cadence stays a true real 24h, but the anchor is
+    ``RUN_HOUR``:00 Beijing time (via ``now_real`` in Asia/Shanghai) instead of
+    UTC 00:30, so the digest is ready in the Beijing morning.
+    """
     while True:
-        await asyncio.sleep(_seconds_until_next_run(datetime.now(UTC)))
+        await asyncio.sleep(_seconds_until_next_run(now_real()))
         await run_nightly_jobs()

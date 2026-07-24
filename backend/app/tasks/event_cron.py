@@ -39,6 +39,14 @@ async def event_cron_loop():
                             await write_collective_memories(db, event)
                         except Exception:
                             logger.warning("collective memory write failed", exc_info=True)
+                    # M3 F3.3: a public lecture ending spawns a resident debate.
+                    if phase == "end":
+                        try:
+                            from app.services.civic_service import maybe_spawn_lecture_debate
+                            if await maybe_spawn_lecture_debate(db, event):
+                                logger.info("Spawned lecture debate from '%s'", event.get("title"))
+                        except Exception:
+                            logger.warning("lecture debate step failed", exc_info=True)
                 # C3: fire due script acts + settle finished seasons.
                 try:
                     from app.services.script_service import fire_due_scripts, settle_due_seasons

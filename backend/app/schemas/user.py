@@ -16,6 +16,9 @@ class UserResponse(BaseModel):
     avatar: str | None
     soul_coin_balance: int
     is_admin: bool = False
+    # Feature flags the frontend needs to gate UI entries (e.g. hide the Lab
+    # button when the deploy has LAB_ENABLED=false).
+    lab_enabled: bool = False
 
 class AuthResponse(BaseModel):
     access_token: str

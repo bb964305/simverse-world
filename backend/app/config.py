@@ -74,8 +74,11 @@ class Settings(BaseSettings):
     # Global daily spend cap (USD). Background LLM work degrades in three tiers
     # as this fills: >=80% throttle (tick x2), >=95% rule-only (force plan, no
     # inter-resident chat), >=100% background paused (only player-visible calls).
-    # Default ≈ 15-resident baseline × 1.5; raise for larger worlds. Set 0 to disable.
-    budget_global_daily_usd: float = 1.5
+    # Default raised to 10.0 to fund the world-clock k=4 speed-up: daily-action
+    # counting now resets per WORLD day (tick.py._daily_key), so a resident can
+    # act cap×4 ≈ 80×/real-day ≈ $6/real-day for a 15-resident world — kept under
+    # this $10 guardrail. Raise for larger worlds. Set 0 to disable.
+    budget_global_daily_usd: float = 10.0
     # Per-user daily player-visible spend cap (USD); over it, player chat replies
     # with a friendly "daily limit reached" instead of calling the LLM. 0 disables.
     budget_user_daily_usd: float = 0.5
@@ -139,8 +142,15 @@ class Settings(BaseSettings):
     user_llm_max_retries: int = 3
     user_llm_concurrency: int = 5
 
-    # --- Media Upload (P2) ---
-    media_upload_dir: str = "backend/static/uploads"
+    # --- Static files & Media Upload (P2) ---
+    # Root directory served at GET /static (portraits, uploaded media). Relative
+    # paths resolve against the process CWD: `backend/` in dev (uvicorn runs
+    # there), `/app` in the Docker image — both yield <cwd>/static.
+    static_dir: str = "static"
+    # Media uploads live UNDER static_dir so they are reachable at
+    # /static/uploads/... . (The old default "backend/static/uploads" pointed
+    # outside the served root in Docker, so every upload URL 404'd.)
+    media_upload_dir: str = "static/uploads"
     media_max_image_size: int = 5 * 1024 * 1024   # 5 MB
     media_max_video_size: int = 50 * 1024 * 1024  # 50 MB
     video_llm_model: str = "kimi-k2.5"
@@ -171,12 +181,19 @@ class Settings(BaseSettings):
     # --- Agent Loop ---
     agent_tick_interval: int = 60          # seconds between tick rounds
     agent_max_concurrent: int = 5          # max residents ticking in parallel
-    agent_max_daily_actions: int = 20      # per-resident action cap per in-game day
+    agent_max_daily_actions: int = 20      # per WORLD day (accelerated by WORLD_CLOCK_K); a spend guardrail, not real-time
     agent_chat_max_turns: int = 8          # max dialog turns in a resident-resident chat
     agent_chat_cooldown: int = 1800        # seconds before same pair can chat again
-    agent_time_scale: float = 1.0          # world time multiplier (1.0 = realtime)
     agent_enabled: bool = True             # master switch (set False to pause loop)
     agent_debug_always_active: bool = False  # bypass schedule, all residents always active
+
+    # --- World Clock (agent-T) — single conversion entry lives in app/world_clock.py ---
+    # World time = WORLD_EPOCH + k×(real elapsed). k=4 → 1 real day = 4 world days
+    # (a full day/night every 6 real hours). Residents' 作息/星期/日期语义 read world
+    # time; LLM budget日结/cron/TTL/日志 stay on real time. See WORLD_CLOCK_DESIGN.md.
+    world_clock_k: int = 4                                    # world-time speed multiplier
+    world_epoch: str = "2026-01-01T00:00:00+08:00"           # instant where world==real (fixed, tz-aware Asia/Shanghai)
+    timezone: str = "Asia/Shanghai"                          # time-semantics anchor zone (UTC+8, no DST)
 
     # --- Lab / experiment building (元游戏入口) ---
     # Deploy-level master switch (loaded at startup). The *runtime* kill switch
@@ -475,6 +492,27 @@ class Settings(BaseSettings):
     realism_crowd_threshold: int = 5             # a location with ≥ this many residents reads as "lively"
     realism_crowd_social_max: float = 0.5        # herd hint only when own social need < this
     # (festival ×3 draw reuses realism_festival_weight defined above)
+
+    # ── Town extension milestones (M1–M6) — each an independent gate ────
+    # M1 economy: duty wages, NPC meal cost, wallet-pressure hint, resident works.
+    npc_economy_enabled: bool = True
+    npc_default_wage_sc: int = 5                  # duty wage when perks lack wage_sc
+    npc_meal_cost_sc: int = 2                     # EAT debit from the resident's treasury
+    npc_wallet_pressure_threshold: int = 3        # below this balance → "手头紧" prompt hint
+    npc_work_item_prob: float = 0.35              # chance a producing WORK also lists a shop item
+    npc_work_item_price_sc: int = 15              # price of a resident-made shop item
+    npc_work_item_stock: int = 3                  # limited stock per listing
+    market_day_weekday: int = 5                   # Saturday=5: weekly 集市日
+    market_day_discount: float = 0.9              # shop price × this on market day
+    # M2 story arcs: rule-triggered milestone engine (nightly, zero tick cost).
+    arc_engine_enabled: bool = True
+    # M3 civic governance: proposals → clerk bulletin → NPC+player vote → execute.
+    civic_polls_enabled: bool = True
+    civic_poll_days: int = 3                      # voting window length
+    # M6 seasonal mayor election (built on the M3 engine).
+    election_enabled: bool = True
+    election_mayor_wage_bonus: float = 1.2
+    election_interval_days: int = 28              # off-season election cadence (nightly trigger)        # winner's town-wide wage multiplier
 
     model_config = {"env_file": ".env"}
 

@@ -8,10 +8,13 @@ are created inactive; the S1 event_cron flips + broadcasts them on their window.
 import random
 import logging
 from datetime import datetime, date as date_type, timedelta, UTC
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
+from app.config import settings
 from app.models.world_event import WorldEvent
+from app.world_clock import now_world, world_to_real
 
 logger = logging.getLogger(__name__)
 
@@ -32,27 +35,48 @@ NEWS_POOL: list[tuple[str, str]] = [
     ("旧物展", "图书馆展出了一批小镇的旧物，勾起许多回忆。"),
 ]
 
-HOLIDAY_WINDOW_DAYS = 2  # holiday event lasts this many days
+HOLIDAY_WINDOW_DAYS = 2  # holiday event lasts this many REAL days (player-visible continuity)
 SCHEDULE_LOOKAHEAD_DAYS = 3
 NEWS_PROBABILITY = 0.15  # ~1/week when run daily
 
 
-async def _exists(db, title: str, starts_on: date_type) -> bool:
-    day_start = datetime(starts_on.year, starts_on.month, starts_on.day, tzinfo=UTC)
+def _world_day_real_start(world_day: date_type) -> datetime:
+    """Real (UTC) anchor for a world calendar day's 00:00.
+
+    World time (agent-T) decides *which day* an event is held on, but the active
+    window is anchored to REAL time — the S1 event_cron flips ``is_active`` by
+    comparing ``starts_at/ends_at`` to real-UTC now, and players should see a
+    continuous activity window. So we take world-midnight, map it back to the
+    real instant it occurs at, and store that (as UTC) as ``starts_at``."""
+    zone = ZoneInfo(settings.timezone)
+    world_midnight = datetime(world_day.year, world_day.month, world_day.day, tzinfo=zone)
+    return world_to_real(world_midnight).astimezone(UTC)
+
+
+async def _exists(db, title: str, start_real: datetime) -> bool:
+    # Idempotency: a same-title event already anchored within the same real-hour
+    # window (re-running for the same world day recomputes the identical anchor).
+    lo = start_real - timedelta(hours=1)
+    hi = start_real + timedelta(hours=1)
     row = (await db.execute(
         select(WorldEvent.id).where(
             WorldEvent.title == title,
-            WorldEvent.starts_at >= day_start,
-            WorldEvent.starts_at < day_start + timedelta(days=1),
+            WorldEvent.starts_at >= lo,
+            WorldEvent.starts_at < hi,
         ).limit(1)
     )).scalar_one_or_none()
     return row is not None
 
 
 async def ensure_scheduled_events(db, today: date_type | None = None) -> int:
-    """Schedule upcoming holidays (idempotent) + maybe a random news event. Returns created count."""
-    today = today or datetime.now(UTC).date()
+    """Schedule upcoming holidays (idempotent) + maybe a random news event.
+
+    World time (agent-T): ``today`` and the lookahead iterate the WORLD calendar
+    (which day to hold an event), while each event's active window is anchored to
+    REAL time via ``_world_day_real_start`` (§5 seam). Returns created count."""
+    today = today or now_world().date()
     created = 0
+    announcements: list[tuple[str, str, date_type]] = []
 
     for offset in range(SCHEDULE_LOOKAHEAD_DAYS + 1):
         day = today + timedelta(days=offset)
@@ -60,19 +84,40 @@ async def ensure_scheduled_events(db, today: date_type | None = None) -> int:
         if not info:
             continue
         title, desc, payload = info
-        if await _exists(db, title, day):
+        start = _world_day_real_start(day)
+        if await _exists(db, title, start):
             continue
-        start = datetime(day.year, day.month, day.day, tzinfo=UTC)
         db.add(WorldEvent(
             type="festival", title=title, description=desc, payload_json=payload,
             starts_at=start, ends_at=start + timedelta(days=HOLIDAY_WINDOW_DAYS), is_active=False,
         ))
         created += 1
+        announcements.append((title, desc, day))
+
+    # M1 F1.5: 集市日 — a weekly all-day festival at the plaza.摊贩 duties get a
+    # halved WORK cooldown and the shop runs a discount that day. Weekday is read
+    # on the WORLD calendar; the active window stays real-time.
+    for offset in range(SCHEDULE_LOOKAHEAD_DAYS + 1):
+        day = today + timedelta(days=offset)
+        if day.weekday() != settings.market_day_weekday:
+            continue
+        title = "集市日"
+        start = _world_day_real_start(day)
+        if await _exists(db, title, start):
+            continue
+        db.add(WorldEvent(
+            type="festival", title=title,
+            description="广场上支起了摊子,居民们摆摊、赶集、讨价还价,热闹了一整天。",
+            payload_json={"market_day": True, "location_id": "central_plaza", "ambience": "market"},
+            starts_at=start, ends_at=start + timedelta(days=1), is_active=False,
+        ))
+        created += 1
+        announcements.append((title, "本周集市日,欢迎各位摊主到中央广场出摊。", day))
 
     if random.random() < NEWS_PROBABILITY:
         title, desc = random.choice(NEWS_POOL)
-        if not await _exists(db, title, today):
-            start = datetime(today.year, today.month, today.day, tzinfo=UTC)
+        start = _world_day_real_start(today)
+        if not await _exists(db, title, start):
             db.add(WorldEvent(
                 type="news", title=title, description=desc, payload_json={},
                 starts_at=start, ends_at=start + timedelta(days=1), is_active=False,
@@ -81,4 +126,29 @@ async def ensure_scheduled_events(db, today: date_type | None = None) -> int:
 
     if created:
         await db.commit()
+        await _announce_events(db, announcements)
     return created
+
+
+async def _announce_events(db, announcements: list[tuple[str, str, date_type]]) -> None:
+    """Duty system: the town clerk (市政厅文书) posts an official bulletin for
+    each newly scheduled festival. Best-effort — a bulletin failure must never
+    break event scheduling; without a clerk resident, no post is made."""
+    if not announcements:
+        return
+    try:
+        from app.services.bulletin_service import create_post
+        from app.services.duty_service import find_duty_resident
+
+        clerk = await find_duty_resident(db, "town_clerk")
+        if clerk is None:
+            return
+        for title, desc, day in announcements:
+            await create_post(
+                db, "notice",
+                f"市政厅公告:{title}({day.month}月{day.day}日)",
+                f"{desc}\n\n届时相关活动照章有序进行,请各位居民相互转告。——{clerk.name} 谨启",
+                author_resident_id=clerk.id,
+            )
+    except Exception:
+        logger.warning("clerk event announcement failed", exc_info=True)

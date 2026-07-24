@@ -92,6 +92,17 @@ class ForgePipeline:
             await self._db.commit()
             await notify_forge_done(session.user_id, session.id)
         except Exception as e:
+            # The failure may have poisoned the session (e.g. a mid-stage commit
+            # blew up) — roll back first so the terminal-state write below can't
+            # itself fail and leave the session stuck non-terminal (P1 fix).
+            try:
+                await self._db.rollback()
+            except Exception:
+                pass
+            result = await self._db.execute(
+                select(ForgeSession).where(ForgeSession.id == session_id)
+            )
+            session = result.scalar_one()
             session.status = "error"
             session.refinement_log = {
                 **(session.refinement_log or {}),

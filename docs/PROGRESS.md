@@ -424,3 +424,26 @@
 - **选做项不做**：世界时钟（§3.1B）与记忆失真（§6.3，唯一有 LLM 成本项）本次明确排除,按 kickoff 完成 8 项后停下等 Jimmy 拍板。
 - **交付状态**：`feat/realism-p2` CI 绿（1243 passed）+ 两探针出数 + PROGRESS 更新。**不合并、不部署,等 Jimmy 拍板真实 burn-in 与 REALISM_* 生产默认值。**
 
+
+## 小镇扩展 M1–M6 — 完成度审计与补齐(2026-07-23,云端 Cowork)
+
+**背景**:此前会话交付的小镇扩展六里程碑(M1 经济 / M2 故事弧 / M3 镇务自治 / M4 记忆召回评估 / M5 空间扩展 / M6 镇长选举)自称「全部实现完成」。本轮任务:独立审计是否属实,不属实则补齐。审计方式:通读全部 M 相关 diff(19 个改动文件 + 8 个新文件)、反查每个新服务的生产调用点、在干净环境用 uv.lock 锁定版本跑全量 pytest。
+
+**审计结论:六个里程碑的机制体都已实现且测试真实通过(33 个 M 测试 + 全量套件绿),但存在三处「实现了却接不上电」的缺口 + 一处纪律缺口,不能算"全部完成"**:
+
+1. **M5 缺口:`seed_civic_agenda` 无任何生产调用点**。邮局/剧院两个常设建设议案只有测试在调,真实部署里永远不会开出来——「治理驱动的空间扩展」在生产中不存在。
+2. **M6 缺口:`open_election` 无任何生产调用点**。选举的开启/计票/就任/换届/工资加成全链路都在且有测试,但没有任何调度器会触发选举——「赛季镇长选举」在生产中永远不会发生。
+3. **M3 缺口:NPC 投票的「与提案人关系」启发式是死桩**。`_npc_choice` docstring 承诺了该项,代码里是一段 `pass`;`propose(proposer_slug=...)` 收到提案人后原样丢弃(公告不署名、投票不加权),CIVIC_AGENDA 里配置的 proposer_slug 全部无效。
+4. **纪律缺口**:整批工作未记 PROGRESS.md、未提交 git(此前每批次均独立提交)。
+
+**本轮补齐**(全部零新增 LLM 调用,延续既有门控):
+
+- **M5/M6 接电**:`nightly_cron` 在关闭到期议案之后、NPC 投票之前新增两步——`seed_civic_agenda()`(幂等,已存在同题议案即跳过;老部署无需重 seed 即可拾取)与 `maybe_open_seasonal_election()`。顺序有意安排在 NPC 投票之前,当晚新开的议案/选举当晚就有 NPC 票。
+- **M6 选举节奏**(新增 `election_service.maybe_open_seasonal_election`):已有选举议案开着 → 不开;有活跃赛季 → 每赛季恰好一场(system_config `election_last_season` 记账);无赛季 → 每 `ELECTION_INTERVAL_DAYS`(新配置,默认 28 天)一场(`election_last_opened` 记账)。状态全部落 system_config,重启不丢,零 schema 改动。
+- **M3 提案人接线**:`propose()` 把 proposer_slug 存进 options_json[0]._proposer_slug(沿用 `_npc_voters` 的 blob 惯例,零迁移);文书公告加「本案由 XX 提议」;`_npc_choice` 实装两条规则——提案人给自己的议案 +2.0,与提案人 affinity>0 的居民给首选项 +1.5×affinity(足以翻转轻度守序者,守序无交情者不受影响)。死桩代码删除。
+- **测试 +7**:提案人加权翻转与对照(2)、公告署名(1)、赛季选举一季一场/开着不重开(1)、非赛季间隔节奏(1)、选举触发器门控(1)、nightly 接线防悬空守卫(1,inspect 源码断言两个入口真的被 nightly 调用——正是本次缺口的类别守卫)。
+- `.env.example` 补 `ELECTION_INTERVAL_DAYS`(env-consistency 测试约束)。
+
+**验证**:锁定版本(uv sync --frozen)干净环境全量 pytest:**1310 passed / 1 skipped / 12 deselected,0 failed**(deselect = 11 个 lab_oci 惯例排除 + `test_agent_worker::test_worker_crashing_task_is_fatal`——该项在未含 M1–M6 改动的 HEAD 上同样超时失败,属沙盒环境既有现象,与本批改动无关,已用反向 patch 重建 HEAD 复核确认)。M 系测试 33 → 40 全绿。
+
+**遗留(记录不处理)**:1) M 批次工作(含本轮补齐)仍未 git 提交,工作树同时躺着 0723 生产修复批的改动,需要 Jimmy 拍板提交切分;2) 集市日折扣只在 purchase 结算时生效,商店目录展示的仍是原价(玩家看不到折扣标签,属前端增强项);3) `_npc_choice` 的 duty 经济倾向用 `str(effect)` 关键词匹配,粗但够用,如后续 effect 类型增多建议结构化。
