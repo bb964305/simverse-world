@@ -298,11 +298,13 @@ async def test_basic_plan_generates_plan_when_stale():
 @pytest.mark.anyio
 async def test_basic_plan_skips_when_fresh():
     from app.agent.phases.plan.basic import BasicPlanPlugin
-    from datetime import datetime as dt
+    from app.world_clock import world_date_key
 
     ctx = _make_ctx()
     resident = ctx.resident
-    today = dt.now().strftime("%Y-%m-%d")
+    # World time (agent-T): a plan is "fresh" when generated on the current WORLD
+    # day, so the fixture stamps the world date key (not the real wall-clock date).
+    today = world_date_key()
     resident.daily_goal_json = {"goal": "existing", "motivation": "test", "created_at": "now", "status": "active"}
     resident.daily_plans_json = {
         "generated_date": today,
