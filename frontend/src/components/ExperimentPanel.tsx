@@ -12,7 +12,7 @@ import {
 } from '../services/api'
 import { resolveLabDisplay, selectLabTask, canDecideApproval, approvalId } from '../services/labState'
 import { artifactKindBadge, artifactStatusBadges } from '../services/labArtifactBadges'
-import { LabTimeline } from './LabTimeline'
+import { LabTimelineLive } from './LabTimelineLive'
 
 // ExperimentPanel — Lab / 实验楼 entry panel (spec §9). Self-mounted in TopNav.
 // Panel-local state (spec sanctions this over a store slice); live run steps come
@@ -331,7 +331,7 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
                 eventPhase: latest?.phase === 'verifying' ? 'verifying' : null,
               })
               return <div style={{ marginBottom: 8 }}>
-                <LabTimeline display={d} />
+                <LabTimelineLive display={d} />
                 <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>适配器 {run.adapter}</div>
               </div>
             })()}
