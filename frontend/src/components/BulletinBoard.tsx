@@ -2,8 +2,10 @@ import { useState, useEffect, useRef } from 'react'
 import { bridge } from '../game/phaserBridge'
 import { getBulletinPosts, type BulletinPostData } from '../services/api'
 import { parseUTC } from '../utils/time'
+import { Pager } from './Pager'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const POSTS_PAGE_SIZE = 10
 
 interface BulletinResident {
   id: string
@@ -79,6 +81,7 @@ export function BulletinBoard() {
   const [postKind, setPostKind] = useState('')
   const [posts, setPosts] = useState<BulletinPostData[]>([])
   const [postsCursor, setPostsCursor] = useState<string | null>(null)
+  const [postsPage, setPostsPage] = useState(1)
   const [postsLoading, setPostsLoading] = useState(false)
   const [postsLoadingMore, setPostsLoadingMore] = useState(false)
   const [postsError, setPostsError] = useState<string | null>(null)
@@ -116,6 +119,7 @@ export function BulletinBoard() {
     setPostsError(null)
     setPosts([])
     setPostsCursor(null)
+    setPostsPage(1)
     getBulletinPosts(postKind ? { kind: postKind } : {})
       .then((r) => {
         if (cancelled) return
@@ -239,7 +243,7 @@ export function BulletinBoard() {
             <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>暂无帖子</div>
           ) : (
             <>
-              {posts.map((p) => (
+              {posts.slice((postsPage - 1) * POSTS_PAGE_SIZE, postsPage * POSTS_PAGE_SIZE).map((p) => (
                 <div key={p.id} style={{
                   padding: '10px 12px', borderRadius: 10, marginBottom: 8,
                   background: p.pinned ? '#f59e0b0d' : 'var(--bg-input)',
@@ -277,7 +281,16 @@ export function BulletinBoard() {
                   </div>
                 </div>
               ))}
-              {postsCursor && (
+              {posts.length > POSTS_PAGE_SIZE && (
+                <div style={{ marginTop: 12 }}>
+                  <Pager
+                    page={postsPage}
+                    totalPages={Math.ceil(posts.length / POSTS_PAGE_SIZE)}
+                    setPage={setPostsPage}
+                  />
+                </div>
+              )}
+              {postsCursor && postsPage >= Math.ceil(posts.length / POSTS_PAGE_SIZE) && (
                 <button
                   onClick={() => void loadMorePosts()}
                   disabled={postsLoadingMore}
