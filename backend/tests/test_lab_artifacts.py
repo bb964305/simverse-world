@@ -124,7 +124,11 @@ async def test_verify_and_get_acl_cross_tenant_denied_admin_allowed(db_session):
 
 
 @pytest.mark.anyio
-async def test_rest_artifact_cross_tenant_404_tamper_409_flag_off_200(client, db_session, monkeypatch):
+async def test_rest_artifact_metadata_acl_and_download_digest_boundary(client, db_session, monkeypatch):
+    """Current contract (ADR-lab-artifact-storage): GET /lab/artifacts/{id} is an
+    ACL-only, metadata-ONLY projection (cross-tenant 404; owner 200 but no body/URI
+    inline). Digest-tamper is enforced at the /download seam (409), never via the
+    metadata endpoint. Body content leaves ONLY through /download."""
     from app.config import settings
 
     owner = User(id="owner-a", name="Owner A", email="owner-a@t.com")
@@ -141,24 +145,28 @@ async def test_rest_artifact_cross_tenant_404_tamper_409_flag_off_200(client, db
 
     monkeypatch.setattr(settings, "lab_agent_v1_enabled", True, raising=False)
 
+    # Cross-tenant metadata read is refused (anti-probing 404, not 403).
     headers_intruder = {"Authorization": f"Bearer {create_token('intruder-b')}"}
     resp = await client.get(f"/lab/artifacts/{artifact_id}", headers=headers_intruder)
     assert resp.status_code == 404
 
+    # Owner metadata read: 200, but body/URI are never inlined — metadata-only.
     headers_owner = {"Authorization": f"Bearer {create_token('owner-a')}"}
+    meta = await client.get(f"/lab/artifacts/{artifact_id}", headers=headers_owner)
+    assert meta.status_code == 200
+    body = meta.json()
+    assert "text_md" not in body and "uri" not in body
+    assert body["sha256"] == artifact.sha256
+
+    # Tamper the stored body: the digest boundary at /download rejects it (409),
+    # so a tampered body can never leave the API.
     fresh = await db_session.get(LabArtifact, artifact_id)
     fresh.text_md = "tampered"
     await db_session.commit()
 
-    resp2 = await client.get(f"/lab/artifacts/{artifact_id}", headers=headers_owner)
-    assert resp2.status_code == 409
-    assert "digest" in resp2.json()["detail"]
-
-    # Flag off → legacy behavior untouched (digest is never enforced).
-    monkeypatch.setattr(settings, "lab_agent_v1_enabled", False, raising=False)
-    resp3 = await client.get(f"/lab/artifacts/{artifact_id}", headers=headers_owner)
-    assert resp3.status_code == 200
-    assert resp3.json()["text_md"] == "tampered"
+    dl = await client.get(f"/lab/artifacts/{artifact_id}/download", headers=headers_owner)
+    assert dl.status_code == 409
+    assert "digest" in dl.json()["detail"]
 
 
 # ── 3. locked semantics regression: content hidden, new metadata fields present ──
@@ -167,7 +175,7 @@ def test_serialize_artifact_locked_hides_content_but_shows_integrity_metadata():
     a = LabArtifact(
         id="art1", run_id="run1", task_id="task1", kind="text", title="x",
         text_md="secret", uri="http://x", sha256="abc123", scan_status="clean",
-        verification_status="verified", retention_hold=True,
+        verification_status="verified", retention_hold=True, storage_status="legacy",
     )
 
     locked = svc.serialize_artifact(a, unlocked=False)
@@ -177,6 +185,9 @@ def test_serialize_artifact_locked_hides_content_but_shows_integrity_metadata():
     assert locked["verification_status"] == "verified"
     assert locked["retention_hold"] is True
 
+    # Unlocking flips the ``unlocked`` flag, but body/URI still never inline into
+    # metadata — content leaves ONLY through /download (ADR-lab-artifact-storage).
     unlocked = svc.serialize_artifact(a, unlocked=True)
-    assert unlocked["text_md"] == "secret" and unlocked["uri"] == "http://x"
+    assert unlocked["unlocked"] is True
+    assert "text_md" not in unlocked and "uri" not in unlocked
     assert unlocked["sha256"] == "abc123"
