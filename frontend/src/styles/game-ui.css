@@ -459,6 +459,15 @@
   .game-encounter-card { transition: none; }
 }
 
+/* Lab tablet tier — between the >1024px desktop default (side-by-side split at
+   its natural width) and the <=680px mobile tier (stacked). Widens the modal
+   toward the viewport and trims the task-list rail so the two-pane Lab layout
+   stays comfortable at portrait-tablet widths without collapsing to a stack. */
+@media (min-width: 681px) and (max-width: 1024px) {
+  .game-modal-panel { width: min(760px, calc(100vw - 40px)); }
+  .game-lab-split > :first-child { width: 168px !important; }
+}
+
 /* LabTimeline pulses the verifying phase + a resyncing connection. Kept subtle
    (opacity dip) and paused whenever the timeline is frozen (disconnected or
    OS reduced-motion) — LabTimeline drops the animation inline in that state. */
