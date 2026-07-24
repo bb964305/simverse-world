@@ -6,6 +6,7 @@ import {
   purchaseShopItem,
   getResidents,
   getMe,
+  getMarketDay,
   type ShopItemData,
   type ShopInventoryRow,
   type ResidentListItem,
@@ -51,6 +52,8 @@ export function ShopModal({ onClose }: Props) {
   const [newName, setNewName] = useState('')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null)
+  // Market-day discount is display-only — the server settles the real price.
+  const [marketDay, setMarketDay] = useState<{ active: boolean; discount: number }>({ active: false, discount: 1 })
 
   useEffect(() => {
     Promise.all([getShopCatalog(), getResidents()])
@@ -61,6 +64,13 @@ export function ShopModal({ onClose }: Props) {
       })
       .catch(() => setItems([]))
       .finally(() => setLoading(false))
+  }, [])
+
+  useEffect(() => {
+    // best-effort; a failed fetch just means "not market day".
+    getMarketDay()
+      .then((m) => setMarketDay({ active: m.active, discount: m.discount }))
+      .catch(() => setMarketDay({ active: false, discount: 1 }))
   }, [])
 
   const loadInventory = useCallback(() => {
@@ -176,7 +186,18 @@ export function ShopModal({ onClose }: Props) {
                       background: '#e9456018', border: '1px solid var(--accent-red)', color: 'var(--accent-red)',
                       opacity: busy ? 0.5 : 1,
                     }}>
-                      🪙 {item.price_sc} 购买
+                      {marketDay.active && marketDay.discount < 1 ? (
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, justifyContent: 'center' }}>
+                          <span style={{ textDecoration: 'line-through', opacity: 0.6 }}>🪙 {item.price_sc}</span>
+                          <span>🪙 {Math.max(1, Math.round(item.price_sc * marketDay.discount))} 购买</span>
+                          <span style={{
+                            fontSize: 9, fontWeight: 700, padding: '1px 5px', borderRadius: 4,
+                            background: 'var(--accent-red)', color: 'white',
+                          }}>集市日</span>
+                        </span>
+                      ) : (
+                        <>🪙 {item.price_sc} 购买</>
+                      )}
                     </button>
                   </div>
                 ))}
