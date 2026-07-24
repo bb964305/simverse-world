@@ -7,6 +7,7 @@ from app.config import settings
 from app.routers import auth, users, residents, forge, profile, search, bulletin, onboarding, sprites, avatar, settings as settings_router, media as media_router, events as events_router, notifications as notifications_router, achievements as achievements_router, shop as shop_router, digest as digest_router, daily as daily_router, commissions as commissions_router, graph as graph_router, exploration as exploration_router, capsules as capsules_router, feed as feed_router, photos as photos_router, tts as tts_router, seasons as seasons_router, goals as goals_router, debates as debates_router, polls as polls_router, home_decor as home_decor_router
 from app.routers import lab as lab_router
 from app.routers import world as world_router
+from app.routers import townhall as townhall_router
 # Import the modules whose @on(...) handlers must register on the event bus.
 import app.events.achievements  # noqa: F401
 import app.services.daily_quest_service  # noqa: F401
@@ -178,6 +179,7 @@ app.include_router(debates_router.router)
 app.include_router(polls_router.router)
 app.include_router(lab_router.router)
 app.include_router(world_router.router)
+app.include_router(townhall_router.router)
 app.include_router(admin_router)
 
 # --- Observability (Phase 3): GET /metrics + runtime gauges ---
