@@ -48,7 +48,14 @@ async def _distort(content: str) -> str:
 
 async def maybe_gossip(db, speaker: Resident, listener: Resident, rng=random) -> Memory | None:
     """Maybe pass a third-party memory from speaker to listener. Returns the new memory."""
-    if random.random() >= GOSSIP_PROBABILITY:
+    # Duty system: an information-hub resident (酒馆老板) gossips more readily —
+    # per-speaker multiplier on the base probability. The 0.9 cap only bounds
+    # the multiplied surplus and never lowers the base, so tests (and ops) that
+    # pin GOSSIP_PROBABILITY = 1.0 stay fully deterministic.
+    from app.services.duty_service import perk as _duty_perk
+    multiplier = _duty_perk(speaker, "gossip_multiplier", 1.0)
+    probability = max(GOSSIP_PROBABILITY, min(0.9, GOSSIP_PROBABILITY * multiplier))
+    if random.random() >= probability:
         return None
 
     # Candidate rumors the speaker could pass on. Fetch a superset (JSON event_id

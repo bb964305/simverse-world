@@ -53,6 +53,7 @@ async def ensure_scheduled_events(db, today: date_type | None = None) -> int:
     """Schedule upcoming holidays (idempotent) + maybe a random news event. Returns created count."""
     today = today or datetime.now(UTC).date()
     created = 0
+    announcements: list[tuple[str, str, date_type]] = []
 
     for offset in range(SCHEDULE_LOOKAHEAD_DAYS + 1):
         day = today + timedelta(days=offset)
@@ -68,6 +69,27 @@ async def ensure_scheduled_events(db, today: date_type | None = None) -> int:
             starts_at=start, ends_at=start + timedelta(days=HOLIDAY_WINDOW_DAYS), is_active=False,
         ))
         created += 1
+        announcements.append((title, desc, day))
+
+    # M1 F1.5: 集市日 — a weekly all-day festival at the plaza.摊贩 duties get a
+    # halved WORK cooldown and the shop runs a discount that day.
+    from app.config import settings as _s
+    for offset in range(SCHEDULE_LOOKAHEAD_DAYS + 1):
+        day = today + timedelta(days=offset)
+        if day.weekday() != _s.market_day_weekday:
+            continue
+        title = "集市日"
+        if await _exists(db, title, day):
+            continue
+        start = datetime(day.year, day.month, day.day, tzinfo=UTC)
+        db.add(WorldEvent(
+            type="festival", title=title,
+            description="广场上支起了摊子,居民们摆摊、赶集、讨价还价,热闹了一整天。",
+            payload_json={"market_day": True, "location_id": "central_plaza", "ambience": "market"},
+            starts_at=start, ends_at=start + timedelta(days=1), is_active=False,
+        ))
+        created += 1
+        announcements.append((title, "本周集市日,欢迎各位摊主到中央广场出摊。", day))
 
     if random.random() < NEWS_PROBABILITY:
         title, desc = random.choice(NEWS_POOL)
@@ -81,4 +103,29 @@ async def ensure_scheduled_events(db, today: date_type | None = None) -> int:
 
     if created:
         await db.commit()
+        await _announce_events(db, announcements)
     return created
+
+
+async def _announce_events(db, announcements: list[tuple[str, str, date_type]]) -> None:
+    """Duty system: the town clerk (市政厅文书) posts an official bulletin for
+    each newly scheduled festival. Best-effort — a bulletin failure must never
+    break event scheduling; without a clerk resident, no post is made."""
+    if not announcements:
+        return
+    try:
+        from app.services.bulletin_service import create_post
+        from app.services.duty_service import find_duty_resident
+
+        clerk = await find_duty_resident(db, "town_clerk")
+        if clerk is None:
+            return
+        for title, desc, day in announcements:
+            await create_post(
+                db, "notice",
+                f"市政厅公告:{title}({day.month}月{day.day}日)",
+                f"{desc}\n\n届时相关活动照章有序进行,请各位居民相互转告。——{clerk.name} 谨启",
+                author_resident_id=clerk.id,
+            )
+    except Exception:
+        logger.warning("clerk event announcement failed", exc_info=True)

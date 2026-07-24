@@ -262,3 +262,49 @@ async def _tip_effect(db, user_id, item, qty, context):
 
     await emit(db, "purchase_tip", user_id=user_id, post_id=post_id)  # D1 patron
     return {"tips_sc": post.tips_sc, "creator_share": share}
+
+
+@register("resident_work")
+async def _resident_work_effect(db, user_id, item, qty, context):
+    """M1 F1.4: a resident-made good. Buying it decrements the limited stock
+    (deactivating the listing at 0), credits the maker's treasury, and leaves
+    the maker a memory that their work sold — a purchase is a plot beat."""
+    from sqlalchemy import select
+    from app.models.resident import Resident
+    from app.services import coin_service
+    from app.services.duty_service import set_wallet_cache
+
+    payload = dict(item.payload_json or {})
+    creator_slug = payload.get("creator_slug")
+    if not creator_slug:
+        return None
+
+    earned = item.price_sc * qty
+    await coin_service.treasury_credit(db, creator_slug, earned, reason=f"work_sold:{item.code}")
+
+    stock = int(payload.get("stock", 1)) - qty
+    payload["stock"] = max(0, stock)
+    item.payload_json = payload
+    if stock <= 0:
+        item.active = False
+    await db.commit()
+
+    creator = (await db.execute(
+        select(Resident).where(Resident.slug == creator_slug)
+    )).scalar_one_or_none()
+    if creator is not None:
+        try:
+            balance = await coin_service.treasury_balance(db, creator_slug)
+            set_wallet_cache(db, creator, balance)
+            from app.memory.service import MemoryService
+            await MemoryService(db).add_memory(
+                creator.id, "event",
+                f"我的「{item.name}」被人买走了,挣了 {earned} 枚硬币。有人喜欢我做的东西,真好。",
+                0.6, "observation",
+            )
+            await db.commit()
+        except Exception:
+            logger.warning("resident_work maker memory failed for %s", creator_slug, exc_info=True)
+
+    return {"resident_work": item.code, "creator_slug": creator_slug,
+            "earned": earned, "stock": payload["stock"]}

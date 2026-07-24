@@ -85,6 +85,26 @@ async def _apply_contagion(db, a, b) -> None:
         logger.warning("emotion contagion failed", exc_info=True)
 
 
+async def _apply_duty_chat_effects(db, a, b) -> None:
+    """Duty system: a host-type resident (咖啡馆老板娘) makes conversations
+    restorative — the *other* party leaves with a small mood lift and a touch of
+    extra goodwill. Independent of the realism gates (it is a duty feature, not
+    a realism feature) and fail-open."""
+    try:
+        from app.services import relation_service
+        from app.services.duty_service import perk as _duty_perk
+
+        for host, guest in ((a, b), (b, a)):
+            uplift = _duty_perk(host, "chat_mood_uplift", 0.0)
+            if uplift > 0:
+                await apply_mood_event(db, guest, uplift, 0.0)
+            aff_bonus = _duty_perk(host, "chat_affinity_bonus", 0.0)
+            if aff_bonus > 0:
+                await relation_service.bump(db, host.id, guest.id, d_affinity=aff_bonus)
+    except Exception:
+        logger.warning("duty chat effects failed", exc_info=True)
+
+
 def _pair_key(a: Resident, b: Resident) -> str:
     lo, hi = sorted([a.id, b.id])
     return f"sv:chat_cd:{lo}:{hi}"
@@ -232,6 +252,8 @@ async def resident_chat(
         await _apply_contagion(svc.db, initiator, target)
         # Realism P2-2: numeric relation bump (familiarity + affinity by mood).
         await _apply_chat_relations(svc.db, initiator, target, summary_data.get("mood"))
+        # Duty system: host-type residents leave the other party warmer.
+        await _apply_duty_chat_effects(svc.db, initiator, target)
 
         # E3: each may pass a third-party rumor to the other (best-effort).
         try:

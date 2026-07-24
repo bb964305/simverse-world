@@ -73,6 +73,58 @@ async def run_nightly_jobs() -> None:
     except Exception:
         logger.error("Event scheduling failed", exc_info=True)
 
+    # M2: advance story arcs (rule-based milestone engine).
+    try:
+        from app.services.arc_service import evaluate_arcs
+        async with async_session() as db:
+            n = await evaluate_arcs(db)
+        if n:
+            logger.info("Advanced %d story-arc milestones", n)
+    except Exception:
+        logger.error("Arc engine failed", exc_info=True)
+
+    # M3: close due civic polls and execute the winning outcome.
+    try:
+        from app.services.civic_service import close_due_polls
+        async with async_session() as db:
+            n = await close_due_polls(db)
+        if n:
+            logger.info("Closed %d civic polls", n)
+    except Exception:
+        logger.error("Civic poll close failed", exc_info=True)
+
+    # M5: open the standing building proposals (idempotent one-shot per topic —
+    # an existing world picks them up here without a re-seed).
+    try:
+        from app.services.civic_service import seed_civic_agenda
+        async with async_session() as db:
+            n = await seed_civic_agenda(db)
+        if n:
+            logger.info("Opened %d civic building proposals", n)
+    except Exception:
+        logger.error("Civic agenda seeding failed", exc_info=True)
+
+    # M6: seasonal mayor election — once per active season, else every
+    # election_interval_days; never while an election poll is already open.
+    try:
+        from app.services.election_service import maybe_open_seasonal_election
+        async with async_session() as db:
+            poll = await maybe_open_seasonal_election(db)
+        if poll is not None:
+            logger.info("Opened mayor election poll %s", poll.id)
+    except Exception:
+        logger.error("Mayor election opening failed", exc_info=True)
+
+    # M3: NPC residents cast their (rule-based) votes on open civic polls.
+    try:
+        from app.services.civic_service import run_npc_voting
+        async with async_session() as db:
+            n = await run_npc_voting(db)
+        if n:
+            logger.info("%d NPC civic votes cast", n)
+    except Exception:
+        logger.error("NPC civic voting failed", exc_info=True)
+
     # Lab: expire overdue tasks + auto-release reviewed ones (72h), and dispatch
     # any funded open-recruitment tasks that now have an idle researcher.
     try:

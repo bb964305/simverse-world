@@ -483,6 +483,27 @@ class Settings(BaseSettings):
     realism_crowd_social_max: float = 0.5        # herd hint only when own social need < this
     # (festival ×3 draw reuses realism_festival_weight defined above)
 
+    # ── Town extension milestones (M1–M6) — each an independent gate ────
+    # M1 economy: duty wages, NPC meal cost, wallet-pressure hint, resident works.
+    npc_economy_enabled: bool = True
+    npc_default_wage_sc: int = 5                  # duty wage when perks lack wage_sc
+    npc_meal_cost_sc: int = 2                     # EAT debit from the resident's treasury
+    npc_wallet_pressure_threshold: int = 3        # below this balance → "手头紧" prompt hint
+    npc_work_item_prob: float = 0.35              # chance a producing WORK also lists a shop item
+    npc_work_item_price_sc: int = 15              # price of a resident-made shop item
+    npc_work_item_stock: int = 3                  # limited stock per listing
+    market_day_weekday: int = 5                   # Saturday=5: weekly 集市日
+    market_day_discount: float = 0.9              # shop price × this on market day
+    # M2 story arcs: rule-triggered milestone engine (nightly, zero tick cost).
+    arc_engine_enabled: bool = True
+    # M3 civic governance: proposals → clerk bulletin → NPC+player vote → execute.
+    civic_polls_enabled: bool = True
+    civic_poll_days: int = 3                      # voting window length
+    # M6 seasonal mayor election (built on the M3 engine).
+    election_enabled: bool = True
+    election_mayor_wage_bonus: float = 1.2
+    election_interval_days: int = 28              # off-season election cadence (nightly trigger)        # winner's town-wide wage multiplier
+
     model_config = {"env_file": ".env"}
 
 
