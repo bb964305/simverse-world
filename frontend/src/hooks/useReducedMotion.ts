@@ -18,7 +18,8 @@ export function useReducedMotion(): boolean {
   useEffect(() => {
     const mql = window.matchMedia?.(QUERY)
     if (!mql) return
-    setReduced(mql.matches)
+    // Initial value already read in the useState initializer; only subscribe to
+    // subsequent OS-toggle changes here (avoids a redundant setState in effect).
     const onChange = (e: MediaQueryListEvent) => setReduced(e.matches)
     if (mql.addEventListener) {
       mql.addEventListener('change', onChange)
