@@ -458,3 +458,11 @@
   .game-topnav__menu-button,
   .game-encounter-card { transition: none; }
 }
+
+/* LabTimeline pulses the verifying phase + a resyncing connection. Kept subtle
+   (opacity dip) and paused whenever the timeline is frozen (disconnected or
+   OS reduced-motion) — LabTimeline drops the animation inline in that state. */
+@keyframes sv-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
