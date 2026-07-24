@@ -51,6 +51,25 @@ export const LAB_BLOCKOUT = [
   "#################",
 ];
 
+// ── Post office authoritative geometry (art-spec §邮局地图) ────────────────
+// Inclusive footprint (44,100)-(48,106) = 5x7. The center column remains the
+// public route from the north entrance to the sorting-room work station.
+export const POST_OFFICE = {
+  x0: 44, y0: 100, w: 5, h: 7,
+  entrance: [46, 100],
+  center: [46, 103],
+};
+
+const POST_OFFICE_LAYOUT = [
+  "##E##",
+  "#...#",
+  "#...#",
+  "#...#",
+  "#...#",
+  "#...#",
+  "#####",
+];
+
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
@@ -239,6 +258,127 @@ export function paintExperimentBuilding(tilemap) {
   return tilemap;
 }
 
+// Post office visual pass. All tile choices are existing registered assets;
+// resolveGid keeps the painter independent of tileset ordering.
+export function paintPostOffice(tilemap) {
+  const resolve = makeGidResolver(tilemap);
+  const { x0, y0, w, h } = POST_OFFICE;
+  const idx = (x, y) => y * EXPANDED_WIDTH + x;
+  const FLOOR = resolve("Room_Builder_32x32", 4658);
+  const WALL = resolve("Room_Builder_32x32", 4164);
+  const BLOCK = resolve("blocks", 0);
+  const FURNITURE = {
+    // The mailbox is deliberately a saturated red single-tile object so it
+    // reads at the town-map zoom; the envelope sign completes the facade.
+    mailbox: resolve("interiors_pt3", 3973),
+    envelopePlain: resolve("interiors_pt4", 1915),
+    envelopeStamped: resolve("interiors_pt4", 1916),
+    // These are the left/right pieces of the same 2-tile service counter.
+    counterLeft: resolve("interiors_pt2", 3056),
+    counterLeftRight: resolve("interiors_pt2", 3057),
+    counterRight: resolve("interiors_pt2", 3059),
+    counterRightSide: resolve("interiors_pt2", 3060),
+    // Two complete pigeonhole runs: warm wood on the west wall and postal red
+    // on the east wall. They are built-in against the wall crown.
+    pigeonholesGoldLeft: resolve("interiors_pt4", 1947),
+    pigeonholesGoldRight: resolve("interiors_pt4", 1948),
+    pigeonholesRedLeft: resolve("interiors_pt4", 1931),
+    pigeonholesRedRight: resolve("interiors_pt4", 1932),
+    parcelShelfLeft: resolve("interiors_pt4", 1950),
+    parcelShelfRight: resolve("interiors_pt4", 1951),
+    parcelSmall: resolve("interiors_pt4", 1923),
+    parcelSmallAlt: resolve("interiors_pt4", 1924),
+    // Existing 2x2 table construction used by the neighbouring apartment.
+    tableTopLeft: resolve("interiors_pt1", 2579),
+    tableTopRight: resolve("interiors_pt1", 2580),
+    tableBottomLeft: resolve("interiors_pt1", 2595),
+    tableBottomRight: resolve("interiors_pt1", 2596),
+    restChair: resolve("interiors_pt1", 2610),
+    benchLeft: resolve("interiors_pt4", 1934),
+    benchRight: resolve("interiors_pt4", 1935),
+  };
+  const decoL1 = layerByName(tilemap, "Exterior Decoration L1").data;
+  const decoL2 = layerByName(tilemap, "Exterior Decoration L2").data;
+  const interior = layerByName(tilemap, "Interior Ground").data;
+  const wall = layerByName(tilemap, "Wall").data;
+  const furnitureL1 = layerByName(tilemap, "Interior Furniture L1").data;
+  const furnitureL2 = layerByName(tilemap, "Interior Furniture L2 ").data;
+  const collisions = layerByName(tilemap, "Collisions").data;
+
+  // Remove vegetation only from the construction rectangle. The single
+  // mailbox tile just north-west of the door is intentionally outside the
+  // rectangle and is already a clear grass tile in the survey.
+  for (let y = y0; y < y0 + h; y += 1)
+    for (let x = x0; x < x0 + w; x += 1) { decoL1[idx(x, y)] = 0; decoL2[idx(x, y)] = 0; }
+
+  // Reset the shell first; furniture is placed in a second pass so composite
+  // atlas objects can span the wall edge without making the route ambiguous.
+  for (let v = 0; v < h; v += 1) {
+    for (let u = 0; u < w; u += 1) {
+      const x = x0 + u, y = y0 + v, i = idx(x, y);
+      furnitureL1[i] = 0;
+      furnitureL2[i] = 0;
+      if (POST_OFFICE_LAYOUT[v][u] === "#") {
+        wall[i] = WALL; interior[i] = 0; collisions[i] = BLOCK;
+      } else {
+        wall[i] = 0; interior[i] = FLOOR; collisions[i] = 0;
+      }
+    }
+  }
+
+  const setFurniture = (x, y, gid, { layer = furnitureL1, blocks = true } = {}) => {
+    layer[idx(x, y)] = gid;
+    if (blocks) collisions[idx(x, y)] = BLOCK;
+  };
+  const setPair = (x, y, left, right, options) => {
+    setFurniture(x, y, left, options);
+    setFurniture(x + 1, y, right, options);
+  };
+
+  // Facade identity: keep the red mailbox unobscured beside the doorway; the
+  // stamped-envelope sign is mounted above the service counter below.
+  decoL1[idx(45, 99)] = FURNITURE.mailbox;
+  decoL2[idx(45, 99)] = 0;
+  collisions[idx(45, 99)] = BLOCK;
+
+  // Service hall. The counter and pigeonhole pairs deliberately sit against
+  // the side walls, leaving x=46 as the public approach through y=103.
+  setPair(44, 101, FURNITURE.counterLeft, FURNITURE.counterLeftRight);
+  setPair(47, 101, FURNITURE.counterRight, FURNITURE.counterRightSide);
+  setPair(44, 102, FURNITURE.pigeonholesGoldLeft, FURNITURE.pigeonholesGoldRight);
+  setPair(47, 102, FURNITURE.pigeonholesRedLeft, FURNITURE.pigeonholesRedRight);
+  setFurniture(45, 102, FURNITURE.envelopePlain, { layer: furnitureL2, blocks: false });
+  setFurniture(47, 102, FURNITURE.envelopeStamped, { layer: furnitureL2, blocks: false });
+
+  // Parcel rack and loose parcels on the east wall.
+  setPair(47, 103, FURNITURE.parcelShelfLeft, FURNITURE.parcelShelfRight);
+  setFurniture(47, 103, FURNITURE.parcelSmall, { layer: furnitureL2, blocks: false });
+
+  // A complete 2x2 sorting table occupies the back-left bay. Its top-right
+  // tile is below the route's center marker, so the player can reach the work
+  // station without stepping through the furniture.
+  setFurniture(45, 104, FURNITURE.tableTopLeft);
+  setFurniture(46, 104, FURNITURE.tableTopRight);
+  setFurniture(45, 105, FURNITURE.tableBottomLeft);
+  setFurniture(46, 105, FURNITURE.tableBottomRight);
+  setFurniture(45, 104, FURNITURE.parcelSmallAlt, { layer: furnitureL2, blocks: false });
+
+  // Rest corner: a red chair beside a compact built-in bench.
+  setFurniture(47, 104, FURNITURE.restChair);
+  setPair(47, 105, FURNITURE.benchLeft, FURNITURE.benchRight);
+
+  // Entrance and central aisle are always walkable, even if a future layout
+  // symbol accidentally places a decorative tile there. The sorting table is
+  // intentionally behind the center marker, so the route ends at (46,103).
+  for (const [x, y] of [[46, 100], [46, 101], [46, 102], [46, 103]]) {
+    collisions[idx(x, y)] = 0;
+    furnitureL1[idx(x, y)] = 0;
+    furnitureL2[idx(x, y)] = 0;
+    if (y !== 100) interior[idx(x, y)] = FLOOR;
+  }
+  return tilemap;
+}
+
 // ── Pure build core (no disk I/O) ────────────────────────────────────────────
 export function buildExpandedTilemap(tilemap, maze) {
   const inputWidth = tilemap.width;
@@ -263,6 +403,7 @@ export function buildExpandedTilemap(tilemap, maze) {
   tilemap.height = EXPANDED_HEIGHT;
 
   paintExperimentBuilding(tilemap);
+  paintPostOffice(tilemap);
 
   if (maze) maze.size = [EXPANDED_HEIGHT, EXPANDED_WIDTH];
   return { tilemap, maze, rebuilt: shouldRebuild, layerCount: tileLayers.length };
@@ -296,7 +437,7 @@ async function main() {
   await writeFile(backendTilemapPath, tilemapJson); // byte-identical backend copy
 
   console.log(
-    `${rebuilt ? "Expanded" : "Validated"} town map at ${EXPANDED_WIDTH}x${EXPANDED_HEIGHT}: ${layerCount} layers, painted Experiment Building blockout (108,72)-(124,86).`,
+    `${rebuilt ? "Expanded" : "Validated"} town map at ${EXPANDED_WIDTH}x${EXPANDED_HEIGHT}: ${layerCount} layers, painted Experiment Building and post office.`,
   );
 }
 

@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
   buildExpandedTilemap, makeGidResolver, LAB, LAB_BLOCKOUT,
-  EXPANDED_WIDTH as W, EXPANDED_HEIGHT as H,
+  EXPANDED_WIDTH as W, EXPANDED_HEIGHT as H, POST_OFFICE,
 } from "./expand-town-map.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -52,9 +52,11 @@ async function main() {
   const genA2 = buildExpandedTilemap(clone(genA.tilemap), clone(maze));
   check(ser(genA2.tilemap) === ser(genA.tilemap), "re-running on the painted map is stable (idempotent)");
   check(genA.maze.size[0] === H && genA.maze.size[1] === W, `maze.size === [${H},${W}]`);
+  check(ser(genA.maze) === ser(maze), "maze.json content is unchanged by the art pass");
 
   const tm = genA.tilemap;
   const idx = (x, y) => y * W + x;
+  const resolve = makeGidResolver(tm);
 
   console.log("2. 17x15 footprint bounds");
   check(tm.width === W && tm.height === H, `map is ${W}x${H}`);
@@ -86,6 +88,47 @@ async function main() {
   for (const [k, [x, y]] of Object.entries(targets))
     check(seen[idx(x, y)] === 1, `reachable from hub+access: ${k} (${x},${y})`);
 
+  console.log("3b. post-office footprint + reachability");
+  const poCol = layer(tm, "Collisions").data;
+  const poDecoL1 = layer(tm, "Exterior Decoration L1").data;
+  const poDecoL2 = layer(tm, "Exterior Decoration L2").data;
+  const poFurnitureL2 = layer(tm, "Interior Furniture L2 ").data;
+  let poRingOk = true, poTreesCleared = true;
+  for (let y = POST_OFFICE.y0; y < POST_OFFICE.y0 + POST_OFFICE.h; y += 1) {
+    for (let x = POST_OFFICE.x0; x < POST_OFFICE.x0 + POST_OFFICE.w; x += 1) {
+      const edge = x === POST_OFFICE.x0 || x === POST_OFFICE.x0 + POST_OFFICE.w - 1 ||
+        y === POST_OFFICE.y0 + POST_OFFICE.h - 1 ||
+        (y === POST_OFFICE.y0 && x !== POST_OFFICE.entrance[0]);
+      if (edge && !poCol[idx(x, y)]) poRingOk = false;
+      if (poDecoL1[idx(x, y)] !== 0 || poDecoL2[idx(x, y)] !== 0) poTreesCleared = false;
+    }
+  }
+  check(poRingOk, "post-office wall/furniture collision boundary leaves only the north entrance open");
+  check(poTreesCleared, "post-office footprint has no exterior decoration trees");
+  check(poCol[idx(...POST_OFFICE.entrance)] === 0, "post-office entrance is walkable");
+  check([100, 101, 102, 103].every((y) => poCol[idx(46, y)] === 0), "post-office entrance-to-center route remains walkable");
+  const poSeen = floodFill(poCol, [[POST_OFFICE.entrance[0], POST_OFFICE.entrance[1] - 1]]);
+  check(poSeen[idx(...POST_OFFICE.center)] === 1, "post-office center is reachable from the entrance");
+  check(poDecoL1[idx(45, 99)] === resolve("interiors_pt3", 3973), "red mailbox is mounted beside the north door");
+  check(poFurnitureL2[idx(47, 102)] === resolve("interiors_pt4", 1916), "stamped-envelope service sign is present");
+
+  // The painter is allowed to add the mailbox at (45,99), but must leave the
+  // surrounding survey vegetation untouched. This catches accidental broad
+  // clears when the post-office pass is edited later.
+  const sourceDecoL1 = layer(source, "Exterior Decoration L1").data;
+  const sourceDecoL2 = layer(source, "Exterior Decoration L2").data;
+  let outsideNeighborhoodIntact = true;
+  for (let y = 97; y <= 109; y += 1) {
+    for (let x = 42; x <= 51; x += 1) {
+      const inFootprint = x >= POST_OFFICE.x0 && x < POST_OFFICE.x0 + POST_OFFICE.w &&
+        y >= POST_OFFICE.y0 && y < POST_OFFICE.y0 + POST_OFFICE.h;
+      if (inFootprint || (x === 45 && y === 99)) continue;
+      if (poDecoL1[idx(x, y)] !== sourceDecoL1[idx(x, y)] ||
+          poDecoL2[idx(x, y)] !== sourceDecoL2[idx(x, y)]) outsideNeighborhoodIntact = false;
+    }
+  }
+  check(outsideNeighborhoodIntact, "post-office pass preserves decoration outside the surveyed footprint");
+
   console.log("4. semantic block layers untouched by generation");
   const before = clone(source);
   const after = buildExpandedTilemap(clone(source), clone(maze)).tilemap;
@@ -100,7 +143,6 @@ async function main() {
   check(frontRaw === backRaw, "frontend and backend tilemap.json are byte-identical");
 
   console.log("6. atlas / collision-dependency sanity");
-  const resolve = makeGidResolver(tm);
   const FLAG_MASK = 0x1fffffff;
   const blocksTs = tm.tilesets.find((t) => t.name === "blocks");
   const blocksMin = blocksTs.firstgid, blocksMax = blocksTs.firstgid + blocksTs.tilecount - 1;
