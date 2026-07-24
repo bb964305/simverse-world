@@ -447,3 +447,26 @@
 **验证**:锁定版本(uv sync --frozen)干净环境全量 pytest:**1310 passed / 1 skipped / 12 deselected,0 failed**(deselect = 11 个 lab_oci 惯例排除 + `test_agent_worker::test_worker_crashing_task_is_fatal`——该项在未含 M1–M6 改动的 HEAD 上同样超时失败,属沙盒环境既有现象,与本批改动无关,已用反向 patch 重建 HEAD 复核确认)。M 系测试 33 → 40 全绿。
 
 **遗留(记录不处理)**:1) M 批次工作(含本轮补齐)仍未 git 提交,工作树同时躺着 0723 生产修复批的改动,需要 Jimmy 拍板提交切分;2) 集市日折扣只在 purchase 结算时生效,商店目录展示的仍是原价(玩家看不到折扣标签,属前端增强项);3) `_npc_choice` 的 duty 经济倾向用 `str(effect)` 关键词匹配,粗但够用,如后续 effect 类型增多建议结构化。
+
+## KICKOFF S0 落地 — M1–M6 上线 + 世界时钟(东八区k=4) + 拟真开闸 + 内置居民sbti (2026-07-25)
+
+**背景**：按 `docs/KICKOFF_PROMPT_S0_LAUNCH.md` 拍板执行——M1–M6 合并部署 vm212 生产、拟真 REALISM P0–P2 开闸、时间锚东八区、世界时钟 ×4 加速、内置居民补 sbti。多 agent 编排（阶段 A 主线 + 阶段 B 三 worktree 并行 + 阶段 C 收口）。
+
+**阶段 A（合并+复验）**：A1/A2 上个会话已做（`feat/town-m1-m6-20260724`@`5172f0e`；`integ/m1-m6-on-prod`@`dde187c` 叠在生产线 `8a0449c`）。A3 硬门复验：**相对生产 base(port/044) 回归=0**——base 与 integ 全量 pytest 各 55 failed/17 error，失败集逐行完全一致（全部 lab-v2 需真 redis/testcontainers + 1 个 lab_egress .env-consistency 残留，与本批无关）；M 系定向 54/0；harness full 8/8 + alloff 1/1 + boundary 4/4。
+
+**阶段 B（3 worktree 并行，各独立 venv 隔离）**：
+- **agent-T 世界时钟**（`feat/m1m6-world-clock`）：先出 `docs/design/WORLD_CLOCK_DESIGN.md`（两类时间归属 + 唯一换算入口 + WORLD_EPOCH 策略 + 成本核算）。新建 `app/world_clock.py`（纯函数唯一入口：now_world/real_to_world/world_hour/world_weekday/world_date_key/world_week_index/next_beijing_morning_real 等，tz-aware Asia/Shanghai）。config：`world_clock_k=4`/`world_epoch=2026-01-01T00:00:00+08:00`/`timezone=Asia/Shanghai`。接线：loop 作息读世界时、plan/decide 日期 key 读世界日期（decide 的 created_at 经 real_to_world 再比对）、schemas.get_world_time 薄封装、event_templates 选哪天办用世界时/active 窗口 world_to_real 回真实时、nightly_cron 锚北京清晨 07:00 + 周任务门改「世界周 index 跨越」(Redis `sv:nightly:last_goal_week`/`last_decay_week`)、tick daily_key 改世界日期。commit 链 `f7ed43f`(design)→`b650577`→`eeeab8b`→`3713446`→`11b1156`。单测：world_clock 11 + seams 4，全绿。
+- **agent-R 拟真开闸**（`feat/m1m6-realism-gates`，`c72d17e`）：产出 REALISM_* 生产默认值表——四开关（REALISM_ENABLED + relations/info_gradient/crowd）生产 =true 写入 `.env.example`（config 代码默认仍 False，双轨=一键回滚）；数值参数 k=4 副作用核算结论**全维持**（tick 仍 60 真实秒，per-tick 代谢/情绪项不随 k 变；关系衰减系数走「世界周门」cadence 正确无需改；清醒窗 240 真实 tick 下 satiety 触 EAT≈110tick/energy 触睡≈138tick，午/晚双峰、siesta 自愈，不饿死不永醒）；六探针出数全达标（到达率83.3%/一致率100%/dining双峰/需求健康/度偏度1.7/半衰期2h）。
+- **agent-S 内置居民 sbti**（`feat/m1m6-preset-sbti`，`aa3faad`）：给 seed `PRESET_CHARACTERS` 11 位补完整 15 维 sbti.dimensions（match_type 纯函数反推 type），A2/Ac1/So1/A1 在 11 人间有区分度。修复前后：NPC 票 [option0:11, 维持:0] 全垄断 → [5,6] 平衡；选举候选走 Ac1/So1=H 路径不再 heat 回落。定向 47/0。
+
+**阶段 C（收口）**：C1 依次 merge T→R→S 入 integ（`.env.example` 冲突加性解决：budget=10.0 与 world-clock 键取 T、REALISM 四开关取 R 的 true）。C2 硬门：全量 pytest **相对 base 回归=0**（1625 passed，+19 新测试全绿），M+sbti+world_clock 定向 73/0，harness 8/8+1/1+4/4；前端 N/A（全批零前端改动）。C3 部署 vm212【Jimmy 授权】：gzip-tar 姿势（byte+gzip 双验），fresh-extract 保 static/uploads+portraits，`.env` 改 BUDGET 1.5→10、加 3 世界时钟键、`AGENT_MAX_DAILY_ACTIONS=100`(每世界天=400/真实天，Jimmy 拍板)、四 REALISM+AGENT_ENABLED 已 true；build+up 后 alembic 保持 045（零迁移）、health 200、world_clock live 出数正确（now_world 2028-*，k=4）、api+worker restarts=0、worker 日志净。C4 回写 master【Jimmy 授权】：`git merge --no-ff` integ 入 master 一并带 prod-fix 8a0449c（master 追平生产线），push origin → `af16bd4..5420d53` 远端核实一致。C5 burn-in：agent loop 确认存活（interval=60s/3 configs），世界时钟夜间门正确（world hour 0-1 residents ASLEEP 零 LLM=预期）。
+
+**Jimmy 拍板变更（覆盖 kickoff 边界）**：`BUDGET_GLOBAL_DAILY_USD` 1.5→**10**（原 kickoff §4「不改预算上限仅报告」被 Jimmy 本人新决定推翻，合法）；`AGENT_MAX_DAILY_ACTIONS` 语义改「每世界天」，vm212 保持 100（=400/真实天，×4 更活跃）。
+
+**偏差与发现（不隐藏）**：
+1. **生产硬门语义偏差**：kickoff 写「全量 pytest 0 failed / 基线 1310」是 HEAD 老 dev 线（alembic 040，早于 lab-v2）口径；生产线 port/044 含 lab-v2，本机无 redis/testcontainers 必有 55 预存失败，正确硬门=「相对 base 零新增失败」，已铁证满足。
+2. **【重要】内置居民 sbti 修复对当前生产人口无效**：agent-S 修的是 seed 文件（未来新世界/重播种生效，已测）。但 vm212 现有 26 位居民**不是** seed 的 11 位 preset（是 Generative-Agents demo cast isabella/klaus/mei + 玩家 forge 的 p-新居民-*，kickoff 点名的 lin-wanqiu 等 11 slug 在生产不存在），且这 26 位有**部分维**（LLM forge 时算的 type，dimensions 稀疏）——**0/26 有 A2 键** → `_npc_choice` 的 `dims.get("A2","M")` 仍恒 M，**同款 option-0 投票偏差在生产仍存在**（经不同机制：部分维而非缺 sbti）。这是既有数据画像问题，**超本 kickoff 字面 scope**（只点名 11 seed preset），需单独决定（LLM 重算 SBTI 或 backfill 迁移）。列为跟进项，未擅自扩 scope。
+3. **【既有 bug，非本批回归】heat_cron datetime 报错**：`heat_service.py:64` `last < seven_days_ago` offset-naive vs offset-aware 比较失败（`last_conversation_at` 存在 tz-aware 脏数据）。与 pre-deploy 备份 backend 逐字节相同=100% 既有（8a0449c 就有），非 M1–M6/world_clock 引入。启动时 fire 一次、中断该次 heat 重算。超 scope，列跟进项，未擅自热补生产。
+4. agent-T 偏差：`next_beijing_morning_real` 未被 cron 采用（改用已测的 `_seconds_until_next_run(now_real())`，语义等价，helper 保留有单测）。
+
+**遗留跟进**（未处理，待 Jimmy 定）：(a) 生产 26 居民部分维 sbti → 投票偏差仍在，需 LLM 重算或 backfill；(b) heat_cron tz 混比 bug（既有）；(c) burn-in 首 24h 真实 llm_usage 成本待测（预算已 $10，×4 行动量预计 ~$2/真实天）；(d) 集市日折扣目录页原价（前端增强，续记）。
