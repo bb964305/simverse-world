@@ -841,6 +841,90 @@ PRESET_CHARACTERS = [
     },
 ]
 
+# ── SBTI 15-dimension profiles (P2-1) ──────────────────────────────────
+# Hand-derived from each resident's ability/persona/soul text so the built-in
+# cast has *differentiated* personalities. Without these, civic_service._npc_choice
+# read every A2 as the "M" default → the conservative/rebel branches never fired
+# and NPC votes piled systematically onto option 0; election_service.open_election
+# found no Ac1/So1=H candidate and fell back to heat order. The type / type_name /
+# type_en / similarity / exact fields are NOT hand-coded — they are derived from
+# these dims by sbti_service.match_type() in _inject_sbti() below.
+# Dimension order: S1 S2 S3 E1 E2 E3 A1 A2 A3 Ac1 Ac2 Ac3 So1 So2 So3
+_PRESET_SBTI_DIMS: dict[str, dict[str, str]] = {
+    # 林晚秋 咖啡馆老板娘 — 温和有边界、观察者、被动社交枢纽、前产品总监
+    "lin-wanqiu": {"S1": "H", "S2": "H", "S3": "H", "E1": "H", "E2": "M",
+                   "E3": "H", "A1": "H", "A2": "M", "A3": "H", "Ac1": "M",
+                   "Ac2": "M", "Ac3": "H", "So1": "M", "So2": "H", "So3": "M"},
+    # 周大河 酒馆老板 — 热心多管闲事、主动社交发动机、先干再说、藏孤独
+    "zhou-dahe": {"S1": "H", "S2": "H", "S3": "H", "E1": "M", "E2": "H",
+                  "E3": "L", "A1": "H", "A2": "L", "A3": "H", "Ac1": "H",
+                  "Ac2": "H", "Ac3": "M", "So1": "H", "So2": "L", "So3": "M"},
+    # 陈铁生 修理匠 — 固执、社交省电、工序型、"画画能当饭吃"式怀疑者
+    "chen-tiesheng": {"S1": "H", "S2": "H", "S3": "H", "E1": "M", "E2": "M",
+                      "E3": "H", "A1": "L", "A2": "H", "A3": "H", "Ac1": "H",
+                      "Ac2": "H", "Ac3": "H", "So1": "L", "So2": "H", "So3": "L"},
+    # 沈静书 图书管理员 — 内向、纸上完美主义、小半径深社交、资料型、又渴望又害怕被看见
+    "shen-jingshu": {"S1": "M", "S2": "H", "S3": "H", "E1": "M", "E2": "M",
+                     "E3": "H", "A1": "H", "A2": "H", "A3": "H", "Ac1": "M",
+                     "Ac2": "L", "Ac3": "M", "So1": "L", "So2": "H", "So3": "L"},
+    # 顾明远 学院教师 — 温和的固执、师者社交、原则+证据型、传承理想
+    "gu-mingyuan": {"S1": "H", "S2": "H", "S3": "H", "E1": "H", "E2": "H",
+                    "E3": "M", "A1": "H", "A2": "H", "A3": "H", "Ac1": "H",
+                    "Ac2": "H", "Ac3": "H", "So1": "M", "So2": "M", "So3": "M"},
+    # 苏小满 学生 — 好奇心装不下、越挫越问、自来熟、兴趣驱动、方向未定
+    "su-xiaoman": {"S1": "M", "S2": "L", "S3": "M", "E1": "M", "E2": "H",
+                   "E3": "L", "A1": "H", "A2": "L", "A3": "M", "Ac1": "H",
+                   "Ac2": "M", "Ac3": "M", "So1": "H", "So2": "L", "So3": "L"},
+    # 何巧云 杂货铺店主 — 刀子嘴豆腐心、务实、街坊型社交枢纽、成本收益(人情半权重)
+    "he-qiaoyun": {"S1": "H", "S2": "H", "S3": "H", "E1": "H", "E2": "M",
+                   "E3": "M", "A1": "H", "A2": "M", "A3": "H", "Ac1": "H",
+                   "Ac2": "H", "Ac3": "H", "So1": "H", "So2": "L", "So3": "M"},
+    # 赵启文 市政厅文书 — 原则如铁、程序正义、公事公办外壳+悄悄补台里子、对秩序谨慎
+    "zhao-qiwen": {"S1": "M", "S2": "H", "S3": "H", "E1": "M", "E2": "M",
+                   "E3": "H", "A1": "L", "A2": "H", "A3": "H", "Ac1": "M",
+                   "Ac2": "M", "Ac3": "H", "So1": "M", "So2": "H", "So3": "M"},
+    # 江临 研究员 — 冷静不冷淡、诚实到严格、低频高质社交、证据分级、谨慎改良
+    "jiang-lin": {"S1": "H", "S2": "H", "S3": "H", "E1": "H", "E2": "M",
+                  "E3": "H", "A1": "H", "A2": "H", "A3": "H", "Ac1": "H",
+                  "Ac2": "M", "Ac3": "H", "So1": "L", "So2": "H", "So3": "M"},
+    # 阿岚 街头画家 — 倔、对世界温柔对自己诚实、感觉优先落笔无悔、广场型社交、父女心结
+    "a-lan": {"S1": "M", "S2": "H", "S3": "H", "E1": "M", "E2": "H",
+              "E3": "M", "A1": "H", "A2": "L", "A3": "H", "Ac1": "H",
+              "Ac2": "H", "Ac3": "M", "So1": "H", "So2": "M", "So3": "M"},
+    # 骆小舟 邮差 — 可靠有分寸、点到即止的高频社交、路线最优型、表里如一
+    "luo-xiaozhou": {"S1": "M", "S2": "H", "S3": "H", "E1": "M", "E2": "M",
+                     "E3": "H", "A1": "M", "A2": "H", "A3": "H", "Ac1": "M",
+                     "Ac2": "H", "Ac3": "H", "So1": "M", "So2": "H", "So3": "L"},
+}
+
+
+def _inject_sbti(items: list[dict]) -> list[dict]:
+    """Attach a full ``meta_json['sbti']`` block (dims + match_type()-derived type
+    fields) to each preset that has an entry in ``_PRESET_SBTI_DIMS``.
+
+    Runs BEFORE ``_apply_overrides`` so a generated override can still win the
+    shallow meta_json merge; residents without an entry are left untouched."""
+    from app.services.sbti_service import match_type
+
+    for item in items:
+        dims = _PRESET_SBTI_DIMS.get(item["slug"])
+        if not dims:
+            continue
+        matched = match_type(dims)
+        meta = dict(item.get("meta_json") or {})
+        meta["sbti"] = {
+            "type": matched["type"],
+            "type_name": matched["type_name"],
+            "type_en": matched["type_en"],
+            "dimensions": dict(dims),
+            "similarity": matched["similarity"],
+            "exact": matched["exact"],
+        }
+        item["meta_json"] = meta
+    return items
+
+
+PRESET_CHARACTERS = _inject_sbti(PRESET_CHARACTERS)
 PRESET_CHARACTERS = _apply_overrides(PRESET_CHARACTERS)
 PRESET_CHARACTERS = [
     {
