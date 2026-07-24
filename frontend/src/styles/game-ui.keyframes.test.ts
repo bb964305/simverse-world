@@ -20,4 +20,10 @@ describe('game-ui.css — sv-pulse keyframe backing LabTimeline', () => {
     expect(block).toMatch(/opacity/)
     expect(block).toMatch(/0?\.45/)
   })
+
+  it('has a CSS reduced-motion backstop that disables sv-pulse (defense-in-depth beyond the JS hook)', () => {
+    const reduced = css.match(/@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?\n\}/)?.[0] ?? ''
+    expect(reduced).toMatch(/sv-pulse/)
+    expect(reduced).toMatch(/animation:\s*none/)
+  })
 })

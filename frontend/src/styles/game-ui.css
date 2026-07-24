@@ -457,6 +457,10 @@
   .game-nav-link,
   .game-topnav__menu-button,
   .game-encounter-card { transition: none; }
+  /* Backstop for the sv-pulse timeline animation. LabTimeline already drops the
+     inline animation via useReducedMotion, but this guards any future inline
+     sv-pulse consumer that forgets the hook — reduced-motion users never pulse. */
+  [style*="sv-pulse"] { animation: none !important; }
 }
 
 /* Lab tablet tier — between the >1024px desktop default (side-by-side split at
