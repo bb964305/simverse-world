@@ -70,3 +70,52 @@ async def test_decide_today_actions_uses_world_date(fixed_real):
 
     assert ctx.today_actions == ["今天完成了报告"]
 
+
+# ── nightly cron: real 24h cadence, Beijing-morning anchor ──
+
+def test_nightly_anchor_is_beijing_morning(fixed_real):
+    """The cron keeps a true real-24h cadence but fires at the Beijing morning
+    hour (agent-T §5), not UTC 00:30. ``_seconds_until_next_run`` computes the
+    delay to the next ``RUN_HOUR``:00 in the anchor zone."""
+    from app.tasks import nightly_cron as nc
+
+    assert (nc.RUN_HOUR, nc.RUN_MINUTE) == (7, 0)
+
+    base = datetime(2026, 6, 1, 5, 0, 0, tzinfo=SH)  # 05:00 Beijing
+    # Next 07:00 is 2h out.
+    assert nc._seconds_until_next_run(base) == pytest.approx(2 * 3600)
+    # 08:00 Beijing → already past 07:00 → next is tomorrow 07:00 (23h out).
+    later = datetime(2026, 6, 1, 8, 0, 0, tzinfo=SH)
+    assert nc._seconds_until_next_run(later) == pytest.approx(23 * 3600)
+
+
+# ── nightly cron: world-week gate fires once per world week ──
+
+@pytest.mark.anyio
+async def test_world_week_gate_same_week_then_cross(fixed_real):
+    """Two real runs inside one world week → gate passes once; a run that crosses
+    into the next world week passes again. A world week is 7 world days = 42 real
+    hours at k=4, so equality on real weekday would misfire (agent-T §5)."""
+    from app.tasks import nightly_cron as nc
+
+    epoch = wc.world_epoch()
+    key = "sv:nightly:test_week"
+
+    # First run in world week 0 → passes, records ordinal 0.
+    fixed_real(epoch)
+    assert wc.world_week_index() == 0
+    assert await nc._world_week_gate(key) is True
+
+    # Another run ~1 real day later, still world week 0 (24 real h = 4 world days
+    # < 7) → does NOT pass again.
+    fixed_real(epoch + timedelta(hours=24))
+    assert wc.world_week_index() == 0
+    assert await nc._world_week_gate(key) is False
+
+    # A run past 42 real hours → world week 1 → passes again.
+    fixed_real(epoch + timedelta(hours=42) + timedelta(minutes=1))
+    assert wc.world_week_index() == 1
+    assert await nc._world_week_gate(key) is True
+    # Immediately re-checking the same world week does not re-fire.
+    assert await nc._world_week_gate(key) is False
+
