@@ -7,6 +7,8 @@ import { DigestModal } from './DigestModal'
 import { CommissionModal } from './CommissionModal'
 import { BulletinBoard } from './BulletinBoard'
 import { ExperimentPanel } from './ExperimentPanel'
+import { TownHallPanel } from './TownHallPanel'
+import { LabTerminalPanel } from './LabTerminalPanel'
 import { ShopModal } from './ShopModal'
 import { bridge } from '../game/phaserBridge'
 import { disconnectWS, onWSMessage } from '../services/ws'
@@ -210,12 +212,16 @@ export function TopNav() {
     }
     const unsubBulletin = bridge.on('bulletin:open', closeLocalLayers)
     const unsubExperiment = bridge.on('experiment:open', closeLocalLayers)
-    return () => { unsubBulletin(); unsubExperiment() }
+    const unsubTownhall = bridge.on('townhall:open', closeLocalLayers)
+    const unsubLabTerminal = bridge.on('labterminal:open', closeLocalLayers)
+    return () => { unsubBulletin(); unsubExperiment(); unsubTownhall(); unsubLabTerminal() }
   }, [])
 
+  const BRIDGE_PANELS = ['bulletin', 'experiment', 'townhall', 'labterminal'] as const
+  type BridgePanel = (typeof BRIDGE_PANELS)[number]
+
   const closeBridgePanels = () => {
-    bridge.emit('bulletin:close')
-    bridge.emit('experiment:close')
+    for (const p of BRIDGE_PANELS) bridge.emit(`${p}:close`)
   }
 
   const openModal = (modal: Exclude<NavModal, null>) => {
@@ -224,10 +230,11 @@ export function TopNav() {
     setActiveModal(modal)
   }
 
-  const openBridgePanel = (panel: 'bulletin' | 'experiment') => {
+  const openBridgePanel = (panel: BridgePanel) => {
     setActiveModal(null)
     setActivePopover(null)
-    bridge.emit(panel === 'bulletin' ? 'experiment:close' : 'bulletin:close')
+    // Close every other bridge panel so only one overlay owns the lane.
+    for (const p of BRIDGE_PANELS) if (p !== panel) bridge.emit(`${p}:close`)
     bridge.emit(`${panel}:open`)
   }
 
@@ -256,8 +263,12 @@ export function TopNav() {
           <button onClick={() => navigateTo('/debates')} className="game-nav-link game-nav-link--violet">⚔️ 辩论</button>
           <button onClick={() => openModal('shop')} className="game-nav-link game-nav-link--pink">🛒 商店</button>
           <button onClick={() => openModal('commission')} className="game-nav-link game-nav-link--green">🗒️ 委托</button>
+          <button onClick={() => openBridgePanel('townhall')} className="game-nav-link game-nav-link--violet">🏛️ 市政厅</button>
           {labEnabled && (
             <button onClick={() => openBridgePanel('experiment')} className="game-nav-link game-nav-link--teal">🧪 实验楼</button>
+          )}
+          {labEnabled && (
+            <button onClick={() => openBridgePanel('labterminal')} className="game-nav-link game-nav-link--teal">📊 实验楼终端</button>
           )}
           {user?.is_admin && (
             <button onClick={() => navigateTo('/admin')} className="game-nav-link game-nav-link--danger">🔐 管理</button>
@@ -282,8 +293,12 @@ export function TopNav() {
               <button onClick={() => navigateTo('/debates')} className="game-nav-link game-nav-link--violet" role="menuitem">⚔️ 辩论</button>
               <button onClick={() => openModal('shop')} className="game-nav-link game-nav-link--pink" role="menuitem">🛒 商店</button>
               <button onClick={() => openModal('commission')} className="game-nav-link game-nav-link--green" role="menuitem">🗒️ 委托</button>
+              <button onClick={() => openBridgePanel('townhall')} className="game-nav-link game-nav-link--violet" role="menuitem">🏛️ 市政厅</button>
               {labEnabled && (
                 <button onClick={() => openBridgePanel('experiment')} className="game-nav-link game-nav-link--teal" role="menuitem">🧪 实验楼</button>
+              )}
+              {labEnabled && (
+                <button onClick={() => openBridgePanel('labterminal')} className="game-nav-link game-nav-link--teal" role="menuitem">📊 实验楼终端</button>
               )}
               <button onClick={() => { setDigestUnread(false); openModal('digest') }} className="game-nav-link" role="menuitem">📰 村落日报</button>
               {user?.is_admin && (
@@ -463,6 +478,8 @@ export function TopNav() {
         a 48px fixed-position containing block around them. */}
     <BulletinBoard />
     <ExperimentPanel />
+    <TownHallPanel />
+    <LabTerminalPanel />
     {/* The shared event-height variable moves every game HUD surface below it. */}
     {currentEvent && (
       <div className="game-world-event" style={{ opacity: bannerVisible ? 1 : 0, transition: 'opacity 0.3s ease' }} role="status">

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, type CSSProperties } from 'react'
+import { useState, useEffect, useRef, useCallback, type CSSProperties } from 'react'
 import { bridge } from '../game/phaserBridge'
 import { getTownHallOverview, type TownHallOverview } from '../services/api'
 
@@ -41,25 +41,29 @@ export function TownHallPanel() {
   const [error, setError] = useState<string | null>(null)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
 
-  useEffect(() => {
-    const unsubOpen = bridge.on('townhall:open', () => {
-      bridge.emit('bulletin:close')
-      bridge.emit('experiment:close')
-      setOpen(true)
-    })
-    const unsubClose = bridge.on('townhall:close', () => setOpen(false))
-    return () => { unsubOpen(); unsubClose() }
-  }, [])
-
-  useEffect(() => {
-    if (!open) return
-    closeButtonRef.current?.focus()
+  const load = useCallback(() => {
     setLoading(true)
     setError(null)
     getTownHallOverview()
       .then((d) => setData(d))
       .catch(() => setError('市政厅暂时无法访问'))
       .finally(() => setLoading(false))
+  }, [])
+
+  useEffect(() => {
+    const unsubOpen = bridge.on('townhall:open', () => {
+      bridge.emit('bulletin:close')
+      bridge.emit('experiment:close')
+      setOpen(true)
+      load()
+    })
+    const unsubClose = bridge.on('townhall:close', () => setOpen(false))
+    return () => { unsubOpen(); unsubClose() }
+  }, [load])
+
+  useEffect(() => {
+    if (!open) return
+    closeButtonRef.current?.focus()
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)

@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { MemoryRouter } from 'react-router-dom'
 import { TopNav } from './TopNav'
 import { useGameStore } from '../stores/gameStore'
+import { bridge } from '../game/phaserBridge'
 
 vi.mock('../services/ws', () => ({
   disconnectWS: vi.fn(),
@@ -14,7 +15,7 @@ vi.mock('../services/api', () => ({
   getNotifications: vi.fn().mockResolvedValue({ notifications: [], unread_count: 0 }),
   getDailyQuest: vi.fn().mockResolvedValue({ login_streak: 1, quest: null }),
   getActiveEvents: vi.fn().mockResolvedValue({ events: [] }),
-  getMe: vi.fn().mockResolvedValue({ soul_coin_balance: 110 }),
+  getMe: vi.fn().mockResolvedValue({ soul_coin_balance: 110, lab_enabled: true }),
 }))
 
 vi.mock('./SearchDropdown', () => ({ SearchDropdown: () => <div data-testid="resident-search" /> }))
@@ -38,6 +39,8 @@ vi.mock('./ShopModal', () => ({
 }))
 vi.mock('./BulletinBoard', () => ({ BulletinBoard: () => null }))
 vi.mock('./ExperimentPanel', () => ({ ExperimentPanel: () => null }))
+vi.mock('./TownHallPanel', () => ({ TownHallPanel: () => null }))
+vi.mock('./LabTerminalPanel', () => ({ LabTerminalPanel: () => null }))
 
 const user = {
   id: 'user-1',
@@ -81,5 +84,27 @@ describe('TopNav overlay ownership', () => {
 
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('dialog', { name: '杂货铺' })).not.toBeInTheDocument()
+  })
+})
+
+describe('TopNav townhall + lab-terminal entries', () => {
+  it('emits townhall:open when the 市政厅 entry is clicked', () => {
+    const spy = vi.fn()
+    const unsub = bridge.on('townhall:open', spy)
+    renderNav()
+    fireEvent.click(screen.getByRole('button', { name: /市政厅/ }))
+    expect(spy).toHaveBeenCalledTimes(1)
+    unsub()
+  })
+
+  it('emits labterminal:open when lab is enabled', async () => {
+    const spy = vi.fn()
+    const unsub = bridge.on('labterminal:open', spy)
+    renderNav()
+    // lab_enabled resolves from getMe(); wait for the gated entry to appear.
+    const btn = await screen.findByRole('button', { name: /实验楼终端/ })
+    fireEvent.click(btn)
+    expect(spy).toHaveBeenCalledTimes(1)
+    unsub()
   })
 })
