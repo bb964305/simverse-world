@@ -1,12 +1,13 @@
+/// <reference types="node" />
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-// Source-level guard (jsdom does not evaluate imported CSS @keyframes/@media):
-// LabTimeline.tsx animates `sv-pulse` for the verifying phase and a resyncing
-// connection. If the keyframe is undefined the animation silently no-ops, so
-// this asserts the definition exists. The real visual effect is verified at
-// runtime (Step 6, verify-before-done).
+// Source-level guard (jsdom does not evaluate imported CSS @keyframes/@media,
+// and Vite's ?raw returns empty for CSS under vitest): read the stylesheet text
+// directly. LabTimeline.tsx animates `sv-pulse` for the verifying phase and a
+// resyncing connection; an undefined keyframe silently no-ops, so this asserts
+// the definition exists. The real visual effect is verified at runtime (Step 6).
 describe('game-ui.css — sv-pulse keyframe backing LabTimeline', () => {
   const css = readFileSync(resolve(process.cwd(), 'src/styles/game-ui.css'), 'utf8')
 
