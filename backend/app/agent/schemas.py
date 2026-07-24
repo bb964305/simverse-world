@@ -79,7 +79,10 @@ class TickContext:
 
 
 def get_world_time() -> tuple[str, int, str]:
-    now = datetime.now()
+    # World time (agent-T): thin wrapper over the single conversion entry point.
+    # Residents perceive the accelerated world clock, not real wall-clock time.
+    from app.world_clock import now_world
+    now = now_world()
     hour = now.hour
     formatted = now.strftime("%H:%M")
     if 5 <= hour < 9:

@@ -77,7 +77,10 @@ class BasicPlanPlugin:
         self.preferred_actions: list[str] = params.get("preferred_actions", [])
 
     async def execute(self, ctx: TickContext) -> TickContext:
-        today = datetime.now().strftime("%Y-%m-%d")
+        # World time (agent-T): plans regenerate per WORLD day, so dedup keys off
+        # the world date, not real wall-clock.
+        from app.world_clock import world_date_key
+        today = world_date_key()
 
         plans_data = ctx.resident.daily_plans_json
         is_fresh = (
@@ -151,11 +154,14 @@ class BasicPlanPlugin:
         recent_text = "\n".join(f"- {m.content}" for m in recent) or "（无）"
         rels_text = "\n".join(f"- {m.content}" for m in rels) or "（无）"
 
-        # Yesterday's event summary
-        yesterday = (datetime.now().replace(hour=0, minute=0, second=0, microsecond=0))
+        # Yesterday's event summary. Memories store created_at in real UTC, so we
+        # convert each to world time before comparing against the world date — a
+        # world "yesterday" is any memory dated before today's world date.
+        from app.world_clock import now_world, real_to_world
+        world_today = now_world().date()
         yesterday_events = [
             m for m in recent_all
-            if m.created_at and m.created_at.date() < yesterday.date()
+            if m.created_at and real_to_world(m.created_at).date() < world_today
         ][:5]
         yesterday_text = "\n".join(f"- {m.content}" for m in yesterday_events) if yesterday_events else "（无）"
 

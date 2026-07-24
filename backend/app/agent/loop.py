@@ -147,8 +147,11 @@ class AgentLoop:
 
         force_plan_only = tier == BudgetTier.RULE_ONLY
         suppress_chat = tier == BudgetTier.RULE_ONLY
-        current_hour = datetime.now().hour
-        current_weekday = datetime.now().weekday()
+        # World time (agent-T): resident 作息 runs on the accelerated world clock,
+        # not real wall-clock — a full day/night every 6 real hours at k=4.
+        from app.world_clock import world_hour, world_weekday
+        current_hour = world_hour()
+        current_weekday = world_weekday()
         # Realism P1-10: sleeping residents (excluded from the tick round) recover
         # energy and wake within their schedule window once rested.
         if settings.realism_enabled:

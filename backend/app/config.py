@@ -74,8 +74,11 @@ class Settings(BaseSettings):
     # Global daily spend cap (USD). Background LLM work degrades in three tiers
     # as this fills: >=80% throttle (tick x2), >=95% rule-only (force plan, no
     # inter-resident chat), >=100% background paused (only player-visible calls).
-    # Default ≈ 15-resident baseline × 1.5; raise for larger worlds. Set 0 to disable.
-    budget_global_daily_usd: float = 1.5
+    # Default raised to 10.0 to fund the world-clock k=4 speed-up: daily-action
+    # counting now resets per WORLD day (tick.py._daily_key), so a resident can
+    # act cap×4 ≈ 80×/real-day ≈ $6/real-day for a 15-resident world — kept under
+    # this $10 guardrail. Raise for larger worlds. Set 0 to disable.
+    budget_global_daily_usd: float = 10.0
     # Per-user daily player-visible spend cap (USD); over it, player chat replies
     # with a friendly "daily limit reached" instead of calling the LLM. 0 disables.
     budget_user_daily_usd: float = 0.5
@@ -178,12 +181,19 @@ class Settings(BaseSettings):
     # --- Agent Loop ---
     agent_tick_interval: int = 60          # seconds between tick rounds
     agent_max_concurrent: int = 5          # max residents ticking in parallel
-    agent_max_daily_actions: int = 20      # per-resident action cap per in-game day
+    agent_max_daily_actions: int = 20      # per WORLD day (accelerated by WORLD_CLOCK_K); a spend guardrail, not real-time
     agent_chat_max_turns: int = 8          # max dialog turns in a resident-resident chat
     agent_chat_cooldown: int = 1800        # seconds before same pair can chat again
-    agent_time_scale: float = 1.0          # world time multiplier (1.0 = realtime)
     agent_enabled: bool = True             # master switch (set False to pause loop)
     agent_debug_always_active: bool = False  # bypass schedule, all residents always active
+
+    # --- World Clock (agent-T) — single conversion entry lives in app/world_clock.py ---
+    # World time = WORLD_EPOCH + k×(real elapsed). k=4 → 1 real day = 4 world days
+    # (a full day/night every 6 real hours). Residents' 作息/星期/日期语义 read world
+    # time; LLM budget日结/cron/TTL/日志 stay on real time. See WORLD_CLOCK_DESIGN.md.
+    world_clock_k: int = 4                                    # world-time speed multiplier
+    world_epoch: str = "2026-01-01T00:00:00+08:00"           # instant where world==real (fixed, tz-aware Asia/Shanghai)
+    timezone: str = "Asia/Shanghai"                          # time-semantics anchor zone (UTC+8, no DST)
 
     # --- Lab / experiment building (元游戏入口) ---
     # Deploy-level master switch (loaded at startup). The *runtime* kill switch
