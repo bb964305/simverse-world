@@ -486,3 +486,25 @@
 2. **kickoff §4.2 的字面 grep 必然落空**：`grep 'TownHall\|LabTerminal'` 匹配不到生产 bundle——PascalCase 组件名被 minify 掉，实际以小写事件名 + 中文 UI 串为证（见上）。
 3. **执行顺序调整**：3 个待删分支被 worktree 检出（`branch -d` 会被拒），故 worktree 移除提前到删分支之前（kickoff 原顺序为先删分支）。
 4. push 范围经 Jimmy 确认扩为「两个 cherry-pick + 本条 PROGRESS 记录」（kickoff 字面仅前者）。
+
+## 三线并行批次收口 — S2-1 offices + S1-3 opinion + 生产修缮三件套 (2026-07-25)
+
+**背景**:按 `docs/PARALLEL_WORKSTREAMS_2026-07-25.md` 三线并行开发(base=master `d27fce7`),各线独立 worktree+分支、TDD、一任务一提交,均已单线通过「全量 pytest 相对基线零新增失败」硬门后,主会话按文档顺序统一收口合并。
+
+**合并序列(均 --no-ff)**:
+1. `fix/prod-hygiene-batch`(4 commits)→ `aaa421d`:A sbti_backfill 工具(Roadmap #11)+ B heat_cron tz 修复(#12,收掉上批遗留跟进项 b)+ C 熔断静默告警 budget_alerts(#6)。
+2. `feat/s2-1-offices`(7+1 commits)→ `d314784`:offices 表+OfficeService(原子 appoint/vacate/term_check)、镇长写读改道(dual-write/offices-first)、find_duty_resident 查表改道+doctor 槽位、GET /admin/offices+office_changed WS、nightly term_check 门控块。合并前迁移线性化 `NNN→046_add_offices`(`e85a956`,接 045)。
+3. `feat/s1-3-opinion`(7+1 commits)→ `a4dc3e1`:issue_stances 表+OpinionService 有界信任内核、三条零 LLM 信号接线、nightly drift(digest 前)、日报 opinion_line、burn-in 探针。合并前迁移重排 `046→047_add_issue_stances` 且 down_revision 改接 `046_add_offices`(`97b13e4`)。
+
+**冲突解决(全部为预期的两线同锚点追加型)**:config.py Settings 类尾 POLIS_OFFICE_/POLIS_OPINION_ 两块并存;.env.example 两键块并存;models/__init__.py 两 import 并存;burnin_report.py 两探针调用并存(联合后手修一个多余右括号)。nightly_cron 两块位置不同自动合并干净。
+
+**硬门(每合一条跑全量 pytest,失败集与基线逐条 diff)**:基线 @d27fce7 = 51 failed/17 errors(全为 lab-v2 需真 redis/testcontainers 预存+1 env 一致性预存)。合并 1 后 51f/17e/1667p ✓;合并 2 后 51f/17e/1703p ✓;合并 3+修复后 51f/17e/**1737 passed** ✓——零新增失败,+95 passed 恰等于三线新增测试数(25+36+34)。`alembic heads` = `047_add_issue_stances` 单头 ✓(链 044→045→046→047)。
+
+**清理**:三 worktree(sv-hygiene/sv-s2-offices/sv-s1-opinion)移除+prune,三分支 `-d` 删除(均已进 master)。终态本地 master + port/prod-fixes-onto-044。
+
+**偏差(不隐藏)**:
+1. S1-3 的 `test_integration_migration_single_head` 写死重排前 down_revision=045,线性化后必然红 → 按收口后事实更新断言为 `046_add_offices`(`ee8ce29`,合并后曾短暂 52f)。
+2. 主仓 .git 残留 0 字节陈旧 index.lock(并行批次遗留)阻塞首次 merge,确认无 git 进程后清除。
+3. 修缮线 C 的三个告警 env 键(BUDGET_ALERTS_ENABLED/BUDGET_ALERT_COOLDOWN_MIN/BUDGET_USAGE_STALL_MIN)非 Settings 字段(os.environ 直读),**刻意不入 .env.example**(入则触发 env 一致性不变量 1),默认值即生产合理值,报告有案。
+
+**第二波解锁**:S2-1 已收口 → S1-5 财政与 S2-5 政策可并行(文件集不相交),S1-1 声誉最后;接口冻结声明见 `docs/reports/feat-s2-1-offices-report.md`。
