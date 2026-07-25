@@ -1082,7 +1082,7 @@ def _norm_entropy(tally: list[int]) -> float:
     if total <= 0 or len(tally) < 2:
         return 0.0
     h = -sum((n / total) * math.log(n / total) for n in tally if n > 0)
-    return h / math.log(len(tally))
+    return abs(h / math.log(len(tally)))  # abs(): 单选项独占时 -sum(0.0) = -0.0
 
 
 def npc_vote_distribution(snapshot: dict) -> dict:
