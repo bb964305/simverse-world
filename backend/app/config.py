@@ -514,6 +514,18 @@ class Settings(BaseSettings):
     election_mayor_wage_bonus: float = 1.2
     election_interval_days: int = 28              # off-season election cadence (nightly trigger)        # winner's town-wide wage multiplier
 
+    # ── S2-1 offices 职位实体化 (POLIS_OFFICE_*) — independent gate ─────
+    # Unified offices table (mayor/town_clerk/postman/doctor) + OfficeService.
+    # Default False (rollback-safe, realism-family pattern): off → byte-level
+    # fallback to today's install_mayor / current_mayor / _pay_wage /
+    # find_duty_resident behavior; the offices table is neither read nor
+    # written by any business path and term_check is skipped in the cron.
+    polis_office_enabled: bool = False
+    # Mayor term length in WORLD days (world_clock is the only conversion
+    # entry point). 0 = unlimited term — byte-equivalent to today's
+    # overwrite-on-reelection mayor; >0 enables nightly term expiry.
+    polis_office_mayor_term_days: int = 0
+
     model_config = {"env_file": ".env"}
 
 

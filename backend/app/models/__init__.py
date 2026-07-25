@@ -55,3 +55,5 @@ import app.models.lab_runtime  # noqa: F401
 import app.models.lab_control  # noqa: F401
 # Realism P2 — numeric two-axis relationships (§7.1)
 import app.models.resident_relation  # noqa: F401
+# S2-1 offices — unified job/office table (职位实体化)
+import app.models.office  # noqa: F401
