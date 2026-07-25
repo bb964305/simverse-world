@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import async_session
 from app.memory.embedding import generate_embedding
 from app.models.memory import Memory
+from app.tasks.loop_heartbeat import beat
 
 logger = logging.getLogger(__name__)
 BACKFILL_INTERVAL_SECONDS = 3600  # 1 hour
@@ -93,4 +94,6 @@ async def embedding_backfill_loop() -> None:
                     logger.info("Embedding backfill: recomputed %d embeddings", fixed)
         except Exception as e:
             logger.error("Embedding backfill error: %s", e, exc_info=True)
+        # P2: liveness signal + sibling-loop watchdog
+        await beat("embedding_backfill")
         await asyncio.sleep(BACKFILL_INTERVAL_SECONDS)

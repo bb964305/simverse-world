@@ -10,6 +10,7 @@ import logging
 
 from app.database import async_session
 from app.services.world_event_service import flip_active_events, write_collective_memories
+from app.tasks.loop_heartbeat import beat
 from app.ws.manager import manager
 
 logger = logging.getLogger(__name__)
@@ -68,4 +69,5 @@ async def event_cron_loop():
                 logger.info("Event cron: %d world-event transitions", len(changes))
         except Exception as e:
             logger.error(f"Event cron error: {e}", exc_info=True)
+        await beat("event")  # P2: liveness signal + sibling-loop watchdog
         await asyncio.sleep(EVENT_CRON_INTERVAL_SECONDS)

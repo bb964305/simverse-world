@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, UTC
 from app.database import async_session
 from app.redis_client import get_redis
 from app.services.digest_service import generate_village_digest
+from app.tasks.loop_heartbeat import beat
 from app.world_clock import now_real, world_week_index
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,13 @@ RUN_MINUTE = 0
 # many real days (~1.75) that spans.
 _GOAL_WEEK_KEY = "sv:nightly:last_goal_week"
 _DECAY_WEEK_KEY = "sv:nightly:last_decay_week"
+
+# R3 (eng-health A): ledger of the anchor DATE this cron last ran for. Without
+# it a crash / container restart / deploy window straddling the RUN_HOUR anchor
+# silently dropped that whole day's nightly batch — no log, no alert. Same
+# Redis idempotency shape as _world_week_gate above, keyed by date instead of
+# world-week ordinal.
+_LAST_RUN_DATE_KEY = "sv:nightly:last_run_date"
 
 
 def _seconds_until_next_run(now: datetime) -> float:
@@ -60,8 +68,77 @@ async def _world_week_gate(redis_key: str) -> bool:
     return True
 
 
-async def run_nightly_jobs() -> None:
-    """Run each nightly job in isolation."""
+# --------------------------------------------------------------------------- #
+# R3 — missed-window catch-up (eng-health A)                                   #
+# --------------------------------------------------------------------------- #
+
+def _anchor_passed(now: datetime) -> bool:
+    """True once today's RUN_HOUR:RUN_MINUTE anchor is in the past."""
+    return now >= now.replace(hour=RUN_HOUR, minute=RUN_MINUTE, second=0, microsecond=0)
+
+
+def _anchor_date(now: datetime) -> str:
+    """ISO date of the anchor the given instant belongs to.
+
+    Before today's anchor the current "nightly day" is still yesterday's, so a
+    03:00 restart must not claim today's slot and suppress the 07:00 run.
+    """
+    day = now.date() if _anchor_passed(now) else (now - timedelta(days=1)).date()
+    return day.isoformat()
+
+
+async def _claim_run_date(date_str: str) -> bool:
+    """Claim ``date_str`` in the ledger. True = this caller should run.
+
+    SET NX + follow-up GET (the fakeredis-safe shape used by ws.manager locks):
+    the first claimant of an anchor date wins, a same-date re-entry loses, a new
+    date overwrites. **Fail-open**: a broken ledger must never silence the whole
+    nightly batch, so a Redis error returns True.
+    """
+    try:
+        r = get_redis()
+        if await r.set(_LAST_RUN_DATE_KEY, date_str, nx=True):
+            return True
+        if (await r.get(_LAST_RUN_DATE_KEY)) == date_str:
+            return False
+        await r.set(_LAST_RUN_DATE_KEY, date_str)
+        return True
+    except Exception:
+        logger.warning(
+            "nightly run-date ledger unavailable — running unguarded", exc_info=True
+        )
+        return True
+
+
+async def _needs_catch_up(now: datetime) -> bool:
+    """True when today's anchor already passed with no run recorded for it.
+
+    Fail-closed on Redis errors (unlike the claim): with an unknown ledger the
+    conservative move at boot is to stay quiet and let the scheduled run fire.
+    """
+    if not _anchor_passed(now):
+        return False
+    try:
+        last = await get_redis().get(_LAST_RUN_DATE_KEY)
+    except Exception:
+        logger.warning("nightly catch-up check: ledger unreadable", exc_info=True)
+        return False
+    return last != _anchor_date(now)
+
+
+async def run_nightly_jobs(*, once_per_day: bool = False) -> None:
+    """Run each nightly job in isolation.
+
+    ``once_per_day`` (R3): claim today's anchor date in the Redis ledger first
+    and skip the batch entirely if it was already claimed — this is what makes
+    a restart-triggered catch-up safe. Default False keeps direct/manual calls
+    (ops scripts, tests) behaving exactly as before.
+    """
+    if once_per_day:
+        _date = _anchor_date(now_real())
+        if not await _claim_run_date(_date):
+            logger.info("nightly jobs already ran for anchor %s — skipping", _date)
+            return
     # S1-3 opinion drift — MUST run before digest: the same night's digest
     # opinion_line has to reflect the post-drift variance (KICKOFF S1-3 §7
     # ordering hard requirement). Keep this block immediately above the digest
@@ -445,7 +522,25 @@ async def nightly_cron_loop() -> None:
     World time (agent-T §5): the cadence stays a true real 24h, but the anchor is
     ``RUN_HOUR``:00 Beijing time (via ``now_real`` in Asia/Shanghai) instead of
     UTC 00:30, so the digest is ready in the Beijing morning.
+
+    R3 (eng-health A): before entering the wait, check the Redis run-date ledger
+    — if today's anchor already passed and nothing ran for it (crash, container
+    restart, deploy window over 07:00), catch up immediately instead of losing
+    the whole day's batch silently. Every run goes through the ``once_per_day``
+    guard, so a same-day restart never double-runs.
     """
+    try:
+        _boot = now_real()
+        if await _needs_catch_up(_boot):
+            logger.warning(
+                "nightly: anchor %02d:%02d for %s already passed with no recorded "
+                "run (restart/downtime) — catching up now",
+                RUN_HOUR, RUN_MINUTE, _anchor_date(_boot),
+            )
+            await run_nightly_jobs(once_per_day=True)
+    except Exception:
+        logger.error("nightly catch-up check failed", exc_info=True)
     while True:
+        await beat("nightly")  # P2: liveness signal + sibling-loop watchdog
         await asyncio.sleep(_seconds_until_next_run(now_real()))
-        await run_nightly_jobs()
+        await run_nightly_jobs(once_per_day=True)

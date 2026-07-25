@@ -12,6 +12,7 @@ from app.memory.service import MemoryService
 from app.models.resident import Resident
 from app.redis_client import get_redis
 from app.services.mood_service import apply_mood_event, get_mood
+from app.services.social_status_recovery import clear_socializing, mark_socializing
 
 logger = logging.getLogger(__name__)
 
@@ -199,9 +200,11 @@ async def resident_chat(
         except Exception:
             logger.warning("familiarity turn interpolation failed", exc_info=True)
 
-    # Lock both as socializing
-    initiator.status = "socializing"
-    target.status = "socializing"
+    # Lock both as socializing. R4: the lock is stamped with a timestamp so a
+    # worker that dies before the `finally` below cannot leave the pair stuck
+    # forever — social_status_recovery sweeps stamps older than SOCIAL_LOCK_TTL.
+    mark_socializing(initiator, partner_id=target.id)
+    mark_socializing(target, partner_id=initiator.id)
     await db.commit()
 
     svc = MemoryService(db)
@@ -278,9 +281,9 @@ async def resident_chat(
         return None
 
     finally:
-        # Always unlock both residents
-        initiator.status = "idle"
-        target.status = "idle"
+        # Always unlock both residents (and drop the R4 lock stamp)
+        clear_socializing(initiator)
+        clear_socializing(target)
         try:
             await db.commit()
         except Exception:

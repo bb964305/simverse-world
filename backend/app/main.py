@@ -216,3 +216,24 @@ async def ws_endpoint(websocket: WebSocket):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/health/loops")
+async def health_loops():
+    """Read-only liveness view of the background loops (P2, Roadmap #5).
+
+    The five loops above run in a single process; heartbeats live in Redis, so
+    this answers correctly from any API worker even when the loops are owned by
+    the standalone agent-worker. ``degraded`` = at least one loop's heartbeat
+    expired (a loop that never beat at all is ``never_seen``, not an outage).
+    """
+    from app.tasks.loop_heartbeat import heartbeats_enabled, snapshot
+
+    loops = await snapshot()
+    stale = sorted(n for n, i in loops.items() if i["state"] == "stale")
+    return {
+        "status": "degraded" if stale else "ok",
+        "enabled": heartbeats_enabled(),
+        "stale": stale,
+        "loops": loops,
+    }

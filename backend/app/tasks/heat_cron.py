@@ -2,6 +2,7 @@ import asyncio
 import logging
 from app.database import async_session
 from app.services.heat_service import recalculate_heat
+from app.tasks.loop_heartbeat import beat
 from app.ws.manager import manager
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,19 @@ async def heat_cron_loop():
                     await apply_weather_mood(db)
                 except Exception:
                     logger.warning("weather mood failed", exc_info=True)
+            # R4 (eng-health B): recycle DB-side chat locks left behind by a
+            # worker that died mid-conversation. Own block, own session, fail
+            # open — a sweep hiccup must never break the heat cron.
+            try:
+                from app.services.social_status_recovery import recover_stale_socializing
+                async with async_session() as recovery_db:
+                    n_recovered = await recover_stale_socializing(recovery_db)
+                if n_recovered:
+                    logger.warning(
+                        "recycled %d stale socializing lock(s) (R4)", n_recovered
+                    )
+            except Exception:
+                logger.warning("stale socializing recovery failed", exc_info=True)
             for change in changes:
                 await manager.broadcast({
                     "type": "resident_status",
@@ -39,4 +53,5 @@ async def heat_cron_loop():
                 logger.info(f"Heat cron: {len(changes)} status changes")
         except Exception as e:
             logger.error(f"Heat cron error: {e}", exc_info=True)
+        await beat("heat")  # P2: liveness signal + sibling-loop watchdog
         await asyncio.sleep(HEAT_CRON_INTERVAL_SECONDS)

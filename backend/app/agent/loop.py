@@ -35,6 +35,7 @@ from app.database import async_session
 from app.llm.budget import BudgetTier, background_tier
 from app.llm.budget_alerts import maybe_check_usage_stall
 from app.models.resident import Resident
+from app.tasks.loop_heartbeat import beat
 from app.ws.manager import manager
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,8 @@ class AgentLoop:
             # alerts when llm_usage gets zero new rows for the whole window
             # while this loop keeps running. Never raises.
             await maybe_check_usage_stall()
+            # P2: liveness signal + sibling-loop watchdog (Roadmap #5).
+            await beat("agent")
             # Budget throttle (E-24, ≥80%/≥95%): halve background frequency.
             sleep_mult = 2 if tier in (BudgetTier.THROTTLE, BudgetTier.RULE_ONLY) else 1
             await asyncio.sleep(settings.agent_tick_interval * sleep_mult)
