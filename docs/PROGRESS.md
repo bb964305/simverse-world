@@ -508,3 +508,5 @@
 3. 修缮线 C 的三个告警 env 键(BUDGET_ALERTS_ENABLED/BUDGET_ALERT_COOLDOWN_MIN/BUDGET_USAGE_STALL_MIN)非 Settings 字段(os.environ 直读),**刻意不入 .env.example**(入则触发 env 一致性不变量 1),默认值即生产合理值,报告有案。
 
 **第二波解锁**:S2-1 已收口 → S1-5 财政与 S2-5 政策可并行(文件集不相交),S1-1 声誉最后;接口冻结声明见 `docs/reports/feat-s2-1-offices-report.md`。
+
+**部署 vm212【Jimmy 授权】(2026-07-25,master `238cba4`)**:DB 备份 61MB(`db-backup-closeout-20260725-034152.sql.gz`)+ backend 树备份 + `.env` 备份;gzip-tar 传输 1589402 字节双端一致 + GZIP_OK;fresh-extract 回填 static/uploads;`.env` 追加 POLIS_OFFICE_ENABLED=true / POLIS_OPINION_ENABLED=true(测试环境开闸);build→`alembic upgrade head` 045→046→047 干净(offices 四槽 seed 到位)→up。**运行时证据**:api/agent-worker Up、restarts=0、20 分钟日志零 traceback、本地+公网 /health 双 200;`recalculate_heat` 对含 tz 脏数据的真实库跑通(修复前必崩,B 实锤);/townhall/overview 出数;/admin/offices 未授权 401 守门;告警演练 WARN 发射成功(C 实锤);burnin_report 两个新探针段对真实库出数(offices 空缺态+三存储一致;issue_stances 空=无信号预期);S1-3 写读路径 drill(写 0.5→读回→方差→清理)。**sbti backfill 生产执行**:dry-run 审阅(26 居民全 partial、type 零翻转)→ `--apply` filled=26 → 幂等复跑 skip_complete=26 → A2 覆盖率 26/26、missing_sbti=0(收掉上批遗留跟进项 a)。**待观察**:投票分布复验需等下一个 civic poll 周期(当前 open poll「邮局」14 票仍是 backfill 前投的);未 push origin(待授权)。
