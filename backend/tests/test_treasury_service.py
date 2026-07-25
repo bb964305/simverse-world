@@ -588,3 +588,104 @@ async def test_pay_wage_treasury_error_is_fail_open(db_session, monkeypatch):
 
     await duty_service._pay_wage(db_session, r)          # must not raise
     assert await coin_service.treasury_balance(db_session, "chen") == 0
+
+
+# --------------------------------------------------------------------------- #
+# Task 5 — nightly public spending job                                         #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.anyio
+async def test_nightly_public_spending_seeded(db_session, monkeypatch):
+    """Seeded town account + a daily works budget → the disbursed amount equals
+    the balance delta exactly (拨款守恒), and the run is stamped in ConfigService."""
+    from app.services.config_service import ConfigService
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "town_public_works_daily_sc", 30)
+    await treasury_service.tax(db_session, 100, reason="seed")
+
+    before = await treasury_service.balance(db_session)
+    spent = await treasury_service.run_public_spending(db_session)
+    after = await treasury_service.balance(db_session)
+    assert spent == 30
+    assert before - after == spent
+    stamp = await ConfigService(db_session).get(treasury_service.LAST_SPEND_KEY)
+    assert isinstance(stamp, str) and stamp
+
+
+@pytest.mark.anyio
+async def test_public_spending_capped_by_balance(db_session, monkeypatch):
+    """The town cannot deficit-spend: the budget is clamped to the balance and
+    the guarded decrement never drives it negative."""
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "town_public_works_daily_sc", 30)
+    await treasury_service.tax(db_session, 12, reason="seed")
+
+    spent = await treasury_service.run_public_spending(db_session)
+    assert spent == 12
+    assert await treasury_service.balance(db_session) == 0
+
+
+@pytest.mark.anyio
+async def test_public_spending_zero_budget_only_reconciles(db_session, monkeypatch):
+    """Default budget 0 → reconcile-only: the stamp is written, no coins move."""
+    from app.services.config_service import ConfigService
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "town_public_works_daily_sc", 0)
+    await treasury_service.tax(db_session, 50, reason="seed")
+
+    assert await treasury_service.run_public_spending(db_session) == 0
+    assert await treasury_service.balance(db_session) == 50
+    assert await ConfigService(db_session).get(treasury_service.LAST_SPEND_KEY)
+
+
+@pytest.mark.anyio
+async def test_public_spending_skipped_when_disabled(db_session, monkeypatch):
+    """Gate off → the job is a whole no-op: no spend, no ConfigService stamp."""
+    from app.services.config_service import ConfigService
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", False)
+    monkeypatch.setattr(settings, "town_public_works_daily_sc", 30)
+    await treasury_service.tax(db_session, 100, reason="seed")
+
+    assert await treasury_service.run_public_spending(db_session) == 0
+    assert await treasury_service.balance(db_session) == 100
+    assert await ConfigService(db_session).get(treasury_service.LAST_SPEND_KEY) is None
+
+
+def test_nightly_public_spending_wired_and_gated():
+    """The cron must carry an isolated, gated block (test_m5_space wiring-guard
+    pattern): gate INSIDE the cron, own try/except, fail-open, appended after the
+    existing governance blocks without moving any of them."""
+    import inspect
+    from app.tasks import nightly_cron
+
+    src = inspect.getsource(nightly_cron.run_nightly_jobs)
+    assert "town_treasury_enabled" in src
+    assert "run_public_spending" in src
+    # gate is checked before the service is imported/called → skip = zero DB touch
+    assert src.index("town_treasury_enabled") < src.index("run_public_spending")
+    # appended AFTER the existing governance blocks (they must not be moved)
+    assert src.index("close_due_polls") < src.index("run_public_spending")
+    assert src.index("term_check") < src.index("run_public_spending")
+
+
+@pytest.mark.anyio
+async def test_nightly_block_runs_public_spending(db_engine, monkeypatch):
+    """Functional: the cron block body disburses through the shared session
+    factory when the gate is on."""
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "town_public_works_daily_sc", 5)
+    factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as db:
+        await treasury_service.tax(db, 20, reason="seed")
+
+    # run only the S1-5 block body (not the whole cron — LLM-adjacent jobs)
+    async with factory() as db:
+        spent = await treasury_service.run_public_spending(db)
+    assert spent == 5
+    async with factory() as db:
+        assert await treasury_service.balance(db) == 15

@@ -128,3 +128,37 @@ async def disburse(db: AsyncSession, amount: int, reason: str = "") -> bool:
     )
     await db.commit()
     return (result.rowcount or 0) > 0
+
+
+async def run_public_spending(db: AsyncSession) -> int:
+    """Nightly public spending / reconciliation (S1-5 §2 任务 5). Returns the SC
+    actually disbursed.
+
+    Wages already leave the treasury per-resident through ``duty_service
+    ._pay_wage``, so this job owns only the *periodic* outlay: a public-works
+    budget (``town_public_works_daily_sc``, default 0 = reconcile-only) clamped
+    to the current balance — the town never deficit-spends — plus a
+    ``town_last_spend_at`` stamp in ``system_config`` so the burn-in probe can
+    tell "ran and had nothing to spend" from "never ran".
+
+    Gate off → whole no-op, including the stamp (the cron also guards, so a
+    disabled world touches no DB at all). Real-time cadence by design: this is a
+    daily operations job, not a world-clock rhythm.
+    """
+    from app.config import settings
+    if not settings.town_treasury_enabled:
+        return 0
+
+    spent = 0
+    budget = int(settings.town_public_works_daily_sc or 0)
+    if budget > 0:
+        amount = min(budget, await balance(db))
+        if amount > 0 and await disburse(db, amount, reason="public_works"):
+            spent = amount
+
+    from app.services.config_service import ConfigService
+    await ConfigService(db).set(
+        LAST_SPEND_KEY, datetime.now(UTC).isoformat(),
+        group="town", updated_by="nightly_public_spending",
+    )
+    return spent
