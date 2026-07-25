@@ -25,7 +25,12 @@ async def recalculate_heat(db: AsyncSession) -> list[dict]:
     Recalculate heat for all residents and apply status transitions.
     Returns list of status change dicts for WebSocket broadcast.
     """
-    seven_days_ago = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=SLEEPING_DAYS)
+    now = datetime.now(UTC)
+    # Naive-UTC bind kept for the SQL side (Conversation.started_at rows are
+    # written naive on sqlite dev DBs; prod asyncpg handles the naive param).
+    seven_days_ago = now.replace(tzinfo=None) - timedelta(days=SLEEPING_DAYS)
+    # Aware cutoff for the Python-side comparison below (Roadmap #12).
+    sleep_cutoff = now - timedelta(days=SLEEPING_DAYS)
 
     # Count recent conversations per resident
     conv_counts_stmt = (
@@ -59,9 +64,17 @@ async def recalculate_heat(db: AsyncSession) -> list[dict]:
             new_status = "popular"
         elif new_heat == 0:
             last = resident.last_conversation_at
+            # tz-mix guard (Roadmap #12, 既有 bug since 8a0449c): asyncpg
+            # returns AWARE datetimes for this timezone=True column while
+            # legacy/sqlite rows are naive-UTC; comparing them raised
+            # TypeError and killed the whole hourly recalc round. Normalize
+            # the naive side to UTC and compare aware — same convention as
+            # civic_service.close_due_polls.
+            if last is not None and last.tzinfo is None:
+                last = last.replace(tzinfo=UTC)
             # Only put to sleep if they had conversations before but none recently
             # Never sleep residents that have never been talked to (new/preset NPCs)
-            if last is not None and last < seven_days_ago:
+            if last is not None and last < sleep_cutoff:
                 new_status = "sleeping"
             else:
                 new_status = "idle"
