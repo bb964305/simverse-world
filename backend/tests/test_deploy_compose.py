@@ -7,6 +7,7 @@ in-process ConnectionManager and a worker-side broadcast would be a dead letter.
 P0-3b landed the cross-process bus (Redis pub/sub + Redis-backed locks/queues/
 presence/counters), so the deploy topology now is:
 - a `redis` service (the shared bus),
+- a one-shot `bootstrap` service that migrates and synchronises built-in data,
 - the `api` service delegating background loops (RUN_BACKGROUND_TASKS=false) and
   free to run multiple uvicorn workers,
 - the `agent-worker` service starting by default (no profile gate),
@@ -86,4 +87,21 @@ def test_api_and_worker_depend_on_redis():
     for name in ("api", "agent-worker"):
         assert "redis" in _depends_on(services[name]), (
             f"{name} must depend_on redis so it doesn't start before the bus"
+        )
+
+
+def test_builtin_roster_bootstrap_precedes_api_and_worker():
+    """A deploy must replace legacy built-ins before any world loop starts."""
+    services = _load_services()
+    bootstrap = services.get("bootstrap")
+    assert bootstrap is not None, "missing one-shot production bootstrap"
+    assert bootstrap.get("restart") == "no"
+    command = str(bootstrap.get("command") or "")
+    assert "alembic upgrade head" in command
+    assert "python -m seed.reset_builtin_residents" in command
+
+    for name in ("api", "agent-worker"):
+        dependency = (services[name].get("depends_on") or {}).get("bootstrap")
+        assert dependency == {"condition": "service_completed_successfully"}, (
+            f"{name} may start before the built-in roster is synchronised"
         )

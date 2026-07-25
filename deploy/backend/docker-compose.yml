@@ -35,6 +35,22 @@ services:
       timeout: 3s
       retries: 5
 
+  # One-shot production bootstrap.  Built-in residents are data, not schema,
+  # so Alembic alone cannot replace a legacy roster.  Run the idempotent
+  # roster reset before either long-lived process can observe the world.
+  bootstrap:
+    build:
+      context: ../backend
+      dockerfile: ../deploy/Dockerfile
+    command: sh -c "alembic upgrade head && python -m seed.reset_builtin_residents"
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-changeme}@db:5432/skills_world
+
   api:
     build:
       context: ../backend
@@ -47,6 +63,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-changeme}@db:5432/skills_world
@@ -98,6 +116,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-changeme}@db:5432/skills_world
