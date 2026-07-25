@@ -204,6 +204,103 @@ async def test_gate_off_byte_level_fallback(db_session, monkeypatch):
     assert rows == []  # offices never read nor written with the gate off
 
 
+# ── task 3: duty lookup rerouting ─────────────────────────────────────
+
+@pytest.mark.anyio
+async def test_find_duty_resident_reads_offices_when_gate_on(db_session, monkeypatch):
+    """Gate on → find_duty_resident resolves town_clerk/postman through the
+    offices table (single indexed lookup), even when the meta_json duty scan
+    would have returned someone else first."""
+    monkeypatch.setattr(settings, "polis_office_enabled", True)
+    from app.services import duty_service
+    from app.services.office_service import OfficeService
+
+    # decoy carries the same duty key in meta_json but is NOT the office holder
+    db_session.add_all([
+        _res("decoy-clerk", "冒牌文书", meta={"duty": {"key": "town_clerk"}}),
+        _res("zhao-qiwen", "赵启文", meta={"duty": {"key": "town_clerk"}}),
+        _res("luo-xiaozhou", "骆小舟", meta={"duty": {"key": "postman"}}),
+    ])
+    await db_session.commit()
+    svc = OfficeService(db_session)
+    await svc.appoint("town_clerk", "zhao-qiwen", fill_strategy="seed")
+    await svc.appoint("postman", "luo-xiaozhou", fill_strategy="seed")
+
+    clerk = await duty_service.find_duty_resident(db_session, "town_clerk")
+    postman = await duty_service.find_duty_resident(db_session, "postman")
+    assert clerk is not None and clerk.slug == "zhao-qiwen"
+    assert postman is not None and postman.slug == "luo-xiaozhou"
+
+
+@pytest.mark.anyio
+async def test_find_duty_resident_falls_back_for_non_office_keys(db_session, monkeypatch):
+    """Gate on, but a duty key with no offices row (cafe_host, researcher…)
+    must still resolve through the legacy linear scan."""
+    monkeypatch.setattr(settings, "polis_office_enabled", True)
+    from app.services import duty_service
+
+    db_session.add(_res("chen", "陈铁生", meta={"duty": {"key": "workshop_fixer"}}))
+    await db_session.commit()
+    r = await duty_service.find_duty_resident(db_session, "workshop_fixer")
+    assert r is not None and r.slug == "chen"
+
+
+@pytest.mark.anyio
+async def test_find_duty_resident_vacant_office_falls_back_to_scan(db_session, monkeypatch):
+    """Gate on with a vacant offices row → fall back to the meta_json scan
+    (fail-open: a not-yet-backfilled world must not lose its clerk)."""
+    monkeypatch.setattr(settings, "polis_office_enabled", True)
+    from app.services import duty_service
+    from app.services.office_service import OfficeService
+
+    db_session.add(_res("zhao-qiwen", "赵启文", meta={"duty": {"key": "town_clerk"}}))
+    await db_session.commit()
+    svc = OfficeService(db_session)
+    await svc.appoint("town_clerk", "someone", fill_strategy="seed")
+    await svc.vacate("town_clerk")
+
+    r = await duty_service.find_duty_resident(db_session, "town_clerk")
+    assert r is not None and r.slug == "zhao-qiwen"
+
+
+@pytest.mark.anyio
+async def test_find_duty_resident_gate_off_linear_scan(db_session, monkeypatch):
+    """Gate off → byte-level legacy behavior: first meta_json match wins and
+    the offices table is never consulted."""
+    monkeypatch.setattr(settings, "polis_office_enabled", False)
+    from app.services import duty_service
+    from app.services.office_service import OfficeService
+
+    db_session.add_all([
+        _res("first-clerk", "文书甲", meta={"duty": {"key": "town_clerk"}}),
+        _res("zhao-qiwen", "赵启文", meta={"duty": {"key": "town_clerk"}}),
+    ])
+    await db_session.commit()
+    # offices says zhao — but with the gate off the scan's first match wins
+    await OfficeService(db_session).appoint("town_clerk", "zhao-qiwen",
+                                            fill_strategy="seed")
+    r = await duty_service.find_duty_resident(db_session, "town_clerk")
+    assert r is not None and r.slug == "first-clerk"
+
+
+@pytest.mark.anyio
+async def test_doctor_office_slot_appointable(db_session, monkeypatch):
+    """Doctor is greenfield: the office slot exists and is appointable via
+    OfficeService (S5-8 will consume); no duty/preset/clinic is created."""
+    monkeypatch.setattr(settings, "polis_office_enabled", True)
+    from app.services.office_service import OfficeService
+
+    db_session.add(_res("doc", "白大褂"))
+    await db_session.commit()
+    svc = OfficeService(db_session)
+    assert await svc.appoint("doctor", "doc", fill_strategy="appointment") is True
+    assert await svc.get_holder("doctor") == "doc"
+    # no meta_json duty was invented for the doctor (greenfield boundary)
+    doc = (await db_session.execute(
+        select(Resident).where(Resident.slug == "doc"))).scalar_one()
+    assert ((doc.meta_json or {}).get("duty")) is None
+
+
 @pytest.mark.anyio
 async def test_migration_backfill_tolerates_empty_world(db_session):
     """No residents, no system_config → four vacant rows, no crash."""
