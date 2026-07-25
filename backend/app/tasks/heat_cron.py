@@ -27,6 +27,19 @@ async def heat_cron_loop():
                     await apply_weather_mood(db)
                 except Exception:
                     logger.warning("weather mood failed", exc_info=True)
+            # R4 (eng-health B): recycle DB-side chat locks left behind by a
+            # worker that died mid-conversation. Own block, own session, fail
+            # open — a sweep hiccup must never break the heat cron.
+            try:
+                from app.services.social_status_recovery import recover_stale_socializing
+                async with async_session() as recovery_db:
+                    n_recovered = await recover_stale_socializing(recovery_db)
+                if n_recovered:
+                    logger.warning(
+                        "recycled %d stale socializing lock(s) (R4)", n_recovered
+                    )
+            except Exception:
+                logger.warning("stale socializing recovery failed", exc_info=True)
             for change in changes:
                 await manager.broadcast({
                     "type": "resident_status",
