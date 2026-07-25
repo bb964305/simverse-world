@@ -59,3 +59,5 @@ import app.models.resident_relation  # noqa: F401
 import app.models.office  # noqa: F401
 # S1-3 议题立场与舆论动力学 — bounded-confidence issue stances
 import app.models.issue_stance  # noqa: F401
+# S1-5 镇财政闭环 — the town's public account (third account kind)
+import app.models.town_treasury  # noqa: F401
