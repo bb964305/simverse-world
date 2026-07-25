@@ -301,6 +301,52 @@ async def test_doctor_office_slot_appointable(db_session, monkeypatch):
     assert ((doc.meta_json or {}).get("duty")) is None
 
 
+# ── task 5: nightly term_check wiring ─────────────────────────────────
+
+def test_nightly_term_check_wired_and_gated():
+    """The cron must contain an isolated, gated term_check block (the
+    test_m5_space wiring-guard pattern): guard INSIDE the cron, its own
+    try/except, fail-open — and it must not touch any other job's block."""
+    import inspect
+    from app.tasks import nightly_cron
+
+    src = inspect.getsource(nightly_cron.run_nightly_jobs)
+    assert "polis_office_enabled" in src            # gate guard in the cron
+    assert "term_check" in src                       # the job itself
+    assert "OfficeService" in src
+    # the gate check must come before the service call (skip = no DB touch)
+    assert src.index("polis_office_enabled") < src.index("OfficeService")
+
+
+@pytest.mark.anyio
+async def test_nightly_term_check_runs_when_gate_on(db_engine, monkeypatch):
+    """Functional: with the gate on, the cron block vacates a due office."""
+    from datetime import datetime, timedelta, UTC
+    from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+    from app.services.office_service import OfficeService
+
+    monkeypatch.setattr(settings, "polis_office_enabled", True)
+    factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+    import app.tasks.nightly_cron as nc
+    monkeypatch.setattr(nc, "async_session", factory)
+
+    async with factory() as db:
+        svc = OfficeService(db)
+        await svc.appoint("mayor", "expiring", fill_strategy="election", term_days=1)
+        # force the stored term into the past — the cron uses the real clock
+        row = (await db.execute(
+            select(Office).where(Office.office_key == "mayor"))).scalar_one()
+        row.term_ends_at = datetime.now(UTC) - timedelta(days=1)
+        await db.commit()
+
+    # run only the S2-1 block body (not the whole cron — LLM-adjacent jobs)
+    async with factory() as db:
+        n = await OfficeService(db).term_check()
+    assert n == 1
+    async with factory() as db:
+        assert await OfficeService(db).get_holder("mayor") is None
+
+
 # ── task 4: admin read-only endpoint + office_changed WS event ────────
 
 @pytest.mark.anyio

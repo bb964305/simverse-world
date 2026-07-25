@@ -160,6 +160,20 @@ async def run_nightly_jobs() -> None:
     except Exception:
         logger.error("NPC civic voting failed", exc_info=True)
 
+    # S2-1: office term expiry — vacate offices whose term_ends_at has passed
+    # (realism-family pattern: gate INSIDE the cron, own try/except, fail-open;
+    # skipped entirely while polis_office_enabled is False).
+    try:
+        from app.config import settings as _office_settings
+        if _office_settings.polis_office_enabled:
+            from app.services.office_service import OfficeService
+            async with async_session() as db:
+                n = await OfficeService(db).term_check()
+            if n:
+                logger.info("office term_check vacated %d", n)
+    except Exception:
+        logger.error("office term_check failed", exc_info=True)
+
     # Lab: expire overdue tasks + auto-release reviewed ones (72h), and dispatch
     # any funded open-recruitment tasks that now have an idle researcher.
     try:
