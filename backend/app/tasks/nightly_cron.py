@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, UTC
 from app.database import async_session
 from app.redis_client import get_redis
 from app.services.digest_service import generate_village_digest
+from app.tasks.loop_heartbeat import beat
 from app.world_clock import now_real, world_week_index
 
 logger = logging.getLogger(__name__)
@@ -525,5 +526,6 @@ async def nightly_cron_loop() -> None:
     except Exception:
         logger.error("nightly catch-up check failed", exc_info=True)
     while True:
+        await beat("nightly")  # P2: liveness signal + sibling-loop watchdog
         await asyncio.sleep(_seconds_until_next_run(now_real()))
         await run_nightly_jobs(once_per_day=True)

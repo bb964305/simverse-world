@@ -2,6 +2,7 @@ import asyncio
 import logging
 from app.database import async_session
 from app.services.heat_service import recalculate_heat
+from app.tasks.loop_heartbeat import beat
 from app.ws.manager import manager
 
 logger = logging.getLogger(__name__)
@@ -52,4 +53,5 @@ async def heat_cron_loop():
                 logger.info(f"Heat cron: {len(changes)} status changes")
         except Exception as e:
             logger.error(f"Heat cron error: {e}", exc_info=True)
+        await beat("heat")  # P2: liveness signal + sibling-loop watchdog
         await asyncio.sleep(HEAT_CRON_INTERVAL_SECONDS)
