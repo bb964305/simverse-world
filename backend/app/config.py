@@ -540,6 +540,22 @@ class Settings(BaseSettings):
     polis_opinion_digest_issues: int = 2       # 日报 opinion_line 最多点名的议题数
     polis_opinion_variance_split: float = 0.15 # opinion_line 措辞阈值: 方差≥此值读作"分歧"
 
+    # ── S2-5 policies + 四级分级审批 (POLIS_POLICY_*) ────────────────────
+    # 两个独立门, 都默认 False → 行为与现状字节级一致 (KICKOFF_S2-5 §3):
+    #   polis_policy_enabled=False          → PolicyService.get/get_group 回落
+    #       ConfigService(system_config), seed_defaults 不执行, policies 表不被
+    #       任何业务路径读写, /admin/policies 空态。
+    #   polis_policy_approval_enabled=False → proposal_service.approve_proposal
+    #       不插 tier 门 (回落单-admin CAS), civic_service._close_one 回落纯
+    #       plurality (无阈值/无法定人数), _execute_outcome 不识别 policy 效果
+    #       类型 (未知类型按现状 no-op)。
+    # 可以只开存储门做影子读写, 再开审批门接四级路由。零新增 LLM 调用。
+    polis_policy_enabled: bool = False           # 主开关: policies 表读写路径总门
+    polis_policy_approval_enabled: bool = False  # 独立门: 四级审批路由 (track A/B)
+    polis_policy_simple_majority_threshold: float = 0.50    # 简单多数阈值
+    polis_policy_absolute_majority_threshold: float = 0.667 # 绝对多数阈值(超多数)
+    polis_policy_quorum_fraction: float = 0.50   # 绝对多数档的法定投票人数占比
+
     model_config = {"env_file": ".env"}
 
 
