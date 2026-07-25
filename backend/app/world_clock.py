@@ -1,6 +1,6 @@
 """World clock — the single time-scale conversion entry point (agent-T).
 
-Two kinds of time live in this world (see docs/design/WORLD_CLOCK_DESIGN.md):
+Two kinds of time live in this world (see docs/ROADMAP.md):
 
 - **World time** — an accelerated clock the *simulation* runs on. It equals
   ``WORLD_EPOCH + k × (real elapsed since WORLD_EPOCH)`` with ``k = WORLD_CLOCK_K``

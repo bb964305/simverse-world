@@ -1,7 +1,8 @@
 """Adapter for the Simverse reference runtime (recovery plan Phase 7).
 
 The reference runtime is the one candidate that PASSED the adapter conformance
-gate — see ``docs/adr/ADR-lab-runtime-adapter.md`` + ``docs/renders/lab-p7-evidence/``.
+gate — see ``archive/2026-07-25/docs/adr/ADR-lab-runtime-adapter.md`` and
+``archive/2026-07-25/docs/renders/lab-p7-evidence/``.
 It speaks the same HTTP wire protocol as the other real adapters, so this is a
 thin subclass of ``HttpAgentAdapter`` reading its own endpoint/credentials. Empty
 ``base_url`` = unconfigured → fail-closed at ``start()`` (the runtime must be

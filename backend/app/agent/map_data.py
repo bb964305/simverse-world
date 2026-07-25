@@ -78,8 +78,9 @@ LOCATIONS: dict[str, dict[str, Any]] = {
     },
     # === Experiment Building (Lab / 元游戏入口) ===
     # Bounds chosen on empty land in the south-east; verified non-overlapping
-    # against every existing LOCATIONS entry (see docs/FEATURE_SPEC_LAB.md §13,
-    # LAB_HANDOFF risk note). The visual tilemap tile is deferred to art (P4);
+    # against every existing LOCATIONS entry (see the archived
+    # archive/2026-07-25/docs/FEATURE_SPEC_LAB.md §13 and LAB_HANDOFF risk note).
+    # The visual tilemap tile is deferred to art (P4);
     # the location is logic-only for now (pathfinding/planning/codex).
     "experiment_building": {
         "name": "实验楼",

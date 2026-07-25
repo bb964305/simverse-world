@@ -15,9 +15,10 @@ candidate no matter how high the rest score.
 This module is the *framework*: ``score_candidate`` is the pure scoring engine,
 and ``run_conformance`` drives executable probes against a candidate to produce
 evidence-backed per-dimension results. It does NOT select a real adapter — that
-requires real runtime endpoints (unconfigured; see
-``docs/adr/ADR-lab-runtime-adapter.md``). ``run_conformance`` is proven against
-deterministic fake candidates so the gate's SCORING and ELIMINATION are trusted;
+requires real runtime endpoints (unconfigured; see the archived
+``archive/2026-07-25/docs/adr/ADR-lab-runtime-adapter.md``).
+``run_conformance`` is proven against deterministic fake candidates so the
+gate's SCORING and ELIMINATION are trusted;
 a real Hermes/Grok integration ships a thin conformance shim exposing the same
 duck-typed hooks the probes call.
 

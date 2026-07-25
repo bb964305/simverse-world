@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """SBTI backfill for existing production residents (Roadmap #11).
 
-Why: the S0 audit (docs/PROGRESS.md 遗留跟进 (a)) found the 26 live vm212
+Why: the archived S0 audit (archive/2026-07-25/docs/PROGRESS.md 遗留跟进 (a))
+found the 26 live vm212
 residents carry a forge-time ``meta_json.sbti.type`` but *sparse*
 ``dimensions`` — 0/26 had an ``A2`` key, so ``civic_service._npc_choice``'s
 ``dims.get("A2", "M")`` read every voter as "M" and NPC votes piled onto

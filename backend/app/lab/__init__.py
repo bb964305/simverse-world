@@ -3,7 +3,8 @@
 Kept decoupled from resident tick: B-layer (routers/services) only manages money
 + state machine and drops a run onto the Redis queue; the standalone Lab Runner
 (``python -m app.lab.main``) consumes it, executes a SandboxAdapter, streams
-steps back, and lands artifacts. See docs/FEATURE_SPEC_LAB.md §5.
+steps back, and lands artifacts. See the archived
+archive/2026-07-25/docs/FEATURE_SPEC_LAB.md §5.
 """
 from app.redis_client import get_redis
 

@@ -62,7 +62,7 @@ python3 -m pytest -m lab_oci tests/integration/test_lab_executor_oci.py -v
 ```
 
 Evidence (env fingerprint + pytest output) is written to
-`docs/renders/lab-oci-evidence/{env,pytest}-<UTC timestamp>.txt`. Commit that
+`artifacts/lab-oci-evidence/{env,pytest}-<UTC timestamp>.txt`. Commit that
 bundle as the V11 record.
 
 ## After a green run

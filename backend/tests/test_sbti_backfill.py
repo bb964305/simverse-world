@@ -1,7 +1,8 @@
 """Roadmap #11: production-resident SBTI backfill tool (scripts/sbti_backfill.py).
 
-Covers the three production states found in the S0 audit (docs/PROGRESS.md
-遗留跟进 (a)): residents with NO sbti block at all, residents with a forge-time
+Covers the three production states found in the archived S0 audit
+(archive/2026-07-25/docs/PROGRESS.md 遗留跟进 (a)): residents with NO sbti
+block at all, residents with a forge-time
 ``type`` but sparse ``dimensions`` (0/26 prod residents had an A2 key → the
 `_npc_choice` option-0 voting bias), and residents already complete.
 

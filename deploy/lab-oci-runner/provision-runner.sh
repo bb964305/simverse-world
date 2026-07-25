@@ -14,7 +14,7 @@ set -euo pipefail
 
 IMAGE="${LAB_OCI_IMAGE:-alpine:latest}"
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-EVIDENCE_DIR="${EVIDENCE_DIR:-$REPO_DIR/docs/renders/lab-oci-evidence}"
+EVIDENCE_DIR="${EVIDENCE_DIR:-$REPO_DIR/artifacts/lab-oci-evidence}"
 RUNNER="${LAB_OCI_RUNNER:-docker}"   # docker (rootless) or podman
 
 log() { printf '\n=== %s ===\n' "$*"; }

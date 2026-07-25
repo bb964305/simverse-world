@@ -40,11 +40,13 @@ from app.models.llm_usage import LLMUsage  # noqa: E402
 # 预测区间（硬编码，供对账基准；出处见各行注释）
 # ---------------------------------------------------------------------------
 # E-11 基线定格：15 居民 ≈ $0.88–1.00/天 @ Anthropic Haiku 列表价。
-#   出处：docs/research/COST_RESEARCH_REPORT.md §一.1；COST_RESEARCH_LOG.md E-11。
+#   出处：archive/2026-07-25/docs/research/COST_RESEARCH_REPORT.md §一.1；
+#   COST_RESEARCH_LOG.md E-11。
 BASELINE_PER_RESIDENT_DAY = (0.88 / 15, 1.00 / 15)  # ≈ $0.0587–0.0667 /居民·天
 # 叠加已落地的三大杠杆（E-09/E-10 decide 计划优先跳过 + E-04/E-05 互聊收尾 5→1
 # 合并 + E-02 history 双注入修复）后的理论稳态 ≈ 基线的 45%–55%。
-#   出处：docs/research/COST_RESEARCH_REPORT.md §一.6（其中 E-09 单项 = 全服省
+#   出处：archive/2026-07-25/docs/research/COST_RESEARCH_REPORT.md §一.6
+#   （其中 E-09 单项 = 全服省
 #   29–37%，COST_RESEARCH_LOG.md E-09）。
 OPTIMIZED_PER_RESIDENT_DAY = (
     BASELINE_PER_RESIDENT_DAY[0] * 0.45,  # ≈ $0.0264 /居民·天

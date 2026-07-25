@@ -1,8 +1,9 @@
 """T1 / recovery-plan Phase 1 — adapter-selection fail-closed guard.
 
-No real runtime endpoint is configured in this session (ADR
-`docs/adr/ADR-lab-runtime-adapter.md` stays 未选型 / undecided; the written
-block is `docs/adr/T1-P2-blocking-report.md`). These tests machine-assert the
+No real runtime endpoint is configured in this session (the archived ADR
+`archive/2026-07-25/docs/adr/ADR-lab-runtime-adapter.md` stays 未选型 / undecided;
+the written block is `archive/2026-07-25/docs/adr/T1-P2-blocking-report.md`).
+These tests machine-assert the
 honest state the ADR describes, so a future change can't silently enable or
 fabricate a real adapter while it is unconfigured:
 

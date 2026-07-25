@@ -19,7 +19,7 @@ class ResidentTreasury(Base):
     ``treasury:<slug>`` account. ``transactions.user_id`` is a hard FK to
     ``users.id``, so a synthetic account id would violate it — treasury flows
     are therefore recorded here (balance_sc + updated_at) rather than in
-    transactions. See docs/LAB_HANDOFF.md deviations.
+    transactions. See archive/2026-07-25/docs/LAB_HANDOFF.md deviations.
     """
 
     __tablename__ = "resident_treasuries"
