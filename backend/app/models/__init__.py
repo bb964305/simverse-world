@@ -57,3 +57,5 @@ import app.models.lab_control  # noqa: F401
 import app.models.resident_relation  # noqa: F401
 # S2-1 offices — unified job/office table (职位实体化)
 import app.models.office  # noqa: F401
+# S1-3 议题立场与舆论动力学 — bounded-confidence issue stances
+import app.models.issue_stance  # noqa: F401

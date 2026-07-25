@@ -525,6 +525,20 @@ class Settings(BaseSettings):
     # entry point). 0 = unlimited term — byte-equivalent to today's
     # overwrite-on-reelection mayor; >0 enables nightly term expiry.
     polis_office_mayor_term_days: int = 0
+    # ── S1-3 议题立场与舆论动力学 (KICKOFF_S1-3_opinion.md §3) ─────────────
+    # Independent gate, default False → byte-identical fallback to the status
+    # quo (debate/chat/digest/nightly paths unchanged, zero stance writes).
+    # All knobs share the POLIS_OPINION_ env prefix; zero new LLM calls.
+    polis_opinion_enabled: bool = False        # 主开关 (env POLIS_OPINION_ENABLED)
+    polis_opinion_epsilon: float = 0.4         # 有界信任阈值 ε (|Δstance|<=ε 才互相影响)
+    polis_opinion_chat_rate: float = 0.08      # from_chat Deffuant 步长
+    polis_opinion_drift_rate: float = 0.05     # nightly 漂移步长
+    polis_opinion_seed_mag: float = 0.3        # 辩论开场初始对立幅度(缺 SBTI 时)
+    polis_opinion_active_window_days: int = 14 # "活跃议题"时间窗(世界日, 经 world_clock 换算)
+    polis_opinion_min_participants: int = 3    # "活跃议题"最少表态人数
+    polis_opinion_neg_repel: bool = False      # negative mood 是否轻微远离(默认仅"不靠拢")
+    polis_opinion_digest_issues: int = 2       # 日报 opinion_line 最多点名的议题数
+    polis_opinion_variance_split: float = 0.15 # opinion_line 措辞阈值: 方差≥此值读作"分歧"
 
     model_config = {"env_file": ".env"}
 

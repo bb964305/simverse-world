@@ -62,6 +62,21 @@ async def _world_week_gate(redis_key: str) -> bool:
 
 async def run_nightly_jobs() -> None:
     """Run each nightly job in isolation."""
+    # S1-3 opinion drift — MUST run before digest: the same night's digest
+    # opinion_line has to reflect the post-drift variance (KICKOFF S1-3 §7
+    # ordering hard requirement). Keep this block immediately above the digest
+    # block; do not append it to the end of the job list.
+    try:
+        from app.config import settings as _opinion_settings
+        if _opinion_settings.polis_opinion_enabled:
+            from app.services.opinion_service import OpinionService
+            async with async_session() as db:
+                n = await OpinionService(db).drift()
+            if n:
+                logger.info("S1-3: opinion drift moved %d stances", n)
+    except Exception:
+        logger.error("S1-3 opinion drift failed", exc_info=True)
+
     try:
         async with async_session() as db:
             digest = await generate_village_digest(db)

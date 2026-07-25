@@ -53,6 +53,17 @@ async def create_debate(db, topic: str, a_slug: str, b_slug: str) -> Debate:
     db.add(d)
     await db.commit()
     await db.refresh(d)
+    # S1-3: seed opposing issue stances for the two debaters. `announced` is
+    # the reliable first-hand signal — the debate lifecycle stops here today
+    # (no live/settle driver in app code). Best-effort + gated: an opinion
+    # failure must never break debate creation.
+    try:
+        from app.config import settings
+        if settings.polis_opinion_enabled:
+            from app.services.opinion_service import OpinionService
+            await OpinionService(db).update_from_debate(d, seed_only=True)
+    except Exception:
+        logger.warning("opinion seed from create_debate failed", exc_info=True)
     return d
 
 
@@ -276,6 +287,16 @@ async def _resident_aftermath(db, d: Debate, winner: str) -> None:
                                  importance=0.6, source="debate")
     except Exception:
         logger.warning("debate aftermath failed", exc_info=True)
+    # S1-3 (opportunistic seam): winner stance reinforced toward its pole,
+    # loser regresses toward 0 — only ever fires when settle is actually
+    # driven, which app code does not do today. Best-effort + gated.
+    try:
+        from app.config import settings
+        if settings.polis_opinion_enabled:
+            from app.services.opinion_service import OpinionService
+            await OpinionService(db).update_from_debate(d, seed_only=False)
+    except Exception:
+        logger.warning("opinion update from settle failed", exc_info=True)
 
 
 # --------------------------------------------------------------------------- #

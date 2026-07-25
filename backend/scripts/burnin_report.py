@@ -510,6 +510,70 @@ def diffusion_relation_correlation(diffusion: dict, edges: list[tuple[str, str, 
     return round(cov / (vr * vs), 3)
 
 
+# --------------------------------------------------------------------------- #
+# S1-3 舆论动力学探针（验收：立场方差时间序列收敛/极化，非白噪声）                    #
+# --------------------------------------------------------------------------- #
+
+async def fetch_issue_stances(session) -> list[tuple[str, str, float]]:
+    """issue_stances 全表 (issue_key, resident_slug, stance) — S1-3 探针输入。"""
+    from app.models.issue_stance import IssueStance
+    rows = (await session.execute(
+        select(IssueStance.issue_key, IssueStance.resident_slug, IssueStance.stance)
+    )).all()
+    return [(k, s, float(st)) for k, s, st in rows if st is not None]
+
+
+def opinion_issue_stats(rows: list[tuple[str, str, float]], epsilon: float = 0.4) -> list[dict]:
+    """每议题：n / mean / var + 双峰性指标。
+
+    双峰性两个口径（KICKOFF S1-3 §6 允许任一，两个都给）：
+    - Sarle bimodality coefficient = (skew²+1)/kurtosis，>5/9≈0.556 → 双峰倾向；
+    - ε-最大间隔簇数：stance 排序后按 gap>ε 切簇，2+ = 极化保留。
+    方差时间序列 = 连续夜（drift 后）运行本报告采样得到的 var 序列。"""
+    from collections import defaultdict
+    by_issue: dict[str, list[float]] = defaultdict(list)
+    for key, _, st in rows:
+        by_issue[key].append(st)
+    out = []
+    for key, xs in by_issue.items():
+        n = len(xs)
+        mean = sum(xs) / n
+        var = sum((x - mean) ** 2 for x in xs) / n
+        std = var ** 0.5
+        if std == 0 or n < 3:
+            bc = None
+        else:
+            skew = (sum((x - mean) ** 3 for x in xs) / n) / std ** 3
+            kurt = (sum((x - mean) ** 4 for x in xs) / n) / std ** 4
+            bc = round((skew ** 2 + 1) / kurt, 3)
+        xs_sorted = sorted(xs)
+        clusters = 1 if xs_sorted else 0
+        for a, b in zip(xs_sorted, xs_sorted[1:]):
+            if b - a > epsilon:
+                clusters += 1
+        out.append({"issue": key, "n": n, "mean": round(mean, 3),
+                    "variance": round(var, 4), "bimodality": bc, "clusters": clusters})
+    out.sort(key=lambda d: (-d["n"], d["issue"]))
+    return out
+
+
+def render_probes_s13(rows: list[tuple[str, str, float]]) -> str:
+    from app.config import settings
+    out = ["== 拟真探针（S1-3 验收：议题立场与舆论动力学）=="]
+    stats = opinion_issue_stats(rows, epsilon=settings.polis_opinion_epsilon)
+    if not stats:
+        out.append("  议题立场 = -（issue_stances 空；POLIS_OPINION_ENABLED 关 = "
+                   "对照组「无动力学」，或世界尚无辩论/互聊信号）")
+        return "\n".join(out)
+    out.append(f"  议题数 {len(stats)}（连续夜运行本报告即得方差时间序列；"
+               "目标=收敛或极化，非白噪声）")
+    for s in stats[:5]:
+        bc = "-" if s["bimodality"] is None else s["bimodality"]
+        out.append(f"    「{s['issue'][:24]}」 n={s['n']} mean={s['mean']} "
+                   f"var={s['variance']} 双峰系数={bc}（>0.556≈双峰） ε-簇数={s['clusters']}")
+    return "\n".join(out)
+
+
 def render_probes_p2(edges: list[tuple[str, str, float]], diffusion: dict) -> str:
     out = ["== 拟真探针（P2 验收：社会结构）=="]
     skew = degree_distribution_skewness(edges)
@@ -699,6 +763,7 @@ async def _run(days_window: int, residents: int, budget: float | None) -> str:
         rel_edges = await fetch_relation_edges(session)
         diffusion = await fetch_event_diffusion(session)
         office_snap = await fetch_office_snapshot(session)
+        stance_rows = await fetch_issue_stances(session)
     report = render_report(
         aggregate(rows), residents=residents, budget=budget, window_days=days_window
     )
@@ -707,7 +772,8 @@ async def _run(days_window: int, residents: int, budget: float | None) -> str:
             + "\n\n" + render_probes_p2(rel_edges, diffusion)
             + "\n\n" + render_probes_offices(
                 office_snap, gate_on=settings.polis_office_enabled,
-                window_days=days_window))
+                window_days=days_window)
+            + "\n\n" + render_probes_s13(stance_rows))
 
 
 def main(argv: list[str] | None = None) -> None:
