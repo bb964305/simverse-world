@@ -31,6 +31,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/townhall", tags=["townhall"])
 
+# 收口 (2026-07-25B): SOCIETY_EXPANSION_PLAN §6 names the two player-read-only
+# civic endpoints ``GET /town/treasury`` (S1-5) and ``GET /town/policies``
+# (S2-5). Both landed on /townhall because the parallel lines could not edit
+# main.py; this alias router serves the spec paths from the same handlers.
+alias_router = APIRouter(prefix="/town", tags=["townhall"])
+
 # Finance config keys projected verbatim (policies table not built yet, §10).
 _FINANCE_KEYS = (
     "npc_default_wage_sc", "npc_meal_cost_sc", "market_day_weekday",
@@ -170,6 +176,7 @@ async def market_day(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/treasury")
+@alias_router.get("/treasury")
 async def town_treasury(request: Request, db: AsyncSession = Depends(get_db)):
     """S1-5: the town's public account, read-only, for any logged-in player.
 
@@ -215,6 +222,7 @@ async def town_treasury(request: Request, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/policies")
+@alias_router.get("/policies")
 async def policies(db: AsyncSession = Depends(get_db)):
     """S2-5 玩家只读政策投影 (§6 "GET /town/policies 玩家只读").
 

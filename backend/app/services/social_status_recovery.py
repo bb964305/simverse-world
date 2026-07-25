@@ -54,10 +54,22 @@ _TRUE = {"1", "true", "yes", "on"}
 # switches                                                                     #
 # --------------------------------------------------------------------------- #
 
+def _settings_default(name: str, default):
+    """Registered default for an env knob (收口 2026-07-25B): the env var stays
+    the runtime source, ``Settings`` owns the fallback so every .env.example key
+    maps to a real field."""
+    try:
+        from app.config import settings
+
+        return getattr(settings, name.lower(), default)
+    except Exception:  # config import must never break the recovery pass
+        return default
+
+
 def recovery_enabled() -> bool:
     raw = os.environ.get("SOCIAL_STATUS_RECOVERY_ENABLED")
     if raw is None or raw.strip() == "":
-        return True
+        return bool(_settings_default("SOCIAL_STATUS_RECOVERY_ENABLED", True))
     return raw.strip().lower() in _TRUE
 
 
@@ -68,15 +80,17 @@ def stale_threshold_s() -> float:
     outlives the lock its Redis counterpart would have held is, by the system's
     own definition, no longer alive.
     """
+    fallback = float(_settings_default(
+        "SOCIAL_STATUS_STALE_SECONDS", SOCIAL_LOCK_TTL) or SOCIAL_LOCK_TTL)
     raw = os.environ.get("SOCIAL_STATUS_STALE_SECONDS")
     if raw is None or raw.strip() == "":
-        return float(SOCIAL_LOCK_TTL)
+        return fallback
     try:
         value = float(raw)
     except ValueError:
         logger.warning("invalid SOCIAL_STATUS_STALE_SECONDS=%r — using default", raw)
-        return float(SOCIAL_LOCK_TTL)
-    return value if value > 0 else float(SOCIAL_LOCK_TTL)
+        return fallback
+    return value if value > 0 else fallback
 
 
 # --------------------------------------------------------------------------- #

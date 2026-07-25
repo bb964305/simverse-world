@@ -567,6 +567,22 @@ class Settings(BaseSettings):
     polis_policy_absolute_majority_threshold: float = 0.667 # 绝对多数阈值(超多数)
     polis_policy_quorum_fraction: float = 0.50   # 绝对多数档的法定投票人数占比
 
+    # ── 工程健康批 (2026-07-25B 收口登记) ────────────────────────────────
+    # 这两组旋钮在运行时由 app/services/social_status_recovery.py 与
+    # app/tasks/loop_heartbeat.py 直接读 os.environ (运维热改、无需重启);
+    # 这里的字段是它们的**默认值来源**——env 未设时回落到这些值,同时让
+    # .env.example 的每个 key 都能映射到真实 Settings 字段
+    # (tests/test_env_example_consistency.py 不变量 1)。
+    # R4 聊天锁 DB 侧回收: worker 猝死留下的 socializing 状态的回收器。
+    social_status_recovery_enabled: bool = True
+    social_status_stale_seconds: int = 600       # = ws SOCIAL_LOCK_TTL
+    # P2 后台 loop 心跳与死亡告警 (默认开, 一键可静默)。
+    loop_heartbeat_enabled: bool = True
+    loop_heartbeat_stale_factor: float = 3.0     # 过期阈值 = N × 该 loop 自身节拍
+    loop_heartbeat_min_stale_sec: float = 900.0  # 阈值下限, 防 60s 级 loop 误报
+    loop_heartbeat_alert_cooldown_min: float = 60.0   # 同 loop 两次告警最小间隔
+    loop_heartbeat_check_interval_min: float = 5.0    # 一次 beat 最多多久巡检一次
+
     model_config = {"env_file": ".env"}
 
 

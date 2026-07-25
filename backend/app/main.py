@@ -180,6 +180,7 @@ app.include_router(polls_router.router)
 app.include_router(lab_router.router)
 app.include_router(world_router.router)
 app.include_router(townhall_router.router)
+app.include_router(townhall_router.alias_router)  # 收口: /town/{treasury,policies} 别名
 app.include_router(admin_router)
 
 # --- Observability (Phase 3): GET /metrics + runtime gauges ---

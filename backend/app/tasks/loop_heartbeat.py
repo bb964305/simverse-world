@@ -83,7 +83,23 @@ def reset_state_for_tests() -> None:
 # config helpers                                                               #
 # --------------------------------------------------------------------------- #
 
+def _settings_default(name: str, default):
+    """Registered default for an env knob (收口 2026-07-25B).
+
+    The env var stays the runtime source (ops can retune without a restart);
+    ``Settings`` merely owns the fallback value so every .env.example key maps
+    to a real field. A missing field keeps the caller's literal default.
+    """
+    try:
+        from app.config import settings
+
+        return getattr(settings, name.lower(), default)
+    except Exception:  # config import must never break a heartbeat
+        return default
+
+
 def _env_float(name: str, default: float) -> float:
+    default = float(_settings_default(name, default))
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
         return default
@@ -97,7 +113,7 @@ def _env_float(name: str, default: float) -> float:
 def heartbeats_enabled() -> bool:
     raw = os.environ.get("LOOP_HEARTBEAT_ENABLED")
     if raw is None or raw.strip() == "":
-        return True
+        return bool(_settings_default("LOOP_HEARTBEAT_ENABLED", True))
     return raw.strip().lower() in _TRUE
 
 
