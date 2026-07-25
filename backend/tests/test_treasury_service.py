@@ -31,9 +31,9 @@ def test_town_treasury_migration_single_head():
     """`alembic heads` stays single-headed in this worktree and the S1-5
     migration chains onto the measured head (047_add_issue_stances).
 
-    NOTE (收口): the migration file keeps the ``NNN`` placeholder number — the
-    parallel S2-5 line also chains onto 047, so the main session linearizes the
-    numbers at merge time and re-runs this single-head assertion.
+    收口 (2026-07-25B): linearized to ``048_add_town_treasury`` — S1-5 merged
+    first, so it takes 048 and the parallel S2-5 migration re-chains onto it
+    as 049.
     """
     from alembic.config import Config
     from alembic.script import ScriptDirectory
@@ -42,7 +42,7 @@ def test_town_treasury_migration_single_head():
     script = ScriptDirectory.from_config(Config(str(ini)))
     heads = script.get_heads()
     assert len(heads) == 1, f"alembic multi-head: {heads}"
-    rev = script.get_revision("NNN_add_town_treasury")
+    rev = script.get_revision("048_add_town_treasury")
     assert rev is not None
     assert rev.down_revision == "047_add_issue_stances"
 

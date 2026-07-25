@@ -5,19 +5,18 @@ sales tax flows into and duty wages / public spending flow out of. Shape mirrors
 ``resident_treasuries`` (032_add_lab_core) so the proven coin_service atomic
 write idioms apply verbatim.
 
-NOTE (收口): the ``NNN`` number is a PLACEHOLDER for this worktree. The measured
-chain head at branch time was ``047_add_issue_stances``; the parallel S2-5 line
-also chains onto 047, so the main session renumbers these at merge time and
-re-verifies ``alembic heads`` is single-headed (KICKOFF §7 链尾单头校验).
+收口 (2026-07-25B): linearized from the ``NNN`` placeholder to 048 — S1-5 was
+merged first, so the parallel S2-5 migration re-chains onto this one as 049.
+``alembic heads`` verified single-headed after the merge (KICKOFF §7 链尾单头校验).
 
-Revision ID: NNN_add_town_treasury
+Revision ID: 048_add_town_treasury
 Revises: 047_add_issue_stances
 Create Date: 2026-07-25
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "NNN_add_town_treasury"
+revision = "048_add_town_treasury"
 down_revision = "047_add_issue_stances"
 branch_labels = None
 depends_on = None
