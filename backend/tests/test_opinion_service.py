@@ -67,7 +67,7 @@ async def _count_rows(db):
 
 def test_integration_migration_single_head():
     """`alembic heads` stays single-headed and the S1-3 migration is on the
-    chain (down_revision anchored on the real current head, 045)."""
+    chain (linearized at closeout: 045 → 046_add_offices → 047)."""
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
@@ -77,7 +77,7 @@ def test_integration_migration_single_head():
     assert len(heads) == 1, f"alembic multi-head: {heads}"
     rev = script.get_revision("047_add_issue_stances")
     assert rev is not None
-    assert rev.down_revision == "045_residents_creator_nullable"
+    assert rev.down_revision == "046_add_offices"
 
 
 @pytest.mark.anyio
