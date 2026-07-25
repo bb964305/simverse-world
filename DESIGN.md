@@ -3,7 +3,7 @@
 ## 0. Research Log
 
 - Embedded refs: shortlisted `voltagent` (void-black + emerald terminal), `raycast` (dark chrome + gradient glow), `runwayml` (cinematic dark media) → picked **Layer A `soft-skill`** + **Layer B `voltagent`** remapped to product neon (cyan/magenta) because Simverse is a living AI world, not a SaaS dashboard — needs dark depth + one luminous accent story.
-- Lazyweb: skipped — network research optional; product screenshots in `docs/screenshots/` used as primary visual truth.
+- Lazyweb: skipped — network research optional; product screenshots in `assets/screenshots/` used as primary visual truth.
 - Imagen drafts: skipped — existing game/forge screenshots serve as reference-fidelity product frames.
 - Product DNA extracted from app: `--bg-page #0f0f17`, accent cyan `#0ea5e9`, soul-red `#e94560`, zinc surfaces, pixel isometric world.
 

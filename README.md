@@ -12,18 +12,18 @@ Simverse World 是一个赛博朋克风格的开放世界多人游戏/模拟平�
 
 | 主界面 & 公告栏 | 小地图 & 工坊区 |
 |:---:|:---:|
-| ![游戏主界面](docs/screenshots/game-overview.jpg) | ![小地图与工坊](docs/screenshots/game-minimap.jpg) |
+| ![游戏主界面](assets/screenshots/game-overview.jpg) | ![小地图与工坊](assets/screenshots/game-minimap.jpg) |
 
 ### 角色锻造（Forge）
 
 | 引导式炼化 | 深度蒸馏模式 |
 |:---:|:---:|
-| ![炼化主界面](docs/screenshots/forge-main.png) | ![深度蒸馏](docs/screenshots/forge-deep.png) |
+| ![炼化主界面](assets/screenshots/forge-main.png) | ![深度蒸馏](assets/screenshots/forge-deep.png) |
 
 ### 视频演示
 
-- [对话演示](docs/screenshots/chat-demo.webm) — 与 AI 角色实时对话
-- [传送演示](docs/screenshots/teleport-demo.webm) — 在游戏世界中传送到不同区域
+- [对话演示](assets/screenshots/chat-demo.webm) — 与 AI 角色实时对话
+- [传送演示](assets/screenshots/teleport-demo.webm) — 在游戏世界中传送到不同区域
 
 ## 核心功能
 
@@ -136,7 +136,9 @@ Simverse-World/
 ├── deploy/                   # 部署配置
 │   ├── backend/              #   Docker + deploy 脚本
 │   └── frontend/             #   Cloudflare Workers 配置
-├── docs/screenshots/         # 演示截图 & 视频
+├── assets/screenshots/       # README 演示截图 & 视频
+├── docs/ROADMAP.md           # 唯一现行项目路线图
+├── archive/                  # 过时文档与记忆清理记录
 ├── docker-compose.yml        # 本地开发基础设施
 └── LICENSE                   # MIT License
 ```
@@ -480,13 +482,17 @@ alembic downgrade -1
 
 ## 致谢
 
-本项目的诞生离不开以下开源项目的启发与贡献，在此致以诚挚的感谢：
+本项目的诞生离不开以下开源项目与素材创作者的启发和贡献，在此致以诚挚的感谢：
 
 - **[Nuwa Skill](https://github.com/alchaincyf/nuwa-skill)** — AI 角色锻造的核心灵感来源。Nuwa 的 Skill 概念和 LLM 驱动的角色构建思路深刻影响了本项目的 Forge pipeline 设计。
 - **[Generative Agents CN](https://github.com/x-glacier/GenerativeAgentsCN)** — 斯坦福「生成式智能体」论文的中文复现。本项目的 AI 居民行为系统（记忆、反思、对话）从中汲取了大量灵感和架构思路。
 - **[Star Office UI](https://github.com/ringhyacinth/Star-Office-UI)** — 精美的像素风 UI 资源包。本项目的游戏界面视觉风格和部分精灵素材源自此项目。
+- **[PixyMoon](https://itch.io/s/78711/2d-cute-rpg-asset-bundle)** — `Cute RPG` 室外地图素材。
+- **[LimeZu](https://limezu.itch.io/moderninteriors)** — `Modern Interiors` 室内地图素材。
 
-感谢这些项目的作者们将优秀的工作开源分享，让更多人能够站在巨人的肩膀上创造新的可能。
+感谢这些项目与素材的作者分享优秀作品，让更多人能够站在巨人的肩膀上创造新的可能。
+
+第三方美术素材的逐项授权状态与发布条件见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 友情链接
 
