@@ -413,3 +413,89 @@ async def test_disabled_drift_noop(db_session):
     assert await svc.drift() == 0
     for slug, st in (("ann", 0.0), ("bo", 0.2), ("cid", 0.4)):
         assert await svc.get_stance("k", slug) == pytest.approx(st)
+
+
+# --------------------------------------------------------------------------- #
+# Task 3 — wiring: create_debate / settle / chat wrapup / nightly order        #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.anyio
+async def test_integration_create_debate_seeds_stances(opinion_on, db_session):
+    from app.services import debate_service as ds
+    await _resident(db_session, "ann", "安", sbti_dims={"A1": "H"})
+    await _resident(db_session, "bo", "波", sbti_dims={"A1": "L"})
+    d = await ds.create_debate(db_session, "关于「夜市」的争论", "ann", "bo")
+    assert d.status == "announced"
+    svc = _svc(db_session)
+    ann = await svc.get_stance("关于「夜市」的争论", "ann")
+    bo = await svc.get_stance("关于「夜市」的争论", "bo")
+    assert ann is not None and bo is not None
+    assert ann > 0 > bo  # two opposing seeded rows
+
+
+@pytest.mark.anyio
+async def test_integration_settle_hook_reinforces_via_aftermath(opinion_on, db_session):
+    """Opportunistic settle seam: when settle IS driven (tests only today),
+    the winner is reinforced and the loser regresses through _resident_aftermath."""
+    from app.services import debate_service as ds
+    await _resident(db_session, "ann", "安")
+    await _resident(db_session, "bo", "波")
+    d = await ds.create_debate(db_session, "议题X", "ann", "bo")  # seeds ±0.3
+    d.status = "voting"
+    d.votes_a, d.votes_b = 2, 0
+    await db_session.commit()
+    out = await ds.settle(db_session, d.id)
+    assert out["winner"] == "a"
+    svc = _svc(db_session)
+    assert await svc.get_stance("议题X", "ann") > 0.3        # reinforced
+    assert abs(await svc.get_stance("议题X", "bo")) < 0.3    # regressed toward 0
+
+
+@pytest.mark.anyio
+async def test_integration_chat_wrapup_moves_stance(opinion_on, db_session):
+    """process_chat_wrapup (mood already extracted by the ONE wrapup call)
+    moves shared-issue stances — LLM call count stays exactly 1."""
+    import json
+    from unittest.mock import AsyncMock, patch
+    from app.memory.service import MemoryService
+
+    ann = await _resident(db_session, "ann", "安")
+    bo = await _resident(db_session, "bo", "波")
+    await _seed_row(db_session, "k", "ann", 0.3)
+    await _seed_row(db_session, "k", "bo", 0.0)
+
+    payload = json.dumps({
+        "summary": "聊得很来", "mood": "positive",
+        "initiator": {"memories": []}, "target": {"memories": []},
+    })
+    with patch("app.memory.service.llm_chat", new=AsyncMock(return_value=payload)) as llm:
+        out = await MemoryService(db_session).process_chat_wrapup(ann, bo, "对话全文")
+
+    assert llm.await_count == 1  # 零新增 LLM 调用：只有 wrapup 本身
+    assert out["mood"] == "positive"
+    svc = _svc(db_session)
+    assert await svc.get_stance("k", "ann") == pytest.approx(0.3 + 0.08 * (0.0 - 0.3))
+    assert await svc.get_stance("k", "bo") == pytest.approx(0.08 * 0.3)
+
+
+@pytest.mark.anyio
+async def test_integration_nightly_drift_before_digest(opinion_on, db_session):
+    """Ordering hard requirement (§7): the drift block sits BEFORE the digest
+    block in run_nightly_jobs, so the same night's opinion_line reflects the
+    post-drift variance. Source-order guard (test_m5_space precedent) plus the
+    functional half: drift lowers the variance the digest will read."""
+    import inspect
+    from app.tasks import nightly_cron
+    src = inspect.getsource(nightly_cron.run_nightly_jobs)
+    assert "OpinionService" in src and "drift" in src
+    assert "MUST run before digest" in src
+    assert src.index("drift") < src.index("generate_village_digest")
+
+    # functional half: tonight's digest material is post-drift
+    for slug, st in (("ann", 0.0), ("bo", 0.2), ("cid", 0.4)):
+        await _seed_row(db_session, "k", slug, st)
+    svc = _svc(db_session)
+    var_before, _ = await svc.issue_variance("k")
+    await svc.drift()
+    var_after, _ = await svc.issue_variance("k")
+    assert var_after < var_before

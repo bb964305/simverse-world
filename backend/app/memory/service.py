@@ -576,9 +576,24 @@ class MemoryService:
         await self._persist_wrapup_side(target, initiator, tgt_side, mention_map)
 
         mood = data.get("mood")
+        mood = mood if mood in ("positive", "neutral", "negative") else "neutral"
+
+        # S1-3: feed the already-extracted mood into opinion dynamics (zero
+        # extra LLM — the one wrapup call above is the only call). Best-effort
+        # + gated: an opinion failure must never break the chat wrapup.
+        try:
+            from app.config import settings as _opinion_settings
+            if _opinion_settings.polis_opinion_enabled:
+                from app.services.opinion_service import OpinionService
+                await OpinionService(self.db).update_from_chat(
+                    initiator.slug, target.slug, mood,
+                )
+        except Exception:
+            logger.warning("opinion update from chat wrapup failed", exc_info=True)
+
         return {
             "summary": str(data.get("summary") or fallback["summary"]),
-            "mood": mood if mood in ("positive", "neutral", "negative") else "neutral",
+            "mood": mood,
         }
 
     async def _persist_wrapup_side(
