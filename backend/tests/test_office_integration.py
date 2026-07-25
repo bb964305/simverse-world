@@ -301,6 +301,84 @@ async def test_doctor_office_slot_appointable(db_session, monkeypatch):
     assert ((doc.meta_json or {}).get("duty")) is None
 
 
+# ── task 4: admin read-only endpoint + office_changed WS event ────────
+
+@pytest.mark.anyio
+async def test_admin_offices_endpoint_requires_admin(client, db_session, monkeypatch):
+    monkeypatch.setattr(settings, "polis_office_enabled", True)
+    from app.models.user import User
+    from app.services.auth_service import create_token
+    from app.services.office_service import OfficeService
+
+    await OfficeService(db_session).appoint(
+        "town_clerk", "zhao-qiwen", fill_strategy="seed")
+
+    admin = User(name="adm", email="adm-office@test.com", is_admin=True, is_banned=False)
+    pleb = User(name="pleb", email="pleb-office@test.com", is_admin=False, is_banned=False)
+    db_session.add_all([admin, pleb])
+    await db_session.commit()
+
+    # no token → 401
+    assert (await client.get("/admin/offices")).status_code == 401
+    # non-admin → 403
+    pleb_headers = {"Authorization": f"Bearer {create_token(pleb.id)}"}
+    assert (await client.get("/admin/offices", headers=pleb_headers)).status_code == 403
+    # admin → 200 with the office list
+    headers = {"Authorization": f"Bearer {create_token(admin.id)}"}
+    resp = await client.get("/admin/offices", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    keys = {o["office_key"]: o for o in body["offices"]}
+    assert keys["town_clerk"]["holder_slug"] == "zhao-qiwen"
+    assert keys["town_clerk"]["institution"] == "town_hall"
+
+
+@pytest.mark.anyio
+async def test_office_changed_ws_event_emitted_when_gate_on(db_session, monkeypatch):
+    """Appoint/vacate broadcast an office_changed envelope anchored with
+    seq (OutboxEvent cursor) + world_revision_id — world_changed v1 shape,
+    no new counter."""
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(settings, "polis_office_enabled", True)
+    broadcast = AsyncMock()
+    monkeypatch.setattr("app.ws.manager.manager.broadcast", broadcast)
+    from app.services.office_service import OfficeService
+
+    svc = OfficeService(db_session)
+    await svc.appoint("mayor", "cand", fill_strategy="election")
+    assert broadcast.await_count == 1
+    payload = broadcast.await_args.args[0]
+    assert payload["type"] == "office_changed"
+    assert payload["action"] == "office_appointed"
+    assert payload["office_key"] == "mayor"
+    assert payload["holder_slug"] == "cand"
+    assert "seq" in payload and "world_revision_id" in payload
+    assert "event_id" in payload and "occurred_at" in payload
+    assert payload["schema_version"] == 1
+
+    await svc.vacate("mayor")
+    assert broadcast.await_count == 2
+    payload = broadcast.await_args.args[0]
+    assert payload["action"] == "office_vacated"
+    assert payload["holder_slug"] is None
+
+
+@pytest.mark.anyio
+async def test_office_changed_not_emitted_when_gate_off(db_session, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(settings, "polis_office_enabled", False)
+    broadcast = AsyncMock()
+    monkeypatch.setattr("app.ws.manager.manager.broadcast", broadcast)
+    from app.services.office_service import OfficeService
+
+    svc = OfficeService(db_session)
+    await svc.appoint("mayor", "cand", fill_strategy="election")
+    await svc.vacate("mayor")
+    assert broadcast.await_count == 0
+
+
 @pytest.mark.anyio
 async def test_migration_backfill_tolerates_empty_world(db_session):
     """No residents, no system_config → four vacant rows, no crash."""

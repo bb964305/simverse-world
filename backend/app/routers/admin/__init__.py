@@ -14,6 +14,7 @@ from app.routers.admin.gossip import router as gossip_router
 from app.routers.admin.lab import router as lab_router
 from app.routers.admin.world import router as world_router
 from app.routers.admin.social_graph import router as social_graph_router
+from app.routers.admin.offices import router as offices_router
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 router.include_router(dashboard_router)
@@ -29,3 +30,4 @@ router.include_router(gossip_router)
 router.include_router(lab_router)
 router.include_router(world_router)
 router.include_router(social_graph_router)
+router.include_router(offices_router)
