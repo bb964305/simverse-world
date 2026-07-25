@@ -509,6 +509,11 @@ class Settings(BaseSettings):
     # M3 civic governance: proposals → clerk bulletin → NPC+player vote → execute.
     civic_polls_enabled: bool = True
     civic_poll_days: int = 3                      # voting window length
+    # Kill switch for the 2026-07-25 _npc_choice bias fix (option-0 monopoly:
+    # A2=M zero signal + index-order tie-break + all-effect polls). True falls
+    # back to the pre-fix scorer byte-for-byte. Default False = fix ON, because
+    # a default-off bug fix leaves production broken.
+    civic_npc_choice_legacy: bool = False
     # M6 seasonal mayor election (built on the M3 engine).
     election_enabled: bool = True
     election_mayor_wage_bonus: float = 1.2

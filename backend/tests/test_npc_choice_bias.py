@@ -25,9 +25,12 @@ acceptance criteria written down *before* the fix:
   * the outcome is deterministic (identical ballot-by-ballot across runs and
     across processes — no ``random``/``hash()`` salt)
 """
+import math
+
 import pytest
 from sqlalchemy import select
 
+from app.config import settings
 from app.models.resident import Resident
 from app.models.season import Poll
 from app.services import civic_service, relation_service
@@ -155,3 +158,49 @@ async def test_building_shape_is_not_a_mirror_monopoly(db_session):
     tally = await _tally(db_session, poll)
     assert sum(tally) == 14
     assert min(tally) >= 3, f"one option monopolises the building poll: {tally}"
+
+
+@pytest.mark.anyio
+async def test_election_shape_entropy_is_not_zero(db_session):
+    """Normalised entropy H/lnK — the ops-audit metric, 0 on production."""
+    await _seed_production_cast(db_session)
+    poll = await civic_service.propose(
+        db_session, "镇长选举:谁来当下一任镇长?", ELECTION_OPTIONS,
+        proposer_slug="jiang-lin",
+    )
+    await civic_service.run_npc_voting(db_session)
+    tally = await _tally(db_session, poll)
+    total = sum(tally)
+    h = -sum((n / total) * math.log(n / total) for n in tally if n)
+    assert h / math.log(len(tally)) >= 0.75, f"entropy still low: {tally}"
+
+
+# ── kill switch: both paths are covered ────────────────────────────────
+
+@pytest.mark.anyio
+async def test_legacy_kill_switch_restores_the_old_scorer(db_session, monkeypatch):
+    """``CIVIC_NPC_CHOICE_LEGACY=true`` must reproduce the pre-fix behaviour
+    byte-for-byte — that is what makes it a usable rollback."""
+    monkeypatch.setattr(settings, "civic_npc_choice_legacy", True)
+    await _seed_production_cast(db_session)
+    poll = await civic_service.propose(
+        db_session, "镇长选举:谁来当下一任镇长?", ELECTION_OPTIONS,
+        proposer_slug="jiang-lin",
+    )
+    await civic_service.run_npc_voting(db_session)
+    assert await _tally(db_session, poll) == [14, 0, 0, 0]
+
+
+def test_civic_npc_choice_legacy_defaults_off():
+    """A bug fix that ships default-off leaves production broken."""
+    assert settings.civic_npc_choice_legacy is False
+
+
+def test_stable_unit_is_reproducible_across_processes():
+    """Pins the digest: a regression to ``hash()`` (PYTHONHASHSEED-salted) or to
+    ``random`` would move these numbers between runs."""
+    v = civic_service._stable_unit("mei", "镇长选举:谁来当下一任镇长?", "0:候选甲:cand-a")
+    assert 0.0 <= v < 1.0
+    assert round(v, 12) == 0.260063755221, v
+    assert civic_service._stable_unit("a", "b", 1) == civic_service._stable_unit("a", "b", 1)
+    assert civic_service._stable_unit("a", "b", 1) != civic_service._stable_unit("a", "b", 2)

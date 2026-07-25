@@ -16,6 +16,7 @@ is fail-open and gated by ``settings.civic_polls_enabled``.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import datetime, timedelta, UTC
 
@@ -177,16 +178,224 @@ async def run_npc_voting(db) -> int:
     return cast
 
 
+# ── option scoring internals (fix: structural option-0 bias) ───────────
+#
+# ops-audit-2026-07-25B §A measured 14/14 NPC votes on option 0 across all
+# three production polls (normalised entropy 0). The SBTI backfill closed the
+# *data* gap, but a static replay still predicted 92.9%–100% — the monopoly is
+# structural in the scorer:
+#   (1) A2="M" scored nothing at all, and 10 of 14 production NPCs are M;
+#   (2) the tie-break `(scores[i], -i)` is pure index order, so every all-zero
+#       row lands on index 0;
+#   (3) an election poll gives *every* option an effect, which silences the
+#       `H and not eff` branch and makes `L and eff` uniform → tie → index 0.
+# The three fixes below are numbered to match.
+
+# (2) Personal taste: a deterministic per-(resident, poll, option) draw that
+# replaces the index tie-break. Strictly smaller than every trait signal
+# (smallest trait step is 0.30), so it can only ever decide a genuine tie —
+# but large enough to split residents whose SBTI vectors are identical, which
+# is exactly the production situation (10 NPCs all A2=M).
+_TASTE_MAG = 0.25
+
+# (3) Topic tags read off the *content* of an effect, so options that all carry
+# an effect can still be told apart.
+_TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "social": ("chat_resident", "tavern", "cafe", "剧院", "酒馆", "咖啡",
+               "聚会", "社交", "故事", "演"),
+    "economy": ("shop", "market", "price", "wage", "tax", "treasury", "经济",
+                "商", "价格", "工资", "税", "财政", "集市"),
+    "order": ("policy", "system_config", "规则", "制度", "条例", "秩序", "章程"),
+    "build": ("dynamic_location", "兴建", "工程", "修建", "建一座"),
+    "office": ("mayor", "election", "镇长", "选举", "office"),
+    "culture": ("observe", "library", "culture", "书", "讲", "学堂", "展",
+                "文化", "艺"),
+}
+
+# Effect types a 务实中间派 considers walk-back-able (a knob you can turn
+# again) as opposed to irreversible commitments (a building, an office).
+_REVERSIBLE_TYPES = frozenset({"system_config", "policy", "narrative"})
+
+# Effect types whose payload names a *person* — the option's identity is the
+# candidate, not the topic, so score it by the voter's tie to that resident.
+_PERSON_TYPES = frozenset({"mayor", "office", "duty"})
+
+# (dimension, level, tag, delta) — only explicit H/L levels emit a signal, so a
+# resident with a partial profile keeps today's behaviour.
+_TRAIT_AFFINITY: tuple[tuple[str, str, str, float], ...] = (
+    # A1 世界观乐观度: optimists back change, skeptics back the status quo.
+    ("A1", "H", "change", 0.30),
+    ("A1", "L", "status_quo", 0.30),
+    # So1 社交能量: extroverts want more places and occasions to meet.
+    ("So1", "H", "social", 0.30),
+    ("So1", "L", "social", -0.30),
+    # Ac1 成就动机: the ambitious care who holds office, and about money.
+    ("Ac1", "H", "office", 0.30),
+    ("Ac1", "H", "economy", 0.30),
+    ("Ac1", "L", "office", -0.30),
+    # E1 表达欲: expressive residents favour culture and stages.
+    ("E1", "H", "culture", 0.30),
+)
+
+
+def _stable_unit(*parts: object) -> float:
+    """Deterministic float in ``[0, 1)`` from a stable digest of *parts*.
+
+    Explicitly NOT :func:`hash` (PYTHONHASHSEED-salted → different per process)
+    and NOT :mod:`random` (unreproducible). Same inputs ⇒ same value on every
+    machine, every run — which is what makes the tie-break auditable.
+    """
+    raw = "|".join(str(p) for p in parts).encode("utf-8")
+    return int.from_bytes(hashlib.blake2b(raw, digest_size=8).digest(), "big") / 2 ** 64
+
+
+def _option_key(o: dict, i: int) -> str:
+    """Stable identity of an option: its position *and* its content, so the same
+    recurring question (elections repeat verbatim) reshuffles when the actual
+    options change."""
+    eff = o.get("effect") if isinstance(o.get("effect"), dict) else None
+    tail = ""
+    if eff:
+        tail = str(eff.get("slug") or eff.get("key") or eff.get("type") or "")
+    return f"{i}:{o.get('label', '')}:{tail}"
+
+
+def _effect_tags(eff) -> set[str]:
+    """Topic tags for one option's effect (``None`` → the status-quo option)."""
+    if not eff:
+        return {"status_quo"}
+    tags = {"change"}
+    etype = eff.get("type") if isinstance(eff, dict) else None
+    if etype:
+        tags.add(f"type:{etype}")
+        if etype in _REVERSIBLE_TYPES:
+            tags.add("reversible")
+    blob = str(eff).lower()
+    for topic, keywords in _TOPIC_KEYWORDS.items():
+        if any(k in blob for k in keywords):
+            tags.add(topic)
+    return tags
+
+
 async def _npc_choice(db, resident, poll, opts, relation_service, by_slug=None) -> int:
     """Score each option for this resident and return the best index.
 
-    Heuristics (all rule-based):
-      - conservative residents (SBTI A2=H, 守序) lean to the status-quo /
-        no-effect option;
+    Heuristics (all rule-based, zero LLM, fully deterministic):
+      - the SBTI A2 axis (规则与灵活度): H=守序 backs the status quo, L=叛逆
+        backs change, and M=务实 — 71% of the production cast — prefers changes
+        it can walk back rather than scoring nothing at all;
+      - other dimensions (A1/So1/Ac1/E1) are matched against topic tags read off
+        the effect's content, so a poll whose options *all* carry an effect can
+        still differentiate;
+      - person-shaped effects (mayor/office) are scored by the voter's tie to
+        that candidate — you back yourself, and you back your friends;
       - a positive tie to the proposer nudges toward the proposer's lead option
         (index 0 by convention); the proposer backs their own proposal;
       - a shopkeeper/economy duty leans toward options whose effect touches the
-        shop or economy.
+        shop or economy;
+      - ties are broken by a deterministic per-resident taste hash, never by
+        index order.
+
+    ``settings.civic_npc_choice_legacy`` (env ``CIVIC_NPC_CHOICE_LEGACY``) falls
+    back to the pre-fix scorer byte-for-byte — kill switch only, the fix is on
+    by default because the default-off variant means production stays broken.
+    """
+    if settings.civic_npc_choice_legacy:
+        return await _npc_choice_legacy(db, resident, poll, opts, relation_service, by_slug)
+
+    sbti = (resident.meta_json or {}).get("sbti", {})
+    dims = sbti.get("dimensions", {})
+    a2 = dims.get("A2", "M")  # 规则与灵活度: H=守序
+    duty = (resident.meta_json or {}).get("duty", {}).get("key")
+    # Recurring polls (elections repeat verbatim) key off the question, not the
+    # per-run poll id, so a replay of the same fixture is bit-identical.
+    poll_key = getattr(poll, "question", None) or getattr(poll, "id", "")
+
+    scores = [0.0] * len(opts)
+    for i, o in enumerate(opts):
+        eff = o.get("effect")
+        tags = _effect_tags(eff)
+
+        # (1) A2 — every level now emits a signal, including M.
+        if a2 == "H":
+            if "status_quo" in tags:
+                scores[i] += 1.0     # 守序: the status quo needs no defence
+            if "order" in tags:
+                scores[i] += 0.4     # …and a rule-level change is at least legible
+        elif a2 == "L":
+            if "change" in tags:
+                scores[i] += 0.5     # 叛逆者 lean toward change
+        else:                        # "M" — 务实中间派
+            # Deliberately *not* a blanket pro- or anti-change lean: 71% of the
+            # production cast is M, so any uniform tilt just swaps an option-0
+            # monopoly for an option-1 one. The pragmatist's actual signal is
+            # reversibility — back what you can walk back. When no option is
+            # reversible (a building, an election), the M block is decided by
+            # the other dimensions and by personal taste, i.e. it splits.
+            if "reversible" in tags:
+                scores[i] += 0.35
+
+        # (3) topic fit from the remaining dimensions
+        for code, level, tag, delta in _TRAIT_AFFINITY:
+            if dims.get(code) == level and tag in tags:
+                scores[i] += delta
+
+        # duty interest
+        if eff and duty in ("shop_keeper", "tavern_hub", "cafe_host"):
+            blob = str(eff)
+            if any(k in blob for k in ("shop", "market", "经济", "price")):
+                scores[i] += 0.8
+
+        # (2) deterministic personal taste — replaces the index tie-break
+        scores[i] += _TASTE_MAG * _stable_unit(resident.slug, poll_key, _option_key(o, i))
+
+    # (3) person-shaped effects: score the candidate, not the topic.
+    for i, o in enumerate(opts):
+        eff = o.get("effect")
+        if not isinstance(eff, dict) or eff.get("type") not in _PERSON_TYPES:
+            continue
+        target = eff.get("slug")
+        if not target:
+            continue
+        if target == resident.slug:
+            scores[i] += 2.0         # you stand for yourself
+            continue
+        other = (by_slug or {}).get(target)
+        if other is None:
+            continue
+        try:
+            pair = await relation_service.get_pair(db, resident.id, other.id)
+            if pair is not None and pair.affinity:
+                scores[i] += 1.5 * pair.affinity
+        except Exception:
+            logger.debug("candidate relation lookup failed", exc_info=True)
+
+    # Relationship-to-proposer nudge toward option 0 (the proposer's lead).
+    proposer_slug = opts[0].get("_proposer_slug") if opts else None
+    if proposer_slug:
+        if resident.slug == proposer_slug:
+            scores[0] += 2.0  # you back your own proposal
+        else:
+            proposer = (by_slug or {}).get(proposer_slug)
+            if proposer is not None:
+                try:
+                    pair = await relation_service.get_pair(db, resident.id, proposer.id)
+                    if pair is not None and pair.affinity > 0:
+                        # a close friend's ask outweighs mild conservatism
+                        scores[0] += 1.5 * pair.affinity
+                except Exception:
+                    logger.debug("proposer relation lookup failed", exc_info=True)
+    # Taste is already baked into `scores`; `-i` only settles an exact float
+    # collision, which the digest makes vanishingly unlikely.
+    best = max(range(len(opts)), key=lambda i: (scores[i], -i))
+    return best
+
+
+async def _npc_choice_legacy(db, resident, poll, opts, relation_service, by_slug=None) -> int:
+    """Pre-2026-07-25 scorer, kept verbatim behind ``CIVIC_NPC_CHOICE_LEGACY``.
+
+    Known broken: A2="M" is a zero signal and the tie-break is index order, so
+    an all-tie poll sends 100% of the NPC votes to option 0. Kill switch only.
     """
     sbti = (resident.meta_json or {}).get("sbti", {})
     dims = sbti.get("dimensions", {})
