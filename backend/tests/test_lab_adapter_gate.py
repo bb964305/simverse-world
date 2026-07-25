@@ -230,8 +230,15 @@ async def test_broker_mediation_probe_requires_denial_and_admission(db_session):
 def test_adr_records_reference_runtime_selected_commercial_unevaluated():
     """The ADR now records the honest post-P7 state: the self-hosted reference
     runtime is SELECTED (100/100), the commercial runtimes stay UNEVALUATED (no
-    endpoints — no fabricated scores), and Mock remains the default."""
-    adr = Path(__file__).resolve().parents[2] / "docs" / "adr" / "ADR-lab-runtime-adapter.md"
+    endpoints — no fabricated scores), and Mock remains the default.
+
+    The ADR itself now lives in the 2026-07-25 archive snapshot (docs/ keeps only
+    the active ROADMAP); it is read-only evidence, so this test pins the archived
+    copy."""
+    adr = (
+        Path(__file__).resolve().parents[2]
+        / "archive" / "2026-07-25" / "docs" / "adr" / "ADR-lab-runtime-adapter.md"
+    )
     assert adr.exists(), f"ADR missing at {adr}"
     text = adr.read_text(encoding="utf-8")
     assert "Accepted" in text                        # decision recorded
