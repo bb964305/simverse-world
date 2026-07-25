@@ -55,3 +55,5 @@ import app.models.lab_runtime  # noqa: F401
 import app.models.lab_control  # noqa: F401
 # Realism P2 — numeric two-axis relationships (§7.1)
 import app.models.resident_relation  # noqa: F401
+# S1-3 议题立场与舆论动力学 — bounded-confidence issue stances
+import app.models.issue_stance  # noqa: F401
