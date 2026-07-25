@@ -130,6 +130,47 @@ async def disburse(db: AsyncSession, amount: int, reason: str = "") -> bool:
     return (result.rowcount or 0) > 0
 
 
+async def notify_changed(db: AsyncSession, *, delta: int, reason: str = "") -> bool:
+    """Broadcast a ``treasury_changed`` WS envelope for a significant balance
+    move. Returns whether anything was sent.
+
+    Anchored to the world revision / seq the art spec froze for
+    ``world_changed`` v1 (``seq`` reuses the OutboxEvent cursor — no new
+    counter), same shape S2-1's ``office_changed`` uses.
+
+    Rate discipline: high-frequency micro-skims must never spam the channel, so
+    a broadcast needs ``|delta| >= town_ws_min_delta_sc`` and the default of 0
+    disables broadcasting entirely — the nightly job is the intended trigger.
+    Gated + fail-open: a broadcast failure never breaks a write.
+    """
+    try:
+        from app.config import settings
+        if not settings.town_treasury_enabled:
+            return False
+        threshold = int(settings.town_ws_min_delta_sc or 0)
+        if threshold <= 0 or abs(int(delta)) < threshold:
+            return False
+        import uuid
+        from app.services import world_revision_service as wrsvc
+        payload = {
+            "type": "treasury_changed",
+            "schema_version": wrsvc.SCHEMA_VERSION,
+            "event_id": str(uuid.uuid4()),
+            "seq": await wrsvc.current_source_cursor(db),
+            "world_revision_id": await wrsvc.current_revision_id(db),
+            "delta_sc": int(delta),
+            "balance_sc": await balance(db),
+            "reason": reason,
+            "occurred_at": datetime.now(UTC).isoformat(),
+        }
+        from app.lab import apply as apply_engine
+        await apply_engine.broadcast_world_changed(payload)
+        return True
+    except Exception:
+        logger.warning("treasury_changed broadcast failed (%s)", reason, exc_info=True)
+        return False
+
+
 async def run_public_spending(db: AsyncSession) -> int:
     """Nightly public spending / reconciliation (S1-5 §2 任务 5). Returns the SC
     actually disbursed.
@@ -155,6 +196,8 @@ async def run_public_spending(db: AsyncSession) -> int:
         amount = min(budget, await balance(db))
         if amount > 0 and await disburse(db, amount, reason="public_works"):
             spent = amount
+            # The nightly job is the intended low-frequency WS trigger (§2 任务 6).
+            await notify_changed(db, delta=-spent, reason="public_works")
 
     from app.services.config_service import ConfigService
     await ConfigService(db).set(

@@ -689,3 +689,153 @@ async def test_nightly_block_runs_public_spending(db_engine, monkeypatch):
     assert spent == 5
     async with factory() as db:
         assert await treasury_service.balance(db) == 15
+
+
+# --------------------------------------------------------------------------- #
+# Task 6 — read-only REST endpoint + treasury_changed WS event                 #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.anyio
+async def test_get_town_treasury_readonly_auth(client, db_session, monkeypatch):
+    """Player read-only endpoint: a logged-in (non-admin) user may read it; an
+    anonymous or invalid caller gets 401. It never exposes a write verb."""
+    from app.models.user import User
+    from app.services.auth_service import create_token
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "town_tax_rate_sales", 0.1)
+    await treasury_service.tax(db_session, 42, reason="seed")
+
+    pleb = User(name="pleb", email="pleb-treasury@test.com", is_admin=False, is_banned=False)
+    db_session.add(pleb)
+    await db_session.commit()
+
+    assert (await client.get("/townhall/treasury")).status_code == 401
+    bad = await client.get("/townhall/treasury",
+                           headers={"Authorization": "Bearer nope"})
+    assert bad.status_code == 401
+
+    ok = await client.get("/townhall/treasury",
+                          headers={"Authorization": f"Bearer {create_token(pleb.id)}"})
+    assert ok.status_code == 200
+    body = ok.json()
+    assert body["balance_sc"] == 42
+    assert body["tax_rate"] == 0.1
+    assert body["enabled"] is True
+    assert isinstance(body["updated_at"], str)
+    # read-only: no write verb is mounted on this path
+    assert (await client.post("/townhall/treasury", json={})).status_code in (404, 405)
+
+
+@pytest.mark.anyio
+async def test_get_town_treasury_when_disabled(client, db_session, monkeypatch):
+    """Gate off → the projection still reads (it is a pure read) but reports a
+    zero balance and enabled=False; no town row is created by the read."""
+    from app.models.user import User
+    from app.services.auth_service import create_token
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", False)
+    pleb = User(name="pleb", email="pleb-treasury2@test.com", is_admin=False, is_banned=False)
+    db_session.add(pleb)
+    await db_session.commit()
+
+    res = await client.get("/townhall/treasury",
+                           headers={"Authorization": f"Bearer {create_token(pleb.id)}"})
+    assert res.status_code == 200
+    assert res.json()["balance_sc"] == 0 and res.json()["enabled"] is False
+    assert (await _row(db_session)) is None
+
+
+@pytest.mark.anyio
+async def test_treasury_changed_ws_envelope_has_seq_revision(db_session, monkeypatch):
+    """A significant balance move broadcasts a treasury_changed envelope carrying
+    the world revision / seq anchors (world_changed v1 shape, seq reuses the
+    OutboxEvent cursor — no new counter)."""
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "town_ws_min_delta_sc", 10)
+
+    sent: list[dict] = []
+
+    async def _capture(payload=None):
+        sent.append(payload)
+
+    import app.lab.apply as apply_engine
+    monkeypatch.setattr(apply_engine, "broadcast_world_changed", _capture)
+
+    await treasury_service.notify_changed(db_session, delta=50, reason="sales_tax:x")
+    assert len(sent) == 1
+    env = sent[0]
+    assert env["type"] == "treasury_changed"
+    assert "seq" in env and "world_revision_id" in env
+    assert env["schema_version"] == 1
+    assert env["delta_sc"] == 50 and env["reason"] == "sales_tax:x"
+    assert isinstance(env["occurred_at"], str) and env["event_id"]
+
+
+@pytest.mark.anyio
+async def test_treasury_changed_below_threshold_is_silent(db_session, monkeypatch):
+    """High-frequency micro-skims must not spam the WS channel; the default
+    threshold 0 disables broadcasting outright."""
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    sent: list[dict] = []
+
+    async def _capture(payload=None):
+        sent.append(payload)
+
+    import app.lab.apply as apply_engine
+    monkeypatch.setattr(apply_engine, "broadcast_world_changed", _capture)
+
+    monkeypatch.setattr(settings, "town_ws_min_delta_sc", 10)
+    await treasury_service.notify_changed(db_session, delta=9, reason="tiny")
+    monkeypatch.setattr(settings, "town_ws_min_delta_sc", 0)
+    await treasury_service.notify_changed(db_session, delta=9999, reason="huge")
+    monkeypatch.setattr(settings, "town_treasury_enabled", False)
+    monkeypatch.setattr(settings, "town_ws_min_delta_sc", 1)
+    await treasury_service.notify_changed(db_session, delta=9999, reason="gate off")
+    assert sent == []
+
+
+@pytest.mark.anyio
+async def test_nightly_public_spending_broadcasts(db_session, monkeypatch):
+    """The nightly job is the intended low-frequency broadcast trigger."""
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "town_public_works_daily_sc", 30)
+    monkeypatch.setattr(settings, "town_ws_min_delta_sc", 10)
+    await treasury_service.tax(db_session, 100, reason="seed")
+
+    sent: list[dict] = []
+
+    async def _capture(payload=None):
+        sent.append(payload)
+
+    import app.lab.apply as apply_engine
+    monkeypatch.setattr(apply_engine, "broadcast_world_changed", _capture)
+
+    assert await treasury_service.run_public_spending(db_session) == 30
+    assert [e["type"] for e in sent] == ["treasury_changed"]
+    assert sent[0]["delta_sc"] == -30
+
+
+@pytest.mark.anyio
+async def test_treasury_numbers_never_enter_npc_prompt(db_session, monkeypatch):
+    """§7 hard rule: town-wide finance figures must never reach an NPC prompt.
+
+    The decision prompt may only see the resident's OWN wallet cache — the town
+    balance, tax rate and public-works budget are absent from the rendered text.
+    """
+    from app.agent.prompts import build_decision_prompt
+    from app.agent.actions import ActionType
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    await treasury_service.tax(db_session, 4242, reason="seed")
+
+    r = _npc("chen", "陈铁生", {"key": "workshop_fixer",
+                               "prompt_hint": "你在工坊修东西", "perks": {}})
+    r.meta_json = {**(r.meta_json or {}), "wallet": 7}
+    system, user = build_decision_prompt(
+        r, "工作时段", "10:00", [], [], [], [ActionType.WORK], 20,
+    )
+    blob = f"{system}\n{user}"
+    assert "4242" not in blob
+    assert "town_treasury" not in blob and "镇财政" not in blob
+    assert "tax" not in blob.lower()

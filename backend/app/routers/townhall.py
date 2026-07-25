@@ -14,12 +14,13 @@ section rather than a 500 — this endpoint only ever reads.
 """
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
+from app.services.auth_service import get_current_user
 from app.models.resident import Resident
 from app.models.season import Poll
 from app.services import duty_service, election_service, script_service
@@ -165,4 +166,49 @@ async def market_day(db: AsyncSession = Depends(get_db)):
         "active": active,
         "discount": settings.market_day_discount if active else 1.0,
         "weekday": settings.market_day_weekday,
+    }
+
+
+@router.get("/treasury")
+async def town_treasury(request: Request, db: AsyncSession = Depends(get_db)):
+    """S1-5: the town's public account, read-only, for any logged-in player.
+
+    Plain login auth (NOT admin) per SOCIETY_EXPANSION_PLAN §6 — this is a
+    civic-transparency projection, not an admin view, and there is deliberately
+    no write verb on this path (the treasury only moves through taxes, wages and
+    the nightly job). Pure read: it never upserts the town row, so a world with
+    the gate off keeps reporting a flat 0.
+
+    DEVIATION (registered in the S1-5 report): the spec names this endpoint
+    ``GET /town/treasury``. Mounting a new router requires editing
+    ``app/main.py``, which the parallel engineering-health line owns for this
+    batch, so it is served from the existing town-hall router instead. The
+    handler is path-agnostic — closeout can alias ``/town/treasury`` with a
+    one-line include.
+    """
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing auth token")
+    user = await get_current_user(db, auth.removeprefix("Bearer "))
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid auth token")
+
+    balance_sc = 0
+    updated_at = None
+    try:
+        from app.models.town_treasury import TOWN_KEY, TownTreasury
+        row = (await db.execute(
+            select(TownTreasury).where(TownTreasury.key == TOWN_KEY)
+        )).scalar_one_or_none()
+        if row is not None:
+            balance_sc = row.balance_sc
+            updated_at = row.updated_at
+    except Exception:
+        logger.warning("townhall: treasury lookup failed", exc_info=True)
+
+    return {
+        "enabled": settings.town_treasury_enabled,
+        "balance_sc": balance_sc,
+        "updated_at": updated_at.isoformat() if updated_at else None,
+        "tax_rate": settings.town_tax_rate_sales,
     }
