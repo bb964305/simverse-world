@@ -470,3 +470,19 @@
 4. agent-T 偏差：`next_beijing_morning_real` 未被 cron 采用（改用已测的 `_seconds_until_next_run(now_real())`，语义等价，helper 保留有单测）。
 
 **遗留跟进**（未处理，待 Jimmy 定）：(a) 生产 26 居民部分维 sbti → 投票偏差仍在，需 LLM 重算或 backfill；(b) heat_cron tz 混比 bug（既有）；(c) burn-in 首 24h 真实 llm_usage 成本待测（预算已 $10，×4 行动量预计 ~$2/真实天）；(d) 集市日折扣目录页原价（前端增强，续记）。
+
+## 收尾清理 — 抢救文档提交 + 历史分支/worktree 清理 + 部署复核 (2026-07-25)
+
+**背景**：M1–M6 上线后仓库收尾。血统上未合并的两个分支挂着 master 没有的文档提交（磁盘上文件已不存在，仅存于 git 对象），删分支前先抢救；随后清理全部已进 master 的历史分支与 worktree；销掉两个遗留「未验证」部署项。全程不碰源码/生产。
+
+**抢救（cherry-pick 入 master 并 push）**：`f1e33d2`→`0b042fa`（KICKOFF_PROMPT_{LAB,LAB_REMAINING,REALISM_P2,V6}.md ×4 + .gitignore 加 `tmp/`）、`8d411a2`→`337c084`（docs/renders/simverse-*.png ×4 + output/imagegen/simverse-concepts/* ×5），共 14 文件，零冲突，push `be68797..337c084` 完成。
+
+**删除的本地分支（10，均留 tip SHA 可恢复）**：feat/realism-p0(`c0341d3`)、feat/realism-p1(`63eb181`)、fix/burnin-batch-1(`4ebbc21`)、feat/lab-agent-v1(`77b64c2`)、feat/lab-agent-completion(`a161cd5`)、feature/lab(`b7c6f6b`)、codex/ink-inspired-simverse-site(`1b06f75`)、feat/rate-limiting-p1(`3586ebb`)——8 个验证 master 祖先走 `-d`；feat/realism-p2(`b6ab062`)、fix/production-test-fixes-20260723(`8b42d96`)——血统非祖先走 `-D`【Jimmy 确认】，抢救后 `git cherry` 证明 realism-p2 零独有提交。**远端删除**：origin/codex/ink-inspired-simverse-site、origin/feat/rate-limiting-p1。**worktree 移除（3）**：simverse-world-lab-agent-completion（净）、simverse-world-pr-homepage（净）、.claude/worktrees/fix-burnin-batch-1（--force 丢弃本地 dev SQLite 改动【Jimmy 确认】）+ prune。**终态**：本地仅 master + port/prod-fixes-onto-044（生产基线，连同 worktree 保留），远端仅 origin/master。
+
+**部署复核（只读，销掉两个未验证项）**：① wrangler deployments list 最新 Version ID = `6de99e27-41c1-45e5-b694-aa8c2326cedb`（2026-07-24T17:09:39Z）✓。② TownHall/LabTerminal 面板代码在线上 bundle：命中 chunk `assets/TopNav-CbDokkBv.js`，simverse.world 与 skills-world.stawky.workers.dev 两域名该 chunk md5 一致（`9d0c1f4e19bd07433ac818de655fe3a1`），含 `townhall:open`×2/`labterminal:open`×2/`市政厅`×5/`实验楼`×9 ✓。
+
+**偏差（不隐藏）**：
+1. **kickoff 第 0 步事实缺一条**：fix/production-test-fixes-20260723 血统上还有第三条独有提交 `8b42d96`（生产测试轮代码修复），非仅两条文档提交。逐文件核实其内容已全在 master（7 文件直接命中；迁移 `040_residents_creator_nullable` 被 port 重编号为 `045_residents_creator_nullable.py`，与 vm212 alembic=045 一致），`git cherry` 显示 `+` 仅因 port 改写 patch-id。确认后照删。
+2. **kickoff §4.2 的字面 grep 必然落空**：`grep 'TownHall\|LabTerminal'` 匹配不到生产 bundle——PascalCase 组件名被 minify 掉，实际以小写事件名 + 中文 UI 串为证（见上）。
+3. **执行顺序调整**：3 个待删分支被 worktree 检出（`branch -d` 会被拒），故 worktree 移除提前到删分支之前（kickoff 原顺序为先删分支）。
+4. push 范围经 Jimmy 确认扩为「两个 cherry-pick + 本条 PROGRESS 记录」（kickoff 字面仅前者）。
