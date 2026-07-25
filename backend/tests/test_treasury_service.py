@@ -339,6 +339,14 @@ async def test_purchase_resident_work_skims_sales_tax(db_session, monkeypatch):
 
     monkeypatch.setattr(settings, "town_treasury_enabled", True)
     monkeypatch.setattr(settings, "town_tax_rate_sales", 0.1)
+    # Pin the 集市日 discount: it rides a process-wide active-event cache that
+    # other suites warm up, and a discounted total would confuse the tax math
+    # below (the payout is computed off item.price_sc, not off the charged total
+    # — pre-existing _resident_work_effect behavior, untouched by S1-5).
+    async def _full_price(_db):
+        return 1.0
+
+    monkeypatch.setattr(shop_service, "_market_discount", _full_price)
     item = _work_item("ann", price_sc=20)
     maker = Resident(slug="ann", name="安", district="workshop", status="idle",
                      resident_type="npc", tile_x=1, tile_y=1, meta_json={})
