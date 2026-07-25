@@ -267,6 +267,28 @@ async def _close_one(db, poll: Poll) -> None:
         await db.commit()
         return
     win = max(range(len(tally)), key=lambda i: (tally[i], -i))
+
+    # S2-5 track B: a tier-governed poll must clear its threshold (and, at the
+    # absolute-majority tier, quorum) before the winner is executed. Gate off →
+    # `verdict` is never computed and the pure-plurality path below runs
+    # byte-for-byte as before S2-5.
+    verdict = None
+    if settings.polis_policy_approval_enabled:
+        verdict = await _policy_threshold_verdict(db, opts, tally, win)
+    if verdict is not None:
+        from app.services.policy_service import META_OUTCOME
+        opts[0][META_OUTCOME] = verdict
+        opts[win]["final_votes"] = tally[win]
+        poll.options_json = opts
+        flag_modified(poll, "options_json")
+        await db.commit()
+        await _clerk_announce(
+            db, f"镇务结果:{poll.question}",
+            f"「{poll.question}」投票结束,「{opts[win]['label']}」得 {tally[win]} 票,"
+            f"{_VERDICT_NOTE.get(verdict, '未达生效条件')},本案流会,政策维持原状。",
+        )
+        return
+
     opts[win]["won"] = True
     opts[win]["final_votes"] = tally[win]
     poll.options_json = opts
@@ -276,15 +298,76 @@ async def _close_one(db, poll: Poll) -> None:
     effect = opts[win].get("effect")
     result_note = f"「{poll.question}」投票结束,「{opts[win]['label']}」以 {tally[win]} 票胜出。"
     if effect:
-        applied = await _execute_outcome(db, effect)
+        applied = await _execute_outcome(db, effect, poll_id=poll.id)
         result_note += "议案已生效。" if applied else "议案生效时遇到问题,已记录。"
     await _clerk_announce(db, f"镇务结果:{poll.question}", result_note)
 
 
-async def _execute_outcome(db, effect: dict) -> bool:
+#: 流会原因 → 公告措辞（世界内信息物；探针数值永不进 NPC prompt）。
+_VERDICT_NOTE = {
+    "threshold_not_met": "未达本级审批所需的票数门槛",
+    "quorum_not_met": "投票人数未达法定出席门槛",
+    "no_votes": "无人投票",
+}
+
+
+async def _eligible_voter_count(db) -> int:
+    """Quorum denominator: the NPC residents who could have voted."""
+    return int((await db.execute(
+        select(func.count()).select_from(Resident).where(
+            Resident.resident_type == "npc")
+    )).scalar() or 0)
+
+
+async def _policy_threshold_verdict(db, opts: list[dict], tally: list[int],
+                                    win: int) -> str | None:
+    """S2-5 §2 任务 4 — threshold / quorum judgement for a tier-governed poll.
+
+    Returns ``None`` when the poll may execute (either it carries no tier
+    metadata at all — an ordinary civic poll keeps pure plurality — or the
+    winner cleared its bar), otherwise a 流会 reason code.
+    """
+    from app.services.policy_service import META_THRESHOLD, META_QUORUM
+
+    blob = opts[0] if opts else {}
+    threshold = blob.get(META_THRESHOLD)
+    if threshold is None:
+        return None                      # not a policy poll → status quo
+    total = sum(tally)
+    if total <= 0:
+        return "no_votes"
+    if blob.get(META_QUORUM):
+        eligible = await _eligible_voter_count(db)
+        if eligible > 0 and total < eligible * settings.polis_policy_quorum_fraction:
+            return "quorum_not_met"
+    if (tally[win] / total) < float(threshold):
+        return "threshold_not_met"
+    return None
+
+
+async def _execute_outcome(db, effect: dict, *, poll_id: int | None = None) -> bool:
     """Land a winning outcome through an existing channel. Returns success."""
     etype = effect.get("type")
     try:
+        if etype == "policy" and settings.polis_policy_approval_enabled:
+            # S2-5: the only new effect type. Gated — with the approval gate off
+            # this branch is not even evaluated, so a "policy" effect falls
+            # through to the `return False` below exactly like any unknown type
+            # did before S2-5 (byte-level status quo).
+            from app.services.policy_service import (
+                PolicyService, PolicyImmutableError,
+            )
+            try:
+                return await PolicyService(db).apply_amend(
+                    effect["key"], effect["value"],
+                    expected_version=effect.get("expected_version"),
+                    updated_by=f"poll:{poll_id if poll_id is not None else '?'}",
+                )
+            except PolicyImmutableError:
+                # A core entry can never be amended, not even by referendum.
+                logger.warning("civic outcome targeted a constitutional_core "
+                               "policy (%s) — refused", effect.get("key"))
+                return False
         if etype == "system_config":
             from app.services.config_service import ConfigService
             await ConfigService(db).set(

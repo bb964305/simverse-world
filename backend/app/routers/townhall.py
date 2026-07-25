@@ -212,3 +212,31 @@ async def town_treasury(request: Request, db: AsyncSession = Depends(get_db)):
         "updated_at": updated_at.isoformat() if updated_at else None,
         "tax_rate": settings.town_tax_rate_sales,
     }
+
+
+@router.get("/policies")
+async def policies(db: AsyncSession = Depends(get_db)):
+    """S2-5 玩家只读政策投影 (§6 "GET /town/policies 玩家只读").
+
+    Landed on the existing public read-only ``/townhall`` router rather than a
+    new ``/town`` prefix: no ``/town`` router exists in this codebase, and
+    ``/townhall`` is exactly the "political layer, read-only, fail-open"
+    aggregation surface (see this module's docstring). Deviation recorded in
+    docs/reports/feat-s2-5-policies-report.md.
+
+    Gate off → ``{"enabled": false, "policies": []}``: policy state still lives
+    in ``system_config`` and the table is not a source of truth yet.
+    """
+    rows: list[dict] = []
+    try:
+        from app.services.policy_service import PolicyService, TIER_MATRIX
+        rows = await PolicyService(db).list_all()
+        matrix = {t: {"path": spec["path"]} for t, spec in TIER_MATRIX.items()}
+    except Exception:
+        logger.warning("townhall: policy projection failed", exc_info=True)
+        matrix = {}
+    return {
+        "enabled": settings.polis_policy_enabled,
+        "tiers": matrix,
+        "policies": rows,
+    }

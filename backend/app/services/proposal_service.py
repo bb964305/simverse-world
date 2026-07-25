@@ -185,6 +185,39 @@ async def reclaim_stuck_proposals(db, *, stuck_minutes: int | None = None) -> in
     return n
 
 
+async def _assert_policy_tier_allows_admin_direct(db, p: WorldChangeProposal) -> None:
+    """S2-5 track A tier door (KICKOFF §2 任务 3).
+
+    A proposal targets a policy entry when its patch carries ``policy_key``.
+    Only ``administrative`` entries may be applied by a single admin; anything
+    at a vote tier has to go through track B (a civic poll) and
+    ``constitutional_core`` is refused outright.
+
+    Gated: with ``POLIS_POLICY_APPROVAL_ENABLED=false`` this returns
+    immediately, so ``approve_proposal`` behaves byte-for-byte like the
+    pre-S2-5 single-admin CAS→apply path. No new lock is invented — ownership
+    is still won by ``transitions.cas_proposal_status`` right after this door.
+    """
+    from app.config import settings
+    if not settings.polis_policy_approval_enabled:
+        return
+    key = (p.patch_json or {}).get("policy_key")
+    if not key:
+        return
+    from app.services import policy_service as pol
+    tier = await pol.PolicyService(db).classify(key)
+    if tier == pol.TIER_ADMINISTRATIVE:
+        return
+    if tier == pol.TIER_CONSTITUTIONAL_CORE:
+        raise ProposalError(
+            f"policy '{key}' is constitutional_core and cannot be modified"
+        )
+    raise ProposalError(
+        f"policy '{key}' is tier '{tier}' — single-admin approval is not "
+        f"allowed; route it through a civic poll ({pol.procedure_for(tier)})"
+    )
+
+
 async def approve_proposal(db, proposal_id: str, reviewer_id: str, note: str = "") -> WorldChangeProposal:
     p = await db.scalar(
         select(WorldChangeProposal)
@@ -197,6 +230,7 @@ async def approve_proposal(db, proposal_id: str, reviewer_id: str, note: str = "
     if p.status != "pending":
         raise ProposalError("proposal is not pending")
     _assert_kind_enabled(p.kind)
+    await _assert_policy_tier_allows_admin_direct(db, p)
     await _lock_apply_authority(db, p)
 
     # Win ownership before touching the overlay. PostgreSQL row locks already

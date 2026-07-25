@@ -819,6 +819,57 @@ async def fetch_treasury_snapshot(session) -> dict:
     return snap
 
 
+
+# --------------------------------------------------------------------------- #
+# S2-5 §6 — 政策探针（纯读 policies + system_config 探针计数器，零 LLM）。         #
+# 两个指标：① 政策漂移距离（按 tier 分档：门槛越高漂移越少；constitutional_core   #
+# 恒 0）；② 核心条款触碰计数（尝试数可 >0，成功数恒 = 0）。                        #
+# 对照组（POLIS_POLICY_APPROVAL_ENABLED=false）：政策仍是 system_config 无类型      #
+# blob，无 tier 约束 → 无分级差异、核心条款无保护。                                #
+# --------------------------------------------------------------------------- #
+_TIER_ORDER = ("administrative", "simple_majority",
+               "absolute_majority", "constitutional_core")
+
+
+async def fetch_policy_snapshot(session) -> dict:
+    """policies 全表 + 核心条款触碰计数器。表不存在（S2-5 前的库 / 迁移未跑）→
+    available=False，探针整体 fail-open。"""
+    import json as _json
+    snap = {"available": True, "policies": [],
+            "core_touch": {"attempts": 0, "by_key": {}}}
+    try:
+        from app.models.policy import Policy
+        rows = (await session.execute(
+            select(Policy).order_by(Policy.tier, Policy.key))).scalars().all()
+        snap["policies"] = [{
+            "key": r.key,
+            "value": _json.loads(r.value),
+            "tier": r.tier,
+            "group": r.group,
+            "version": r.version,
+            "updated_by": r.updated_by,
+        } for r in rows]
+    except Exception:
+        return {"available": False, "policies": [],
+                "core_touch": {"attempts": 0, "by_key": {}}}
+    try:
+        from app.models.system_config import SystemConfig
+        from app.services.policy_service import CORE_TOUCH_KEY
+        row = (await session.execute(
+            select(SystemConfig.value).where(SystemConfig.key == CORE_TOUCH_KEY)
+        )).scalar_one_or_none()
+        if row is not None:
+            parsed = _json.loads(row)
+            if isinstance(parsed, dict):
+                snap["core_touch"] = {
+                    "attempts": int(parsed.get("attempts", 0)),
+                    "by_key": dict(parsed.get("by_key") or {}),
+                }
+    except Exception:
+        pass
+    return snap
+
+
 def treasury_money_split(snapshot: dict) -> dict:
     """货币分布：镇 vs 居民。开关关 → 镇占比恒 0（对照组的平线）。"""
     town = int(snapshot.get("town_balance_sc") or 0)
@@ -880,6 +931,110 @@ def render_probes_s15(snapshot: dict, gate_on: bool) -> str:
     return "\n".join(out)
 
 
+def _value_drift(current, seed) -> float:
+    """归一化单条漂移量。数值型 → |Δ|/|seed|（seed=0 时取 |Δ|）；
+    枚举/布尔/结构型 → 翻转计数（改了记 1，没改记 0）。"""
+    if isinstance(current, bool) or isinstance(seed, bool):
+        return 0.0 if current == seed else 1.0
+    if isinstance(current, (int, float)) and isinstance(seed, (int, float)):
+        if seed == 0:
+            return abs(float(current))
+        return abs(float(current) - float(seed)) / abs(float(seed))
+    return 0.0 if current == seed else 1.0
+
+
+def policy_drift(snapshot: dict) -> dict:
+    """政策漂移距离：每条 = amend 次数（version-1）+ 归一化数值漂移；按 tier 聚合。
+
+    目标形态：simple_majority 漂移 > administrative > absolute_majority
+    （门槛越高越稳定），constitutional_core **恒为 0**。
+    """
+    from app.services.policy_service import catalog_default
+
+    per_policy = []
+    per_tier: dict[str, dict] = {}
+    for p in snapshot.get("policies", []):
+        seed = catalog_default(p["key"])
+        drift = _value_drift(p["value"], seed) if seed is not None else 0.0
+        amends = max(0, int(p["version"]) - 1)
+        per_policy.append({
+            "key": p["key"], "tier": p["tier"], "version": p["version"],
+            "amend_count": amends, "drift": round(drift, 4),
+        })
+        bucket = per_tier.setdefault(
+            p["tier"], {"n": 0, "amend_total": 0, "drift_total": 0.0})
+        bucket["n"] += 1
+        bucket["amend_total"] += amends
+        bucket["drift_total"] += drift
+    for bucket in per_tier.values():
+        bucket["drift_total"] = round(bucket["drift_total"], 4)
+        bucket["drift_mean"] = round(bucket["drift_total"] / bucket["n"], 4) if bucket["n"] else 0.0
+    per_policy.sort(key=lambda d: (-d["amend_count"], -d["drift"], d["key"]))
+    core = per_tier.get("constitutional_core", {})
+    return {
+        "per_policy": per_policy,
+        "per_tier": per_tier,
+        "core_drift": round(float(core.get("drift_total", 0.0)), 4),
+        "core_amends": int(core.get("amend_total", 0)),
+    }
+
+
+def core_touch_counts(snapshot: dict) -> dict:
+    """核心条款触碰计数：尝试数（探针计数器）与成功数（core 行的 version-1 之和）。
+
+    红线：成功数恒 = 0（PolicyImmutableError 全挡）。对照组（开关关）无
+    constitutional_core 概念，成功数 = 尝试数。
+    """
+    successes = sum(max(0, int(p["version"]) - 1)
+                    for p in snapshot.get("policies", [])
+                    if p["tier"] == "constitutional_core")
+    touch = snapshot.get("core_touch") or {}
+    return {
+        "attempts": int(touch.get("attempts", 0)),
+        "successes": successes,
+        "by_key": dict(touch.get("by_key") or {}),
+        "core_rows": sum(1 for p in snapshot.get("policies", [])
+                         if p["tier"] == "constitutional_core"),
+    }
+
+
+def render_probes_s25(snapshot: dict, gate_on: bool) -> str:
+    out = ["== 社会探针（S2-5 验收：政策漂移距离 / 核心条款不可触碰）=="]
+    if not snapshot.get("available"):
+        out.append("  policies 表不存在（迁移未跑或 S2-5 前的库）——探针跳过")
+        return "\n".join(out)
+    if not snapshot.get("policies"):
+        out.append("  policies 表为空（POLIS_POLICY_ENABLED 关 = 对照组「政策仍是 "
+                   "system_config 无类型 blob」，或 seed_defaults 未跑）")
+        return "\n".join(out)
+
+    drift = policy_drift(snapshot)
+    out.append("  政策漂移距离（按 tier;目标:门槛越高漂移越少，阶梯状累积）：")
+    for tier in _TIER_ORDER:
+        b = drift["per_tier"].get(tier)
+        if not b:
+            continue
+        out.append(f"    {tier:<20} 条目 {b['n']:>2} | amend 累计 {b['amend_total']:>3} "
+                   f"| 漂移合计 {b['drift_total']} (均值 {b['drift_mean']})")
+    out.append("    漂移最大的条目：" + (
+        ", ".join(f"{d['key']}(v{d['version']}, Δ{d['drift']})"
+                  for d in drift["per_policy"][:3]) or "-"))
+
+    touch = core_touch_counts(snapshot)
+    verdict = ("成功数 = 0 ✅ 核心条款不可触碰"
+               if touch["successes"] == 0
+               else f"成功数 = {touch['successes']} 🔴 红线破防：宪法核心被改动")
+    out.append(f"  核心条款触碰计数:尝试 {touch['attempts']} 次 / {verdict}"
+               f"（核心条目 {touch['core_rows']} 条,漂移合计 {drift['core_drift']}）")
+    if touch["by_key"]:
+        top = sorted(touch["by_key"].items(), key=lambda kv: -kv[1])[:3]
+        out.append("    被盯上的核心条款：" +
+                   ", ".join(f"{k}×{v}" for k, v in top))
+    if not gate_on:
+        out.append("    （对照组:POLIS_POLICY_APPROVAL_ENABLED 关 = 无分级纪律，"
+                   "任意 admin 可改任意键，漂移应呈无差别随机游走）")
+    return "\n".join(out)
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -900,6 +1055,7 @@ async def _run(days_window: int, residents: int, budget: float | None) -> str:
         office_snap = await fetch_office_snapshot(session)
         stance_rows = await fetch_issue_stances(session)
         treasury_snap = await fetch_treasury_snapshot(session)
+        policy_snap = await fetch_policy_snapshot(session)
     report = render_report(
         aggregate(rows), residents=residents, budget=budget, window_days=days_window
     )
@@ -911,7 +1067,9 @@ async def _run(days_window: int, residents: int, budget: float | None) -> str:
                 window_days=days_window)
             + "\n\n" + render_probes_s13(stance_rows)
             + "\n\n" + render_probes_s15(
-                treasury_snap, gate_on=settings.town_treasury_enabled))
+                treasury_snap, gate_on=settings.town_treasury_enabled)
+            + "\n\n" + render_probes_s25(
+                policy_snap, gate_on=settings.polis_policy_approval_enabled))
 
 
 def main(argv: list[str] | None = None) -> None:

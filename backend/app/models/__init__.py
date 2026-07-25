@@ -61,3 +61,5 @@ import app.models.office  # noqa: F401
 import app.models.issue_stance  # noqa: F401
 # S1-5 镇财政闭环 — the town's public account (third account kind)
 import app.models.town_treasury  # noqa: F401
+# S2-5 policies — typed/tiered/versioned policy table (四级分级审批)
+import app.models.policy  # noqa: F401
