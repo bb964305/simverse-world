@@ -101,8 +101,19 @@ async def gather_material(db: AsyncSession, day: date_type) -> dict:
         except Exception:
             logger.warning("digest circle line failed", exc_info=True)
 
+    # S1-3: one line of opinion dynamics (zero new LLM — rides the SAME
+    # compose_digest call, circle_line precedent). Independent gate +
+    # best-effort; gate off → no key at all, prompt byte-identical to status quo.
+    opinion_line = None
+    if settings.polis_opinion_enabled:
+        try:
+            from app.services.opinion_service import OpinionService
+            opinion_line = await OpinionService(db).digest_opinion_line()
+        except Exception:
+            logger.warning("digest opinion line failed", exc_info=True)
+
     has_material = bool(chats or shifts or events or arc_lines)
-    return {
+    material = {
         "chats": list(chats),
         "shifts": [f"{o}→{n}" for o, n in shifts],
         "events": [f"{t}：{d}" for t, d in events],
@@ -112,6 +123,9 @@ async def gather_material(db: AsyncSession, day: date_type) -> dict:
         "stats": stats,
         "has_material": has_material,
     }
+    if opinion_line:
+        material["opinion_line"] = opinion_line
+    return material
 
 
 def _build_prompt(day: date_type, material: dict) -> str:
@@ -131,6 +145,8 @@ def _build_prompt(day: date_type, material: dict) -> str:
         parts.append("人气居民：" + "、".join(material["heat_top"]))
     if material.get("circle_line"):
         parts.append("社交圈子：" + material["circle_line"])
+    if material.get("opinion_line"):  # S1-3 — same single compose_digest call
+        parts.append("小镇舆论：" + material["opinion_line"])
     return "\n\n".join(parts)
 
 

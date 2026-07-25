@@ -499,3 +499,66 @@ async def test_integration_nightly_drift_before_digest(opinion_on, db_session):
     await svc.drift()
     var_after, _ = await svc.issue_variance("k")
     assert var_after < var_before
+
+
+# --------------------------------------------------------------------------- #
+# Task 4 — digest opinion_line (zero new LLM)                                  #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.anyio
+async def test_disabled_digest_has_no_opinion_line(db_session):
+    """Gate off → gather_material has no opinion_line key and the digest
+    prompt is byte-identical to the status quo."""
+    from datetime import date
+    from app.services import digest_service as ds
+    for slug, st in (("ann", 0.5), ("bo", 0.0), ("cid", -0.5)):
+        await _seed_row(db_session, "k", slug, st)
+    material = await ds.gather_material(db_session, date(2026, 7, 25))
+    assert "opinion_line" not in material
+    prompt = ds._build_prompt(date(2026, 7, 25), material)
+    assert "小镇舆论" not in prompt
+
+
+@pytest.mark.anyio
+async def test_enabled_digest_opinion_line_present(opinion_on, db_session):
+    from datetime import date
+    from app.services import digest_service as ds
+    for slug, st in (("ann", 0.5), ("bo", 0.0), ("cid", -0.5)):
+        await _seed_row(db_session, "夜市该不该扩建", slug, st)
+    material = await ds.gather_material(db_session, date(2026, 7, 25))
+    assert "夜市该不该扩建" in material["opinion_line"]
+    prompt = ds._build_prompt(date(2026, 7, 25), material)
+    assert "小镇舆论" in prompt and "夜市该不该扩建" in prompt
+
+
+@pytest.mark.anyio
+async def test_integration_digest_opinion_line_zero_new_llm(opinion_on, db_session):
+    """Gate on: the opinion material rides the SAME single compose_digest
+    call — LLM client create count stays exactly 1."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from app.models.memory import Memory
+    from app.services import digest_service as ds
+
+    day = datetime.now(UTC).date()
+    db_session.add(Memory(
+        resident_id="r1", type="event", content="今天大家聊得很开心",
+        importance=0.9, source="chat_resident", created_at=datetime.now(UTC),
+    ))
+    await db_session.commit()
+    for slug, st in (("ann", 0.5), ("bo", 0.0), ("cid", -0.5)):
+        await _seed_row(db_session, "夜市该不该扩建", slug, st)
+
+    block = MagicMock()
+    block.text = "# 今日头条\n镇上为夜市吵起来了"
+    resp = MagicMock()
+    resp.content = [block]
+    client = MagicMock()
+    client.messages.create = AsyncMock(return_value=resp)
+    with patch.object(ds, "get_client", return_value=client), \
+         patch.object(ds, "record_usage", new=AsyncMock()):
+        digest = await ds.generate_village_digest(db_session, day)
+
+    assert client.messages.create.await_count == 1  # 素材增强零新增调用
+    prompt = client.messages.create.await_args.kwargs["messages"][0]["content"]
+    assert "小镇舆论" in prompt and "夜市该不该扩建" in prompt
+    assert "夜市" in digest.content_md
