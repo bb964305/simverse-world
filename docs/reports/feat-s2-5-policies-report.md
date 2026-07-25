@@ -188,3 +188,71 @@ Seeded 治理史:行政级 2 次 amend、简单多数 3 次、绝对多数 1 次
 | 财政类 4 条 effect 接线 | 见 §5,等 S1-5 合并 |
 | `system_config` → `policies` 存量迁移 | 本线只做 catalog 播种,不搬运既有 `system_config` 行(`current_mayor` 等运行时状态不属政策)。迁移期两存储共存,`get` miss 回落 `ConfigService` |
 | `approval_routing` 的实际消费 | 该键目前是"可被公投修改的路由声明",`PolicyService` 仍以 `TIER_MATRIX` 常量为准执行。让运行时真正读该键属 S3-7(违宪控告)配套工作 |
+
+---
+
+## 10. 运行时验证证据(真实进程,非仅单测)
+
+单测绿不等于完成。以下证据来自**真实 uvicorn 进程 + 真实 HTTP 调用 + 真实 alembic 迁移**,
+DB 走临时文件 `/tmp/s25_runtime.db`(**不碰 `backend/skills_world_dev.db`**)。
+
+启动:`DEBUG=true AUTO_CREATE_TABLES=true RUN_BACKGROUND_TASKS=false POLIS_POLICY_ENABLED=true POLIS_POLICY_APPROVAL_ENABLED=true DATABASE_URL=sqlite+aiosqlite:////tmp/s25_runtime.db python -m uvicorn app.main:app --port 8731`
+
+```
+$ curl /health                                     → 200
+$ curl /townhall/policies            (门开、未播种) → {"enabled":true,"tiers":{...4 档...},"policies":[]}
+$ curl -XPOST /admin/policies/seed                 → {"inserted":17}
+$ curl -XPOST /admin/policies/seed   (幂等第二次)   → {"inserted":0}
+$ curl -XPOST /admin/policies/market_day_discount/amend  {"value":0.8,"expected_version":1}
+    → 200 {"key":"market_day_discount","tier":"administrative","version":2,"value":0.8,"fiscal_pending":false}
+$ curl -XPOST /admin/policies/tax_rate/amend             {"value":0.5,"expected_version":1}
+    → 409 policy 'tax_rate' is tier 'simple_majority' — an admin cannot apply it directly;
+          route it through a civic poll (civic_poll)
+$ curl -XPOST /admin/policies/election_exists/amend      {"value":false,"expected_version":1}
+    → 409 policy 'election_exists' is constitutional_core and cannot be amended
+$ curl /admin/policies               (无凭证)      → 401
+$ curl /townhall/policies            (播种后)      → enabled=true, 17 行,4 条带 fiscal_pending
+```
+
+同一真实 DB 上跑探针(`render_probes_s25`):
+
+```
+    administrative       条目  3 | amend 累计   1 | 漂移合计 0.1111 (均值 0.037)
+    simple_majority      条目  5 | amend 累计   0 | 漂移合计 0.0
+    absolute_majority    条目  4 | amend 累计   0 | 漂移合计 0.0
+    constitutional_core  条目  5 | amend 累计   0 | 漂移合计 0.0
+  核心条款触碰计数:尝试 1 次 / 成功数 = 0 ✅ 核心条款不可触碰
+```
+
+迁移真跑(新库 stamp 到 `047` 后 `alembic upgrade head`,再 `downgrade -1`):
+
+```
+$ alembic heads   → 048_add_policies (head)            # 单头
+$ alembic upgrade head
+  Running upgrade 047_add_issue_stances -> 048_add_policies
+  tables: ['alembic_version', 'policies']
+  indexes: ['sqlite_autoindex_policies_1','ix_policies_key','ix_policies_tier','ix_policies_group']
+  version: ('048_add_policies',)
+$ alembic downgrade -1
+  Running downgrade 048_add_policies -> 047_add_issue_stances
+  tables after downgrade: ['alembic_version']        # drop_table 干净
+  version: ('047_add_issue_stances',)
+```
+
+全量 pytest(worktree,`python -m pytest tests/ -q`):
+
+```
+51 failed, 1791 passed, 25 skipped, 11 deselected, 215 warnings, 17 errors in 309.47s
+```
+
+相对 base 基线 `/tmp/batch25B-base.txt`(51 failed / 1737 passed / 25 skipped / 17 errors)
+归一化失败集逐行 diff:
+
+```
+$ comm -13 /tmp/batch25B-base-fails.txt /tmp/s2-5-final-fails.txt   # 新增失败
+(空)
+$ comm -23 /tmp/batch25B-base-fails.txt /tmp/s2-5-final-fails.txt   # 消失的失败
+(空)
+```
+
+失败集与 base **逐行完全一致(68 行)**,`+54 passed` 即本线新增的 54 条测试。
