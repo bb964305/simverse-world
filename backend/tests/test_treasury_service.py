@@ -440,3 +440,151 @@ async def test_tip_tax_rate_zero_is_status_quo(db_session, monkeypatch):
         db_session, "buyer", tip_item, 1, {"post_id": post.id})
     assert out["creator_share"] == 4 and out["tip_tax"] == 0
     assert await treasury_service.balance(db_session) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Task 4 — funded wage: _pay_wage draws from the town treasury                 #
+# --------------------------------------------------------------------------- #
+
+def _npc(slug: str, name: str, duty: dict | None = None, **kw):
+    from app.models.resident import Resident
+    meta = {"duty": duty} if duty else {}
+    d = dict(slug=slug, name=name, district="workshop", status="idle",
+             resident_type="npc", tile_x=116, tile_y=27, meta_json=meta)
+    d.update(kw)
+    return Resident(**d)
+
+
+@pytest.mark.anyio
+async def test_pay_wage_disabled_mints_as_before(db_session, monkeypatch):
+    """Gate off → the pre-S1-5 behavior verbatim: the wage is MINTED into the
+    resident's purse and the town account is not touched (not even created)."""
+    from app.services import coin_service, duty_service
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", False)
+    r = _npc("chen", "陈铁生", {"key": "workshop_fixer", "perks": {"wage_sc": 8}})
+    db_session.add(r)
+    await db_session.commit()
+
+    await duty_service._pay_wage(db_session, r)
+    assert await coin_service.treasury_balance(db_session, "chen") == 8
+    assert (r.meta_json or {}).get("wallet") == 8
+    assert await treasury_service.balance(db_session) == 0
+    assert (await _row(db_session)) is None
+
+
+@pytest.mark.anyio
+async def test_pay_wage_enabled_draws_from_town(db_session, monkeypatch):
+    from app.services import coin_service, duty_service
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "election_enabled", False)
+    await treasury_service.tax(db_session, 100, reason="seed")
+    r = _npc("chen", "陈铁生", {"key": "workshop_fixer", "perks": {"wage_sc": 8}})
+    db_session.add(r)
+    await db_session.commit()
+
+    await duty_service._pay_wage(db_session, r)
+    assert await treasury_service.balance(db_session) == 92
+    assert await coin_service.treasury_balance(db_session, "chen") == 8
+    assert (r.meta_json or {}).get("wallet") == 8
+
+
+@pytest.mark.anyio
+async def test_funded_wage_conserves_total(db_session, monkeypatch):
+    """Money moves between accounts instead of being created: town + residents
+    is invariant across a funded wage (the MINT path deliberately is not)."""
+    from app.services import coin_service, duty_service
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "election_enabled", False)
+    await treasury_service.tax(db_session, 100, reason="seed")
+    r = _npc("chen", "陈铁生", {"key": "workshop_fixer", "perks": {"wage_sc": 8}})
+    db_session.add(r)
+    await db_session.commit()
+
+    before = (await treasury_service.balance(db_session)
+              + await coin_service.treasury_balance(db_session, "chen"))
+    await duty_service._pay_wage(db_session, r)
+    after = (await treasury_service.balance(db_session)
+             + await coin_service.treasury_balance(db_session, "chen"))
+    assert before == after == 100
+
+
+@pytest.mark.anyio
+async def test_pay_wage_unfunded_policy_skip(db_session, monkeypatch):
+    """Town treasury empty + policy 'skip' → 欠薪: nothing is credited and, above
+    all, nothing is minted."""
+    from app.services import coin_service, duty_service
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "town_wage_unfunded_policy", "skip")
+    monkeypatch.setattr(settings, "election_enabled", False)
+    await treasury_service.tax(db_session, 3, reason="seed")   # < wage
+    r = _npc("chen", "陈铁生", {"key": "workshop_fixer", "perks": {"wage_sc": 8}})
+    db_session.add(r)
+    await db_session.commit()
+
+    await duty_service._pay_wage(db_session, r)
+    assert await coin_service.treasury_balance(db_session, "chen") == 0
+    assert await treasury_service.balance(db_session) == 3
+
+
+@pytest.mark.anyio
+async def test_pay_wage_unfunded_policy_mint(db_session, monkeypatch):
+    """policy 'mint' → escape hatch back to the pre-S1-5 mint-from-nothing path
+    (the town balance is untouched, the resident still gets paid)."""
+    from app.services import coin_service, duty_service
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "town_wage_unfunded_policy", "mint")
+    monkeypatch.setattr(settings, "election_enabled", False)
+    await treasury_service.tax(db_session, 3, reason="seed")
+    r = _npc("chen", "陈铁生", {"key": "workshop_fixer", "perks": {"wage_sc": 8}})
+    db_session.add(r)
+    await db_session.commit()
+
+    await duty_service._pay_wage(db_session, r)
+    assert await coin_service.treasury_balance(db_session, "chen") == 8
+    assert await treasury_service.balance(db_session) == 3
+
+
+@pytest.mark.anyio
+async def test_mayor_bonus_funded_from_town(db_session, monkeypatch):
+    """S2-1 regression gate: the mayor bonus semantics (meta_json['mayor'] ×
+    election_mayor_wage_bonus) are untouched — S1-5 only changes WHO pays, so the
+    town funds the bonused amount too."""
+    from app.services import coin_service, duty_service
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "election_enabled", True)
+    monkeypatch.setattr(settings, "election_mayor_wage_bonus", 1.5)
+    await treasury_service.tax(db_session, 100, reason="seed")
+    r = _npc("mayor", "镇长", {"key": "workshop_fixer", "perks": {"wage_sc": 8}})
+    r.meta_json = {**(r.meta_json or {}), "mayor": True}
+    db_session.add(r)
+    await db_session.commit()
+
+    await duty_service._pay_wage(db_session, r)
+    assert await coin_service.treasury_balance(db_session, "mayor") == 12   # 8 × 1.5
+    assert await treasury_service.balance(db_session) == 88
+
+
+@pytest.mark.anyio
+async def test_pay_wage_treasury_error_is_fail_open(db_session, monkeypatch):
+    """A treasury failure must never break the tick: _pay_wage swallows it."""
+    from app.services import coin_service, duty_service
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "election_enabled", False)
+
+    async def _boom(*a, **kw):
+        raise RuntimeError("treasury down")
+
+    monkeypatch.setattr(treasury_service, "disburse", _boom)
+    r = _npc("chen", "陈铁生", {"key": "workshop_fixer", "perks": {"wage_sc": 8}})
+    db_session.add(r)
+    await db_session.commit()
+
+    await duty_service._pay_wage(db_session, r)          # must not raise
+    assert await coin_service.treasury_balance(db_session, "chen") == 0

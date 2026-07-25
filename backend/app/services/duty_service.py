@@ -147,7 +147,13 @@ async def on_work(db, resident, *, market_day: bool = False) -> str | None:
 async def _pay_wage(db, resident) -> None:
     """M1 F1.1: credit the resident's duty wage into their treasury and mirror
     the fresh balance into meta_json['wallet'] (write-through cache read by the
-    decision prompt — no extra tick query). No-op when the economy gate is off."""
+    decision prompt — no extra tick query). No-op when the economy gate is off.
+
+    S1-5: with ``town_treasury_enabled`` the wage is no longer MINTED out of
+    nothing — it is first debited from the town treasury, so tax → wage closes
+    into a conserving loop. That is a BEHAVIOR change, hence its own gate; with
+    the gate off this function is byte-level identical to the pre-S1-5 version.
+    """
     from app.config import settings
     if not settings.npc_economy_enabled:
         return
@@ -160,6 +166,24 @@ async def _pay_wage(db, resident) -> None:
         return
     try:
         from app.services import coin_service
+        # S1-5 funded wage: mirror coin_service.transfer's debit→credit ordering —
+        # take the money out of the town account FIRST, and only credit the
+        # resident once that guarded decrement actually won. The mayor bonus is
+        # already folded into `wage` above (S2-1 semantics untouched), so the town
+        # funds the bonus too. Zero extra per-resident SELECT: one more UPDATE on
+        # the single town row inside the same transaction.
+        if settings.town_treasury_enabled:
+            from app.services import treasury_service
+            funded = await treasury_service.disburse(
+                db, wage, reason=f"wage:{resident.slug}")
+            if not funded:
+                if (settings.town_wage_unfunded_policy or "skip") != "mint":
+                    # 'skip' = 欠薪: nothing credited, and crucially nothing minted.
+                    # No rollback here — disburse's guard wrote nothing.
+                    logger.info("town treasury short: wage skipped for %s", resident.slug)
+                    return
+                # 'mint' = explicit escape hatch back to the pre-S1-5 behavior.
+                logger.info("town treasury short: minting wage for %s", resident.slug)
         await coin_service.treasury_credit(db, resident.slug, wage, reason="duty_wage")
         balance = await coin_service.treasury_balance(db, resident.slug)
         set_wallet_cache(db, resident, balance)
