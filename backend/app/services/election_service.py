@@ -158,6 +158,19 @@ async def install_mayor(db, slug: str | None) -> bool:
         )
     except Exception:
         logger.warning("recording current_mayor failed", exc_info=True)
+    # S2-1: dual-write the offices row when the gate is on. Both legacy
+    # stores above stay alive — meta_json['mayor'] is the wage multiplier
+    # (gotcha #1), system_config the read fallback. Fail-open: an offices
+    # hiccup must never break an election result.
+    if settings.polis_office_enabled:
+        try:
+            from app.services.office_service import OfficeService
+            await OfficeService(db).appoint(
+                "mayor", slug, fill_strategy="election",
+                term_days=settings.polis_office_mayor_term_days,
+            )
+        except Exception:
+            logger.warning("office dual-write failed for mayor", exc_info=True)
     try:
         from app.services.feed_service import push
         await push(slug, "goal_achieved", {"goal": "当选小镇镇长"})
@@ -173,6 +186,18 @@ async def install_mayor(db, slug: str | None) -> bool:
 
 
 async def current_mayor(db) -> str | None:
+    # S2-1: offices-backed read when the gate is on — offices is the new
+    # authority, system_config the fallback (pre-backfill worlds, or a
+    # vacant office after term expiry with a legacy value already cleared
+    # by term_check). Gate off → byte-level legacy behavior.
+    if settings.polis_office_enabled:
+        try:
+            from app.services.office_service import OfficeService
+            holder = await OfficeService(db).get_holder("mayor")
+            if holder:
+                return holder
+        except Exception:
+            logger.warning("offices-backed current_mayor read failed", exc_info=True)
     from app.services.config_service import ConfigService
     try:
         return await ConfigService(db).get("current_mayor")
