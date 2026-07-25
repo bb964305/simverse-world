@@ -562,3 +562,59 @@ async def test_integration_digest_opinion_line_zero_new_llm(opinion_on, db_sessi
     prompt = client.messages.create.await_args.kwargs["messages"][0]["content"]
     assert "小镇舆论" in prompt and "夜市该不该扩建" in prompt
     assert "夜市" in digest.content_md
+
+
+# --------------------------------------------------------------------------- #
+# Task 5 — S1-3 burn-in probe (§6): variance series converges/polarizes        #
+# --------------------------------------------------------------------------- #
+
+def test_probe_opinion_stats_two_modes():
+    from scripts.burnin_report import opinion_issue_stats, render_probes_s13
+    # converged cluster → 1 ε-cluster, tiny variance
+    conv = [("k", f"r{i}", 0.1 + 0.01 * i) for i in range(5)]
+    s = opinion_issue_stats(conv, epsilon=0.4)[0]
+    assert s["clusters"] == 1 and s["variance"] < 0.01
+    # polarized two-camp → 2 ε-clusters, bimodality above the 5/9 threshold
+    pol = [("k", f"n{i}", -0.8 + 0.01 * i) for i in range(3)] + \
+          [("k", f"p{i}", 0.8 - 0.01 * i) for i in range(3)]
+    s = opinion_issue_stats(pol, epsilon=0.4)[0]
+    assert s["clusters"] == 2
+    assert s["bimodality"] is not None and s["bimodality"] > 0.556
+    assert "ε-簇数=2" in render_probes_s13(pol)
+
+
+def test_probe_render_empty_is_control_group():
+    from scripts.burnin_report import render_probes_s13
+    out = render_probes_s13([])
+    assert "对照组" in out and "无动力学" in out
+
+
+@pytest.mark.anyio
+async def test_probe_seeded_variance_series_not_white_noise(opinion_on, db_session):
+    """§6 seeded fixture 出数：nightly drift 采样的方差序列在 ε 内簇单调收敛、
+    跨 ε 两簇保持极化（簇数恒 2）——两种形态都不是白噪声。数字记入交付报告。"""
+    from scripts.burnin_report import fetch_issue_stances, opinion_issue_stats
+
+    for i, st in enumerate((0.0, 0.1, 0.2, 0.3, 0.4)):
+        await _seed_row(db_session, "收敛议题", f"c{i}", st)
+    for i, st in enumerate((-0.85, -0.75, -0.7, 0.7, 0.75, 0.85)):
+        await _seed_row(db_session, "极化议题", f"p{i}", st)
+
+    svc = _svc(db_session)
+    conv_series, pol_series, pol_clusters = [], [], []
+    for _night in range(5):
+        v, _ = await svc.issue_variance("收敛议题")
+        conv_series.append(round(v, 5))
+        v, _ = await svc.issue_variance("极化议题")
+        pol_series.append(round(v, 5))
+        stats = {s["issue"]: s for s in opinion_issue_stats(
+            await fetch_issue_stances(db_session), epsilon=0.4)}
+        pol_clusters.append(stats["极化议题"]["clusters"])
+        await svc.drift()
+
+    # 收敛形态：方差严格单调下降（非白噪声的无规律抖动）
+    assert all(a > b for a, b in zip(conv_series, conv_series[1:])), conv_series
+    # 极化形态：两簇存续整个序列，簇内收敛使方差缓降但不归零、不合并
+    assert pol_clusters == [2] * 5, pol_clusters
+    assert pol_series[-1] > 0.4, pol_series  # camps remain far apart
+    assert all(a >= b for a, b in zip(pol_series, pol_series[1:])), pol_series
