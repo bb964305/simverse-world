@@ -39,7 +39,7 @@ async def _count(db):
 
 def test_integration_migration_single_head():
     """`alembic heads` stays single-headed and the S2-5 migration chains onto
-    the verified head (047_add_issue_stances)."""
+    the linearized head (048_add_town_treasury, S1-5 merged first)."""
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
@@ -47,9 +47,9 @@ def test_integration_migration_single_head():
     script = ScriptDirectory.from_config(Config(str(ini)))
     heads = script.get_heads()
     assert len(heads) == 1, f"alembic multi-head: {heads}"
-    rev = script.get_revision("048_add_policies")
+    rev = script.get_revision("049_add_policies")
     assert rev is not None
-    assert rev.down_revision == "047_add_issue_stances"
+    assert rev.down_revision == "048_add_town_treasury"
 
 
 def test_migration_creates_table_only_no_alter():
@@ -58,7 +58,7 @@ def test_migration_creates_table_only_no_alter():
     import ast
 
     path = (Path(__file__).resolve().parent.parent / "alembic" / "versions"
-            / "048_add_policies.py")
+            / "049_add_policies.py")
     tree = ast.parse(path.read_text(encoding="utf-8"))
     # Compare code only — the module docstring legitimately names these APIs.
     body = [n for n in tree.body if not (isinstance(n, ast.Expr)

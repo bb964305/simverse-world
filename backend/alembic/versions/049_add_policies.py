@@ -14,15 +14,15 @@ kickoff lines (S1-5 town_treasury) each chain onto the same verified head
 ``047_add_issue_stances`` in their own worktree; the main session linearizes
 the numbers at merge time and re-verifies single-head (`alembic heads`).
 
-Revision ID: 048_add_policies
-Revises: 047_add_issue_stances
+Revision ID: 049_add_policies
+Revises: 048_add_town_treasury
 Create Date: 2026-07-25
 """
 import sqlalchemy as sa
 from alembic import op
 
-revision = "048_add_policies"
-down_revision = "047_add_issue_stances"
+revision = "049_add_policies"
+down_revision = "048_add_town_treasury"
 branch_labels = None
 depends_on = None
 
