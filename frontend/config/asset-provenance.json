@@ -1,0 +1,182 @@
+{
+  "schema_version": 1,
+  "generated": "2026-07-25",
+  "task": "A0 — asset provenance & licensing audit (art-spec §资产来源与风险; V23)",
+  "asset_root": "frontend/public/assets/village",
+  "authorization_records": [
+    {
+      "id": "project-owner-attestation-2026-07-25",
+      "authorized_by": "project owner",
+      "authorized_at": "2026-07-25",
+      "asset_count": 16,
+      "scope": "The 16 concrete tilemap files carrying this authorization_ref.",
+      "assertion": "The project owner confirmed that the project holds the permissions required for its intended commercial use, modification, repository inclusion, and release distribution of the scoped files.",
+      "evidence": "Owner confirmation recorded in the project work session; any private purchase receipts or supplemental grants are retained outside this repository.",
+      "excludes": "agents/*/texture.png and every asset without this authorization_ref"
+    }
+  ],
+  "notes": [
+    "This manifest is the version-controlled source-of-truth for third-party art provenance.",
+    "audit_status: pending = no authoritative license or owner authorization confirmed yet; cleared = the public terms and/or a recorded owner attestation cover the intended use.",
+    "distribution_status: blocked = must NOT be exported in a public/release build until cleared; allowed = cleared for the intended project release, subject to the recorded credit and redistribution conditions.",
+    "hashes are the first 16 hex chars of sha256 over the committed bytes (drift detection).",
+    "The 2026-07-25 owner attestation clears only the 16 concrete tilemap records. The 25 resident texture sheets remain pending and blocked."
+  ],
+  "distribution_policy": {
+    "release_requires": "every present third-party asset has audit_status=cleared AND distribution_status=allowed",
+    "prototype_allows": "third-party assets may be present for local prototyping; release packaging is blocked while any asset or category is blocked/prototype-only"
+  },
+  "assets": [
+    {
+      "file": "tilemap/CuteRPG_Desert_B.png", "sha256_16": "a3b77168f04d8c6b", "bytes": 22518, "dims": "512x512",
+      "pack": "PixyMoon — Cute RPG",
+      "author_store": "PixyMoon (itch.io)",
+      "source_url": "https://itch.io/s/78711/2d-cute-rpg-asset-bundle",
+      "license": "Personal and commercial project use and modification are permitted with PixyMoon credit; standalone asset-pack resale is prohibited. Intended project distribution is additionally covered by the owner attestation.",
+      "license_version": "itch.io listing verified 2026-07-25",
+      "modifications": "none (as committed 2026-07-06)",
+      "commercial_use": "allowed", "derivative_use": "allowed",
+      "distribution_status": "allowed", "audit_status": "cleared",
+      "authorization_ref": "project-owner-attestation-2026-07-25",
+      "release_condition": "Credit PixyMoon; do not resell the files as an asset pack."
+    },
+    {
+      "file": "tilemap/CuteRPG_Desert_C.png", "sha256_16": "78e15fd0bd608f7b", "bytes": 24102, "dims": "512x512",
+      "pack": "PixyMoon — Cute RPG", "author_store": "PixyMoon (itch.io)",
+      "source_url": "https://itch.io/s/78711/2d-cute-rpg-asset-bundle", "license": "see CuteRPG_Desert_B.png", "license_version": "itch.io listing verified 2026-07-25",
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "allowed", "derivative_use": "allowed",
+      "distribution_status": "allowed", "audit_status": "cleared", "authorization_ref": "project-owner-attestation-2026-07-25",
+      "release_condition": "Credit PixyMoon; do not resell the files as an asset pack."
+    },
+    {
+      "file": "tilemap/CuteRPG_Field_B.png", "sha256_16": "c2b4504f86139088", "bytes": 20444, "dims": "512x512",
+      "pack": "PixyMoon — Cute RPG", "author_store": "PixyMoon (itch.io)",
+      "source_url": "https://itch.io/s/78711/2d-cute-rpg-asset-bundle", "license": "see CuteRPG_Desert_B.png", "license_version": "itch.io listing verified 2026-07-25",
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "allowed", "derivative_use": "allowed",
+      "distribution_status": "allowed", "audit_status": "cleared", "authorization_ref": "project-owner-attestation-2026-07-25",
+      "release_condition": "Credit PixyMoon; do not resell the files as an asset pack."
+    },
+    {
+      "file": "tilemap/CuteRPG_Field_C.png", "sha256_16": "baed604f2a3af373", "bytes": 17278, "dims": "512x512",
+      "pack": "PixyMoon — Cute RPG", "author_store": "PixyMoon (itch.io)",
+      "source_url": "https://itch.io/s/78711/2d-cute-rpg-asset-bundle", "license": "see CuteRPG_Desert_B.png", "license_version": "itch.io listing verified 2026-07-25",
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "allowed", "derivative_use": "allowed",
+      "distribution_status": "allowed", "audit_status": "cleared", "authorization_ref": "project-owner-attestation-2026-07-25",
+      "release_condition": "Credit PixyMoon; do not resell the files as an asset pack."
+    },
+    {
+      "file": "tilemap/CuteRPG_Forest_B.png", "sha256_16": "e217184126100f34", "bytes": 19839, "dims": "512x512",
+      "pack": "PixyMoon — Cute RPG", "author_store": "PixyMoon (itch.io)",
+      "source_url": "https://itch.io/s/78711/2d-cute-rpg-asset-bundle", "license": "see CuteRPG_Desert_B.png", "license_version": "itch.io listing verified 2026-07-25",
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "allowed", "derivative_use": "allowed",
+      "distribution_status": "allowed", "audit_status": "cleared", "authorization_ref": "project-owner-attestation-2026-07-25",
+      "release_condition": "Credit PixyMoon; do not resell the files as an asset pack."
+    },
+    {
+      "file": "tilemap/CuteRPG_Forest_C.png", "sha256_16": "43fb62dcce64cb4d", "bytes": 22285, "dims": "512x512",
+      "pack": "PixyMoon — Cute RPG", "author_store": "PixyMoon (itch.io)",
+      "source_url": "https://itch.io/s/78711/2d-cute-rpg-asset-bundle", "license": "see CuteRPG_Desert_B.png", "license_version": "itch.io listing verified 2026-07-25",
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "allowed", "derivative_use": "allowed",
+      "distribution_status": "allowed", "audit_status": "cleared", "authorization_ref": "project-owner-attestation-2026-07-25",
+      "release_condition": "Credit PixyMoon; do not resell the files as an asset pack."
+    },
+    {
+      "file": "tilemap/CuteRPG_Harbor_C.png", "sha256_16": "c4e1e925972a7f1d", "bytes": 14307, "dims": "512x512",
+      "pack": "PixyMoon — Cute RPG", "author_store": "PixyMoon (itch.io)",
+      "source_url": "https://itch.io/s/78711/2d-cute-rpg-asset-bundle", "license": "see CuteRPG_Desert_B.png", "license_version": "itch.io listing verified 2026-07-25",
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "allowed", "derivative_use": "allowed",
+      "distribution_status": "allowed", "audit_status": "cleared", "authorization_ref": "project-owner-attestation-2026-07-25",
+      "release_condition": "Credit PixyMoon; do not resell the files as an asset pack."
+    },
+    {
+      "file": "tilemap/CuteRPG_Mountains_B.png", "sha256_16": "f0144655cea00d68", "bytes": 22091, "dims": "512x512",
+      "pack": "PixyMoon — Cute RPG", "author_store": "PixyMoon (itch.io)",
+      "source_url": "https://itch.io/s/78711/2d-cute-rpg-asset-bundle", "license": "see CuteRPG_Desert_B.png", "license_version": "itch.io listing verified 2026-07-25",
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "allowed", "derivative_use": "allowed",
+      "distribution_status": "allowed", "audit_status": "cleared", "authorization_ref": "project-owner-attestation-2026-07-25",
+      "release_condition": "Credit PixyMoon; do not resell the files as an asset pack."
+    },
+    {
+      "file": "tilemap/CuteRPG_Village_B.png", "sha256_16": "af92963707bbd9e2", "bytes": 21351, "dims": "512x512",
+      "pack": "PixyMoon — Cute RPG", "author_store": "PixyMoon (itch.io)",
+      "source_url": "https://itch.io/s/78711/2d-cute-rpg-asset-bundle", "license": "see CuteRPG_Desert_B.png", "license_version": "itch.io listing verified 2026-07-25",
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "allowed", "derivative_use": "allowed",
+      "distribution_status": "allowed", "audit_status": "cleared", "authorization_ref": "project-owner-attestation-2026-07-25",
+      "release_condition": "Credit PixyMoon; do not resell the files as an asset pack."
+    },
+    {
+      "file": "tilemap/Room_Builder_32x32.png", "sha256_16": "a6bd5690110f94d8", "bytes": 394420, "dims": "2432x3488",
+      "pack": "LimeZu — Modern Interiors (Room Builder), 32x32 variant",
+      "author_store": "LimeZu (itch.io)",
+      "source_url": "https://limezu.itch.io/moderninteriors",
+      "license": "Paid Modern Interiors terms permit commercial and non-commercial project use and editing with LimeZu credit; standalone source-asset resale/redistribution is prohibited. Intended project distribution is additionally covered by the owner attestation.",
+      "license_version": "itch.io listing verified 2026-07-25",
+      "modifications": "none (as committed 2026-07-06)",
+      "commercial_use": "allowed", "derivative_use": "allowed",
+      "distribution_status": "allowed", "audit_status": "cleared",
+      "authorization_ref": "project-owner-attestation-2026-07-25",
+      "release_condition": "Credit LimeZu; keep the files within the Simverse project and do not offer them as a standalone asset download."
+    },
+    {
+      "file": "tilemap/interiors_pt1.png", "sha256_16": "67cdb13cd6977794", "bytes": 600217, "dims": "512x10016",
+      "pack": "LimeZu — Modern Interiors (interiors part 1)", "author_store": "LimeZu (itch.io)",
+      "source_url": "https://limezu.itch.io/moderninteriors", "license": "see Room_Builder_32x32.png", "license_version": "itch.io listing verified 2026-07-25",
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "allowed", "derivative_use": "allowed",
+      "distribution_status": "allowed", "audit_status": "cleared", "authorization_ref": "project-owner-attestation-2026-07-25",
+      "release_condition": "Credit LimeZu; keep the files within the Simverse project and do not offer them as a standalone asset download."
+    },
+    {
+      "file": "tilemap/interiors_pt2.png", "sha256_16": "9fa6d54340f3c16d", "bytes": 745288, "dims": "512x10016",
+      "pack": "LimeZu — Modern Interiors (interiors part 2)", "author_store": "LimeZu (itch.io)",
+      "source_url": "https://limezu.itch.io/moderninteriors", "license": "see Room_Builder_32x32.png", "license_version": "itch.io listing verified 2026-07-25",
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "allowed", "derivative_use": "allowed",
+      "distribution_status": "allowed", "audit_status": "cleared", "authorization_ref": "project-owner-attestation-2026-07-25",
+      "release_condition": "Credit LimeZu; keep the files within the Simverse project and do not offer them as a standalone asset download."
+    },
+    {
+      "file": "tilemap/interiors_pt3.png", "sha256_16": "93d523ee6297d54c", "bytes": 798927, "dims": "512x10032",
+      "pack": "LimeZu — Modern Interiors (interiors part 3)", "author_store": "LimeZu (itch.io)",
+      "source_url": "https://limezu.itch.io/moderninteriors", "license": "see Room_Builder_32x32.png", "license_version": "itch.io listing verified 2026-07-25",
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "allowed", "derivative_use": "allowed",
+      "distribution_status": "allowed", "audit_status": "cleared", "authorization_ref": "project-owner-attestation-2026-07-25",
+      "release_condition": "Credit LimeZu; keep the files within the Simverse project and do not offer them as a standalone asset download."
+    },
+    {
+      "file": "tilemap/interiors_pt4.png", "sha256_16": "1ef07dde26c68313", "bytes": 318740, "dims": "512x4000",
+      "pack": "LimeZu — Modern Interiors (interiors part 4)", "author_store": "LimeZu (itch.io)",
+      "source_url": "https://limezu.itch.io/moderninteriors", "license": "see Room_Builder_32x32.png", "license_version": "itch.io listing verified 2026-07-25",
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "allowed", "derivative_use": "allowed",
+      "distribution_status": "allowed", "audit_status": "cleared", "authorization_ref": "project-owner-attestation-2026-07-25",
+      "release_condition": "Credit LimeZu; keep the files within the Simverse project and do not offer them as a standalone asset download."
+    },
+    {
+      "file": "tilemap/interiors_pt5.png", "sha256_16": "aae724a186f1d1ea", "bytes": 719783, "dims": "512x9024",
+      "pack": "LimeZu — Modern Interiors (interiors part 5)", "author_store": "LimeZu (itch.io)",
+      "source_url": "https://limezu.itch.io/moderninteriors", "license": "see Room_Builder_32x32.png", "license_version": "itch.io listing verified 2026-07-25",
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "allowed", "derivative_use": "allowed",
+      "distribution_status": "allowed", "audit_status": "cleared", "authorization_ref": "project-owner-attestation-2026-07-25",
+      "release_condition": "Credit LimeZu; keep the files within the Simverse project and do not offer them as a standalone asset download."
+    },
+    {
+      "file": "tilemap/blocks_1.png", "sha256_16": "1cef1851b09819b7", "bytes": 6086, "dims": "320x256",
+      "pack": "collision/blocks helper",
+      "author_store": "Bundled with joonspk-research/generative_agents Smallville map assets; original pack attribution is not recorded",
+      "source_url": "https://github.com/joonspk-research/generative_agents",
+      "license": "The project owner confirmed the rights required for the intended project use and distribution of this file.",
+      "license_version": "project-owner attestation 2026-07-25",
+      "modifications": "none (as committed 2026-07-06)", "commercial_use": "allowed", "derivative_use": "allowed",
+      "distribution_status": "allowed", "audit_status": "cleared", "authorization_ref": "project-owner-attestation-2026-07-25"
+    },
+    {
+      "file": "agents/*/texture.png", "sha256_16": "VARIES", "bytes": 0, "dims": "96x128 (per sheet)",
+      "pack": "character sprite sheets (25 residents) — origin unconfirmed",
+      "author_store": "UNVERIFIED — character sprites bundled in generative_agents (Smallville). Same audit obligation as tilesets.",
+      "source_url": "https://github.com/joonspk-research/generative_agents (bundled)", "license": "UNVERIFIED", "license_version": null,
+      "modifications": "repacked into per-agent atlas + sprite.json (Simverse)", "commercial_use": "unknown", "derivative_use": "unknown",
+      "distribution_status": "blocked", "audit_status": "pending",
+      "category": true,
+      "file_count": 25,
+      "note": "Category entry — excluded from the 2026-07-25 owner attestation. The 25 agents/<name>/texture.png sheets remain blocked; enumerate individually if any single sprite's provenance diverges."
+    }
+  ]
+}
