@@ -347,7 +347,11 @@ class PolicyService:
                 updated_by=updated_by,
                 updated_at=datetime.now(UTC),
             )
-            .execution_options(synchronize_session=False)
+            # ``fetch`` (not ``False``) on purpose: this UPDATE runs inside the
+            # caller's session and the caller (admin endpoint / _close_one)
+            # reads the new version right after. With no synchronization the
+            # identity map would keep serving the pre-amend row.
+            .execution_options(synchronize_session="fetch")
         )
         won = (result.rowcount or 0) == 1
         await self._db.commit()
