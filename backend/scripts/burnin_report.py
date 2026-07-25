@@ -748,6 +748,139 @@ def render_probes_offices(snapshot: dict, gate_on: bool, window_days: int) -> st
     return "\n".join(out)
 
 
+# --------------------------------------------------------------------------- #
+# S1-5 §6 — 镇财政探针（纯读 town_treasuries + resident_treasuries +            #
+# system_config，零 LLM）。两组指标：                                            #
+#  a) 镇财政余额 + 收支流向：本表无流水账（镇流水不进 transactions ledger，见     #
+#     models/town_treasury.py），故一次运行 = 时间序列的一个采样点，序列由每日     #
+#     重复运行拼出；同时给出货币分布（镇 vs 居民）作为“有界 vs 单调通胀”的判据。   #
+#  b) 发薪覆盖率：funded 发薪成功率同样无流水可查，改用可计算的等价代理——          #
+#     余额 ÷ 当日应发工资总额 = 财政续航天数（<1 天即进入欠薪风险期）。            #
+# 对照组（开关关）：镇余额恒 0、镇占比恒 0、续航恒 0，发薪 100% 靠 MINT。           #
+# --------------------------------------------------------------------------- #
+async def fetch_treasury_snapshot(session) -> dict:
+    """镇账户 + 居民账户总额 + nightly 拨款时间戳 + 在职 duty 工资账单。表不存在
+    （S1-5 前的库）→ available=False，探针整体 fail-open。"""
+    import json as _json
+    snap = {
+        "available": True, "town_balance_sc": 0, "town_updated_at": None,
+        "resident_total_sc": 0, "resident_accounts": 0,
+        "last_spend_at": None, "daily_wage_bill_sc": 0, "duty_holders": 0,
+    }
+    try:
+        from app.models.town_treasury import TOWN_KEY, TownTreasury
+        row = (await session.execute(
+            select(TownTreasury).where(TownTreasury.key == TOWN_KEY)
+        )).scalar_one_or_none()
+        if row is not None:
+            snap["town_balance_sc"] = row.balance_sc
+            snap["town_updated_at"] = _aware(row.updated_at)
+    except Exception:
+        return {**snap, "available": False}
+    try:
+        from app.models.resident_treasury import ResidentTreasury
+        balances = (await session.execute(
+            select(ResidentTreasury.balance_sc))).scalars().all()
+        snap["resident_total_sc"] = sum(int(b or 0) for b in balances)
+        snap["resident_accounts"] = len(balances)
+    except Exception:
+        pass
+    try:
+        from app.models.system_config import SystemConfig
+        from app.services.treasury_service import LAST_SPEND_KEY
+        raw = (await session.execute(
+            select(SystemConfig.value).where(SystemConfig.key == LAST_SPEND_KEY)
+        )).scalar_one_or_none()
+        snap["last_spend_at"] = _json.loads(raw) if raw is not None else None
+    except Exception:
+        pass
+    try:
+        from app.config import settings
+        from app.models.resident import Resident
+        from app.services import duty_service
+        rows = (await session.execute(
+            select(Resident).where(
+                Resident.resident_type == "npc", Resident.meta_json.isnot(None))
+        )).scalars().all()
+        bill = 0
+        holders = 0
+        for r in rows:
+            if not duty_service.duty_key(r):
+                continue
+            holders += 1
+            wage = int(duty_service.perk(r, "wage_sc", settings.npc_default_wage_sc))
+            if settings.election_enabled and (r.meta_json or {}).get("mayor"):
+                wage = int(round(wage * settings.election_mayor_wage_bonus))
+            bill += max(0, wage)
+        snap["duty_holders"] = holders
+        snap["daily_wage_bill_sc"] = bill
+    except Exception:
+        pass
+    return snap
+
+
+def treasury_money_split(snapshot: dict) -> dict:
+    """货币分布：镇 vs 居民。开关关 → 镇占比恒 0（对照组的平线）。"""
+    town = int(snapshot.get("town_balance_sc") or 0)
+    residents = int(snapshot.get("resident_total_sc") or 0)
+    supply = town + residents
+    return {
+        "town_sc": town,
+        "resident_sc": residents,
+        "npc_money_supply_sc": supply,
+        "town_share": round(town / supply, 4) if supply else 0.0,
+    }
+
+
+def treasury_wage_runway(snapshot: dict) -> dict | None:
+    """财政续航：镇余额 ÷ 当日应发工资总额（天）。工资账单为 0（无在职 duty）→
+    None，不假造分母。"""
+    bill = int(snapshot.get("daily_wage_bill_sc") or 0)
+    if bill <= 0:
+        return None
+    town = int(snapshot.get("town_balance_sc") or 0)
+    runway = town / bill
+    return {
+        "daily_wage_bill_sc": bill,
+        "duty_holders": int(snapshot.get("duty_holders") or 0),
+        "runway_days": round(runway, 2),
+        "at_risk": runway < 1.0,
+    }
+
+
+def render_probes_s15(snapshot: dict, gate_on: bool) -> str:
+    out = ["== 拟真探针（S1-5 验收：镇财政闭环）=="]
+    if not snapshot.get("available"):
+        out.append("  -（town_treasuries 表不存在——迁移未跑）")
+        return "\n".join(out)
+    split = treasury_money_split(snapshot)
+    stamp = snapshot.get("town_updated_at")
+    out.append(f"  镇财政余额 = {split['town_sc']} SC"
+               f"（最近变动 {stamp.isoformat() if stamp else '-'}；"
+               f"本表无流水账，一次运行 = 时间序列一个采样点）")
+    out.append(f"  货币分布：镇 {split['town_sc']} / 居民 {split['resident_sc']}"
+               f"（{snapshot.get('resident_accounts', 0)} 个账户）"
+               f"，NPC 侧货币量 {split['npc_money_supply_sc']} SC，"
+               f"镇占比 {split['town_share']}")
+    runway = treasury_wage_runway(snapshot)
+    if runway:
+        flag = " ⚠️ 欠薪风险" if runway["at_risk"] else ""
+        out.append(f"  发薪覆盖代理：日工资账单 {runway['daily_wage_bill_sc']} SC"
+                   f"（{runway['duty_holders']} 名在职），财政续航 "
+                   f"{runway['runway_days']} 天{flag}")
+    else:
+        out.append("  发薪覆盖代理 = -（无在职 duty，工资账单为 0）")
+    out.append(f"  nightly 公共支出最近一次 = {snapshot.get('last_spend_at') or '-'}")
+    if gate_on:
+        out.append("    （目标形态：余额在税入与薪出之间波动、可为负压力，"
+                   "续航偶尔跌破 1 天 = 叙事张力来源）")
+    else:
+        out.append("    （对照组，开关关：镇余额恒 0、镇占比恒 0、续航恒 0，"
+                   "发薪 100% 靠 MINT——货币供给单调增）")
+    return "\n".join(out)
+
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -766,6 +899,7 @@ async def _run(days_window: int, residents: int, budget: float | None) -> str:
         diffusion = await fetch_event_diffusion(session)
         office_snap = await fetch_office_snapshot(session)
         stance_rows = await fetch_issue_stances(session)
+        treasury_snap = await fetch_treasury_snapshot(session)
     report = render_report(
         aggregate(rows), residents=residents, budget=budget, window_days=days_window
     )
@@ -775,7 +909,9 @@ async def _run(days_window: int, residents: int, budget: float | None) -> str:
             + "\n\n" + render_probes_offices(
                 office_snap, gate_on=settings.polis_office_enabled,
                 window_days=days_window)
-            + "\n\n" + render_probes_s13(stance_rows))
+            + "\n\n" + render_probes_s13(stance_rows)
+            + "\n\n" + render_probes_s15(
+                treasury_snap, gate_on=settings.town_treasury_enabled))
 
 
 def main(argv: list[str] | None = None) -> None:

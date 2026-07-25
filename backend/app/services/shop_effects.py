@@ -38,6 +38,32 @@ def register_precheck(kind: str) -> Callable[[EffectHandler], EffectHandler]:
     return decorator
 
 
+async def _skim_town_tax(db, gross: int, rate: float, reason: str) -> int:
+    """S1-5: take ``int(gross * rate)`` out of a payout and credit the town
+    treasury. Returns the cut actually taken (0 when the gate is off, the rate
+    truncates to nothing, or the treasury write fails).
+
+    Pure rule — a multiplication and a truncation, zero LLM cost. Gated on
+    ``town_treasury_enabled`` (off → byte-level status quo: the caller pays the
+    full gross and no town row is ever created) and fail-open: a treasury error
+    must never break a purchase, matching the discipline of every other economy
+    hook (``_pay_wage`` / ``on_work`` / market discount).
+    """
+    if not settings.town_treasury_enabled:
+        return 0
+    try:
+        cut = int(gross * rate)
+        if cut <= 0:
+            return 0
+        cut = min(cut, gross)
+        from app.services import treasury_service
+        await treasury_service.tax(db, cut, reason=reason)
+        return cut
+    except Exception:
+        logger.warning("town tax skim failed (%s)", reason, exc_info=True)
+        return 0
+
+
 async def precheck_effect(db, user_id: str, item, qty: int, context: dict | None) -> None:
     """Run the pre-charge validation for the item's kind (may raise ShopError)."""
     handler = _prechecks.get(item.kind)
@@ -199,8 +225,15 @@ async def _gift_effect(db, user_id, item, qty, context):
     )
 
     share = 0
+    gift_tax = 0
     if resident.creator_id and resident.creator_id not in ("system", user_id):
         share = int(item.price_sc * qty * 0.2)
+        # S1-5 optional knob: town_tax_rate_gift defaults to 0.0, so the shipped
+        # behavior is byte-identical to the pre-S1-5 payout even with the master
+        # gate ON — the rate is the only thing that makes it bite.
+        gift_tax = await _skim_town_tax(
+            db, share, settings.town_tax_rate_gift, f"gift_tax:{item.code}")
+        share -= gift_tax
         if share > 0:
             await reward(db, resident.creator_id, share, f"gift_share:{item.code}")
 
@@ -224,7 +257,8 @@ async def _gift_effect(db, user_id, item, qty, context):
         except Exception:
             logger.warning("gift relation bump failed", exc_info=True)
 
-    return {"gift": item.code, "resident_slug": slug, "relationship_boost": boost, "creator_share": share}
+    return {"gift": item.code, "resident_slug": slug, "relationship_boost": boost,
+            "creator_share": share, "gift_tax": gift_tax}
 
 
 @register("decor")
@@ -253,15 +287,20 @@ async def _tip_effect(db, user_id, item, qty, context):
     await db.commit()
 
     share = 0
+    tip_tax = 0
     if post.author_resident_id:
         resident = (await db.execute(select(Resident).where(Resident.id == post.author_resident_id))).scalar_one_or_none()
         if resident and resident.creator_id and resident.creator_id not in ("system", user_id):
             share = int(amount * 0.8)
+            # S1-5: shares the gift rate knob (default 0.0 → status quo).
+            tip_tax = await _skim_town_tax(
+                db, share, settings.town_tax_rate_gift, f"tip_tax:{post_id}")
+            share -= tip_tax
             if share > 0:
                 await reward(db, resident.creator_id, share, f"tip_share:{post_id}")
 
     await emit(db, "purchase_tip", user_id=user_id, post_id=post_id)  # D1 patron
-    return {"tips_sc": post.tips_sc, "creator_share": share}
+    return {"tips_sc": post.tips_sc, "creator_share": share, "tip_tax": tip_tax}
 
 
 @register("resident_work")
@@ -279,8 +318,14 @@ async def _resident_work_effect(db, user_id, item, qty, context):
     if not creator_slug:
         return None
 
-    earned = item.price_sc * qty
-    await coin_service.treasury_credit(db, creator_slug, earned, reason=f"work_sold:{item.code}")
+    gross = item.price_sc * qty
+    # S1-5: the town's primary tax intake — a sales-tax skim off resident-made
+    # goods. Gate off → cut == 0 → ``earned`` is the untouched gross (status quo).
+    cut = await _skim_town_tax(
+        db, gross, settings.town_tax_rate_sales, f"sales_tax:{item.code}")
+    earned = gross - cut
+    if earned > 0:
+        await coin_service.treasury_credit(db, creator_slug, earned, reason=f"work_sold:{item.code}")
 
     stock = int(payload.get("stock", 1)) - qty
     payload["stock"] = max(0, stock)
@@ -307,4 +352,4 @@ async def _resident_work_effect(db, user_id, item, qty, context):
             logger.warning("resident_work maker memory failed for %s", creator_slug, exc_info=True)
 
     return {"resident_work": item.code, "creator_slug": creator_slug,
-            "earned": earned, "stock": payload["stock"]}
+            "earned": earned, "sales_tax": cut, "stock": payload["stock"]}

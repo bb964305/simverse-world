@@ -306,6 +306,21 @@ async def run_nightly_jobs() -> None:
                 logger.info("Realism P2: detected %d social circles", snap["count"])
         except Exception:
             logger.error("Realism circle detection failed", exc_info=True)
+
+    # S1-5: town public spending / treasury reconciliation (realism-family
+    # pattern: gate INSIDE the cron, own try/except, fail-open; skipped whole
+    # while town_treasury_enabled is False, so a disabled world touches no DB).
+    # Appended after the existing governance blocks — none of them are moved.
+    try:
+        from app.config import settings as _town_settings
+        if _town_settings.town_treasury_enabled:
+            from app.services.treasury_service import run_public_spending
+            async with async_session() as db:
+                spent = await run_public_spending(db)
+            if spent:
+                logger.info("S1-5: town public spending disbursed %d SC", spent)
+    except Exception:
+        logger.error("S1-5 town treasury nightly failed", exc_info=True)
     # Future: E2 dreams, E7 capsule delivery — each own try/except.
 
 
