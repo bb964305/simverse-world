@@ -78,6 +78,9 @@ async def background_tier(session: AsyncSession) -> BudgetTier:
         spent = await global_spend_today(session)
     except Exception as e:  # never let a breaker query freeze the loop
         logger.debug("budget tier check failed, assuming NORMAL: %s", e)
+        # Roadmap #6: failing open silently is how cost control dies unnoticed.
+        from app.llm.budget_alerts import alert_meter_read_failure
+        alert_meter_read_failure("background_tier", e)
         return BudgetTier.NORMAL
     return tier_for_fraction(spent / budget)
 
@@ -91,6 +94,8 @@ async def user_over_budget(session: AsyncSession, user_id: str | None) -> bool:
         return await user_spend_today(session, user_id) >= budget
     except Exception as e:
         logger.debug("user budget check failed, allowing: %s", e)
+        from app.llm.budget_alerts import alert_meter_read_failure
+        alert_meter_read_failure("user_over_budget", e)
         return False
 
 

@@ -33,6 +33,7 @@ from app.observability import observe_tick_round
 from app.config import settings
 from app.database import async_session
 from app.llm.budget import BudgetTier, background_tier
+from app.llm.budget_alerts import maybe_check_usage_stall
 from app.models.resident import Resident
 from app.ws.manager import manager
 
@@ -97,6 +98,11 @@ class AgentLoop:
             except Exception as e:
                 logger.error("AgentLoop tick_round error: %s", e, exc_info=True)
             observe_tick_round(time.perf_counter() - t0)
+            # Roadmap #6: budget-breaker silent-failure watchdog. Cheap no-op
+            # unless armed (env BUDGET_USAGE_STALL_MIN>0 + metering on);
+            # alerts when llm_usage gets zero new rows for the whole window
+            # while this loop keeps running. Never raises.
+            await maybe_check_usage_stall()
             # Budget throttle (E-24, ≥80%/≥95%): halve background frequency.
             sleep_mult = 2 if tier in (BudgetTier.THROTTLE, BudgetTier.RULE_ONLY) else 1
             await asyncio.sleep(settings.agent_tick_interval * sleep_mult)
