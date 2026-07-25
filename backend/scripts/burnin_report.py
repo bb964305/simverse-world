@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 import os
 import sys
 from dataclasses import dataclass
@@ -1037,9 +1038,136 @@ def render_probes_s25(snapshot: dict, gate_on: bool) -> str:
 
 
 # ---------------------------------------------------------------------------
+# NPC 投票分布探针（fix/npc-choice-option0 验收复核）
+# ---------------------------------------------------------------------------
+# ops-audit-2026-07-25B §A 只能靠手写 SQL 取数（现网 3 张 poll 全部 14/14 压
+# option 0，H/lnK = 0）。这个探针把同一口径固化下来，让下一次运维审计直接读数
+# 复核 option-0 偏向是否真的修好了。纯只读、零 LLM。
+# 判据里的「option-0 占比 ≤ 45%」是对 K=4 形态写的；跨不同 K 的 poll 聚合时
+# 直接比原始占比不成立（K=2 的无偏基线本来就是 50%），所以聚合口径用**超额偏向
+# 指数** mean(share0 - 1/K)：无偏世界 ≈ 0，修复前的现网 = 0.5~0.75。
+NPC_VOTE_BIAS_GATE = 0.15      # 判据：超额偏向指数 ≤ 0.15
+NPC_VOTE_OPTION0_GATE = 0.45   # 判据：单张 K≥4 的 poll，option-0 占比 ≤ 45%
+NPC_VOTE_ENTROPY_GATE = 0.60   # 判据：归一化熵 H/lnK ≥ 0.60（K≥2 的 poll）
+
+
+async def fetch_poll_vote_snapshot(session, limit: int = 10) -> dict:
+    """最近 ``limit`` 张 poll 的 NPC 票分布。表不存在 → available=False。"""
+    try:
+        from app.models.season import Poll
+        rows = (await session.execute(
+            select(Poll).order_by(Poll.closes_at.desc()).limit(limit)
+        )).scalars().all()
+    except Exception:
+        return {"available": False, "polls": []}
+    polls = []
+    for p in rows:
+        opts = list(p.options_json or [])
+        if not opts:
+            continue
+        polls.append({
+            "id": str(p.id),
+            "question": (p.question or "")[:28],
+            "status": p.status,
+            "closes_at": p.closes_at,
+            "tally": [int(o.get("npc_votes", 0) or 0) for o in opts],
+            "voters": len((opts[0] or {}).get("_npc_voters") or []),
+        })
+    return {"available": True, "polls": polls}
+
+
+def _norm_entropy(tally: list[int]) -> float:
+    """归一化香农熵 H/lnK。单选项 poll（K<2）无定义，记 0。"""
+    total = sum(tally)
+    if total <= 0 or len(tally) < 2:
+        return 0.0
+    h = -sum((n / total) * math.log(n / total) for n in tally if n > 0)
+    return abs(h / math.log(len(tally)))  # abs(): 单选项独占时 -sum(0.0) = -0.0
+
+
+def npc_vote_distribution(snapshot: dict) -> dict:
+    """每张 poll 的 option-0 占比 / 归一化熵，加全局聚合。
+
+    目标形态：option-0 占比在 1/K 附近波动、H/lnK 接近 1、monopoly_polls = 0。
+    坏形态（修复前的现网）：option-0 占比 = 1.0、H/lnK = 0、monopoly = 全部。
+    """
+    per_poll = []
+    votes_total = 0
+    votes_on_0 = 0
+    monopoly = 0
+    for p in snapshot.get("polls", []):
+        tally = p["tally"]
+        total = sum(tally)
+        if total <= 0:
+            continue
+        share0 = tally[0] / total
+        per_poll.append({
+            "id": p["id"], "question": p["question"], "status": p["status"],
+            "k": len(tally), "tally": tally, "votes": total,
+            "share0": round(share0, 4),
+            "uniform": round(1 / len(tally), 4),
+            "excess0": round(share0 - 1 / len(tally), 4),
+            "entropy": round(_norm_entropy(tally), 4),
+            "nonzero": sum(1 for n in tally if n > 0),
+        })
+        votes_total += total
+        votes_on_0 += tally[0]
+        if len(tally) >= 2 and max(tally) == total:
+            monopoly += 1
+    n = len(per_poll)
+    return {
+        "per_poll": per_poll,
+        "polls_with_votes": n,
+        "votes_total": votes_total,
+        "share0_overall": round(votes_on_0 / votes_total, 4) if votes_total else 0.0,
+        "bias_index": round(sum(d["excess0"] for d in per_poll) / n, 4) if n else 0.0,
+        "entropy_mean": round(sum(d["entropy"] for d in per_poll) / n, 4) if n else 0.0,
+        "monopoly_polls": monopoly,
+    }
+
+
+def render_probes_npc_vote(snapshot: dict, legacy_on: bool, limit: int) -> str:
+    out = [f"== 治理探针（NPC 投票分布 · 最近 {limit} 张 poll）=="]
+    if not snapshot.get("available"):
+        out.append("  polls 表不存在（迁移未跑）——探针跳过")
+        return "\n".join(out)
+    dist = npc_vote_distribution(snapshot)
+    if not dist["polls_with_votes"]:
+        out.append("  窗口内没有已投票的 poll（NPC 票合计 0）——无样本")
+        return "\n".join(out)
+
+    verdict0 = ("✅" if dist["bias_index"] <= NPC_VOTE_BIAS_GATE
+                else "🔴 option-0 结构性偏向")
+    verdictH = ("✅" if dist["entropy_mean"] >= NPC_VOTE_ENTROPY_GATE else "🔴 分布过于集中")
+    out.append(f"  样本:{dist['polls_with_votes']} 张 poll / {dist['votes_total']} 张 NPC 票")
+    out.append(f"  option-0 超额偏向指数 mean(占比-1/K) = {dist['bias_index']:+.4f}"
+               f"（门槛 ≤ {NPC_VOTE_BIAS_GATE}）{verdict0}"
+               f"；原始 option-0 总占比 = {dist['share0_overall']:.1%}")
+    out.append(f"  归一化熵 H/lnK 均值 = {dist['entropy_mean']}"
+               f"（门槛 ≥ {NPC_VOTE_ENTROPY_GATE}）{verdictH}")
+    mono = dist["monopoly_polls"]
+    out.append(f"  全票压单一选项的 poll = {mono} / {dist['polls_with_votes']}"
+               + ("（✅ 无垄断）" if mono == 0 else "（🔴 垄断仍在）"))
+    out.append("  逐张明细（tally / option-0 占比 vs 无偏基线 1/K / H·lnK⁻¹）：")
+    for d in dist["per_poll"]:
+        flag = " 🔴" if d["k"] >= 4 and d["share0"] > NPC_VOTE_OPTION0_GATE else ""
+        out.append(f"    [{d['status']:<6}] {d['question']:<28} K={d['k']} "
+                   f"{d['tally']} → {d['share0']:.1%} vs {d['uniform']:.1%} "
+                   f"/ {d['entropy']} (非零选项 {d['nonzero']}/{d['k']}){flag}")
+    if legacy_on:
+        out.append("    ⚠️ CIVIC_NPC_CHOICE_LEGACY=true —— 跑的是修复前的旧评分器，"
+                   "option-0 占比预期回到 ~100%,本探针的门槛不适用")
+    else:
+        out.append("    （口径同 ops-audit-2026-07-25B §A：NPC 票取自 "
+                   "options_json[i].npc_votes,不含 votes 表的玩家票）")
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
-async def _run(days_window: int, residents: int, budget: float | None) -> str:
+async def _run(days_window: int, residents: int, budget: float | None,
+               polls_window: int = 10) -> str:
     from app.config import settings
     from app.database import async_session
 
@@ -1056,6 +1184,7 @@ async def _run(days_window: int, residents: int, budget: float | None) -> str:
         stance_rows = await fetch_issue_stances(session)
         treasury_snap = await fetch_treasury_snapshot(session)
         policy_snap = await fetch_policy_snapshot(session)
+        poll_snap = await fetch_poll_vote_snapshot(session, limit=polls_window)
     report = render_report(
         aggregate(rows), residents=residents, budget=budget, window_days=days_window
     )
@@ -1069,7 +1198,10 @@ async def _run(days_window: int, residents: int, budget: float | None) -> str:
             + "\n\n" + render_probes_s15(
                 treasury_snap, gate_on=settings.town_treasury_enabled)
             + "\n\n" + render_probes_s25(
-                policy_snap, gate_on=settings.polis_policy_approval_enabled))
+                policy_snap, gate_on=settings.polis_policy_approval_enabled)
+            + "\n\n" + render_probes_npc_vote(
+                poll_snap, legacy_on=settings.civic_npc_choice_legacy,
+                limit=polls_window))
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -1079,8 +1211,11 @@ def main(argv: list[str] | None = None) -> None:
                         help="活跃居民数，用于 $/居民·天（默认 15；金丝雀阶段填 3-5）")
     parser.add_argument("--budget", type=float, default=None,
                         help="覆盖全局日预算（默认读 settings.budget_global_daily_usd）")
+    parser.add_argument("--polls", type=int, default=10,
+                        help="NPC 投票分布探针回看的 poll 张数（默认最近 10 张）")
     args = parser.parse_args(argv)
-    print(asyncio.run(_run(args.days, max(args.residents, 1), args.budget)))
+    print(asyncio.run(_run(args.days, max(args.residents, 1), args.budget,
+                           max(args.polls, 1))))
 
 
 if __name__ == "__main__":
