@@ -75,7 +75,7 @@ def test_integration_migration_single_head():
     script = ScriptDirectory.from_config(Config(str(ini)))
     heads = script.get_heads()
     assert len(heads) == 1, f"alembic multi-head: {heads}"
-    rev = script.get_revision("046_add_issue_stances")
+    rev = script.get_revision("047_add_issue_stances")
     assert rev is not None
     assert rev.down_revision == "045_residents_creator_nullable"
 

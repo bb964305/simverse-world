@@ -9,15 +9,15 @@ kickoff lines each chain onto the current head (045) in their own worktree;
 the main session linearizes the numbers at merge time and re-verifies
 `alembic heads` single-head (KICKOFF §8.3).
 
-Revision ID: 046_add_issue_stances
+Revision ID: 047_add_issue_stances
 Revises: 045_residents_creator_nullable
 Create Date: 2026-07-25
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "046_add_issue_stances"
-down_revision = "045_residents_creator_nullable"
+revision = "047_add_issue_stances"
+down_revision = "046_add_offices"
 branch_labels = None
 depends_on = None
 
