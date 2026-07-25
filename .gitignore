@@ -47,7 +47,8 @@ seed_local.py
 
 # Screenshots
 *.png
-!docs/renders/*.png
+!assets/screenshots/*.png
+!archive/**/docs/**/*.png
 !output/imagegen/simverse-concepts/*.png
 .omx/
 
