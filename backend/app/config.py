@@ -539,6 +539,17 @@ class Settings(BaseSettings):
     polis_opinion_neg_repel: bool = False      # negative mood 是否轻微远离(默认仅"不靠拢")
     polis_opinion_digest_issues: int = 2       # 日报 opinion_line 最多点名的议题数
     polis_opinion_variance_split: float = 0.15 # opinion_line 措辞阈值: 方差≥此值读作"分歧"
+    # ── S1-5 镇财政闭环 (KICKOFF_S1-5_treasury.md §3, TOWN_* env prefix) ────
+    # Independent gate, default False → byte-level fallback to the status quo:
+    # wages keep being MINTED from nothing, resident sales are untaxed, the
+    # nightly public-spending job is skipped whole, and no treasury_changed WS
+    # event is emitted. Pure rules, zero new LLM calls.
+    town_treasury_enabled: bool = False         # 主开关 (env TOWN_TREASURY_ENABLED)
+    town_tax_rate_sales: float = 0.1            # 居民售货销售税率(skim 进镇财政)
+    town_tax_rate_gift: float = 0.0             # 送礼/打赏分成税率,默认 0(留旋钮)
+    town_wage_unfunded_policy: str = "skip"     # 镇财政见底: skip=欠薪 / mint=回落凭空铸造
+    town_public_works_daily_sc: int = 0         # nightly 公共支出预算,0=只做对账不拨款
+    town_ws_min_delta_sc: int = 0               # treasury_changed 广播阈值,0=不广播
 
     model_config = {"env_file": ".env"}
 

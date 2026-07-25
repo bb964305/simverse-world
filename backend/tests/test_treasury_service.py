@@ -13,6 +13,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy import select
 
+from app.config import settings
 from app.models.town_treasury import TOWN_KEY, TownTreasury
 from app.services import treasury_service
 
@@ -216,3 +217,226 @@ async def test_town_treasury_not_in_transactions_ledger(db_session):
     await treasury_service.disburse(db_session, 20, reason="wage:ann")
     rows = (await db_session.execute(select(Transaction))).scalars().all()
     assert rows == []
+
+
+# --------------------------------------------------------------------------- #
+# Task 3 — 税收 hook 接线 (销售税主入口 + 送礼/打赏旋钮, 全部门控 + fail-open)    #
+# --------------------------------------------------------------------------- #
+
+def _work_item(creator_slug: str, price_sc: int = 20, stock: int = 3):
+    from app.models.shop import Item
+    return Item(
+        code=f"work_x_{creator_slug}", kind="resident_work", name="手工件",
+        description="", icon="🔧", price_sc=price_sc, active=True,
+        payload_json={"creator_slug": creator_slug, "stock": stock},
+    )
+
+
+@pytest.mark.anyio
+async def test_tax_hook_disabled_no_skim(db_session, monkeypatch):
+    """Gate off → the maker receives the full amount and the town account is
+    never even created (byte-level status quo)."""
+    from app.models.resident import Resident
+    from app.services import coin_service, shop_effects
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", False)
+    monkeypatch.setattr(settings, "town_tax_rate_sales", 0.1)
+    item = _work_item("ann", price_sc=20)
+    db_session.add_all([
+        item,
+        Resident(slug="ann", name="安", district="workshop", status="idle",
+                 resident_type="npc", tile_x=1, tile_y=1, meta_json={}),
+    ])
+    await db_session.commit()
+
+    out = await shop_effects._resident_work_effect(db_session, "buyer", item, 1, {})
+    assert out["earned"] == 20
+    assert await coin_service.treasury_balance(db_session, "ann") == 20
+    assert await treasury_service.balance(db_session) == 0
+    assert (await _row(db_session)) is None
+
+
+@pytest.mark.anyio
+async def test_resident_work_sale_skims_sales_tax(db_session, monkeypatch):
+    """Gate on → int(earned * rate) is skimmed into the town treasury and the
+    maker receives the remainder. Conservation: cut + net == earned."""
+    from app.models.resident import Resident
+    from app.services import coin_service, shop_effects
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "town_tax_rate_sales", 0.1)
+    item = _work_item("ann", price_sc=20)
+    db_session.add_all([
+        item,
+        Resident(slug="ann", name="安", district="workshop", status="idle",
+                 resident_type="npc", tile_x=1, tile_y=1, meta_json={}),
+    ])
+    await db_session.commit()
+
+    out = await shop_effects._resident_work_effect(db_session, "buyer", item, 1, {})
+    assert out["sales_tax"] == 2 and out["earned"] == 18
+    assert await coin_service.treasury_balance(db_session, "ann") == 18
+    assert await treasury_service.balance(db_session) == 2
+
+
+@pytest.mark.anyio
+async def test_sales_tax_rounds_down_and_never_starves_the_maker(db_session, monkeypatch):
+    """int() truncation: a 1 SC sale at 10% skims 0 — the maker keeps it all."""
+    from app.models.resident import Resident
+    from app.services import coin_service, shop_effects
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "town_tax_rate_sales", 0.1)
+    item = _work_item("bo", price_sc=1)
+    db_session.add_all([
+        item,
+        Resident(slug="bo", name="波", district="workshop", status="idle",
+                 resident_type="npc", tile_x=1, tile_y=1, meta_json={}),
+    ])
+    await db_session.commit()
+
+    out = await shop_effects._resident_work_effect(db_session, "buyer", item, 1, {})
+    assert out["sales_tax"] == 0 and out["earned"] == 1
+    assert await coin_service.treasury_balance(db_session, "bo") == 1
+    assert await treasury_service.balance(db_session) == 0
+
+
+@pytest.mark.anyio
+async def test_sales_tax_failure_is_fail_open(db_session, monkeypatch):
+    """A treasury error must never break a purchase: the maker still gets the
+    full amount (fail-open discipline shared by every economy hook)."""
+    from app.models.resident import Resident
+    from app.services import coin_service, shop_effects
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "town_tax_rate_sales", 0.5)
+
+    async def _boom(*a, **kw):
+        raise RuntimeError("treasury down")
+
+    monkeypatch.setattr(treasury_service, "tax", _boom)
+    item = _work_item("cai", price_sc=20)
+    db_session.add_all([
+        item,
+        Resident(slug="cai", name="蔡", district="workshop", status="idle",
+                 resident_type="npc", tile_x=1, tile_y=1, meta_json={}),
+    ])
+    await db_session.commit()
+
+    out = await shop_effects._resident_work_effect(db_session, "buyer", item, 1, {})
+    assert out["sales_tax"] == 0 and out["earned"] == 20
+    assert await coin_service.treasury_balance(db_session, "cai") == 20
+
+
+@pytest.mark.anyio
+async def test_purchase_resident_work_skims_sales_tax(db_session, monkeypatch):
+    """End-to-end through shop_service.purchase(): buyer charged in full, the
+    town skims its cut, and the maker's write-through wallet cache reflects net."""
+    from app.models.resident import Resident
+    from app.models.user import User
+    from app.services import coin_service, shop_service
+    import app.services.shop_effects  # noqa: F401 — registers the handlers
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "town_tax_rate_sales", 0.1)
+    item = _work_item("ann", price_sc=20)
+    maker = Resident(slug="ann", name="安", district="workshop", status="idle",
+                     resident_type="npc", tile_x=1, tile_y=1, meta_json={})
+    db_session.add_all([
+        item, maker,
+        User(id="buyer", name="Buyer", email="b@x.io", soul_coin_balance=100),
+    ])
+    await db_session.commit()
+
+    res = await shop_service.purchase(db_session, "buyer", item.code, qty=1)
+    assert res["ok"] and res["total_sc"] == 20
+    assert await treasury_service.balance(db_session) == 2
+    assert await coin_service.treasury_balance(db_session, "ann") == 18
+    assert (maker.meta_json or {}).get("wallet") == 18
+
+
+@pytest.mark.anyio
+async def test_gift_tax_rate_zero_is_status_quo(db_session, monkeypatch):
+    """town_tax_rate_gift defaults to 0 → the creator's 20% share is untouched
+    even with the master gate ON (the knob exists, it just doesn't bite)."""
+    from app.models.resident import Resident
+    from app.models.shop import Item
+    from app.models.user import User
+    from app.services import shop_effects
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "town_tax_rate_gift", 0.0)
+    item = Item(code="flower", kind="gift", name="花", price_sc=50, active=True,
+                payload_json={"relationship_boost": 0.1})
+    db_session.add_all([
+        item,
+        Resident(slug="dee", name="丁", district="workshop", status="idle",
+                 resident_type="npc", tile_x=1, tile_y=1, creator_id="creator"),
+        User(id="creator", name="C", email="c@x.io", soul_coin_balance=0),
+        User(id="buyer", name="B", email="b2@x.io", soul_coin_balance=100),
+    ])
+    await db_session.commit()
+
+    out = await shop_effects._gift_effect(
+        db_session, "buyer", item, 1, {"resident_slug": "dee"})
+    assert out["creator_share"] == 10          # 20% of 50, unchanged
+    assert out["gift_tax"] == 0
+    assert await treasury_service.balance(db_session) == 0
+
+
+@pytest.mark.anyio
+async def test_gift_tax_rate_nonzero_skims_creator_share(db_session, monkeypatch):
+    from app.models.resident import Resident
+    from app.models.shop import Item
+    from app.models.user import User
+    from app.services import shop_effects
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "town_tax_rate_gift", 0.2)
+    item = Item(code="flower", kind="gift", name="花", price_sc=50, active=True,
+                payload_json={"relationship_boost": 0.1})
+    db_session.add_all([
+        item,
+        Resident(slug="dee", name="丁", district="workshop", status="idle",
+                 resident_type="npc", tile_x=1, tile_y=1, creator_id="creator"),
+        User(id="creator", name="C", email="c@x.io", soul_coin_balance=0),
+        User(id="buyer", name="B", email="b2@x.io", soul_coin_balance=100),
+    ])
+    await db_session.commit()
+
+    out = await shop_effects._gift_effect(
+        db_session, "buyer", item, 1, {"resident_slug": "dee"})
+    assert out["creator_share"] == 8 and out["gift_tax"] == 2   # 10 → 8 + 2
+    assert await treasury_service.balance(db_session) == 2
+
+
+@pytest.mark.anyio
+async def test_tip_tax_rate_zero_is_status_quo(db_session, monkeypatch):
+    from app.models.bulletin_post import BulletinPost
+    from app.models.resident import Resident
+    from app.models.shop import Item
+    from app.models.user import User
+    from app.services import shop_effects
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "town_tax_rate_gift", 0.0)
+    r = Resident(slug="edd", name="鄂", district="workshop", status="idle",
+                 resident_type="npc", tile_x=1, tile_y=1, creator_id="creator")
+    db_session.add_all([
+        r,
+        Item(code="tip5", kind="tip", name="打赏", price_sc=5, active=True),
+        User(id="creator", name="C", email="c3@x.io", soul_coin_balance=0),
+        User(id="buyer", name="B", email="b3@x.io", soul_coin_balance=100),
+    ])
+    await db_session.commit()
+    post = BulletinPost(kind="notice", title="t", content_md="c",
+                        author_resident_id=r.id)
+    db_session.add(post)
+    await db_session.commit()
+
+    tip_item = (await db_session.execute(
+        select(Item).where(Item.code == "tip5"))).scalars().one()
+    out = await shop_effects._tip_effect(
+        db_session, "buyer", tip_item, 1, {"post_id": post.id})
+    assert out["creator_share"] == 4 and out["tip_tax"] == 0
+    assert await treasury_service.balance(db_session) == 0
