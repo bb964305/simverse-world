@@ -23,7 +23,7 @@ head). down_revision targets the current verified head
 ``045_residents_creator_nullable``; the merge coordinator linearizes and
 renumbers at collect time (`alembic heads` must stay single-headed).
 
-Revision ID: NNN_add_offices
+Revision ID: 046_add_offices
 Revises: 045_residents_creator_nullable
 Create Date: 2026-07-25
 """
@@ -32,7 +32,7 @@ import json
 import sqlalchemy as sa
 from alembic import op
 
-revision = "NNN_add_offices"
+revision = "046_add_offices"
 down_revision = "045_residents_creator_nullable"
 branch_labels = None
 depends_on = None

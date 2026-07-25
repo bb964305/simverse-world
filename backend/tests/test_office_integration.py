@@ -24,7 +24,7 @@ from app.models.resident import Resident
 
 _MIG_PATH = (
     pathlib.Path(__file__).resolve().parent.parent
-    / "alembic" / "versions" / "NNN_add_offices.py"
+    / "alembic" / "versions" / "046_add_offices.py"
 )
 
 
