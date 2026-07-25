@@ -77,7 +77,29 @@ def max_perk(residents, key: str, default: float = 1.0) -> float:
 async def find_duty_resident(db, key: str) -> Resident | None:
     """First NPC holding the given duty key. Town-scale linear scan (the
     resident table is small and meta_json JSON operators are not portable
-    between sqlite and Postgres)."""
+    between sqlite and Postgres).
+
+    S2-1: with polis_office_enabled the offices table is consulted first —
+    a single indexed lookup instead of the O(N) scan (net improvement, tick
+    query budget +1 max). A missing/vacant offices row falls back to the
+    legacy scan (fail-open: non-office duty keys and not-yet-backfilled
+    worlds keep resolving). Gate off → byte-level legacy behavior."""
+    from app.config import settings
+    if settings.polis_office_enabled:
+        try:
+            from app.models.office import Office
+            holder = (await db.execute(
+                select(Office.holder_slug).where(Office.office_key == key)
+            )).scalar_one_or_none()
+            if holder:
+                r = (await db.execute(
+                    select(Resident).where(Resident.slug == holder)
+                )).scalar_one_or_none()
+                if r is not None:
+                    return r
+        except Exception:
+            logger.warning("offices-backed duty lookup failed for %s", key,
+                           exc_info=True)
     rows = (await db.execute(
         select(Resident).where(
             Resident.resident_type == "npc",
