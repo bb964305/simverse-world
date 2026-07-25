@@ -543,6 +543,146 @@ def render_probes_p2(edges: list[tuple[str, str, float]], diffusion: dict) -> st
 
 
 # ---------------------------------------------------------------------------
+# S2-1 §6 — office 快照探针（纯读 offices + system_config + residents.meta_json，
+# 零 LLM）。三组指标：职位占用/空缺时序、任期轮替计数（office 行 updated_at 聚
+# 合——office_changed WS 事件不落 Outbox，规格允许两径取其一）、镇长身份一致性
+# （offices vs system_config['current_mayor'] vs meta_json['mayor'] 持有者集）。
+# 开关关时的对照组：只比对后两者，offices 表不参与。
+# ---------------------------------------------------------------------------
+def _aware(ts):
+    """sqlite 裸连接可能回 naive datetime（DB 统一存 UTC）→ 补 UTC tzinfo。"""
+    if ts is None:
+        return None
+    return ts if ts.tzinfo is not None else ts.replace(tzinfo=UTC)
+
+
+async def fetch_office_snapshot(session) -> dict:
+    """offices 行 + config 镇长 + meta_json['mayor'] 持有者集合。offices 表不存
+    在（S2-1 前的库）→ available=False，探针整体 fail-open。"""
+    import json as _json
+    from app.models.office import Office
+    snap = {"available": True, "offices": [], "config_mayor": None, "meta_mayors": []}
+    try:
+        rows = (await session.execute(select(Office).order_by(Office.id))).scalars().all()
+        snap["offices"] = [{
+            "office_key": o.office_key,
+            "holder_slug": o.holder_slug,
+            "institution": o.institution,
+            "fill_strategy": o.fill_strategy,
+            "term_started_at": _aware(o.term_started_at),
+            "term_ends_at": _aware(o.term_ends_at),
+            "updated_at": _aware(o.updated_at),
+        } for o in rows]
+    except Exception:
+        return {"available": False, "offices": [], "config_mayor": None, "meta_mayors": []}
+    try:
+        from app.models.system_config import SystemConfig
+        row = (await session.execute(
+            select(SystemConfig.value).where(SystemConfig.key == "current_mayor")
+        )).scalar_one_or_none()
+        snap["config_mayor"] = _json.loads(row) if row is not None else None
+    except Exception:
+        snap["config_mayor"] = None
+    try:
+        from app.models.resident import Resident
+        pairs = (await session.execute(
+            select(Resident.slug, Resident.meta_json).where(
+                Resident.resident_type == "npc", Resident.meta_json.isnot(None))
+        )).all()
+        snap["meta_mayors"] = [s for s, m in pairs if (m or {}).get("mayor")]
+    except Exception:
+        snap["meta_mayors"] = []
+    return snap
+
+
+def office_occupancy(snapshot: dict, now=None) -> list[dict]:
+    """每 office 的在任/空缺状态；空缺行给出按 updated_at 推算的空缺天数。"""
+    now = now or datetime.now(UTC)
+    out = []
+    for o in snapshot.get("offices", []):
+        occupied = o["holder_slug"] is not None
+        vacant_days = None
+        if not occupied and o.get("updated_at") is not None:
+            vacant_days = max(0, int((now - _aware(o["updated_at"])).total_seconds() // 86400))
+        out.append({
+            "office_key": o["office_key"],
+            "holder_slug": o["holder_slug"],
+            "occupied": occupied,
+            "vacant_days": vacant_days,
+        })
+    return out
+
+
+def office_turnover(snapshot: dict, window_days: int, now=None) -> dict:
+    """窗口内被触碰（appoint/vacate → updated_at 刷新）的 office 计数。"""
+    now = now or datetime.now(UTC)
+    cutoff = now - timedelta(days=window_days)
+    per = {}
+    for o in snapshot.get("offices", []):
+        ts = _aware(o.get("updated_at"))
+        per[o["office_key"]] = bool(ts is not None and ts >= cutoff)
+    return {"changed_in_window": sum(per.values()), "per_office": per}
+
+
+def mayor_consistency(snapshot: dict, gate_on: bool) -> dict:
+    """三存储镇长一致性（不一致 = dual-write bug 告警）。开关关 → 对照组只比对
+    system_config vs meta_json 两存储。"""
+    office_mayor = None
+    for o in snapshot.get("offices", []):
+        if o["office_key"] == "mayor":
+            office_mayor = o["holder_slug"]
+            break
+    config_mayor = snapshot.get("config_mayor")
+    metas = list(snapshot.get("meta_mayors") or [])
+    meta_mayor = metas[0] if len(metas) == 1 else None
+    if gate_on:
+        consistent = (
+            len(metas) <= 1
+            and office_mayor == config_mayor
+            and (not metas or meta_mayor == office_mayor)
+        )
+    else:
+        consistent = len(metas) <= 1 and (not metas or meta_mayor == config_mayor)
+    return {
+        "consistent": bool(consistent),
+        "office": office_mayor,
+        "config": config_mayor,
+        "meta": metas,
+        "compared_stores": 3 if gate_on else 2,
+    }
+
+
+def render_probes_offices(snapshot: dict, gate_on: bool, window_days: int) -> str:
+    out = ["== 社会探针（S2-1 验收：offices 职位实体化）=="]
+    if not snapshot.get("available"):
+        out.append("  offices 表不存在（迁移未跑或 S2-1 前的库）——探针跳过")
+        return "\n".join(out)
+    occ = office_occupancy(snapshot)
+    if occ:
+        out.append("  职位占用/空缺：")
+        for o in occ:
+            if o["occupied"]:
+                out.append(f"    {o['office_key']:<12} 在任 {o['holder_slug']}")
+            else:
+                days = "?" if o["vacant_days"] is None else str(o["vacant_days"])
+                out.append(f"    {o['office_key']:<12} 空缺（{days} 天）")
+        out.append("    （目标形态：四职位常态在任，空缺是短暂过渡）")
+    else:
+        out.append("  职位占用/空缺 = -（offices 表为空——迁移 seed 未跑）")
+    t = office_turnover(snapshot, window_days)
+    out.append(f"  任期轮替（{window_days} 天窗口，按 office 行 updated_at 聚合）："
+               f"{t['changed_in_window']} 个职位有变更 {t['per_office']}")
+    out.append("    （目标：镇长随选举周期轮替，文书/邮差稳定）")
+    c = mayor_consistency(snapshot, gate_on)
+    stores = ("offices/system_config/meta_json 三存储" if gate_on
+              else "system_config/meta_json 两存储（对照组，开关关）")
+    flag = "一致" if c["consistent"] else "不一致 ⚠️ dual-write bug 告警"
+    out.append(f"  镇长身份一致性（{stores}）：{flag}"
+               f"（office={c['office']} config={c['config']} meta={c['meta']}）")
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 async def _run(days_window: int, residents: int, budget: float | None) -> str:
@@ -558,12 +698,16 @@ async def _run(days_window: int, residents: int, budget: float | None) -> str:
         resident_needs = await fetch_resident_needs(session)
         rel_edges = await fetch_relation_edges(session)
         diffusion = await fetch_event_diffusion(session)
+        office_snap = await fetch_office_snapshot(session)
     report = render_report(
         aggregate(rows), residents=residents, budget=budget, window_days=days_window
     )
     return (report + "\n\n" + render_probes(move_records)
             + "\n\n" + render_probes_p1(move_records, resident_needs)
-            + "\n\n" + render_probes_p2(rel_edges, diffusion))
+            + "\n\n" + render_probes_p2(rel_edges, diffusion)
+            + "\n\n" + render_probes_offices(
+                office_snap, gate_on=settings.polis_office_enabled,
+                window_days=days_window))
 
 
 def main(argv: list[str] | None = None) -> None:
