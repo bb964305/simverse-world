@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   getAdminGossipRecent,
   getAdminResidents,
+  getAdminSocialGraph,
   type AdminGossipItem,
   type AdminResident,
+  type AdminSocialGraph,
 } from '../../services/api'
 
 function reputationOf(resident: AdminResident) {
@@ -90,16 +92,24 @@ function RumorStream({ rumors }: { rumors: AdminGossipItem[] }) {
 export function SocietyInsightsPanel({ token }: { token: string }) {
   const [residents, setResidents] = useState<AdminResident[]>([])
   const [rumors, setRumors] = useState<AdminGossipItem[]>([])
-  const [error, setError] = useState(false)
+  const [graph, setGraph] = useState<AdminSocialGraph | null>(null)
+  const [failedSources, setFailedSources] = useState<string[]>([])
+  const [loading, setLoading] = useState(true)
 
   const load = useCallback(async () => {
-    const [residentResult, rumorResult] = await Promise.allSettled([
+    setLoading(true)
+    const results = await Promise.allSettled([
       getAdminResidents(token, { page: 1, per_page: 100 }),
       getAdminGossipRecent(token, 50),
+      getAdminSocialGraph(token),
     ])
+    const [residentResult, rumorResult, graphResult] = results
     if (residentResult.status === 'fulfilled') setResidents(residentResult.value.items)
     if (rumorResult.status === 'fulfilled') setRumors(rumorResult.value.items)
-    setError(residentResult.status === 'rejected' || rumorResult.status === 'rejected')
+    if (graphResult.status === 'fulfilled') setGraph(graphResult.value)
+    const sourceNames = ['居民结构', '社会传播', '关系网络']
+    setFailedSources(results.flatMap((result, index) => result.status === 'rejected' ? [sourceNames[index]] : []))
+    setLoading(false)
   }, [token])
 
   useEffect(() => {
@@ -127,8 +137,22 @@ export function SocietyInsightsPanel({ token }: { token: string }) {
       avgHeat,
       avgReputation,
       distortionRate: rumors.length ? distorted / rumors.length * 100 : 0,
+      circleCount: graph?.circles.length ?? 0,
+      connectedResidents: graph?.nodes.filter((node) => node.circle_id).length ?? 0,
+      avgFamiliarity: graph?.edges.length
+        ? graph.edges.reduce((sum, edge) => sum + edge.familiarity, 0) / graph.edges.length
+        : 0,
     }
-  }, [residents, rumors])
+  }, [graph, residents, rumors])
+
+  const circleSizes = useMemo(
+    () => (graph?.circles ?? [])
+      .slice()
+      .sort((a, b) => b.activity - a.activity)
+      .slice(0, 6)
+      .map((circle, index) => [`社交圈 ${index + 1}`, circle.size] as [string, number]),
+    [graph],
+  )
 
   const districts = useMemo(() => {
     const counts = new Map<string, number>()
@@ -154,30 +178,34 @@ export function SocietyInsightsPanel({ token }: { token: string }) {
           <h2>社会脉搏</h2>
           <p>从居民组成、活跃度、公共声誉和信息传播观察社会变化。</p>
         </div>
-        <button type="button" className="admin-ghost-button" onClick={() => { void load() }}>刷新数据</button>
+        <button type="button" className="admin-ghost-button" onClick={() => { void load() }}>
+          {loading ? '正在同步…' : '刷新数据'}
+        </button>
       </div>
 
-      {error && <div className="admin-error">部分社会数据暂时不可用。</div>}
+      {failedSources.length > 0 && (
+        <div className="admin-error">{failedSources.join('、')}暂时不可用，已保留其他实时数据。</div>
+      )}
 
       <div className="admin-metric-grid">
         <div className="admin-metric-card">
           <div className="admin-metric-card__label">自治居民</div>
-          <div className="admin-metric-card__value" style={{ color: '#60e6d2' }}>{summary.npc.length}</div>
+          <div className="admin-metric-card__value" style={{ color: '#0071e3' }}>{summary.npc.length}</div>
           <div className="admin-metric-card__note">玩家居民 {summary.players}</div>
         </div>
         <div className="admin-metric-card">
-          <div className="admin-metric-card__label">平均活跃热度</div>
-          <div className="admin-metric-card__value" style={{ color: '#a995ff' }}>{summary.avgHeat.toFixed(1)}</div>
-          <div className="admin-metric-card__note">居民行为热度均值</div>
+          <div className="admin-metric-card__label">活跃社交圈</div>
+          <div className="admin-metric-card__value" style={{ color: '#34c759' }}>{summary.circleCount}</div>
+          <div className="admin-metric-card__note">{summary.connectedResidents} 位居民已形成连接</div>
         </div>
         <div className="admin-metric-card">
-          <div className="admin-metric-card__label">平均公共声誉</div>
-          <div className="admin-metric-card__value" style={{ color: '#e3b562' }}>{summary.avgReputation.toFixed(2)}</div>
-          <div className="admin-metric-card__note">自治居民慢变量</div>
+          <div className="admin-metric-card__label">平均活跃热度</div>
+          <div className="admin-metric-card__value" style={{ color: '#af52de' }}>{summary.avgHeat.toFixed(1)}</div>
+          <div className="admin-metric-card__note">平均熟悉度 {summary.avgFamiliarity.toFixed(2)}</div>
         </div>
         <div className="admin-metric-card">
           <div className="admin-metric-card__label">流言失真率</div>
-          <div className="admin-metric-card__value" style={{ color: summary.distortionRate > 30 ? '#ef7d7d' : '#77b9ff' }}>
+          <div className="admin-metric-card__value" style={{ color: summary.distortionRate > 30 ? '#ff3b30' : '#ff9f0a' }}>
             {summary.distortionRate.toFixed(0)}%
           </div>
           <div className="admin-metric-card__note">最近 {rumors.length} 条传播样本</div>
@@ -190,8 +218,8 @@ export function SocietyInsightsPanel({ token }: { token: string }) {
           <Distribution items={districts} empty="暂无区域数据" />
         </section>
         <section className="admin-analytics-card">
-          <div className="admin-card-title"><h3>居民状态结构</h3><span>当前快照</span></div>
-          <Distribution items={statuses} empty="暂无状态数据" />
+          <div className="admin-card-title"><h3>社交圈结构</h3><span>{graph?.edges.length ?? 0} 条关系</span></div>
+          <Distribution items={circleSizes} empty="暂无稳定社交圈" />
         </section>
       </div>
 
@@ -201,10 +229,18 @@ export function SocietyInsightsPanel({ token }: { token: string }) {
           <RankedResidents residents={residents} mode="heat" />
         </section>
         <section className="admin-analytics-card">
-          <div className="admin-card-title"><h3>公共声誉观察</h3><span>Reputation</span></div>
+          <div className="admin-card-title">
+            <h3>公共声誉观察</h3>
+            <span>平均 {summary.avgReputation.toFixed(2)}</span>
+          </div>
           <RankedResidents residents={summary.npc} mode="reputation" />
         </section>
       </div>
+
+      <section className="admin-analytics-card">
+        <div className="admin-card-title"><h3>居民状态结构</h3><span>当前快照</span></div>
+        <Distribution items={statuses} empty="暂无状态数据" />
+      </section>
 
       <section className="admin-analytics-card">
         <div className="admin-card-title"><h3>社会传播动态</h3><span>最近流言链样本</span></div>

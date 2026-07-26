@@ -3,11 +3,13 @@ import {
   getAdminDashboardHealth,
   getAdminDashboardStats,
   getAdminDashboardTrends,
+  getAdminEconomySeries,
   getAdminEconomyStats,
   getAdminLlmUsageSummary,
   type AdminDashboardHealth,
   type AdminDashboardStats,
   type AdminDashboardTrend,
+  type EconomySeriesPoint,
   type AdminEconomyStats,
   type LlmUsageSummary,
 } from '../../services/api'
@@ -46,12 +48,19 @@ function points(values: number[], width: number, height: number) {
   }).join(' ')
 }
 
-function TrendChart({ trends }: { trends: AdminDashboardTrend[] }) {
+function TrendChart({
+  trends,
+  economySeries,
+}: {
+  trends: AdminDashboardTrend[]
+  economySeries: EconomySeriesPoint[]
+}) {
   const width = 720
   const height = 210
-  const active = points(trends.map((item) => item.active_users), width, height)
-  const registrations = points(trends.map((item) => item.registrations), width, height)
-  const spend = points(trends.map((item) => item.sc_spent), width, height)
+  const registrations = points(trends.map((item) => item.users), width, height)
+  const conversations = points(trends.map((item) => item.conversations), width, height)
+  const consumedByDate = new Map(economySeries.map((item) => [item.date, item.consumed]))
+  const spend = points(trends.map((item) => consumedByDate.get(item.date) ?? 0), width, height)
   const firstDate = trends.at(0)?.date
   const lastDate = trends.at(-1)?.date
 
@@ -63,14 +72,14 @@ function TrendChart({ trends }: { trends: AdminDashboardTrend[] }) {
         {[0.25, 0.5, 0.75].map((ratio) => (
           <line key={ratio} className="admin-chart-grid" x1="0" y1={height * ratio} x2={width} y2={height * ratio} />
         ))}
-        <polyline className="admin-chart-line" points={active} stroke="#60e6d2" />
-        <polyline className="admin-chart-line" points={registrations} stroke="#a995ff" />
-        <polyline className="admin-chart-line" points={spend} stroke="#e3b562" opacity="0.82" />
+        <polyline className="admin-chart-line" points={conversations} stroke="#0071e3" />
+        <polyline className="admin-chart-line" points={registrations} stroke="#34c759" />
+        <polyline className="admin-chart-line" points={spend} stroke="#af52de" opacity="0.8" />
       </svg>
       <div className="admin-chart-legend">
-        <span><i style={{ background: '#60e6d2' }} />活跃用户</span>
-        <span><i style={{ background: '#a995ff' }} />新增注册</span>
-        <span><i style={{ background: '#e3b562' }} />SC 消耗</span>
+        <span><i style={{ background: '#0071e3' }} />居民对话</span>
+        <span><i style={{ background: '#34c759' }} />新增居民</span>
+        <span><i style={{ background: '#af52de' }} />SC 消耗</span>
         <span style={{ marginLeft: 'auto' }}>{firstDate} — {lastDate}</span>
       </div>
     </>
@@ -86,18 +95,19 @@ function HealthList({ health }: { health: AdminDashboardHealth | null }) {
   return (
     <div className="admin-status-list">
       {rows.map((row) => {
-        const ok = health?.[row.key] === 'ok'
+        const status = health?.[row.key]
+        const ok = status === 'ok'
         return (
           <div key={row.key} className="admin-status-row">
-            <span className="admin-live-dot" style={{ background: ok ? '#35d399' : '#ef6b73' }} />
+            <span className="admin-live-dot" style={{ background: ok ? '#34c759' : '#ff3b30' }} />
             <div className="admin-status-row__copy">
               <div className="admin-status-row__label">{row.label}</div>
               <div className="admin-status-row__detail">
                 {health?.details?.[row.key] || row.detail}
               </div>
             </div>
-            <span className="admin-status-row__value" style={{ color: ok ? '#60e6d2' : '#ef7d7d' }}>
-              {health ? (ok ? '正常' : '异常') : '检查中'}
+            <span className="admin-status-row__value" style={{ color: ok ? '#248a3d' : '#d70015' }}>
+              {health ? (ok ? '正常' : status === 'timeout' ? '超时' : '异常') : '检查中'}
             </span>
           </div>
         )
@@ -109,27 +119,34 @@ function HealthList({ health }: { health: AdminDashboardHealth | null }) {
 export function DashboardPanel({ token }: DashboardPanelProps) {
   const [stats, setStats] = useState<AdminDashboardStats | null>(null)
   const [trends, setTrends] = useState<AdminDashboardTrend[]>([])
+  const [economySeries, setEconomySeries] = useState<EconomySeriesPoint[]>([])
   const [health, setHealth] = useState<AdminDashboardHealth | null>(null)
   const [economy, setEconomy] = useState<AdminEconomyStats | null>(null)
   const [llm, setLlm] = useState<LlmUsageSummary | null>(null)
-  const [error, setError] = useState(false)
+  const [failedSources, setFailedSources] = useState<string[]>([])
+  const [loading, setLoading] = useState(true)
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
 
   const load = useCallback(async () => {
+    setLoading(true)
     const results = await Promise.allSettled([
       getAdminDashboardStats(token),
       getAdminDashboardTrends(token),
+      getAdminEconomySeries(token, 7),
       getAdminDashboardHealth(token),
       getAdminEconomyStats(token),
       getAdminLlmUsageSummary(token, 24),
     ])
+    const sourceNames = ['总览', '发展趋势', '经济趋势', '运行状态', '经济统计', '模型用量']
     if (results[0].status === 'fulfilled') setStats(results[0].value)
     if (results[1].status === 'fulfilled') setTrends(results[1].value)
-    if (results[2].status === 'fulfilled') setHealth(results[2].value)
-    if (results[3].status === 'fulfilled') setEconomy(results[3].value)
-    if (results[4].status === 'fulfilled') setLlm(results[4].value)
-    setError(results.some((result) => result.status === 'rejected'))
+    if (results[2].status === 'fulfilled') setEconomySeries(results[2].value.series)
+    if (results[3].status === 'fulfilled') setHealth(results[3].value)
+    if (results[4].status === 'fulfilled') setEconomy(results[4].value)
+    if (results[5].status === 'fulfilled') setLlm(results[5].value)
+    setFailedSources(results.flatMap((result, index) => result.status === 'rejected' ? [sourceNames[index]] : []))
     setLastRefresh(new Date())
+    setLoading(false)
   }, [token])
 
   useEffect(() => {
@@ -158,40 +175,44 @@ export function DashboardPanel({ token }: DashboardPanelProps) {
           <p>关注变化方向，而不是逐项管理系统参数。</p>
         </div>
         <button type="button" className="admin-ghost-button" onClick={() => { void load() }}>
-          {lastRefresh ? `更新于 ${lastRefresh.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : '刷新数据'}
+          {loading ? '正在同步…' : lastRefresh ? `更新于 ${lastRefresh.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : '刷新数据'}
         </button>
       </div>
 
-      {error && <div className="admin-error">部分数据源暂时不可用，已保留其余可用指标。</div>}
+      {failedSources.length > 0 && (
+        <div className="admin-error">
+          {failedSources.join('、')}暂时不可用，已保留其他实时数据。
+        </div>
+      )}
 
       <div className="admin-metric-grid">
         <MetricCard
           label="在线人口"
           value={stats?.online_users ?? '—'}
           note={`今日新增 ${stats?.today_registrations ?? '—'} 人`}
-          color="#60e6d2"
-          glow="rgba(96, 230, 210, 0.11)"
+          color="#0071e3"
+          glow="rgba(0, 113, 227, 0.08)"
         />
         <MetricCard
           label="社会互动"
           value={stats?.active_chats ?? '—'}
           note="当前活跃对话"
-          color="#a995ff"
-          glow="rgba(169, 149, 255, 0.13)"
+          color="#34c759"
+          glow="rgba(52, 199, 89, 0.08)"
         />
         <MetricCard
           label="SOUL COIN 净流量"
           value={netFlow == null ? '—' : `${netFlow >= 0 ? '+' : ''}${netFlow}`}
           note={economySignal}
-          color={netFlow != null && netFlow < 0 ? '#ef7d7d' : '#e3b562'}
-          glow="rgba(227, 181, 98, 0.12)"
+          color={netFlow != null && netFlow < 0 ? '#ff3b30' : '#af52de'}
+          glow="rgba(175, 82, 222, 0.08)"
         />
         <MetricCard
           label="24H AI 成本"
           value={llm ? `$${llm.total.est_cost_usd.toFixed(2)}` : '—'}
           note={llm ? `${llm.total.calls} 次调用` : '正在统计'}
-          color="#77b9ff"
-          glow="rgba(82, 157, 255, 0.12)"
+          color="#ff9f0a"
+          glow="rgba(255, 159, 10, 0.08)"
         />
       </div>
 
@@ -199,9 +220,9 @@ export function DashboardPanel({ token }: DashboardPanelProps) {
         <section className="admin-analytics-card">
           <div className="admin-card-title">
             <h3>发展趋势</h3>
-            <span>注册 / 活跃 / 消耗</span>
+            <span>新增 / 对话 / 消耗</span>
           </div>
-          <TrendChart trends={trends} />
+          <TrendChart trends={trends} economySeries={economySeries} />
         </section>
 
         <section className="admin-analytics-card">
