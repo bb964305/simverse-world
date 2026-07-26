@@ -36,6 +36,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sqlalchemy import select, func  # noqa: E402
 
 from app.models.llm_usage import LLMUsage  # noqa: E402
+from app.services.civic_membership import (  # noqa: E402
+    CIVIC_VOTER_TYPES,
+    SIM_RESIDENT_TYPES,
+)
 
 # ---------------------------------------------------------------------------
 # 预测区间（硬编码，供对账基准；出处见各行注释）
@@ -652,9 +656,12 @@ async def fetch_office_snapshot(session) -> dict:
         snap["config_mayor"] = None
     try:
         from app.models.resident import Resident
+        # C class: probe口径 follows the population set — a stale mayor flag on
+        # a player-authored resident must still be visible to the probe.
         pairs = (await session.execute(
             select(Resident.slug, Resident.meta_json).where(
-                Resident.resident_type == "npc", Resident.meta_json.isnot(None))
+                Resident.resident_type.in_(SIM_RESIDENT_TYPES),
+                Resident.meta_json.isnot(None))
         )).all()
         snap["meta_mayors"] = [s for s, m in pairs if (m or {}).get("mayor")]
     except Exception:
@@ -799,9 +806,12 @@ async def fetch_treasury_snapshot(session) -> dict:
         from app.config import settings
         from app.models.resident import Resident
         from app.services import duty_service
+        # C class: the wage bill covers everyone who actually holds a duty, so
+        # the scan must span the whole population, not just the electorate.
         rows = (await session.execute(
             select(Resident).where(
-                Resident.resident_type == "npc", Resident.meta_json.isnot(None))
+                Resident.resident_type.in_(SIM_RESIDENT_TYPES),
+                Resident.meta_json.isnot(None))
         )).scalars().all()
         bill = 0
         holders = 0
@@ -1164,6 +1174,115 @@ def render_probes_npc_vote(snapshot: dict, legacy_on: bool, limit: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 政治层边界探针（线 A hotfix-4）—— 只读、零 LLM
+# ---------------------------------------------------------------------------
+#: 刻意落在两个集合之外、且已有专门谓词家族管辖的取值。"player" 是玩家化身
+#: （单值 FK users.player_resident_id），由 `!= "player"` 家族管，不算「没人管」。
+_BOUNDARY_KNOWN_OUTSIDE = frozenset({"player"})
+
+
+async def fetch_civic_boundary_snapshot(session) -> dict:
+    """按 resident_type 分组的居民计数。residents 表不存在 → available=False。"""
+    try:
+        from app.models.resident import Resident
+        rows = (await session.execute(
+            select(Resident.resident_type, func.count())
+            .group_by(Resident.resident_type)
+        )).all()
+    except Exception:
+        return {"available": False, "by_type": {}}
+    return {"available": True,
+            "by_type": {(t or "<null>"): int(n or 0) for t, n in rows}}
+
+
+def civic_boundary_breakdown(
+    snapshot: dict,
+    voter_types: frozenset[str] | None = None,
+    population_types: frozenset[str] | None = None,
+) -> dict:
+    """每个 resident_type 的「总数 / 进政治层 / 进世界人口」三列。
+
+    07-25 审计是人工发现「夜风侦探」×3 拿到了投票权的。这个探针把同一个发现
+    自动化:UGC 取值出现在投票人列里 = 泄漏复发;某个取值同时落在两列之外
+    = 没有任何代码在管这批居民。
+
+    ``voter_types`` / ``population_types`` 可注入,便于测试与「假如把某个取值
+    并入政治层」的推演;默认读生产常量。
+    """
+    voters_set = CIVIC_VOTER_TYPES if voter_types is None else voter_types
+    pop_set = SIM_RESIDENT_TYPES if population_types is None else population_types
+    by_type = snapshot.get("by_type", {})
+
+    per_type = []
+    total = voters = population = outside = 0
+    unknown: dict[str, int] = {}
+    leaked: list[str] = []
+    for rtype, n in sorted(by_type.items()):
+        is_voter = rtype in voters_set
+        in_pop = rtype in pop_set
+        total += n
+        if is_voter:
+            voters += n
+        if in_pop:
+            population += n
+        if not is_voter and not in_pop:
+            outside += n
+            # "player" 落在两列之外是设计:它是玩家化身,由第三个谓词家族
+            # (`!= "player"`) 管辖,不是「没人管的居民」。其它取值才要报。
+            if rtype not in _BOUNDARY_KNOWN_OUTSIDE:
+                unknown[rtype] = n
+        # UGC 取值拿到票 = 本次 hotfix 的回归;"npc" 有票是设计。
+        if is_voter and rtype not in ("npc",):
+            leaked.append(rtype)
+        per_type.append({"type": rtype, "count": n,
+                         "voter": is_voter, "population": in_pop})
+    return {
+        "per_type": per_type,
+        "total": total,
+        "voters": voters,
+        "population": population,
+        # 两列之外的居民数（既无票也不算世界人口）——今天是 "player"（设计）
+        # 与 "preset"（待决项）。
+        "outside_both": outside,
+        "unknown_types": unknown,
+        "leaked_voter_types": leaked,
+    }
+
+
+def render_probes_civic_boundary(
+    snapshot: dict,
+    voter_types: frozenset[str] | None = None,
+    population_types: frozenset[str] | None = None,
+) -> str:
+    out = ["== 政治层边界探针（按 resident_type · 只读零 LLM）=="]
+    if not snapshot.get("available"):
+        out.append("  residents 表不存在（迁移未跑）——探针跳过")
+        return "\n".join(out)
+    d = civic_boundary_breakdown(snapshot, voter_types, population_types)
+    if not d["total"]:
+        out.append("  世界里还没有居民——无样本")
+        return "\n".join(out)
+
+    out.append(f"  居民合计 {d['total']}；有政治权利 {d['voters']}"
+               f"（CIVIC_VOTER_TYPES）；算世界人口 {d['population']}"
+               f"（SIM_RESIDENT_TYPES）")
+    out.append("  逐 type 明细（票 = 可投票/可参选，人 = 进世界人口口径）：")
+    for row in d["per_type"]:
+        vote = "票✅" if row["voter"] else "票—"
+        pop = "人✅" if row["population"] else "人—"
+        flag = " 🔴 UGC 取值拿到了投票权（泄漏复发）" if row["type"] in d["leaked_voter_types"] else ""
+        out.append(f"    {row['type']:<10} {row['count']:>5}  {vote}  {pop}{flag}")
+    if d["leaked_voter_types"]:
+        out.append("  🔴 玩家创作的居民重新获得了政治权利——回归到 07-25 的泄漏状态，"
+                   "查 CIVIC_VOTER_TYPES 与 5 处创建路径")
+    if d["unknown_types"]:
+        out.append(f"  ⚠️ 两列之外的取值 {d['unknown_types']}"
+                   "——既不投票也不算世界人口。'preset'（admin 创建）是已知的"
+                   "待决项，不是 bug;其它取值请查来源")
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 async def _run(days_window: int, residents: int, budget: float | None,
@@ -1185,6 +1304,7 @@ async def _run(days_window: int, residents: int, budget: float | None,
         treasury_snap = await fetch_treasury_snapshot(session)
         policy_snap = await fetch_policy_snapshot(session)
         poll_snap = await fetch_poll_vote_snapshot(session, limit=polls_window)
+        boundary_snap = await fetch_civic_boundary_snapshot(session)
     report = render_report(
         aggregate(rows), residents=residents, budget=budget, window_days=days_window
     )
@@ -1201,7 +1321,8 @@ async def _run(days_window: int, residents: int, budget: float | None,
                 policy_snap, gate_on=settings.polis_policy_approval_enabled)
             + "\n\n" + render_probes_npc_vote(
                 poll_snap, legacy_on=settings.civic_npc_choice_legacy,
-                limit=polls_window))
+                limit=polls_window)
+            + "\n\n" + render_probes_civic_boundary(boundary_snap))
 
 
 def main(argv: list[str] | None = None) -> None:
