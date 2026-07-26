@@ -1,9 +1,30 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { visualizer } from 'rollup-plugin-visualizer'
+import { existsSync, readFileSync } from 'node:fs'
+
+const residentBatchReceipt = new URL(
+  './public/assets/village/agents/generation-batch.json',
+  import.meta.url,
+)
+
+function residentSpriteAssetVersion(): string {
+  if (!existsSync(residentBatchReceipt)) return 'legacy-blocked'
+  try {
+    const value = JSON.parse(readFileSync(residentBatchReceipt, 'utf8')) as { batch_id?: unknown }
+    return typeof value.batch_id === 'string' && /^[0-9a-f]{32}$/.test(value.batch_id)
+      ? value.batch_id
+      : 'invalid-batch'
+  } catch {
+    return 'invalid-batch'
+  }
+}
 
 // https://vite.dev/config/
 export default defineConfig({
+  define: {
+    __RESIDENT_SPRITE_ASSET_VERSION__: JSON.stringify(residentSpriteAssetVersion()),
+  },
   plugins: [
     react(),
     // Emit a bundle treemap (dist/stats.html) for size auditing when ANALYZE is set.

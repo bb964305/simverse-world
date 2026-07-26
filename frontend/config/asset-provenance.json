@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "generated": "2026-07-25",
   "task": "A0 — asset provenance & licensing audit (art-spec §资产来源与风险; V23)",
   "asset_root": "frontend/public/assets/village",
@@ -20,7 +20,7 @@
     "audit_status: pending = no authoritative license or owner authorization confirmed yet; cleared = the public terms and/or a recorded owner attestation cover the intended use.",
     "distribution_status: blocked = must NOT be exported in a public/release build until cleared; allowed = cleared for the intended project release, subject to the recorded credit and redistribution conditions.",
     "hashes are the first 16 hex chars of sha256 over the committed bytes (drift detection).",
-    "The 2026-07-25 owner attestation clears only the 16 concrete tilemap records. The 25 resident texture sheets remain pending and blocked."
+    "The 2026-07-25 owner attestation clears only the 16 concrete tilemap records. All 25 resident texture sheets and 25 portraits remain blocked until 50 generated file receipts pass the release verifier."
   ],
   "distribution_policy": {
     "release_requires": "every present third-party asset has audit_status=cleared AND distribution_status=allowed",
@@ -168,15 +168,16 @@
       "distribution_status": "allowed", "audit_status": "cleared", "authorization_ref": "project-owner-attestation-2026-07-25"
     },
     {
-      "file": "agents/*/texture.png", "sha256_16": "VARIES", "bytes": 0, "dims": "96x128 (per sheet)",
-      "pack": "character sprite sheets (25 residents) — origin unconfirmed",
-      "author_store": "UNVERIFIED — character sprites bundled in generative_agents (Smallville). Same audit obligation as tilesets.",
-      "source_url": "https://github.com/joonspk-research/generative_agents (bundled)", "license": "UNVERIFIED", "license_version": null,
-      "modifications": "repacked into per-agent atlas + sprite.json (Simverse)", "commercial_use": "unknown", "derivative_use": "unknown",
+      "file": "agents/*/{texture,portrait}.png", "sha256_16": "PER_FILE_RECEIPT_REQUIRED", "bytes": 0, "dims": "texture 96x128 RGBA; portrait 256x256 RGBA after replacement",
+      "pack": "canonical generated character slot assets (25 texture + 25 portrait files)",
+      "author_store": "First-party generated assets; legacy source bytes are permanently denylisted.",
+      "source_url": null, "license": "Generated from project-authored text specifications without legacy visual references.", "license_version": "resident generated receipt policy v1",
+      "modifications": "portrait is derived from the generated down-idle atlas frame", "commercial_use": "pending", "derivative_use": "pending",
       "distribution_status": "blocked", "audit_status": "pending",
       "category": true,
-      "file_count": 25,
-      "note": "Category entry — excluded from the 2026-07-25 owner attestation. The 25 agents/<name>/texture.png sheets remain blocked; enumerate individually if any single sprite's provenance diverges."
+      "file_count": 50,
+      "receipt_policy": "resident-generation-provenance-v1",
+      "note": "Policy entry only. Release status is computed from 25 per-slot generation-provenance.json receipts and cannot be cleared by editing this category record."
     }
   ]
 }

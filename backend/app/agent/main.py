@@ -12,12 +12,15 @@ import signal
 
 import app.models  # noqa: F401 — full mapper registry so cross-table FKs resolve
 from app.agent.loop import agent_loop
+from app.config import settings
 from app.observability import init_sentry
 from app.redis_client import close_redis
+from app.http import close_client
 from app.tasks.embedding_backfill import embedding_backfill_loop
 from app.tasks.heat_cron import heat_cron_loop
 from app.tasks.event_cron import event_cron_loop
 from app.tasks.nightly_cron import nightly_cron_loop
+from app.tasks.resident_sprite_worker import resident_sprite_worker_loop
 
 logger = logging.getLogger(__name__)
 
@@ -25,9 +28,7 @@ logger = logging.getLogger(__name__)
 async def main() -> None:
     """Run all background loops until SIGTERM/SIGINT or cancellation."""
     init_sentry("agent-worker")  # no-op without SENTRY_DSN
-    logger.info(
-        "agent-worker starting: agent_loop + heat_cron_loop + embedding_backfill_loop"
-    )
+    logger.info("agent-worker starting: world loops")
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -59,6 +60,12 @@ async def main() -> None:
         asyncio.create_task(embedding_backfill_loop(), name="embedding-backfill"),
         asyncio.create_task(world_reload_subscriber(), name="world-reload"),
     ]
+    if settings.resident_sprite_enabled:
+        tasks.append(
+            asyncio.create_task(
+                resident_sprite_worker_loop(), name="resident-sprite-worker"
+            )
+        )
     stop_task = asyncio.create_task(stop_event.wait(), name="stop-signal")
 
     try:
@@ -91,6 +98,7 @@ async def main() -> None:
             loop.remove_signal_handler(sig)
         # Close the shared Redis client the loops used to publish WS events.
         await close_redis()
+        await close_client()
         logger.info("agent-worker stopped")
 
 

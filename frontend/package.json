@@ -11,6 +11,7 @@
     "map:verify-art": "node scripts/verify-lab-art.mjs",
     "assets:verify": "node scripts/verify-asset-provenance.mjs",
     "assets:verify:release": "node scripts/verify-asset-provenance.mjs --release",
+    "assets:verify:dist": "node scripts/verify-asset-provenance.mjs --dist",
     "test": "vitest run",
     "test:watch": "vitest",
     "preview": "vite preview"

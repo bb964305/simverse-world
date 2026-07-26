@@ -81,6 +81,42 @@ def test_api_and_worker_point_at_redis():
         assert env.get("REDIS_URL"), f"{name} is missing REDIS_URL"
 
 
+def test_sprite_provider_secret_is_worker_only_and_artifacts_are_shared():
+    services = _load_services()
+    api_env = _env_as_dict(services["api"])
+    worker_env = _env_as_dict(services["agent-worker"])
+    api_env_files = services["api"].get("env_file") or []
+    worker_env_files = services["agent-worker"].get("env_file") or []
+    if isinstance(api_env_files, str):
+        api_env_files = [api_env_files]
+    if isinstance(worker_env_files, str):
+        worker_env_files = [worker_env_files]
+    worker_paths = {
+        item.get("path") if isinstance(item, dict) else item
+        for item in worker_env_files
+    }
+    api_paths = {
+        item.get("path") if isinstance(item, dict) else item
+        for item in api_env_files
+    }
+    assert "RESIDENT_SPRITE_PROVIDER_API_KEY" not in api_env
+    assert "RESIDENT_SPRITE_PROVIDER_API_KEY" not in worker_env
+    assert "resident-sprite-worker.env" in worker_paths
+    assert "resident-sprite-worker.env" not in api_paths
+    assert worker_env.get("RESIDENT_SPRITE_CAPABILITY_RECEIPT")
+    for name in ("api", "agent-worker"):
+        volumes = services[name].get("volumes") or []
+        rendered = [item for item in volumes if isinstance(item, str)]
+        assert "resident_sprite_artifacts:/var/lib/simverse/resident-sprites" in rendered
+
+
+def test_resident_sprite_generation_is_disabled_by_default():
+    services = _load_services()
+    for name in ("api", "agent-worker"):
+        value = _env_as_dict(services[name]).get("RESIDENT_SPRITE_ENABLED", "")
+        assert value == "${RESIDENT_SPRITE_ENABLED:-false}"
+
+
 def test_api_and_worker_depend_on_redis():
     """Both processes must wait for Redis before starting."""
     services = _load_services()

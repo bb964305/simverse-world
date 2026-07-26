@@ -1,21 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import '../styles/landing-page.css'
+import { staticResidentPortraitUrl } from '../game/residentSpriteRuntime'
 
 const RESIDENTS = [
-  { name: '伊莎贝拉', trait: '把每次相遇写进记忆', src: '/assets/village/agents/伊莎贝拉/portrait.png' },
-  { name: '亚瑟', trait: '在学园区继续研究', src: '/assets/village/agents/亚瑟/portrait.png' },
-  { name: '卡门', trait: '会主动寻找新的关系', src: '/assets/village/agents/卡门/portrait.png' },
-  { name: '山本百合子', trait: '按自己的作息生活', src: '/assets/village/agents/山本百合子/portrait.png' },
-  { name: '弗朗西斯科', trait: '从经历中改变性格', src: '/assets/village/agents/弗朗西斯科/portrait.png' },
-  { name: '塔玛拉', trait: '与其他居民共享事件', src: '/assets/village/agents/塔玛拉/portrait.png' },
+  { name: '伊莎贝拉', trait: '把每次相遇写进记忆', src: staticResidentPortraitUrl('伊莎贝拉') },
+  { name: '亚瑟', trait: '在学园区继续研究', src: staticResidentPortraitUrl('亚瑟') },
+  { name: '卡门', trait: '会主动寻找新的关系', src: staticResidentPortraitUrl('卡门') },
+  { name: '山本百合子', trait: '按自己的作息生活', src: staticResidentPortraitUrl('山本百合子') },
+  { name: '弗朗西斯科', trait: '从经历中改变性格', src: staticResidentPortraitUrl('弗朗西斯科') },
+  { name: '塔玛拉', trait: '与其他居民共享事件', src: staticResidentPortraitUrl('塔玛拉') },
 ] as const
 
 const HERO_RESIDENTS = [
-  { src: '/assets/village/agents/伊莎贝拉/portrait.png', className: 'hero-resident--one' },
-  { src: '/assets/village/agents/亚瑟/portrait.png', className: 'hero-resident--two' },
-  { src: '/assets/village/agents/山本百合子/portrait.png', className: 'hero-resident--three' },
-  { src: '/assets/village/agents/塔玛拉/portrait.png', className: 'hero-resident--four' },
+  { src: staticResidentPortraitUrl('伊莎贝拉'), className: 'hero-resident--one' },
+  { src: staticResidentPortraitUrl('亚瑟'), className: 'hero-resident--two' },
+  { src: staticResidentPortraitUrl('山本百合子'), className: 'hero-resident--three' },
+  { src: staticResidentPortraitUrl('塔玛拉'), className: 'hero-resident--four' },
 ] as const
 
 const MEMORY_LAYERS = [

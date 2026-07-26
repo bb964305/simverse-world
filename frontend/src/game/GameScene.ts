@@ -4,12 +4,28 @@ import { observeContainerResize, waitForNonZeroSize } from './canvasSize'
 import { applyStatusVisuals, clearStatusVisuals, releaseAllStatusVisuals, STATUS_CONFIG } from './StatusVisuals'
 import { useGameStore } from '../stores/gameStore'
 import { sendPosition, sendWS, onWSMessage } from '../services/ws'
-import { updatePlayerPosition, getHomeDecor, decorEmoji, getActiveEvents, getCommissions, HOUSING_BOUNDS, type DecorItem } from '../services/api'
+import { API_BASE, updatePlayerPosition, getHomeDecor, decorEmoji, getActiveEvents, getCommissions, HOUSING_BOUNDS, type DecorItem } from '../services/api'
 import { TILE_SIZE } from './worldGeometry'
+import {
+  STATIC_RESIDENT_ATLAS_JSON_URL,
+  decideResidentTextureLoad,
+  parseResidentSpriteUpdatedMessage,
+  residentTextureKey,
+  resolveResidentSpriteUrl,
+  staticResidentSpriteUrl,
+  type ResidentSpriteUpdatedMessage,
+} from './residentSpriteRuntime'
 
 const PLAYER_SPEED = 160
 const NPC_INTERACT_DISTANCE = 60
 const PLAYER_INTERACT_DISTANCE = 80
+const REQUIRED_RESIDENT_FRAMES = [
+  'down', 'left', 'right', 'up',
+  'down-walk.000', 'down-walk.001', 'down-walk.002',
+  'left-walk.000', 'left-walk.001', 'left-walk.002',
+  'right-walk.000', 'right-walk.001', 'right-walk.002',
+  'up-walk.000', 'up-walk.001', 'up-walk.002',
+] as const
 
 const TILESET_IMAGE_MAP: Record<string, string> = {
   blocks_1: 'blocks_1.png',
@@ -36,6 +52,10 @@ export interface ResidentData {
   name: string
   status: string
   sprite_key: string
+  sprite_url?: string | null
+  sprite_content_hash?: string | null
+  sprite_generation_run_id?: string | null
+  portrait_url?: string | null
   tile_x: number
   tile_y: number
   district: string
@@ -96,6 +116,10 @@ class MainScene extends Phaser.Scene {
   private eKey!: Phaser.Input.Keyboard.Key
   private npcSprites: Phaser.Physics.Arcade.Sprite[] = []
   private npcLabels: Phaser.GameObjects.Text[] = []
+  private residentSpritesById = new Map<string, Phaser.Physics.Arcade.Sprite>()
+  private desiredResidentTextureKeys = new Map<string, string>()
+  private dynamicResidentTextureKeys = new Set<string>()
+  private residentTextureLoads = new Map<string, Promise<boolean>>()
   private residents: ResidentData[] = []
   private mapReady = false
   private isTeleporting = false
@@ -140,6 +164,10 @@ class MainScene extends Phaser.Scene {
     this._chatBubbles.clear()
     this.npcSprites = []
     this.npcLabels = []
+    this.residentSpritesById.clear()
+    this.desiredResidentTextureKeys.clear()
+    this.dynamicResidentTextureKeys.clear()
+    this.residentTextureLoads.clear()
     // Decor objects die with the scene; drop the references so a late
     // getHomeDecor() resolution can't touch dead text objects.
     this.decorTexts.clear()
@@ -167,15 +195,14 @@ class MainScene extends Phaser.Scene {
     const spriteKey = useGameStore.getState().playerSpriteKey
     this.load.atlas(
       'player_atlas',
-      `/assets/village/agents/${spriteKey}/texture.png`,
-      '/assets/village/agents/sprite.json',
+      staticResidentSpriteUrl(spriteKey),
+      STATIC_RESIDENT_ATLAS_JSON_URL,
     )
   }
 
   async create() {
-    const API = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
     try {
-      const resp = await fetch(`${API}/residents`)
+      const resp = await fetch(`${API_BASE}/residents`)
       this.residents = resp.ok ? (await resp.json() as ResidentData[]) : []
     } catch {
       this.residents = []
@@ -187,24 +214,39 @@ class MainScene extends Phaser.Scene {
     if (this.isShutdown) return
 
     // Load resident sprites
-    const spritesToLoad: string[] = []
+    const spritesToLoad = new Set<string>()
     for (const r of this.residents) {
-      if (!this.textures.exists(r.sprite_key)) {
-        spritesToLoad.push(r.sprite_key)
+      // Always keep the checked-in sprite available as a fallback. A bad or
+      // temporarily unavailable generated asset must not make an NPC vanish.
+      if (!this.textures.exists(r.sprite_key) && !spritesToLoad.has(r.sprite_key)) {
+        spritesToLoad.add(r.sprite_key)
         this.load.atlas(
           r.sprite_key,
-          `/assets/village/agents/${r.sprite_key}/texture.png`,
-          '/assets/village/agents/sprite.json',
+          staticResidentSpriteUrl(r.sprite_key),
+          STATIC_RESIDENT_ATLAS_JSON_URL,
         )
+      }
+      const generatedUrl = resolveResidentSpriteUrl(r.sprite_url, API_BASE, r.sprite_content_hash)
+      const generatedKey = residentTextureKey(r)
+      if (generatedUrl && !this.textures.exists(generatedKey) && !spritesToLoad.has(generatedKey)) {
+        spritesToLoad.add(generatedKey)
+        this.dynamicResidentTextureKeys.add(generatedKey)
+        this.load.atlas(generatedKey, generatedUrl, STATIC_RESIDENT_ATLAS_JSON_URL)
       }
     }
 
-    if (spritesToLoad.length > 0 && !this.load.isLoading()) {
+    if (spritesToLoad.size > 0 && !this.load.isLoading()) {
       this.load.start()
       await new Promise<void>((resolve) => this.load.once('complete', resolve))
     }
 
     this.setupWorld()
+  }
+
+  private _residentAtlasIsReady(textureKey: string): boolean {
+    if (!this.textures.exists(textureKey)) return false
+    const texture = this.textures.get(textureKey)
+    return REQUIRED_RESIDENT_FRAMES.every((frame) => texture.has(frame))
   }
 
   private generateMinimapTexture(): void {
@@ -310,7 +352,9 @@ class MainScene extends Phaser.Scene {
       const x = r.tile_x * TILE_SIZE + TILE_SIZE / 2
       const y = r.tile_y * TILE_SIZE + TILE_SIZE
 
-      const sprite = this.physics.add.sprite(x, y, r.sprite_key, 'down')
+      const preferredTextureKey = residentTextureKey(r)
+      const textureKey = this._residentAtlasIsReady(preferredTextureKey) ? preferredTextureKey : r.sprite_key
+      const sprite = this.physics.add.sprite(x, y, textureKey, 'down')
         .setSize(24, 24).setOffset(4, 8).setDepth(1).setImmovable(true)
       sprite.displayWidth = 40
       sprite.scaleY = sprite.scaleX
@@ -327,6 +371,8 @@ class MainScene extends Phaser.Scene {
 
       this.npcSprites.push(sprite)
       this.npcLabels.push(label)
+      this.residentSpritesById.set(r.id, sprite)
+      this.desiredResidentTextureKeys.set(r.id, textureKey)
     }
 
     // Camera
@@ -355,6 +401,10 @@ class MainScene extends Phaser.Scene {
       }
       if (msg.type === 'resident_status') {
         this._handleResidentStatusUpdate(msg as { resident_slug: string; status: string; mood_label?: string })
+      }
+      if (msg.type === 'sprite_updated') {
+        const update = parseResidentSpriteUpdatedMessage(msg)
+        if (update) void this._handleResidentSpriteUpdated(update)
       }
       if (msg.type === 'resident_move') {
         this._handleResidentMove(msg as { resident_slug: string; tile_x: number; tile_y: number; status: string })
@@ -693,6 +743,89 @@ class MainScene extends Phaser.Scene {
         this.residents[idx].status = 'idle'
       },
     })
+  }
+
+  private _loadResidentAtlas(textureKey: string, textureUrl: string): Promise<boolean> {
+    if (this.isShutdown) return Promise.resolve(false)
+    if (this._residentAtlasIsReady(textureKey)) return Promise.resolve(true)
+    if (this.textures.exists(textureKey)) this.textures.remove(textureKey)
+    const activeLoad = this.residentTextureLoads.get(textureKey)
+    if (activeLoad) return activeLoad
+
+    const load = new Promise<boolean>((resolve) => {
+      let settled = false
+      const finish = () => {
+        if (settled) return
+        settled = true
+        this.load.off(Phaser.Loader.Events.COMPLETE, finish)
+        this.events.off(Phaser.Scenes.Events.SHUTDOWN, finish)
+        resolve(!this.isShutdown && this._residentAtlasIsReady(textureKey))
+      }
+      this.load.on(Phaser.Loader.Events.COMPLETE, finish)
+      this.events.once(Phaser.Scenes.Events.SHUTDOWN, finish)
+      this.load.atlas(textureKey, textureUrl, STATIC_RESIDENT_ATLAS_JSON_URL)
+      if (!this.load.isLoading()) this.load.start()
+    })
+    this.residentTextureLoads.set(textureKey, load)
+    void load.finally(() => this.residentTextureLoads.delete(textureKey))
+    return load
+  }
+
+  private _releaseUnusedResidentTexture(textureKey: string): void {
+    if (!this.dynamicResidentTextureKeys.has(textureKey)) return
+    if (this.npcSprites.some((sprite) => sprite.active && sprite.texture.key === textureKey)) return
+    if (this.textures.exists(textureKey)) this.textures.remove(textureKey)
+    this.dynamicResidentTextureKeys.delete(textureKey)
+  }
+
+  private async _handleResidentSpriteUpdated(msg: ResidentSpriteUpdatedMessage): Promise<void> {
+    const resident = this.residents.find((entry) => entry.id === msg.resident_id)
+      ?? (msg.slug ? this.residents.find((entry) => entry.slug === msg.slug) : undefined)
+    if (!resident || this.isShutdown) return
+
+    const sprite = this.residentSpritesById.get(resident.id)
+    if (!sprite) return
+
+    const nextResident: ResidentData = {
+      ...resident,
+      sprite_key: msg.sprite_key,
+      sprite_url: msg.sprite_url,
+      sprite_content_hash: msg.content_hash,
+      sprite_generation_run_id: msg.run_id ?? null,
+    }
+    const nextTextureKey = residentTextureKey(nextResident)
+    const nextTextureUrl = resolveResidentSpriteUrl(msg.sprite_url, API_BASE, msg.content_hash)
+      ?? staticResidentSpriteUrl(msg.sprite_key)
+
+    // Last event wins. If a slower prior download completes later, it is
+    // discarded instead of reverting a newer published/rolled-back texture.
+    this.desiredResidentTextureKeys.set(resident.id, nextTextureKey)
+    if (msg.sprite_url) this.dynamicResidentTextureKeys.add(nextTextureKey)
+
+    const loaded = await this._loadResidentAtlas(nextTextureKey, nextTextureUrl)
+    const decision = decideResidentTextureLoad(
+      loaded,
+      this.isShutdown,
+      this.desiredResidentTextureKeys.get(resident.id),
+      nextTextureKey,
+    )
+    if (decision !== 'apply') {
+      this._releaseUnusedResidentTexture(nextTextureKey)
+      if (decision === 'keep-current') {
+        console.warn(`Resident sprite update failed for ${resident.slug}; keeping current texture`)
+      }
+      return
+    }
+
+    const previousTextureKey = sprite.texture.key
+    const previousFrame = sprite.frame.name
+    sprite.setTexture(nextTextureKey)
+    const nextTexture = this.textures.get(nextTextureKey)
+    sprite.setFrame(nextTexture.has(previousFrame) ? previousFrame : 'down')
+
+    Object.assign(resident, nextResident)
+    ;(sprite as unknown as Record<string, unknown>).__residentData = resident
+    this._releaseUnusedResidentTexture(previousTextureKey)
   }
 
   private _chatBubbles: Map<string, Phaser.GameObjects.Text> = new Map()

@@ -1,0 +1,1 @@
+declare const __RESIDENT_SPRITE_ASSET_VERSION__: string

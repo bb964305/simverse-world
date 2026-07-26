@@ -1,0 +1,36 @@
+.admin-sprite-direction-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 76px);
+  gap: 8px;
+  width: max-content;
+}
+
+@media (max-width: 768px) {
+  .admin-sprite-workspace,
+  .admin-sprite-run-detail,
+  .admin-sprite-preview-pane {
+    min-width: 0 !important;
+    width: 100%;
+  }
+
+  .admin-sprite-run-list {
+    flex-basis: 100% !important;
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  .admin-sprite-run-detail {
+    flex-basis: 100% !important;
+    padding-left: 0 !important;
+    border-left: 0 !important;
+  }
+
+  .admin-sprite-direction-grid {
+    grid-template-columns: repeat(4, 64px);
+    gap: 6px;
+    width: 274px;
+    max-width: 100%;
+  }
+
+  .admin-sprite-preview-state { width: 100% !important; }
+}

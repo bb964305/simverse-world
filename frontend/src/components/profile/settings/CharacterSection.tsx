@@ -7,6 +7,7 @@ import {
 } from '../../../services/api'
 import { FieldLabel, SaveButton, SectionCard, SectionHeader, TextInput } from './shared'
 import { useSectionForm } from './useSectionForm'
+import { staticResidentSpriteUrl } from '../../../game/residentSpriteRuntime'
 
 export function CharacterSection({ settings }: { settings: AllSettings }) {
   const character = settings.character
@@ -60,7 +61,7 @@ export function CharacterSection({ settings }: { settings: AllSettings }) {
               <div style={{
                 width: 32,
                 height: 32,
-                backgroundImage: `url(/assets/village/agents/${encodeURIComponent(selectedSprite)}/texture.png)`,
+                backgroundImage: `url(${staticResidentSpriteUrl(selectedSprite)})`,
                 backgroundPosition: '-32px 0px',
                 backgroundSize: '96px 128px',
                 imageRendering: 'pixelated',
@@ -110,7 +111,7 @@ export function CharacterSection({ settings }: { settings: AllSettings }) {
                 <div style={{
                   width: 32,
                   height: 32,
-                  backgroundImage: `url(/assets/village/agents/${encodeURIComponent(sprite.key)}/texture.png)`,
+                  backgroundImage: `url(${staticResidentSpriteUrl(sprite.key)})`,
                   backgroundPosition: '-32px 0px',
                   backgroundSize: '96px 128px',
                   imageRendering: 'pixelated',

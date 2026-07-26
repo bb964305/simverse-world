@@ -15,6 +15,10 @@ export interface ResidentListItem {
   status: string
   heat: number
   sprite_key: string
+  sprite_url: string | null
+  sprite_content_hash: string | null
+  sprite_generation_run_id: string | null
+  portrait_url: string | null
   tile_x: number
   tile_y: number
   home_location_id?: string | null

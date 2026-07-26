@@ -13,6 +13,10 @@ class ResidentListItem(BaseModel):
     # (reads the model's display_heat property). Off = pinned_heat 0 → unchanged.
     heat: int = Field(validation_alias="display_heat")
     sprite_key: str
+    sprite_url: str | None = None
+    sprite_content_hash: str | None = None
+    sprite_generation_run_id: str | None = None
+    portrait_url: str | None = None
     tile_x: int
     tile_y: int
     home_location_id: str | None

@@ -1,4 +1,4 @@
-import { apiFetch } from './core'
+import { apiFetch, apiFetchResponse } from './core'
 
 // ─── Admin Residents & Forge Monitor API ─────────────────────────
 
@@ -11,6 +11,10 @@ export interface AdminResident {
   heat: number
   star_rating: number
   sprite_key: string
+  sprite_url?: string | null
+  sprite_content_hash?: string | null
+  sprite_generation_run_id?: string | null
+  portrait_url?: string | null
   type: 'NPC' | 'Player'
   creator: string | null
   ability_md: string | null
@@ -52,6 +56,239 @@ export function adminEditResident(
     body: JSON.stringify(data),
     headers: { Authorization: `Bearer ${token}` },
   })
+}
+
+// ─── Admin resident sprite generation & review ──────────────────
+
+export const RESIDENT_SPRITE_REVIEW_KEYS = [
+  'identity_consistency',
+  'down_direction',
+  'left_direction',
+  'right_direction',
+  'up_direction',
+  'walk_animation',
+  'transparent_background',
+  'limited_palette',
+  'phaser_preview',
+] as const
+
+export type ResidentSpriteReviewKey = typeof RESIDENT_SPRITE_REVIEW_KEYS[number]
+export type ResidentSpriteChecklist = Record<ResidentSpriteReviewKey, boolean>
+
+export interface ResidentSpriteGenerationRequest {
+  asset_key: string
+  display_name: string
+  appearance: string
+  gender: 'male' | 'female' | 'neutral'
+  age_group: 'young' | 'adult' | 'elder'
+  vibe: string
+  tags: string[]
+  direction_policy: 'mirror_right' | 'generate_right'
+  model: string
+  anchor_quality: 'medium'
+  strip_quality: 'high'
+  palette_colors: 32
+  prompt_version: 'resident-sprite-v1'
+  algorithm_version: 'resident-atlas-v2'
+  max_strip_generations: 3
+}
+
+export interface AdminResidentSpriteRun {
+  id: string
+  resident_id: string
+  run_id: string
+  status: string
+  direction_policy: 'mirror_right' | 'generate_right'
+  generation_request_json: ResidentSpriteGenerationRequest
+  capability_receipt_id: string | null
+  lease_owner: string | null
+  lease_expires_at: string | null
+  attempts: number
+  retry_of_run_id: string | null
+  manifest_path: string | null
+  candidate_texture_path: string | null
+  candidate_portrait_path: string | null
+  candidate_texture_url?: string | null
+  candidate_portrait_url?: string | null
+  candidate_texture_sha256: string | null
+  candidate_portrait_sha256: string | null
+  published_texture_sha256: string | null
+  published_portrait_sha256: string | null
+  request_count: number
+  estimated_cost_usd: number | null
+  review_evidence_json: Record<string, unknown> | null
+  review_checklist_json: Partial<ResidentSpriteChecklist> | null
+  review_notes: string | null
+  reviewed_by: string | null
+  reviewed_at: string | null
+  rejection_reason: string | null
+  published_by: string | null
+  published_at: string | null
+  rolled_back_by: string | null
+  rolled_back_at: string | null
+  rollback_reason: string | null
+  error_code: string | null
+  error_message: string | null
+  version: number
+  created_at: string
+  updated_at: string
+}
+
+export interface AdminResidentSpriteRunsResponse {
+  items: AdminResidentSpriteRun[]
+  total: number
+  page: number
+  per_page: number
+}
+
+export interface CreateResidentSpriteRunRequest {
+  resident_id: string
+  appearance?: string
+  gender?: 'male' | 'female' | 'neutral'
+  age_group?: 'young' | 'adult' | 'elder'
+  vibe?: string
+  tags?: string[]
+  direction_policy?: 'mirror_right' | 'generate_right'
+}
+
+function spriteRunPath(runId: string, action = ''): string {
+  return `/admin/resident-sprites/${encodeURIComponent(runId)}${action ? `/${action}` : ''}`
+}
+
+export function getAdminResidentSpriteRuns(
+  token: string,
+  params: { status?: string; resident_id?: string; page?: number; per_page?: number } = {},
+  signal?: AbortSignal,
+): Promise<AdminResidentSpriteRunsResponse> {
+  const qs = new URLSearchParams()
+  if (params.status) qs.set('status', params.status)
+  if (params.resident_id) qs.set('resident_id', params.resident_id)
+  if (params.page != null) qs.set('page', String(params.page))
+  if (params.per_page != null) qs.set('per_page', String(params.per_page))
+  const query = qs.size > 0 ? `?${qs.toString()}` : ''
+  return apiFetch(`/admin/resident-sprites${query}`, {
+    headers: { Authorization: `Bearer ${token}` },
+    signal,
+  })
+}
+
+export function getAdminResidentSpriteRun(
+  token: string,
+  runId: string,
+  signal?: AbortSignal,
+): Promise<AdminResidentSpriteRun> {
+  return apiFetch(spriteRunPath(runId), {
+    headers: { Authorization: `Bearer ${token}` },
+    signal,
+  })
+}
+
+export function createAdminResidentSpriteRun(
+  token: string,
+  data: CreateResidentSpriteRunRequest,
+): Promise<AdminResidentSpriteRun> {
+  return apiFetch('/admin/resident-sprites', {
+    method: 'POST',
+    body: JSON.stringify(data),
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export function progressAdminResidentSpriteRun(
+  token: string,
+  runId: string,
+  data: { action: 'resume' | 'retry'; expected_version: number },
+): Promise<AdminResidentSpriteRun> {
+  return apiFetch(spriteRunPath(runId, 'progress'), {
+    method: 'POST',
+    body: JSON.stringify(data),
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export function reviewAdminResidentSpriteRun(
+  token: string,
+  runId: string,
+  data: {
+    expected_version: number
+    evidence: Record<string, unknown>
+    checklist: ResidentSpriteChecklist
+    notes: string
+  },
+): Promise<AdminResidentSpriteRun> {
+  return apiFetch(spriteRunPath(runId, 'review'), {
+    method: 'PUT',
+    body: JSON.stringify(data),
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+function mutateAdminResidentSpriteRun(
+  token: string,
+  runId: string,
+  action: 'approve' | 'publish',
+  expectedVersion: number,
+): Promise<AdminResidentSpriteRun> {
+  return apiFetch(spriteRunPath(runId, action), {
+    method: 'POST',
+    body: JSON.stringify({ expected_version: expectedVersion }),
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export function approveAdminResidentSpriteRun(
+  token: string,
+  runId: string,
+  expectedVersion: number,
+): Promise<AdminResidentSpriteRun> {
+  return mutateAdminResidentSpriteRun(token, runId, 'approve', expectedVersion)
+}
+
+export function publishAdminResidentSpriteRun(
+  token: string,
+  runId: string,
+  expectedVersion: number,
+): Promise<AdminResidentSpriteRun> {
+  return mutateAdminResidentSpriteRun(token, runId, 'publish', expectedVersion)
+}
+
+export function rejectAdminResidentSpriteRun(
+  token: string,
+  runId: string,
+  expectedVersion: number,
+  reason: string,
+): Promise<AdminResidentSpriteRun> {
+  return apiFetch(spriteRunPath(runId, 'reject'), {
+    method: 'POST',
+    body: JSON.stringify({ expected_version: expectedVersion, reason }),
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export function rollbackAdminResidentSpriteRun(
+  token: string,
+  runId: string,
+  expectedVersion: number,
+  reason: string,
+): Promise<AdminResidentSpriteRun> {
+  return apiFetch(spriteRunPath(runId, 'rollback'), {
+    method: 'POST',
+    body: JSON.stringify({ expected_version: expectedVersion, reason }),
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export async function getAdminResidentSpriteCandidate(
+  token: string,
+  runId: string,
+  kind: 'texture' | 'portrait',
+  signal?: AbortSignal,
+): Promise<Blob> {
+  const response = await apiFetchResponse(spriteRunPath(runId, `candidate/${kind}`), {
+    headers: { Authorization: `Bearer ${token}` },
+    signal,
+  })
+  return response.blob()
 }
 
 export interface AdminForgeSession {

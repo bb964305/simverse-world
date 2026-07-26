@@ -1,4 +1,4 @@
-"""Sprite template registry with 20 pre-annotated character sprites and LLM-based matching."""
+"""Sprite template registry with 25 pre-annotated character slots and LLM-based matching."""
 import logging
 from dataclasses import dataclass, field
 
@@ -20,7 +20,8 @@ class SpriteTemplate:
 
 
 SPRITE_TEMPLATES: list[SpriteTemplate] = [
-    # 20 templates with confirmed texture.png files
+    # Canonical 25 static sprite slots. Generation specifications live in the
+    # versioned frontend catalog; these lightweight labels only drive matching.
     SpriteTemplate("伊莎贝拉", "female", "adult", "elegant", ["graceful", "noble"]),
     SpriteTemplate("克劳斯", "male", "adult", "serious", ["stern", "analytical"]),
     SpriteTemplate("亚当", "male", "young", "energetic", ["athletic", "bold"]),
@@ -41,6 +42,11 @@ SPRITE_TEMPLATES: list[SpriteTemplate] = [
     SpriteTemplate("乔治", "male", "elder", "dignified", ["veteran", "respected"]),
     SpriteTemplate("简", "female", "young", "intellectual", ["bookish", "witty"]),
     SpriteTemplate("埃迪", "male", "young", "punk", ["rebellious", "tech"]),
+    SpriteTemplate("卡门", "female", "adult", "helpful", ["practical", "shopkeeper"]),
+    SpriteTemplate("拉吉夫", "male", "young", "serene", ["painter", "patient"]),
+    SpriteTemplate("瑞恩", "male", "young", "pragmatic", ["engineer", "analytical"]),
+    SpriteTemplate("阿伊莎", "female", "young", "independent", ["bookish", "determined"]),
+    SpriteTemplate("阿比盖尔", "female", "young", "inventive", ["artist", "technical"]),
 ]
 
 _TEMPLATE_DICT_CACHE: list[dict] | None = None

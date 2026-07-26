@@ -16,6 +16,7 @@ from app.routers.admin.world import router as world_router
 from app.routers.admin.social_graph import router as social_graph_router
 from app.routers.admin.offices import router as offices_router
 from app.routers.admin.policies import router as policies_router
+from app.routers.admin.resident_sprites import router as resident_sprites_router
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 router.include_router(dashboard_router)
@@ -33,3 +34,4 @@ router.include_router(world_router)
 router.include_router(social_graph_router)
 router.include_router(offices_router)
 router.include_router(policies_router)
+router.include_router(resident_sprites_router)

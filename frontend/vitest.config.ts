@@ -5,6 +5,9 @@ import react from '@vitejs/plugin-react'
 // visualizer) stays untouched; vitest picks this file up with priority.
 export default defineConfig({
   plugins: [react()],
+  define: {
+    __RESIDENT_SPRITE_ASSET_VERSION__: JSON.stringify('legacy-blocked'),
+  },
   test: {
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],

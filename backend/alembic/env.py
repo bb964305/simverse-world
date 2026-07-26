@@ -9,6 +9,7 @@ from alembic import context
 from app.database import Base
 from app.models.user import User
 from app.models.resident import Resident
+from app.models.resident_sprite_run import ResidentSpriteRun
 from app.models.conversation import Conversation, Message
 from app.models.transaction import Transaction
 from app.models.llm_usage import LLMUsage

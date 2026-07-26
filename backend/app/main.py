@@ -21,6 +21,7 @@ from app.tasks.heat_cron import heat_cron_loop
 from app.tasks.event_cron import event_cron_loop
 from app.tasks.nightly_cron import nightly_cron_loop
 from app.tasks.embedding_backfill import embedding_backfill_loop
+from app.tasks.resident_sprite_worker import resident_sprite_worker_loop
 from app.agent.loop import agent_loop
 from app.http import close_client
 from app.redis_client import close_redis
@@ -91,6 +92,8 @@ async def lifespan(app):
             asyncio.create_task(agent_loop.run()),
             asyncio.create_task(embedding_backfill_loop()),
         ]
+        if settings.resident_sprite_enabled:
+            background_tasks.append(asyncio.create_task(resident_sprite_worker_loop()))
         logger.info("Background loops started in-process (run_background_tasks=true)")
     else:
         logger.info(

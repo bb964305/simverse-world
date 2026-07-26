@@ -84,6 +84,10 @@ services:
       # background loops live in the agent-worker service below, and each API
       # worker relays broadcasts from Redis to its own sockets.
       RUN_BACKGROUND_TASKS: "false"
+      # Candidate sprite artifacts are durable but deliberately outside the
+      # /static mount until an administrator approves and publishes them.
+      RESIDENT_SPRITE_ENABLED: "${RESIDENT_SPRITE_ENABLED:-false}"
+      RESIDENT_SPRITE_ARTIFACT_DIR: /var/lib/simverse/resident-sprites
       # Number of uvicorn workers; scale to CPU. Read by the Dockerfile CMD.
       UVICORN_WORKERS: "${UVICORN_WORKERS:-2}"
     # Persist served static files (uploaded media + AI portraits) across
@@ -92,6 +96,7 @@ services:
     # the lab-v2 control plane (044 line) and are kept alongside media_static.
     volumes:
       - media_static:/app/static
+      - resident_sprite_artifacts:/var/lib/simverse/resident-sprites
       - lab_artifact_released:/var/lib/simverse/artifacts/lab-artifact-released:ro
       - type: bind
         source: ${LAB_ARTIFACT_RECEIPT_TRUST_HOST_DIR:-/dev/null}
@@ -118,10 +123,23 @@ services:
         condition: service_healthy
       bootstrap:
         condition: service_completed_successfully
-    env_file: .env
+    env_file:
+      - path: .env
+      - path: resident-sprite-worker.env
+        required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-changeme}@db:5432/skills_world
       REDIS_URL: redis://redis:6379/0
+      RESIDENT_SPRITE_ENABLED: "${RESIDENT_SPRITE_ENABLED:-false}"
+      RESIDENT_SPRITE_ARTIFACT_DIR: /var/lib/simverse/resident-sprites
+      RESIDENT_SPRITE_CAPABILITY_RECEIPT: /run/secrets/resident-sprite-capability.json
+      RESIDENT_SPRITE_REVOCATION_ROOT: "${RESIDENT_SPRITE_REVOCATION_ROOT:-/var/lib/simverse/resident-sprites/revocations}"
+    volumes:
+      - resident_sprite_artifacts:/var/lib/simverse/resident-sprites
+      - type: bind
+        source: ${RESIDENT_SPRITE_CAPABILITY_RECEIPT_HOST_PATH:-/dev/null}
+        target: /run/secrets/resident-sprite-capability.json
+        read_only: true
 
   # Standalone Lab Runner (recovery plan Phase 8 / status report gap #7): consumes
   # the Redis run queue and executes sandbox adapters in a process SEPARATE from
@@ -519,6 +537,7 @@ volumes:
   lab_artifact_quarantine:
   lab_artifact_released:
   media_static:
+  resident_sprite_artifacts:
 
 networks:
   lab-runtime-control:

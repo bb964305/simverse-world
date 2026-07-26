@@ -7,6 +7,7 @@ NoReferencedTableError on relationships into un-imported tables.
 """
 import app.models.user  # noqa: F401
 import app.models.resident  # noqa: F401
+import app.models.resident_sprite_run  # noqa: F401
 import app.models.conversation  # noqa: F401
 import app.models.transaction  # noqa: F401
 import app.models.system_config  # noqa: F401

@@ -9,6 +9,7 @@ import {
   skipOnboarding,
 } from '../services/api'
 import type { ResidentListItem, SpriteTemplate } from '../services/api'
+import { staticResidentSpriteUrl } from '../game/residentSpriteRuntime'
 
 interface PresetCard {
   slug: string
@@ -317,7 +318,7 @@ function PresetCardItem({ card, isSelected, disabled, onSelect }: PresetCardItem
         <div style={{
           width: 32,
           height: 32,
-          backgroundImage: `url(/assets/village/agents/${encodeURIComponent(card.sprite_key)}/texture.png)`,
+          backgroundImage: `url(${staticResidentSpriteUrl(card.sprite_key)})`,
           backgroundPosition: '-32px 0px',
           backgroundSize: '96px 128px',
           imageRendering: 'pixelated',

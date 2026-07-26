@@ -53,6 +53,9 @@ class Resident(Base):
     resident_type: Mapped[str] = mapped_column(String(20), default="npc")
     reply_mode: Mapped[str] = mapped_column(String(20), default="manual")
     portrait_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    sprite_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    sprite_content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    sprite_generation_run_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     # --- Agent fields (P3: Agent Loop) ---
     home_tile_x: Mapped[int | None] = mapped_column(Integer, nullable=True)

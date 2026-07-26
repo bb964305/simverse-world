@@ -1,4 +1,4 @@
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 _DEFAULT_JWT_SECRET = "dev-secret-change-in-production"
@@ -147,6 +147,23 @@ class Settings(BaseSettings):
     # paths resolve against the process CWD: `backend/` in dev (uvicorn runs
     # there), `/app` in the Docker image — both yield <cwd>/static.
     static_dir: str = "static"
+    # Durable, non-public working tree produced by the resident sprite worker.
+    # Admin review/publish APIs reject every candidate path outside this root.
+    resident_sprite_enabled: bool = False
+    resident_sprite_artifact_dir: str = "var/resident-sprites"
+    resident_sprite_provider_base_url: str = ""
+    resident_sprite_provider_api_key: str = ""
+    resident_sprite_provider_model: str = "gpt-image-2"
+    resident_sprite_provider_timeout: float = 180.0
+    # Test-only opt-in. Never enable for production traffic or credentials.
+    resident_sprite_allow_insecure_http_test: bool = False
+    # Conservative operator-supplied upper bound, not provider billing data.
+    # Zero means unknown; the admin API/UI must not present it as zero spend.
+    resident_sprite_request_cost_upper_bound_usd: float = Field(default=0.0, ge=0.0)
+    resident_sprite_capability_receipt: str = ""
+    resident_sprite_revocation_root: str = ""
+    resident_sprite_worker_poll_seconds: float = 5.0
+    resident_sprite_worker_lease_seconds: int = 7200
     # Media uploads live UNDER static_dir so they are reachable at
     # /static/uploads/... . (The old default "backend/static/uploads" pointed
     # outside the served root in Docker, so every upload URL 404'd.)

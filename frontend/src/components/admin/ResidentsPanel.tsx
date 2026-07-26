@@ -4,6 +4,10 @@ import {
   adminEditResident,
 } from '../../services/api'
 import type { AdminResident } from '../../services/api'
+import { ResidentSpritesPanel } from './ResidentSpritesPanel'
+import '../../styles/resident-sprites.css'
+
+const RESIDENT_SPRITE_ENABLED = import.meta.env.VITE_RESIDENT_SPRITE_ENABLED === 'true'
 
 const DISTRICT_OPTIONS = [
   { value: '', label: '全部地点' },
@@ -145,6 +149,7 @@ interface ResidentsPanelProps {
 }
 
 export function ResidentsPanel({ token }: ResidentsPanelProps) {
+  const [panelMode, setPanelMode] = useState<'directory' | 'sprites'>('directory')
   const [residents, setResidents] = useState<AdminResident[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -199,6 +204,34 @@ export function ResidentsPanel({ token }: ResidentsPanelProps) {
 
   return (
     <div>
+      <div role="tablist" aria-label="居民管理视图" style={{ display: 'inline-flex', padding: 2, marginBottom: 16, border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-input)' }}>
+        {([
+          ['directory', '居民资料'] as const,
+          ...(RESIDENT_SPRITE_ENABLED ? [['sprites', '形象工作台'] as const] : []),
+        ]).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            role="tab"
+            aria-selected={panelMode === value}
+            onClick={() => setPanelMode(value)}
+            style={{
+              padding: '6px 12px',
+              border: 0,
+              borderRadius: 4,
+              background: panelMode === value ? '#ffffff12' : 'transparent',
+              color: panelMode === value ? 'white' : 'var(--text-muted)',
+              fontSize: 12,
+              fontWeight: panelMode === value ? 700 : 500,
+              cursor: 'pointer',
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {RESIDENT_SPRITE_ENABLED && panelMode === 'sprites' ? <ResidentSpritesPanel token={token} /> : <>
       {/* Filter bar */}
       <div style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
         <input
@@ -429,6 +462,7 @@ export function ResidentsPanel({ token }: ResidentsPanelProps) {
           </button>
         </div>
       )}
+      </>}
     </div>
   )
 }
