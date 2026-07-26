@@ -50,6 +50,14 @@ async def open_election(db, *, candidate_slugs: list[str] | None = None, days: i
         ]
         if len(candidates) < 2:  # fallback: highest-heat residents
             candidates = sorted(residents, key=lambda r: r.heat or 0, reverse=True)[:3]
+    if settings.rep_enabled:
+        from app.services.reputation_service import score_from_meta
+        # Stable sort: equal reputation preserves the existing SBTI/heat order.
+        candidates = sorted(
+            candidates,
+            key=lambda resident: score_from_meta(resident.meta_json),
+            reverse=True,
+        )
     candidates = candidates[:4]
     if len(candidates) < 2:
         return None
