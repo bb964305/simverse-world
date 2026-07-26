@@ -52,6 +52,10 @@ async def _skim_town_tax(db, gross: int, rate: float, reason: str) -> int:
     if not settings.town_treasury_enabled:
         return 0
     try:
+        # S2-5: once policy storage is enabled, the typed tax_rate becomes the
+        # single town tax ratio. Gate off keeps the legacy per-channel setting.
+        from app.services import fiscal_policy_service
+        rate = await fiscal_policy_service.tax_rate(db, fallback=rate)
         cut = int(gross * rate)
         if cut <= 0:
             return 0
