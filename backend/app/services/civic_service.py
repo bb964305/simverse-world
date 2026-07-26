@@ -150,7 +150,7 @@ async def run_npc_voting(db) -> int:
     if not polls:
         return 0
     residents = (await db.execute(
-        select(Resident).where(Resident.resident_type == "npc")
+        select(Resident).where(Resident.is_autonomous)
     )).scalars().all()
     if not residents:
         return 0
@@ -524,7 +524,7 @@ async def _eligible_voter_count(db) -> int:
     """Quorum denominator: the NPC residents who could have voted."""
     return int((await db.execute(
         select(func.count()).select_from(Resident).where(
-            Resident.resident_type == "npc")
+            Resident.is_autonomous)
     )).scalar() or 0)
 
 
@@ -646,7 +646,7 @@ async def maybe_spawn_lecture_debate(db, event: dict) -> bool:
         return False
     try:
         residents = (await db.execute(
-            select(Resident).where(Resident.resident_type == "npc")
+            select(Resident).where(Resident.is_autonomous)
         )).scalars().all()
         # socially active (So1 != L), lecturer excluded
         pool = []

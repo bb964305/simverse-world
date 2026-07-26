@@ -64,6 +64,27 @@ async def test_npc_voting_is_rule_based_and_idempotent(db_session):
 
 
 @pytest.mark.anyio
+async def test_npc_voting_excludes_registered_player_residents(db_session):
+    npc = _res("autonomous-voter", "自治居民")
+    player = _res(
+        "registered-player", "玩家居民",
+        resident_type="player", creator_id="player-user",
+    )
+    db_session.add_all([npc, player])
+    await db_session.commit()
+    poll = await civic_service.propose(
+        db_session,
+        "是否增设夜间照明",
+        [{"label": "支持", "effect": None}, {"label": "反对", "effect": None}],
+    )
+
+    assert await civic_service.run_npc_voting(db_session) == 1
+    await db_session.refresh(poll)
+    assert poll.options_json[0]["_npc_voters"] == [npc.slug]
+    assert sum(int(o.get("npc_votes", 0)) for o in poll.options_json) == 1
+
+
+@pytest.mark.anyio
 async def test_npc_vote_leans_toward_liked_proposer(db_session):
     """A warm tie to the proposer flips even a conservative toward the lead
     option; without the tie the conservative stays with the status quo."""
