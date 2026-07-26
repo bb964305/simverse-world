@@ -15,6 +15,13 @@ What it deletes (player characters are NEVER touched):
 
 Everything runs in one session against DATABASE_URL, so the same script works
 on the sqlite dev database and the production Postgres.
+
+"Player characters are NEVER touched" is now enforced, not just documented:
+``purge_residents`` refuses a target list containing a player character unless
+the caller passes ``allow_players=True``. Before that guard existed the promise
+held only for the automatic path — 2026-07-25 16:53 a hand-written roster
+migration called ``purge_residents`` directly with its own id list and destroyed
+12 player characters.
 """
 import asyncio
 
@@ -50,6 +57,15 @@ LEGACY_BUILTIN_SLUGS = {
 NEW_ROSTER_SLUGS = {c["slug"] for c in PRESET_CHARACTERS}
 
 
+class PlayerPurgeRefused(RuntimeError):
+    """``purge_residents`` was handed a player character without the explicit
+    ``allow_players=True`` opt-in.
+
+    Raised *before* the first DELETE, so a refusal leaves the database exactly
+    as it was — including the legitimate NPC targets in the same call.
+    """
+
+
 async def find_targets(db) -> list[Resident]:
     """Old built-in NPCs to remove. Player residents are always excluded."""
     result = await db.execute(
@@ -65,11 +81,50 @@ async def find_targets(db) -> list[Resident]:
     return list(result.scalars().all())
 
 
-async def purge_residents(db, targets: list[Resident]) -> None:
+async def _assert_no_players(db, ids: list[str]) -> None:
+    """Refuse a target list containing a player character.
+
+    2026-07-25 16:53: a hand-written roster migration skipped
+    :func:`find_targets` (whose first condition is already
+    ``resident_type != "player"``) and called :func:`purge_residents` with its
+    own id list. That function trusted the list and cascaded across a dozen
+    tables, destroying 12 player characters. This is the guard it lacked.
+
+    Two deliberate choices:
+
+    - **Raise, don't skip.** A silent skip returns success to a caller that
+      asked for those ids to be gone, so the caller believes the purge
+      completed. The 07-25 script would have "succeeded" either way; only a
+      refusal would have stopped it.
+    - **Read the database, not the passed objects.** The offending call site
+      built its own target list, so ``target.resident_type`` is exactly the
+      field that cannot be trusted. The authoritative check is a query by id.
+    """
+    rows = (await db.execute(
+        select(Resident.slug).where(
+            Resident.id.in_(ids), Resident.resident_type == "player",
+        )
+    )).scalars().all()
+    if rows:
+        raise PlayerPurgeRefused(
+            f"refusing to purge {len(rows)} player character(s): "
+            f"{', '.join(sorted(rows))}. Player characters are never part of a "
+            "built-in roster reset (see find_targets); pass allow_players=True "
+            "only if removing a player's own avatar is genuinely intended."
+        )
+
+
+async def purge_residents(
+    db, targets: list[Resident], *, allow_players: bool = False,
+) -> None:
     ids = [r.id for r in targets]
     slugs = [r.slug for r in targets]
     if not ids:
         return
+
+    # Guard first: no DELETE has run yet, so a refusal is a true no-op.
+    if not allow_players:
+        await _assert_no_players(db, ids)
 
     # Messages hang off conversations — delete them first.
     conv_ids = [
