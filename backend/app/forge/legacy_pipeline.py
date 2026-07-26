@@ -42,6 +42,7 @@ from app.llm.client import get_client
 from app.llm.json_extract import extract_json_object
 from app.llm.metering import record_usage
 from app.models.resident import Resident
+from app.services.civic_membership import UGC_RESIDENT_TYPE
 from app.services.resident_placement import (
     SPRITE_KEYS,
     _generate_slug,
@@ -143,10 +144,11 @@ async def run_generation_pipeline(forge_id: str, db: AsyncSession) -> None:
         if sbti:
             forge_meta = update_meta_with_sbti(forge_meta, sbti)
 
-        # Create resident
+        # Create resident — UGC type, no political rights (see civic_membership)
         resident = Resident(
             slug=slug, name=name, district=district, status="idle", heat=0,
             model_tier="standard", token_cost_per_turn=1, creator_id=session["user_id"],
+            resident_type=UGC_RESIDENT_TYPE,
             ability_md=session["ability_md"], persona_md=session["persona_md"],
             soul_md=session["soul_md"],
             meta_json=forge_meta,
@@ -295,9 +297,11 @@ asyncio.run(call_llm())
         if sbti:
             quick_meta = update_meta_with_sbti(quick_meta, sbti)
 
+        # Quick path — same UGC type as the full path above.
         resident = Resident(
             slug=slug, name=name, district=district, status="idle", heat=0,
             model_tier="standard", token_cost_per_turn=1, creator_id=session["user_id"],
+            resident_type=UGC_RESIDENT_TYPE,
             ability_md=session["ability_md"], persona_md=session["persona_md"],
             soul_md=session["soul_md"],
             meta_json=quick_meta,

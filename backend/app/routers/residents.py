@@ -19,6 +19,7 @@ from app.services.auth_service import get_current_user
 from app.services.scoring_service import compute_star_rating
 from app.services.sbti_service import compute_sbti, update_meta_with_sbti
 from app.services.resident_placement import allocate_resident_location, _generate_slug, SPRITE_KEYS
+from app.services.civic_membership import UGC_RESIDENT_TYPE
 
 router = APIRouter(prefix="/residents", tags=["residents"])
 
@@ -176,9 +177,13 @@ async def resident_import(body: ImportBody, request: Request, db: AsyncSession =
     meta = {"origin": "import"}
     if body.sbti:
         meta["sbti"] = body.sbti
+    # UGC type: an imported card is a player-authored character (creator_id +
+    # origin="import"), not the player's avatar — it inhabits the town but
+    # holds no political rights. Never rely on the model default here.
     resident = Resident(
         slug=slug, name=body.name.strip(), district=district, status="idle", heat=0,
-        creator_id=user.id, ability_md=body.ability_md, persona_md=body.persona_md,
+        creator_id=user.id, resident_type=UGC_RESIDENT_TYPE,
+        ability_md=body.ability_md, persona_md=body.persona_md,
         soul_md=body.soul_md, meta_json=meta, sprite_key=_random.choice(SPRITE_KEYS),
         tile_x=tx, tile_y=ty, home_location_id=home,
     )
@@ -273,6 +278,7 @@ async def import_resident(
     if sbti:
         final_meta = update_meta_with_sbti(final_meta, sbti)
 
+    # UGC type: same creation act as import-card, just a file upload.
     resident = Resident(
         slug=slug,
         name=name,
@@ -282,6 +288,7 @@ async def import_resident(
         model_tier="standard",
         token_cost_per_turn=1,
         creator_id=user.id,
+        resident_type=UGC_RESIDENT_TYPE,
         ability_md=ability_md,
         persona_md=persona_md,
         soul_md=soul_md,

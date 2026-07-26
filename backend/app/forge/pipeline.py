@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from app.models.forge_session import ForgeSession
 from app.models.llm_usage import LLMUsage
 from app.models.resident import Resident
+from app.services.civic_membership import UGC_RESIDENT_TYPE
 from app.forge.router_stage import InputRouter
 from app.forge.research_stage import ResearchStage
 from app.forge.extraction_stage import ExtractionStage
@@ -152,9 +153,12 @@ class ForgePipeline:
             soul_text=soul_md,
         )
 
+        # UGC type: the forge builds a player-authored character, not the
+        # player's avatar — it inhabits the town but holds no political rights.
         resident = Resident(
             slug=slug, name=name, district=district, status="idle", heat=10,
             model_tier="standard", token_cost_per_turn=1, creator_id=session.user_id,
+            resident_type=UGC_RESIDENT_TYPE,
             ability_md=ability_md, persona_md=persona_md, soul_md=soul_md,
             meta_json={"origin": "forge"},
             sprite_key=random.choice(SPRITE_KEYS),

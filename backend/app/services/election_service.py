@@ -37,7 +37,7 @@ async def open_election(db, *, candidate_slugs: list[str] | None = None, days: i
     from app.services import civic_service
 
     residents = (await db.execute(
-        select(Resident).where(Resident.is_autonomous)
+        select(Resident).where(Resident.is_civic_voter)
     )).scalars().all()
     by_slug = {r.slug: r for r in residents}
 

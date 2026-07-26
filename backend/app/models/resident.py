@@ -4,6 +4,8 @@ from sqlalchemy import String, Integer, Float, DateTime, Text, JSON, ForeignKey
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
+# Pure constants, zero imports of its own — safe to pull into the model layer.
+from app.services.civic_membership import CIVIC_VOTER_TYPES, SIM_RESIDENT_TYPES
 
 
 class Resident(Base):
@@ -89,16 +91,35 @@ class Resident(Base):
 
     @hybrid_property
     def is_autonomous(self) -> bool:
-        """Whether this resident may be driven by NPC-only world systems.
+        """Whether this resident is a simulated inhabitant of the world.
 
         ``resident_type`` remains the persisted identity field; this hybrid is
-        the canonical eligibility predicate for both loaded objects and SQL
-        queries. Player residents are registered members of the world, but are
-        never autonomous actors.
+        the canonical *population* predicate for both loaded objects and SQL
+        queries — the agent loop, the town-hall roster, duty lookups and the
+        mayor-meta sweeps all read it. Player avatars are registered members of
+        the world, but are never autonomous actors.
+
+        Being an inhabitant is **not** the same as holding political rights:
+        player-authored (UGC) residents live in the town but do not govern it.
+        Use :attr:`is_civic_voter` for anything ballot-shaped.
         """
-        return self.resident_type == "npc"
+        return self.resident_type in SIM_RESIDENT_TYPES
 
     @is_autonomous.inplace.expression
     @classmethod
     def _is_autonomous_expression(cls):
-        return cls.resident_type == "npc"
+        return cls.resident_type.in_(SIM_RESIDENT_TYPES)
+
+    @hybrid_property
+    def is_civic_voter(self) -> bool:
+        """Whether this resident holds political rights (active *and* passive).
+
+        Narrow by construction: the civic ballot, the quorum denominator and
+        the mayor candidate pool are the only three reads that may use it.
+        """
+        return self.resident_type in CIVIC_VOTER_TYPES
+
+    @is_civic_voter.inplace.expression
+    @classmethod
+    def _is_civic_voter_expression(cls):
+        return cls.resident_type.in_(CIVIC_VOTER_TYPES)
