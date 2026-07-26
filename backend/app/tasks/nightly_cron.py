@@ -384,6 +384,20 @@ async def run_nightly_jobs(*, once_per_day: bool = False) -> None:
         except Exception:
             logger.error("Realism circle detection failed", exc_info=True)
 
+    # S1-1: aggregate public reputation from gossip evidence and mood.
+    # Independent default-off gate; one fail-open block like the other social
+    # foundation jobs, with no LLM calls and no schema writes.
+    try:
+        from app.config import settings as _rep_settings
+        if _rep_settings.rep_enabled:
+            from app.services.reputation_service import recompute
+            async with async_session() as db:
+                n = await recompute(db)
+            if n:
+                logger.info("S1-1: reputation recomputed for %d residents", n)
+    except Exception:
+        logger.error("S1-1 reputation recompute failed", exc_info=True)
+
     # S1-5: town public spending / treasury reconciliation (realism-family
     # pattern: gate INSIDE the cron, own try/except, fail-open; skipped whole
     # while town_treasury_enabled is False, so a disabled world touches no DB).

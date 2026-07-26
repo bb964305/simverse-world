@@ -363,6 +363,12 @@ async def _npc_choice(db, resident, poll, opts, relation_service, by_slug=None) 
         other = (by_slug or {}).get(target)
         if other is None:
             continue
+        if settings.rep_enabled:
+            from app.services.reputation_service import score_from_meta
+            scores[i] += (
+                settings.rep_vote_trust_weight
+                * score_from_meta(other.meta_json)
+            )
         try:
             pair = await relation_service.get_pair(db, resident.id, other.id)
             if pair is not None and pair.affinity:

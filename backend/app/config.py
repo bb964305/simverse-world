@@ -544,6 +544,20 @@ class Settings(BaseSettings):
     polis_opinion_neg_repel: bool = False      # negative mood 是否轻微远离(默认仅"不靠拢")
     polis_opinion_digest_issues: int = 2       # 日报 opinion_line 最多点名的议题数
     polis_opinion_variance_split: float = 0.15 # opinion_line 措辞阈值: 方差≥此值读作"分歧"
+    # ── S1-1 公共声誉轴 (REP_*) ───────────────────────────────────────
+    # Default False keeps every existing read/write path byte-equivalent.
+    # Nightly aggregation is pure-rule and adds no LLM calls or migrations.
+    rep_enabled: bool = False
+    rep_min: float = -1.0
+    rep_max: float = 1.0
+    rep_neutral: float = 0.0
+    rep_ema_alpha: float = 0.3
+    rep_gossip_base_tone: float = -0.3
+    rep_distortion_penalty: float = -0.2
+    rep_mood_weight: float = 0.2
+    rep_vote_trust_weight: float = 1.0
+    rep_credit_min_score: float = -0.3
+
     # ── S1-5 镇财政闭环 (KICKOFF_S1-5_treasury.md §3, TOWN_* env prefix) ────
     # Independent gate, default False → byte-level fallback to the status quo:
     # wages keep being MINTED from nothing, resident sales are untaxed, the
