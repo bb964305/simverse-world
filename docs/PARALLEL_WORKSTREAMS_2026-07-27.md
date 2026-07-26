@@ -64,16 +64,60 @@
 
 这与 F1 第 3 项是同一个纪律：阈值必须由实测分布决定，不能拍脑袋——`rep_credit_min_score = -0.3` 之所以变成装饰性闸门，正是因为它是拍出来的。
 
-选熟识度而非 `total_conversations` 的理由：后者衡量的是创建者给了多少关注，前者衡量的是这个角色是否真的融入了小镇的社会网络——公民权应当由后者决定。自我指涉不会死锁：内置阵容本身是 `npc`、天然有政治权利，新居民总能通过与他们熟识达标。
+选熟识度而非 `total_conversations` 的理由：后者衡量的是创建者给了多少关注，前者衡量的是这个角色是否真的融入了小镇的社会网络——公民权应当由后者决定。
+
+**门槛口径的两条硬语义**（不满足则整个机制失效，推导见探查报告 §4.2）
+
+- **①的锚点不是 `created_at`，而是「本轮公民资格起算点」**：取 `civic_standing_history` 里该居民最近一条档位变更的世界时间，无历史行时回落 `real_to_world(created_at)`。若锚 `created_at`，T2 把一个已在镇 200 世界日的 UGC 降权后，F2 开闸当晚条件①对它立刻重新满足——**T2 的降权对存量整批走过场**。
+- **②的同伴取自「锚定公民集」，不是活的 `is_civic_voter`**：否则判定的转移函数自指，产生级联升降与「脱锚公民团」（某人的 N 位同伴全是已晋升 UGC、零条内置边）。锚定公民集 = 内置阵容（`creator_id == SYSTEM_USER_ID`）∪ 已过考察期的归化公民。
+
+判定整体是 **snapshot 语义**：pass 开始一次性冻结输入，末尾一次 commit，中途不重读选民集，否则结果依赖数据库行序。判定做成纯函数，测试用打乱顺序断言输出集合恒等。
+
+### 4.3 撤销（降级／逐出的第一档）
+
+**状态模型 = 出身（provenance）× 档位（standing）二维。** 档位有序三档，正好对应「降级与逐出是同一套机制的不同强度」：
+
+```
+citizen  有票 · 在镇 · 被 loop 驱动          ← 晋升终点
+denizen  无票 · 在镇 · 被 loop 驱动          ← 降级落点（本轮实现）
+exiled   无票 · 不在镇 · 不被驱动 · 不在地图  ← 逐出落点（本轮不实现，仅预留）
+```
+
+v1 档位仍编码在 `resident_type`，**不加列、不加取值**；但业务代码不得再直接读写该列，一律走 `civic_membership` 的派生函数与两个写入口 `grant_citizenship` / `revoke_citizenship(tier="demote"|"exile")`。`"exiled"` 分支现在就写进枚举并 `raise NotImplementedError`——逐出上线时是填空，不是改签名。
+
+**不新增第 5 个 type（如 `"exiled"`）的理由**：地图与感知**不读 type**——公开名录是全表（`app/services/resident_service.py:6-18` 无 where），tile 占用也是全表。新增取值只会掉出 `SIM_RESIDENT_TYPES`，产出「仍在地图上、仍被搭话，只是自己不再 tick」的活体雕像。逐出要收窄的是第四族谓词，这是逐出唯一真正的新增面。
+
+**触发方式：v1 是事件驱动，不是门槛反向。** 夜间任务**只升，永不自动降**——门槛②读的 `familiarity` 有周衰减，接成降级判据等于让公民权跟着社交波动飘；而「违规逐出」本来就是显式事件。自动下滑降级单列开关 `CIVIC_AUTO_DEMOTION_ENABLED` 默认关，开启必须同时具备滞后三件套：滞后区间（`Δ ≥ 0.10`，须严格大于单次最大相关增量 `0.05`）、最短任期（`≥ 12` 世界日 = 一张 poll 的生命周期）、冷却期。
+
+**撤销是有序复合事务，顺序不可颠倒**：防呆 → 卸民选职务 → 清 `meta_json['mayor']` → 清 `system_config['current_mayor']` → 改档位 → 写历史行 → 断言 → 广播。若先改档位再清理，`meta_json['mayor']` 会永久卡死（清扫扫不到他），可产生两个 mayor 并双份工资倍率。
+
+**只卸民选职务**（`fill_strategy == "election"`，今天只有 `mayor`）；`town_clerk` / `postman` / `doctor` 是**劳动职务不受影响**——`offices` 表把两类职务混在一张表里，一刀切会误伤。
+
+**通用约束（不止本线适用）**：凡是清理「已离开集合 S 的居民」的扫描，都不能用 S 本身做 WHERE。`office_service.py:222` 与 `election_service.py:141` 两处现在正是这么写的，降级档侥幸命中，逐出档天然自锁。
+
+**在途投票：开票时冻结分母，不实现撤票。** 快照写进 `options_json[0]['_eligible_at_open']`。幽灵票保留并写成设计语义「投票时具备资格即计票」——`_npc_voters` 是扁平 slug 列表，没存票的归属，撤票要改结构且要兼容存量 poll。
+
+**防呆（对标 `PlayerPurgeRefused`）**：新增 `CivicStandingRefused`，在第一条 UPDATE 之前抛出，使拒绝是真正的 no-op。**raise 而非静默跳过；查库而非信传入对象**。绝对不可碰：玩家化身（`"player"` 且查 `users.player_resident_id` 复核）、内置阵容（`creator_id == SYSTEM_USER_ID`）、admin `preset`、**无晋升记录者**——撤销是晋升的严格逆操作，白名单而非泛谓词。
 
 **边界**
-- 晋升是**单向**的，v1 不做降级（YAGNI）
-- 开关 `CIVIC_PROMOTION_ENABLED` 默认关，关闭时行为与本批开工前逐字节一致
-- 零迁移：只改 `resident_type` 列值
+- 撤销 v1 只做 `demote` 档；`exile` 档只留签名与枚举，不实现
+- 开关 `CIVIC_PROMOTION_MODE ∈ {off, shadow, on}` 默认 `off`；`off` 时行为与本批开工前逐字节一致
+- **「零迁移」边界改为「零数据迁移」**：允许一次纯建表 additive migration（`civic_standing_history`），且该迁移不得与开闸同批
 
-**独占文件**：`app/services/civic_membership.py`、新建 `app/tasks/civic_promotion.py`、对应测试。**不改** `nightly_cron.py`（接线延到收口）。
+**为什么必须建表而不是塞 `meta_json`**：硬门「可回滚」需要载体，而 `meta_json` 有 7 个 read-modify-write 写入方、agent loop 也在同一批居民上写，滞后状态被静默覆盖 = 最短任期与冷却期失效，且只在并发窗口发生、测试抓不到；它还是 `sa.JSON` 无法索引，并由多个无鉴权前台接口原样公开——**撤销原因文本绝不能进去**。该表同时是上面「公民时钟锚点」的载体。
 
-**硬门**：晋升可观测（burn-in 边界探针要能显示晋升队列与已晋升数）、可回滚（晋升动作留下可反向的记录）。
+**独占文件**：`app/services/civic_membership.py`、新建 `app/tasks/civic_promotion.py`、新建模型与迁移、`app/routers/admin/residents.py:117-118`（唯一的 `resident_type` 运行时写入竞争者，改为调用写入口）、`app/services/election_service.py:135-193`（`install_mayor` 的结票复核与事务化，F1/F3 都不覆盖此区）、对应测试。**不改** `nightly_cron.py`（接线延到收口，位置写死在 `close_due_polls` 之后、`run_npc_voting` 之前）。
+
+**硬门**
+- 晋升与撤销均可观测：探针须输出 `resident_type × provenance` 交叉表、晋升队列、翻转统计。判泄漏的条件改为「provenance=UGC 且 `is_civic_voter` 为真、但查不到晋升记录」——现有探针判的是常量集合被拓宽，F2 只改行值不改集合，**永远不会触发**
+- 「最近 7 世界日翻转数 > 0」是**告警条件**，不是信息项
+- 可回滚：每次档位变更落一行 `civic_standing_history`
+
+### 4.4 顺带收口的既有缺陷
+
+**`reputation_service.py:74` 是第 11 处读点，上一轮收口漏掉了**——它是裸的 `Resident.resident_type == "npc"`，既不走 `is_civic_voter` 也不走 `is_autonomous`（本会话已独立复核）。须归到**人口口径**改为 `is_autonomous`：声誉是社会属性不是政治权利。不改的后果是被降级者退出夜间声誉重算、分数永久冻结在降级前那一刻，而 `election_service.py:53-60` 的候选排序读的正是这个冻结值；将来「违规扣声誉」若先改档位再扣分，扣分会因这行字面量永不生效。
+
+F2 开工前先做一次全仓 `resident_type` 字面量分类，任何未归类的 `== "npc"` 都是半状态源。
 
 ## 5. 线 F3 · 官员任期 + 卸任审计
 
@@ -85,9 +129,11 @@
 - 「声誉影响」**不在本线**，切成收口接线步（依赖 F1 的修复后语义）
 - 开关默认关；`polis_office_mayor_term_days` 保持 0 直到本线验收通过
 
-**独占文件**：`app/services/office_service.py`、新建 `app/tasks/office_audit.py`、对应测试。对 `election_service.py` 只 import 调用，不改函数体。**不改** `nightly_cron.py`。
+**独占文件**：`app/services/office_service.py`、新建 `app/tasks/office_audit.py`、对应测试。对 `election_service.py` 只 import 调用，不改函数体（`install_mayor` 的收口归 F2，见 §4.3）。**不改** `nightly_cron.py`。
 
-**硬门**：任期到期后世界不得出现「无限期无镇长」状态——须有测试推进世界时钟越过 `term_ends_at` 并断言补选已开。
+**与 F2 的接口约定**：F2 的撤销只保证职位出缺并广播 `civic_standing_changed`，补选由 F3 的钩子接手（收口时接线）。允许的空缺上限 = 1 个夜间周期，超出由探针报红旗。
+
+**硬门**：任期到期后世界不得出现「无限期无镇长」状态——须有测试推进世界时钟越过 `term_ends_at` 并断言补选已开。注意 `polis_office_mayor_term_days = 0` 且 `term_check` 被 gate 整段跳过时，**gate 开与关都没有自动收回路径**，撤销是唯一的下台方式；两种 gate 状态都要有测试覆盖。
 
 ## 6. 线 T · 运维观测
 
@@ -100,13 +146,30 @@
 | T3 | 新开一张 poll 取真实投票分布 | 复核 `_npc_choice` 修复与 SBTI 回填的效果；现存 3 张 poll 全部早于回填且不重投，取不到样本 |
 | T4 | 25 / 40 名自治居民的扩容与成本测试 | 真实 PostgreSQL / Redis / WebSocket，非 mock |
 
-**部署前须复核**（本会话未实测，来源为 `ops-deploy-2026-07-26-report.md`）：vm212 的 alembic 链头是否确为 049；`TOWN_TREASURY_ENABLED` / `POLIS_POLICY_ENABLED` / `POLIS_POLICY_APPROVAL_ENABLED` 是否确为 true。
+**部署前须复核**（本会话未实测，来源为 `ops-deploy-2026-07-26-report.md`）：vm212 的 alembic 链头是否确为 049；`TOWN_TREASURY_ENABLED` / `POLIS_POLICY_ENABLED` / `POLIS_POLICY_APPROVAL_ENABLED` 是否确为 true；`REALISM_RELATIONS_ENABLED` 是否确为 true（`.env.example:448` 记录的生产决策是 true，F2 条件②的 familiarity 主增长路径挂在它上面）；`offices` 表是否有迁移 046 遗留的陈旧 `holder_slug`。
+
+**T2 的三条硬约束**
+
+1. **目标谓词必须排除已晋升者**：`meta_json.origin ∈ {forge, import, quick_forge}` 或 `creator_id` 为真实用户 id，**且**无 `to=citizen` 的历史行。不要用 `creator_id` 单条判定——迁移 045 让账号注销后它变 NULL，内置阵容是 `SYSTEM_USER_ID`，admin preset 写字面量 `"system"`，三值混合；也不要用 `origin` 单条一刀切，极老的 UGC 行不保证带 origin。残差人工点名复核。
+2. **不可重放**：执行后在 `system_config` 写 `civic_backfill_done`；脚本启动时标记已存在且未带 `--force-rerun` 则拒绝退出。F2 上线后重放一次 = 大规模剥夺公民权且零告警。
+3. **必须是进仓库、被评审、`--dry-run` 为默认值的 `backend/scripts/` 脚本**。禁止在 vm212 上手写一次性 SQL——07-25 的根因正是「手工脚本自带 id 列表绕过 `find_targets`」。
+
+T2 与 F2 共用同一份「谁是 UGC」判定（落在 `civic_membership.py`，两边 import），但触发路径分离、不得由同一次部署同时首跑。两边各写一份必然漂移：T2 降了一批、F2 认为其中一部分不是 UGC 因而永不晋升 → 永久二等公民，正是本线要修的问题复发。
 
 ## 7. 顺序约束（红线）
 
-**T2 存量回填必须在 F2 晋升机制上线之前完成，且二者分属不同变更。**
+原「T2 先于 F2」这一条不足以覆盖，实际须切成**四次独立变更，顺序不可合并**：
 
-先由 T2 把全部存量 UGC 降权为 `resident`，之后由 F2 的定时任务把达标者自然升回 `npc`。若顺序颠倒或合并为一次变更，就会在同一个窗口内既动数据又改行为——即 2026-07-25 事故所处的窗口。
+```
+① 建表迁移 civic_standing_history（纯 DDL，零数据行为）   ← F2 交付的第一步，必须先于 T2
+② T2 存量回填（一次性脚本，数据变更）
+③ F2 代码合入（CIVIC_PROMOTION_MODE=off，零数据写）
+④ shadow 观察 ≥ 3 个夜间周期 → 开闸（单独一次变更，只翻开关）
+```
+
+①先于②的理由：T2 需要写一行历史行作为「公民时钟锚点」，否则 §4.2 的锚点回落到 `created_at`，存量整批在开闸当晚被升回。若运维时序不允许，则走降级方案——F2 首次读取时把无历史行的 UGC 的 anchor 取 `max(created_at 对应世界时间, T2 完成标记的世界时间)`，spec 实现时须写清哪条路径生效。
+
+④的 shadow 态执行完整候选计算与**全部防呆检查**，把当晚会晋升/撤销的名单与每人的证据写进日志与探针，**不执行任何 UPDATE**。理由是首夜爆炸半径不可预演——不是「规模无人知晓」（§4.2 的只读标定本来就能测出候选规模）。
 
 其余三条功能线之间无顺序依赖。
 
@@ -114,8 +177,8 @@
 
 线全部完成后，按序统一处理：
 
-1. `config.py` / `.env.example`：三条线的新开关一次性补齐（`REP_*` 重标定值、`CIVIC_PROMOTION_*`、`POLIS_OFFICE_*` 任期相关）
-2. `nightly_cron.py`：接入 F2 的 `civic_promotion` 与 F3 的 `office_audit`
+1. `config.py` / `.env.example`：三条线的新开关一次性补齐（`REP_*` 重标定值、`CIVIC_PROMOTION_MODE` / `CIVIC_AUTO_DEMOTION_ENABLED` / 门槛与滞后参数、`POLIS_OFFICE_*` 任期相关）
+2. `nightly_cron.py`：接入 F2 的 `civic_promotion` 与 F3 的 `office_audit`。**F2 的位置写死在 `close_due_polls` 之后、`run_npc_voting` 之前**——当晚晋升、当晚补投，新公民参与的第一次关票分子分母同源；接在末尾只会把危害推迟一晚（每晚 close 先于 vote，夜 N 末尾晋升的人在夜 N+1 关票时仍是「进了分母、一票未投」）。对应回归测试须按 **N+1 晚**断言。用与 `nightly_cron.py:142-145` 同样的注释形式锚住位置
 3. **声誉影响接线**：F3 的卸任审计与 F1 的声誉数据打通（决策 2 切出来的那一步）
 4. `alembic heads` 单头校验
 5. 更新 `docs/ROADMAP.md`
