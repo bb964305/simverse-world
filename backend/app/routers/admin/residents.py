@@ -7,6 +7,7 @@ from app.database import get_db
 from app.models.user import User
 from app.models.resident import Resident
 from app.routers.admin.middleware import require_admin
+from app.services.civic_membership import UGC_RESIDENT_TYPE
 from app.services.scoring_service import compute_star_rating
 from app.services.sbti_service import compute_sbti, update_meta_with_sbti
 from app.schemas.admin import (
@@ -31,8 +32,12 @@ def _resident_to_dict(r: Resident) -> dict:
         "heat": r.heat,
         "star_rating": r.star_rating,
         "sprite_key": getattr(r, "sprite_key", None),
-        # frontend uses 'type' and shows 'NPC' or 'Player'
-        "type": "NPC" if getattr(r, "resident_type", "player") in ("preset", "npc") else "Player",
+        # frontend uses 'type' and shows 'NPC' or 'Player'. A UGC resident is a
+        # player-authored *character*, not the user's avatar — labelling it
+        # "Player" here would misreport the town's population split.
+        "type": "NPC" if getattr(r, "resident_type", "player") in (
+            "preset", "npc", UGC_RESIDENT_TYPE,
+        ) else "Player",
         "creator": getattr(r, "creator_id", None),
         "ability_md": r.ability_md,
         "persona_md": r.persona_md,

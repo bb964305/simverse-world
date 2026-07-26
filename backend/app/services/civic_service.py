@@ -150,7 +150,7 @@ async def run_npc_voting(db) -> int:
     if not polls:
         return 0
     residents = (await db.execute(
-        select(Resident).where(Resident.is_autonomous)
+        select(Resident).where(Resident.is_civic_voter)
     )).scalars().all()
     if not residents:
         return 0
@@ -527,10 +527,14 @@ _VERDICT_NOTE = {
 
 
 async def _eligible_voter_count(db) -> int:
-    """Quorum denominator: the NPC residents who could have voted."""
+    """Quorum denominator: the residents who could have voted.
+
+    Must track the ballot query above exactly — a denominator wider than the
+    electorate silently raises the bar every poll has to clear.
+    """
     return int((await db.execute(
         select(func.count()).select_from(Resident).where(
-            Resident.is_autonomous)
+            Resident.is_civic_voter)
     )).scalar() or 0)
 
 
