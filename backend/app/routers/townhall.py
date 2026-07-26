@@ -48,7 +48,7 @@ _FINANCE_KEYS = (
 async def _npc_residents(db: AsyncSession) -> list[Resident]:
     return (await db.execute(
         select(Resident).where(
-            Resident.resident_type == "npc",
+            Resident.is_autonomous,
             Resident.meta_json.isnot(None),
         )
     )).scalars().all()

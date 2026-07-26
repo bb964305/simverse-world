@@ -56,7 +56,10 @@ async def _metabolize_sleepers(current_hour: int, current_weekday: int) -> int:
     woke = 0
     async with async_session() as db:
         sleepers = (await db.execute(
-            select(Resident).where(Resident.status == "sleeping")
+            select(Resident).where(
+                Resident.is_autonomous,
+                Resident.status == "sleeping",
+            )
         )).scalars().all()
         for r in sleepers:
             sbti = (r.meta_json or {}).get("sbti")
@@ -122,7 +125,8 @@ class AgentLoop:
         RULE_ONLY (≥95%) forces plan-only decides and suppresses inter-resident
         chat initiation.
         """
-        # Load id + schedule data for active residents, then release the session
+        # Load id + schedule data for active autonomous residents, then release
+        # the session.
         async with async_session() as db:
             tier = await background_tier(db)
             if tier == BudgetTier.PLAYER_ONLY:
@@ -131,6 +135,7 @@ class AgentLoop:
                 return tier
             result = await db.execute(
                 select(Resident.id, Resident.meta_json, Resident.mood_json).where(
+                    Resident.is_autonomous,
                     Resident.status.not_in(["sleeping"])
                 )
             )
@@ -184,8 +189,11 @@ class AgentLoop:
                 async with semaphore:
                     async with async_session() as db:
                         resident = await db.get(Resident, resident_id)
-                        if resident is None or resident.status in (
-                                "sleeping", "chatting", "socializing"):
+                        if (
+                            resident is None
+                            or not resident.is_autonomous
+                            or resident.status in ("sleeping", "chatting", "socializing")
+                        ):
                             return None
                         new_tile = await night_homing_step(db, resident)
                         if new_tile is not None:
@@ -207,7 +215,11 @@ class AgentLoop:
             async with semaphore:
                 async with async_session() as db:
                     resident = await db.get(Resident, resident_id)
-                    if resident is None or resident.status == "sleeping":
+                    if (
+                        resident is None
+                        or not resident.is_autonomous
+                        or resident.status == "sleeping"
+                    ):
                         return None
                     try:
                         # Pass force_plan_only only when set, so patched ticks
@@ -298,7 +310,10 @@ class AgentLoop:
             return
 
         result = await db.execute(
-            select(Resident).where(Resident.slug == target_slug)
+            select(Resident).where(
+                Resident.is_autonomous,
+                Resident.slug == target_slug,
+            )
         )
         target = result.scalar_one_or_none()
         if target is None:

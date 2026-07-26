@@ -219,7 +219,7 @@ class OfficeService:
 
             residents = (await self.db.execute(
                 select(Resident).where(
-                    Resident.resident_type == "npc",
+                    Resident.is_autonomous,
                     Resident.meta_json.isnot(None),
                 )
             )).scalars().all()

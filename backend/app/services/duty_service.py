@@ -102,7 +102,7 @@ async def find_duty_resident(db, key: str) -> Resident | None:
                            exc_info=True)
     rows = (await db.execute(
         select(Resident).where(
-            Resident.resident_type == "npc",
+            Resident.is_autonomous,
             Resident.meta_json.isnot(None),
         )
     )).scalars().all()

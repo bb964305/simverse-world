@@ -77,6 +77,40 @@ async def test_agent_loop_tick_round_runs(loop_session_factory, loop_residents):
 
 
 @pytest.mark.anyio
+async def test_agent_loop_only_ticks_autonomous_residents(
+    db_session, loop_session_factory, loop_residents
+):
+    player = Resident(
+        id="registered-player",
+        slug="registered-player",
+        name="Registered Player",
+        resident_type="player",
+        district="engineering",
+        status="idle",
+        creator_id="player-user",
+    )
+    db_session.add(player)
+    await db_session.commit()
+    ticked: list[str] = []
+
+    async def capture_tick(db, resident):
+        ticked.append(resident.slug)
+        return None
+
+    with patch("app.agent.loop.async_session", loop_session_factory), \
+         patch("app.agent.loop.resident_tick", side_effect=capture_tick), \
+         patch("app.agent.loop.should_tick", return_value=True), \
+         patch("app.agent.loop.get_activity_probability", return_value=0.5), \
+         patch("app.agent.loop.build_schedule", return_value=MagicMock(
+             wake_hour=6, sleep_hour=23, peak_hours=[10],
+             social_slots=[14], rest_ratio=0.3)):
+        await AgentLoop()._tick_round()
+
+    assert set(ticked) == {r.slug for r in loop_residents}
+    assert player.slug not in ticked
+
+
+@pytest.mark.anyio
 async def test_agent_loop_each_tick_gets_own_session(db_session, loop_session_factory, loop_residents):
     """P0-1 regression: every tick must run in its own AsyncSession, never a shared one."""
     loop = AgentLoop()

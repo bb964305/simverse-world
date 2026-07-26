@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime, UTC
 from sqlalchemy import String, Integer, Float, DateTime, Text, JSON, ForeignKey
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database import Base
 
@@ -82,3 +83,19 @@ class Resident(Base):
     def display_heat(self) -> int:
         """Realism P0-5a: shown heat = max(real heat, pinned floor)."""
         return max(self.heat or 0, self.pinned_heat or 0)
+
+    @hybrid_property
+    def is_autonomous(self) -> bool:
+        """Whether this resident may be driven by NPC-only world systems.
+
+        ``resident_type`` remains the persisted identity field; this hybrid is
+        the canonical eligibility predicate for both loaded objects and SQL
+        queries. Player residents are registered members of the world, but are
+        never autonomous actors.
+        """
+        return self.resident_type == "npc"
+
+    @is_autonomous.inplace.expression
+    @classmethod
+    def _is_autonomous_expression(cls):
+        return cls.resident_type == "npc"

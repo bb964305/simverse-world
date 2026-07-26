@@ -37,7 +37,7 @@ async def open_election(db, *, candidate_slugs: list[str] | None = None, days: i
     from app.services import civic_service
 
     residents = (await db.execute(
-        select(Resident).where(Resident.resident_type == "npc")
+        select(Resident).where(Resident.is_autonomous)
     )).scalars().all()
     by_slug = {r.slug: r for r in residents}
 
@@ -130,7 +130,7 @@ async def install_mayor(db, slug: str | None) -> bool:
     if not slug:
         return False
     residents = (await db.execute(
-        select(Resident).where(Resident.resident_type == "npc")
+        select(Resident).where(Resident.is_autonomous)
     )).scalars().all()
     winner = None
     for r in residents:
