@@ -157,7 +157,16 @@ async def _pay_wage(db, resident) -> None:
     from app.config import settings
     if not settings.npc_economy_enabled:
         return
-    wage = int(perk(resident, "wage_sc", settings.npc_default_wage_sc))
+    base_wage = settings.npc_default_wage_sc
+    if settings.polis_policy_enabled:
+        try:
+            from app.services import fiscal_policy_service
+            base_wage = await fiscal_policy_service.default_wage_sc(
+                db, fallback=base_wage,
+            )
+        except Exception:
+            logger.warning("policy-backed duty wage lookup failed", exc_info=True)
+    wage = int(perk(resident, "wage_sc", base_wage))
     # M6: the sitting mayor earns a town-wide wage bonus (flag on meta_json —
     # zero extra query, it's already loaded).
     if settings.election_enabled and (getattr(resident, "meta_json", None) or {}).get("mayor"):

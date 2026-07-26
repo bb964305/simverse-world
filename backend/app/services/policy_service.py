@@ -68,15 +68,16 @@ META_OUTCOME = "_policy_outcome"
 PROBE_GROUP = "policy_probe"
 CORE_TOUCH_KEY = "policy_core_touch_attempts"
 
-#: 财政类条目 — S1-5 (镇财政闭环) 尚未合并。存储/审批全通,但 amend 落地后没有
-#: 下游 treasury 接线, effect 为 no-op 占位。接线清单见
-#: docs/reports/feat-s2-5-policies-report.md。
-FISCAL_PENDING_KEYS = frozenset({
+#: Fiscal policies wired to S1-5 through fiscal_policy_service.
+#: Keep the complete catalog separate from the compatibility-facing pending set:
+#: older API clients still receive fiscal_pending, now false for every row.
+FISCAL_POLICY_KEYS = frozenset({
     "tax_rate",
     "medical_subsidy_sc",
     "npc_default_wage_sc",
     "housing_development_scale",
 })
+FISCAL_PENDING_KEYS: frozenset[str] = frozenset()
 
 
 def _routing_snapshot() -> dict[str, str]:
@@ -178,6 +179,33 @@ class PolicyImmutableError(PolicyError):
 
     §3.3 红线: 宪法核心不可修改。The attempt is counted (probe: 核心条款触碰
     计数) and always rejected — 成功数恒 = 0."""
+
+
+class PolicyValueError(PolicyError):
+    """A typed fiscal value is outside the runtime-safe domain."""
+
+
+def validate_fiscal_policy_value(key: str, value: Any) -> float | int:
+    """Validate and normalize the four S1-5-backed fiscal policy values.
+
+    Policy rows are JSON blobs, while TreasuryService consumes concrete,
+    non-negative SC amounts and tax ratios. Rejecting invalid amendments here
+    keeps every downstream fiscal write deterministic.
+    """
+    if key not in FISCAL_POLICY_KEYS:
+        raise PolicyValueError(f"'{key}' is not a fiscal policy")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise PolicyValueError(f"policy '{key}' requires a numeric value")
+    numeric = float(value)
+    if numeric != numeric or numeric in (float("inf"), float("-inf")):
+        raise PolicyValueError(f"policy '{key}' requires a finite value")
+    if key == "tax_rate":
+        if not 0.0 <= numeric <= 1.0:
+            raise PolicyValueError("policy 'tax_rate' must be between 0 and 1")
+        return numeric
+    if numeric < 0 or not numeric.is_integer():
+        raise PolicyValueError(f"policy '{key}' requires a non-negative integer")
+    return int(numeric)
 
 
 @dataclass(frozen=True)
@@ -327,6 +355,8 @@ class PolicyService:
         """
         if not settings.polis_policy_enabled:
             return False
+        if key in FISCAL_POLICY_KEYS:
+            new_value = validate_fiscal_policy_value(key, new_value)
         tier = await self.classify(key)
         if tier == TIER_CONSTITUTIONAL_CORE:
             await self._record_core_touch(key, updated_by)
@@ -355,13 +385,6 @@ class PolicyService:
         )
         won = (result.rowcount or 0) == 1
         await self._db.commit()
-        if won and key in FISCAL_PENDING_KEYS:
-            # S1-5 待接线: the value is stored and versioned, but no treasury
-            # effect fires yet — deliberate no-op placeholder, not a silent bug.
-            logger.info(
-                "policy '%s' amended to a fiscal value with no treasury wiring "
-                "yet (S1-5 pending) — stored only", key,
-            )
         return won
 
     async def propose_amend(
@@ -383,6 +406,8 @@ class PolicyService:
         ``rng`` is accepted for signature conformance with the seeded-RNG
         discipline; this path has no random branch (routing is a table lookup).
         """
+        if key in FISCAL_POLICY_KEYS:
+            new_value = validate_fiscal_policy_value(key, new_value)
         tier = await self.classify(key)
         if tier == TIER_CONSTITUTIONAL_CORE:
             await self._record_core_touch(key, author)
