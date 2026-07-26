@@ -271,7 +271,7 @@ export function TopNav() {
             <button onClick={() => openBridgePanel('labterminal')} className="game-nav-link game-nav-link--teal">📊 实验楼终端</button>
           )}
           {user?.is_admin && (
-            <button onClick={() => navigateTo('/admin')} className="game-nav-link game-nav-link--danger">🔐 管理</button>
+            <button onClick={() => navigateTo('/admin')} className="game-nav-link game-nav-link--violet">◫ 小镇观测站</button>
           )}
         </div>
         <div ref={menuRef} className="game-topnav__control">
@@ -302,7 +302,7 @@ export function TopNav() {
               )}
               <button onClick={() => { setDigestUnread(false); openModal('digest') }} className="game-nav-link" role="menuitem">📰 村落日报</button>
               {user?.is_admin && (
-                <button onClick={() => navigateTo('/admin')} className="game-nav-link game-nav-link--danger" role="menuitem">🔐 管理</button>
+                <button onClick={() => navigateTo('/admin')} className="game-nav-link game-nav-link--violet" role="menuitem">◫ 小镇观测站</button>
               )}
             </div>
           )}

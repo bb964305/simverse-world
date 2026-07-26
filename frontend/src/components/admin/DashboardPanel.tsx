@@ -1,232 +1,247 @@
-import { useEffect, useState, useCallback } from 'react'
-import { useGameStore } from '../../stores/gameStore'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  getAdminDashboardStats,
   getAdminDashboardHealth,
-  type AdminDashboardStats,
+  getAdminDashboardStats,
+  getAdminDashboardTrends,
+  getAdminEconomySeries,
+  getAdminEconomyStats,
+  getAdminLlmUsageSummary,
   type AdminDashboardHealth,
+  type AdminDashboardStats,
+  type AdminDashboardTrend,
+  type EconomySeriesPoint,
+  type AdminEconomyStats,
+  type LlmUsageSummary,
 } from '../../services/api'
 
-interface MetricCardProps {
-  icon: string
-  label: string
-  value: string | number
-  color?: string
+interface DashboardPanelProps {
+  token: string
 }
 
-function MetricCard({ icon, label, value, color }: MetricCardProps) {
+interface MetricCardProps {
+  label: string
+  value: string | number
+  note: string
+  color: string
+  glow: string
+}
+
+function MetricCard({ label, value, note, color, glow }: MetricCardProps) {
   return (
-    <div style={{
-      background: 'var(--bg-card)',
-      border: '1px solid var(--border)',
-      borderRadius: 12,
-      padding: '20px 24px',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 8,
-      flex: 1,
-      minWidth: 160,
-    }}>
-      <div style={{ fontSize: 24 }}>{icon}</div>
-      <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>{label}</div>
-      <div style={{
-        fontSize: 28,
-        fontWeight: 700,
-        color: color ?? 'var(--text-primary)',
-      }}>
-        {value}
-      </div>
+    <div className="admin-metric-card" style={{ '--metric-glow': glow } as React.CSSProperties}>
+      <div className="admin-metric-card__label">{label}</div>
+      <div className="admin-metric-card__value" style={{ color }}>{value}</div>
+      <div className="admin-metric-card__note">{note}</div>
     </div>
   )
 }
 
-function HealthDot({ status }: { status: 'ok' | 'error' | 'loading' }) {
-  const color = status === 'ok' ? '#22c55e' : status === 'error' ? '#ef4444' : '#6b7280'
+function points(values: number[], width: number, height: number) {
+  if (values.length === 0) return ''
+  const max = Math.max(...values, 1)
+  const min = Math.min(...values, 0)
+  const span = Math.max(max - min, 1)
+  return values.map((value, index) => {
+    const x = values.length === 1 ? width / 2 : (index / (values.length - 1)) * width
+    const y = height - ((value - min) / span) * (height - 16) - 8
+    return `${x.toFixed(1)},${y.toFixed(1)}`
+  }).join(' ')
+}
+
+function TrendChart({
+  trends,
+  economySeries,
+}: {
+  trends: AdminDashboardTrend[]
+  economySeries: EconomySeriesPoint[]
+}) {
+  const width = 720
+  const height = 210
+  const registrations = points(trends.map((item) => item.users), width, height)
+  const conversations = points(trends.map((item) => item.conversations), width, height)
+  const consumedByDate = new Map(economySeries.map((item) => [item.date, item.consumed]))
+  const spend = points(trends.map((item) => consumedByDate.get(item.date) ?? 0), width, height)
+  const firstDate = trends.at(0)?.date
+  const lastDate = trends.at(-1)?.date
+
+  if (trends.length === 0) return <div className="admin-empty">还没有足够的趋势数据</div>
+
   return (
-    <span style={{
-      display: 'inline-block',
-      width: 10,
-      height: 10,
-      borderRadius: '50%',
-      background: color,
-      boxShadow: status === 'ok' ? `0 0 6px ${color}` : undefined,
-      flexShrink: 0,
-    }} />
+    <>
+      <svg className="admin-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" role="img" aria-label="小镇活跃、注册与灵魂币消耗趋势">
+        {[0.25, 0.5, 0.75].map((ratio) => (
+          <line key={ratio} className="admin-chart-grid" x1="0" y1={height * ratio} x2={width} y2={height * ratio} />
+        ))}
+        <polyline className="admin-chart-line" points={conversations} stroke="#0071e3" />
+        <polyline className="admin-chart-line" points={registrations} stroke="#34c759" />
+        <polyline className="admin-chart-line" points={spend} stroke="#af52de" opacity="0.8" />
+      </svg>
+      <div className="admin-chart-legend">
+        <span><i style={{ background: '#0071e3' }} />居民对话</span>
+        <span><i style={{ background: '#34c759' }} />新增居民</span>
+        <span><i style={{ background: '#af52de' }} />SC 消耗</span>
+        <span style={{ marginLeft: 'auto' }}>{firstDate} — {lastDate}</span>
+      </div>
+    </>
   )
 }
 
-export function DashboardPanel() {
-  const token = useGameStore((s) => s.token)
+function HealthList({ health }: { health: AdminDashboardHealth | null }) {
+  const rows = [
+    { key: 'searxng' as const, label: '世界检索', detail: 'SearXNG' },
+    { key: 'llm_api' as const, label: '居民思考', detail: 'LLM API' },
+  ]
+
+  return (
+    <div className="admin-status-list">
+      {rows.map((row) => {
+        const status = health?.[row.key]
+        const ok = status === 'ok'
+        return (
+          <div key={row.key} className="admin-status-row">
+            <span className="admin-live-dot" style={{ background: ok ? '#34c759' : '#ff3b30' }} />
+            <div className="admin-status-row__copy">
+              <div className="admin-status-row__label">{row.label}</div>
+              <div className="admin-status-row__detail">
+                {health?.details?.[row.key] || row.detail}
+              </div>
+            </div>
+            <span className="admin-status-row__value" style={{ color: ok ? '#248a3d' : '#d70015' }}>
+              {health ? (ok ? '正常' : status === 'timeout' ? '超时' : '异常') : '检查中'}
+            </span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+export function DashboardPanel({ token }: DashboardPanelProps) {
   const [stats, setStats] = useState<AdminDashboardStats | null>(null)
+  const [trends, setTrends] = useState<AdminDashboardTrend[]>([])
+  const [economySeries, setEconomySeries] = useState<EconomySeriesPoint[]>([])
   const [health, setHealth] = useState<AdminDashboardHealth | null>(null)
-  const [statsError, setStatsError] = useState<string | null>(null)
-  const [healthError, setHealthError] = useState<string | null>(null)
-  const [lastRefresh, setLastRefresh] = useState<Date>(new Date())
+  const [economy, setEconomy] = useState<AdminEconomyStats | null>(null)
+  const [llm, setLlm] = useState<LlmUsageSummary | null>(null)
+  const [failedSources, setFailedSources] = useState<string[]>([])
+  const [loading, setLoading] = useState(true)
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
 
-  const fetchData = useCallback(async () => {
-    if (!token) return
-
-    setStatsError(null)
-    setHealthError(null)
-
-    await Promise.allSettled([
-      getAdminDashboardStats(token)
-        .then(setStats)
-        .catch((err: unknown) => {
-          const msg = err instanceof Error ? err.message : 'Failed to load stats'
-          setStatsError(msg)
-        }),
-      getAdminDashboardHealth(token)
-        .then(setHealth)
-        .catch((err: unknown) => {
-          const msg = err instanceof Error ? err.message : 'Failed to load health'
-          setHealthError(msg)
-        }),
+  const load = useCallback(async () => {
+    setLoading(true)
+    const results = await Promise.allSettled([
+      getAdminDashboardStats(token),
+      getAdminDashboardTrends(token),
+      getAdminEconomySeries(token, 7),
+      getAdminDashboardHealth(token),
+      getAdminEconomyStats(token),
+      getAdminLlmUsageSummary(token, 24),
     ])
-
+    const sourceNames = ['总览', '发展趋势', '经济趋势', '运行状态', '经济统计', '模型用量']
+    if (results[0].status === 'fulfilled') setStats(results[0].value)
+    if (results[1].status === 'fulfilled') setTrends(results[1].value)
+    if (results[2].status === 'fulfilled') setEconomySeries(results[2].value.series)
+    if (results[3].status === 'fulfilled') setHealth(results[3].value)
+    if (results[4].status === 'fulfilled') setEconomy(results[4].value)
+    if (results[5].status === 'fulfilled') setLlm(results[5].value)
+    setFailedSources(results.flatMap((result, index) => result.status === 'rejected' ? [sourceNames[index]] : []))
     setLastRefresh(new Date())
+    setLoading(false)
   }, [token])
 
   useEffect(() => {
-    // Kick off the initial fetch from a zero-delay timer callback so the
-    // effect body performs no synchronous setState
-    // (react-hooks/set-state-in-effect). The data arrives asynchronously
-    // either way, so the rendered first frame (placeholder state) and the
-    // refresh-button path are unchanged.
-    const initial = setTimeout(() => { void fetchData() }, 0)
-    const interval = setInterval(() => { void fetchData() }, 30_000)
+    const initial = setTimeout(() => { void load() }, 0)
+    const interval = setInterval(() => { void load() }, 30_000)
     return () => {
       clearTimeout(initial)
       clearInterval(interval)
     }
-  }, [fetchData])
+  }, [load])
 
-  const formatTime = (d: Date) =>
-    d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  const netFlow = stats?.soul_coin_net_flow
+  const economySignal = useMemo(() => {
+    if (!economy || economy.total_issued === 0) return '等待形成流通'
+    const ratio = economy.total_consumed / economy.total_issued
+    if (ratio >= 0.8) return '消耗充分'
+    if (ratio >= 0.45) return '流通平稳'
+    return '留存偏高'
+  }, [economy])
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-      {/* Header row */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>📊 仪表盘</h2>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-            上次刷新：{formatTime(lastRefresh)}
-          </span>
-          <button
-            onClick={() => { void fetchData() }}
-            style={{
-              background: 'var(--bg-input)',
-              border: '1px solid var(--border)',
-              borderRadius: 6,
-              padding: '5px 12px',
-              fontSize: 12,
-              cursor: 'pointer',
-              color: 'var(--text-secondary)',
-            }}
-          >
-            ↻ 刷新
-          </button>
+    <div className="admin-analytics-stack">
+      <div className="admin-section-heading">
+        <div>
+          <h2>此刻的小镇</h2>
+          <p>关注变化方向，而不是逐项管理系统参数。</p>
         </div>
+        <button type="button" className="admin-ghost-button" onClick={() => { void load() }}>
+          {loading ? '正在同步…' : lastRefresh ? `更新于 ${lastRefresh.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` : '刷新数据'}
+        </button>
       </div>
 
-      {/* Metric cards */}
-      <div>
-        <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 12, fontWeight: 600 }}>
-          实时指标
+      {failedSources.length > 0 && (
+        <div className="admin-error">
+          {failedSources.join('、')}暂时不可用，已保留其他实时数据。
         </div>
-        {statsError && (
-          <div style={{ color: '#ef4444', fontSize: 13, marginBottom: 12, padding: '8px 12px', background: '#ef444415', borderRadius: 6 }}>
-            ⚠️ {statsError}
+      )}
+
+      <div className="admin-metric-grid">
+        <MetricCard
+          label="在线人口"
+          value={stats?.online_users ?? '—'}
+          note={`今日新增 ${stats?.today_registrations ?? '—'} 人`}
+          color="#0071e3"
+          glow="rgba(0, 113, 227, 0.08)"
+        />
+        <MetricCard
+          label="社会互动"
+          value={stats?.active_chats ?? '—'}
+          note="当前活跃对话"
+          color="#34c759"
+          glow="rgba(52, 199, 89, 0.08)"
+        />
+        <MetricCard
+          label="SOUL COIN 净流量"
+          value={netFlow == null ? '—' : `${netFlow >= 0 ? '+' : ''}${netFlow}`}
+          note={economySignal}
+          color={netFlow != null && netFlow < 0 ? '#ff3b30' : '#af52de'}
+          glow="rgba(175, 82, 222, 0.08)"
+        />
+        <MetricCard
+          label="24H AI 成本"
+          value={llm ? `$${llm.total.est_cost_usd.toFixed(2)}` : '—'}
+          note={llm ? `${llm.total.calls} 次调用` : '正在统计'}
+          color="#ff9f0a"
+          glow="rgba(255, 159, 10, 0.08)"
+        />
+      </div>
+
+      <div className="admin-analytics-grid">
+        <section className="admin-analytics-card">
+          <div className="admin-card-title">
+            <h3>发展趋势</h3>
+            <span>新增 / 对话 / 消耗</span>
           </div>
-        )}
-        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-          <MetricCard
-            icon="🟢"
-            label="在线用户"
-            value={stats?.online_users ?? '—'}
-            color="var(--accent-green)"
-          />
-          <MetricCard
-            icon="📝"
-            label="今日注册"
-            value={stats?.today_registrations ?? '—'}
-          />
-          <MetricCard
-            icon="💬"
-            label="活跃对话"
-            value={stats?.active_chats ?? '—'}
-            color="#a78bfa"
-          />
-          <MetricCard
-            icon="🪙"
-            label="SC 净流量"
-            value={stats?.soul_coin_net_flow != null
-              ? (stats.soul_coin_net_flow >= 0 ? `+${stats.soul_coin_net_flow}` : `${stats.soul_coin_net_flow}`)
-              : '—'}
-            color={stats?.soul_coin_net_flow != null
-              ? (stats.soul_coin_net_flow >= 0 ? 'var(--accent-green)' : '#ef4444')
-              : 'var(--text-primary)'}
-          />
-        </div>
-      </div>
+          <TrendChart trends={trends} economySeries={economySeries} />
+        </section>
 
-      {/* Health status */}
-      <div>
-        <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 12, fontWeight: 600 }}>
-          服务健康状态
-        </div>
-        {healthError && (
-          <div style={{ color: '#ef4444', fontSize: 13, marginBottom: 12, padding: '8px 12px', background: '#ef444415', borderRadius: 6 }}>
-            ⚠️ {healthError}
+        <section className="admin-analytics-card">
+          <div className="admin-card-title">
+            <h3>运行信号</h3>
+            <span>实时</span>
           </div>
-        )}
-        <div style={{
-          background: 'var(--bg-card)',
-          border: '1px solid var(--border)',
-          borderRadius: 12,
-          padding: '16px 20px',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 12,
-          maxWidth: 360,
-        }}>
-          {[
-            { key: 'searxng' as const, label: 'SearXNG', icon: '🔍' },
-            { key: 'llm_api' as const, label: 'LLM API', icon: '🤖' },
-          ].map(({ key, label, icon }) => {
-            const status = health ? health[key] : 'loading'
-            return (
-              <div key={key} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14 }}>
-                  <span>{icon}</span>
-                  <span>{label}</span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <HealthDot status={status === 'loading' ? 'loading' : status} />
-                  <span style={{
-                    fontSize: 12,
-                    color: status === 'ok' ? '#22c55e' : status === 'error' ? '#ef4444' : 'var(--text-muted)',
-                    fontWeight: 600,
-                  }}>
-                    {status === 'loading' ? '检查中…' : status === 'ok' ? '正常' : '异常'}
-                  </span>
-                  {status === 'error' && health?.details?.[key] && (
-                    <span style={{ fontSize: 11, color: '#ef4444', opacity: 0.8, maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                      title={health.details[key] ?? ''}>
-                      {health.details[key]}
-                    </span>
-                  )}
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      </div>
-
-      {/* Auto-refresh notice */}
-      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-        每 30 秒自动刷新
+          <HealthList health={health} />
+          <div className="admin-distribution" style={{ marginTop: 12 }}>
+            <div className="admin-distribution__item">
+              <div className="admin-distribution__value">{economy?.total_users ?? '—'}</div>
+              <div className="admin-distribution__label">经济参与者</div>
+            </div>
+            <div className="admin-distribution__item">
+              <div className="admin-distribution__value">{economy ? economy.avg_balance.toFixed(1) : '—'}</div>
+              <div className="admin-distribution__label">人均 SC 余额</div>
+            </div>
+          </div>
+        </section>
       </div>
     </div>
   )

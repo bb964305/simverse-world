@@ -1,4 +1,17 @@
-type AdminTab = 'dashboard' | 'users' | 'residents' | 'forge' | 'economy' | 'llm' | 'events' | 'gossip' | 'lab_runs' | 'proposals' | 'system'
+export type AdminTab =
+  | 'overview'
+  | 'society'
+  | 'economy'
+  | 'governance'
+  | 'users'
+  | 'residents'
+  | 'economy_control'
+  | 'events'
+  | 'proposals'
+  | 'forge'
+  | 'llm'
+  | 'lab_runs'
+  | 'system'
 
 interface NavItem {
   key: AdminTab
@@ -6,83 +19,95 @@ interface NavItem {
   label: string
 }
 
-const NAV_ITEMS: NavItem[] = [
-  { key: 'dashboard', icon: '📊', label: '仪表盘' },
-  { key: 'users', icon: '👥', label: '用户' },
-  { key: 'residents', icon: '🏠', label: '居民' },
-  { key: 'forge', icon: '🔮', label: '炼化' },
-  { key: 'economy', icon: '🪙', label: '经济' },
-  { key: 'llm', icon: '💸', label: 'LLM 成本' },
-  { key: 'events', icon: '📣', label: '世界事件' },
-  { key: 'gossip', icon: '🗣️', label: '谣言链' },
-  { key: 'lab_runs', icon: '🧪', label: '实验楼' },
-  { key: 'proposals', icon: '🌍', label: '世界提案' },
-  { key: 'system', icon: '⚙️', label: '系统' },
+const ANALYTICS_ITEMS: NavItem[] = [
+  { key: 'overview', icon: '◫', label: '发展总览' },
+  { key: 'society', icon: '◎', label: '居民与社会' },
+  { key: 'economy', icon: '◇', label: '经济运行' },
+  { key: 'governance', icon: '△', label: '治理与事件' },
+]
+
+const CONTROL_ITEMS: NavItem[] = [
+  { key: 'users', icon: '👥', label: '用户权限' },
+  { key: 'residents', icon: '🏠', label: '居民编辑' },
+  { key: 'economy_control', icon: '🪙', label: '经济参数' },
+  { key: 'events', icon: '📣', label: '事件投放' },
+  { key: 'proposals', icon: '🌍', label: '提案审批' },
+  { key: 'forge', icon: '🔮', label: '炼化监控' },
+  { key: 'llm', icon: '💸', label: '模型用量' },
+  { key: 'lab_runs', icon: '🧪', label: '实验楼控制' },
+  { key: 'system', icon: '⚙️', label: '系统配置' },
 ]
 
 interface AdminSidebarProps {
   activeTab: AdminTab
+  controlOpen: boolean
+  onControlToggle: () => void
   onTabChange: (tab: AdminTab) => void
 }
 
-export function AdminSidebar({ activeTab, onTabChange }: AdminSidebarProps) {
+export function AdminSidebar({
+  activeTab,
+  controlOpen,
+  onControlToggle,
+  onTabChange,
+}: AdminSidebarProps) {
   return (
-    <div style={{
-      width: 220,
-      minHeight: 'calc(100vh - var(--nav-height))',
-      background: 'var(--bg-card)',
-      borderRight: '1px solid var(--border)',
-      padding: '24px 16px',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: 24,
-      flexShrink: 0,
-    }}>
-      {/* Header */}
-      <div style={{ padding: '4px 14px' }}>
-        <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>
-          管理面板
+    <header className="admin-sidebar">
+      <div className="admin-sidebar__inner">
+        <div className="admin-sidebar__brand">
+          <span className="admin-sidebar__mark" aria-hidden="true">S</span>
+          <span className="admin-sidebar__title">Simverse</span>
+          <span className="admin-sidebar__subtitle">小镇观测站</span>
         </div>
-      </div>
 
-      {/* Navigation */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-        {NAV_ITEMS.map((item) => {
-          const isActive = activeTab === item.key
-          return (
+        <nav className="admin-sidebar__nav" aria-label="小镇分析导航">
+          {ANALYTICS_ITEMS.map((item) => (
             <button
               key={item.key}
+              type="button"
+              className={`admin-nav-item${activeTab === item.key ? ' admin-nav-item--active' : ''}`}
               onClick={() => onTabChange(item.key)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 10,
-                padding: '10px 14px',
-                borderRadius: 8,
-                background: isActive ? 'var(--bg-input)' : 'transparent',
-                border: isActive ? '1px solid var(--border)' : '1px solid transparent',
-                color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
-                fontSize: 14,
-                cursor: 'pointer',
-                textAlign: 'left',
-                fontWeight: isActive ? 600 : 400,
-                transition: 'background 0.15s, color 0.15s',
-              }}
             >
-              <span style={{ fontSize: 16 }}>{item.icon}</span>
               {item.label}
             </button>
-          )
-        })}
-      </div>
+          ))}
+        </nav>
 
-      {/* Footer hint */}
-      <div style={{ marginTop: 'auto', padding: '10px 14px', background: '#ef444410', borderRadius: 8 }}>
-        <div style={{ fontSize: 11, color: '#ef4444', fontWeight: 600 }}>🔐 管理员专属</div>
-        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>谨慎操作</div>
+        <div className="admin-sidebar__controls">
+          <div className="admin-sidebar__foot">
+            <span className="admin-live-dot" aria-hidden="true" />
+            <span>数据已同步</span>
+          </div>
+          <button
+            type="button"
+            className={`admin-control-toggle${controlOpen ? ' admin-control-toggle--open' : ''}`}
+            onClick={onControlToggle}
+            aria-expanded={controlOpen}
+            aria-controls="admin-control-nav"
+          >
+            <span className="admin-control-toggle__label">控制中心</span>
+            <span aria-hidden="true">{controlOpen ? '↑' : '↓'}</span>
+          </button>
+
+          {controlOpen && (
+            <nav id="admin-control-nav" className="admin-control-nav" aria-label="管理控制导航">
+              <div className="admin-control-nav__title">集中管理</div>
+              {CONTROL_ITEMS.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={`admin-control-item${activeTab === item.key ? ' admin-control-item--active' : ''}`}
+                  onClick={() => onTabChange(item.key)}
+                >
+                  <span aria-hidden="true">{item.icon}</span>
+                  <span>{item.label}</span>
+                  <b aria-hidden="true">›</b>
+                </button>
+              ))}
+            </nav>
+          )}
+        </div>
       </div>
-    </div>
+    </header>
   )
 }
-
-export type { AdminTab }

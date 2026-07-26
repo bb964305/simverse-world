@@ -10,16 +10,17 @@ export interface AdminDashboardStats {
 }
 
 export interface AdminDashboardHealth {
-  searxng: 'ok' | 'error'
-  llm_api: 'ok' | 'error'
+  searxng: AdminServiceStatus
+  llm_api: AdminServiceStatus
   details: Record<string, string | null>
 }
 
+export type AdminServiceStatus = 'ok' | 'error' | 'timeout'
+
 export interface AdminDashboardTrend {
   date: string
-  registrations: number
-  active_users: number
-  sc_spent: number
+  users: number
+  conversations: number
 }
 
 export function getAdminDashboardStats(token: string): Promise<AdminDashboardStats> {
@@ -37,7 +38,7 @@ export async function getAdminDashboardHealth(token: string): Promise<AdminDashb
   for (const item of arr) {
     const key = item.service as keyof Omit<AdminDashboardHealth, 'details'>
     if (key in result) {
-      result[key] = item.status as 'ok' | 'error'
+      result[key] = item.status as AdminServiceStatus
     }
     result.details[item.service] = item.detail ?? null
   }
@@ -322,6 +323,84 @@ export interface EconomySeriesPoint {
 
 export function getAdminEconomySeries(token: string, days = 30): Promise<{ days: number; series: EconomySeriesPoint[] }> {
   return apiFetch(`/admin/economy/series?days=${days}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+// ─── Admin social structure (P2) ─────────────────────────────────
+
+export interface AdminSocialGraphNode {
+  id: string
+  name: string
+  slug: string
+  circle_id: string | null
+}
+
+export interface AdminSocialGraphEdge {
+  a: string
+  b: string
+  familiarity: number
+  affinity: number
+}
+
+export interface AdminSocialCircle {
+  circle_id: string
+  members: string[]
+  size: number
+  activity: number
+}
+
+export interface AdminSocialGraph {
+  nodes: AdminSocialGraphNode[]
+  edges: AdminSocialGraphEdge[]
+  circles: AdminSocialCircle[]
+}
+
+export function getAdminSocialGraph(token: string): Promise<AdminSocialGraph> {
+  return apiFetch('/admin/social-graph', {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+// ─── Admin offices and policy state (S2) ─────────────────────────
+
+export interface AdminOffice {
+  office_key: string
+  holder_slug: string | null
+  institution: string
+  perms_json: Record<string, unknown>
+  fill_strategy: string
+  term_started_at: string | null
+  term_ends_at: string | null
+  updated_at: string | null
+}
+
+export function getAdminOffices(token: string): Promise<{ offices: AdminOffice[] }> {
+  return apiFetch('/admin/offices', {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export interface AdminPolicy {
+  key: string
+  value: unknown
+  tier: 'administrative' | 'simple_majority' | 'absolute_majority' | 'constitutional_core'
+  procedure: string
+  group: string
+  version: number
+  updated_by: string | null
+  updated_at: string | null
+  fiscal_pending: boolean
+}
+
+export interface AdminPoliciesResponse {
+  enabled: boolean
+  matrix: Record<string, { path?: string; [key: string]: unknown }>
+  policies: AdminPolicy[]
+}
+
+export function getAdminPolicies(token: string): Promise<AdminPoliciesResponse> {
+  return apiFetch('/admin/policies', {
     headers: { Authorization: `Bearer ${token}` },
   })
 }

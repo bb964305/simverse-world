@@ -661,10 +661,13 @@ interface EconomyPanelProps {
 
 export function EconomyPanel({ token }: EconomyPanelProps) {
   return (
-    <div style={{ maxWidth: 900 }}>
-      <h1 style={{ fontSize: 20, fontWeight: 700, marginBottom: 24, color: 'var(--text-primary)' }}>
-        经济管理
-      </h1>
+    <div className="admin-analytics-stack" style={{ maxWidth: 1040 }}>
+      <div className="admin-section-heading">
+        <div>
+          <h2>经济脉搏</h2>
+          <p>观察发行、消耗、余额与投资方向；参数调整已迁移至控制中心。</p>
+        </div>
+      </div>
 
       {/* Stat Cards */}
       <EconomyStatsSection token={token} />
@@ -677,8 +680,21 @@ export function EconomyPanel({ token }: EconomyPanelProps) {
 
       {/* Transaction Log */}
       <TransactionLogSection token={token} />
+    </div>
+  )
+}
 
-      {/* Economy Config */}
+export function EconomyControlPanel({ token }: EconomyPanelProps) {
+  return (
+    <div style={{ maxWidth: 900 }}>
+      <div style={{
+        padding: '12px 14px', marginBottom: 18, borderRadius: 8,
+        border: '1px solid rgba(245, 158, 11, 0.22)',
+        background: 'rgba(245, 158, 11, 0.05)',
+        color: '#d6bd8b', fontSize: 12,
+      }}>
+        此处修改会影响小镇经济行为。分析图表已与参数写操作分离。
+      </div>
       <EconomyConfigSection token={token} />
     </div>
   )
