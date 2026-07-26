@@ -17,14 +17,13 @@ interface NavItem {
   key: AdminTab
   icon: string
   label: string
-  description?: string
 }
 
 const ANALYTICS_ITEMS: NavItem[] = [
-  { key: 'overview', icon: '◫', label: '发展总览', description: '关键趋势与异常' },
-  { key: 'society', icon: '◎', label: '居民与社会', description: '结构、活力与声誉' },
-  { key: 'economy', icon: '◇', label: '经济运行', description: '流通、投资与消费' },
-  { key: 'governance', icon: '△', label: '治理与事件', description: '政策、议案与演化' },
+  { key: 'overview', icon: '◫', label: '发展总览' },
+  { key: 'society', icon: '◎', label: '居民与社会' },
+  { key: 'economy', icon: '◇', label: '经济运行' },
+  { key: 'governance', icon: '△', label: '治理与事件' },
 ]
 
 const CONTROL_ITEMS: NavItem[] = [
@@ -46,34 +45,6 @@ interface AdminSidebarProps {
   onTabChange: (tab: AdminTab) => void
 }
 
-function NavButton({
-  item,
-  active,
-  onClick,
-  compact = false,
-}: {
-  item: NavItem
-  active: boolean
-  onClick: () => void
-  compact?: boolean
-}) {
-  return (
-    <button
-      type="button"
-      className={`admin-nav-item${active ? ' admin-nav-item--active' : ''}${compact ? ' admin-nav-item--compact' : ''}`}
-      onClick={onClick}
-    >
-      <span className="admin-nav-item__icon" aria-hidden="true">{item.icon}</span>
-      <span className="admin-nav-item__copy">
-        <span className="admin-nav-item__label">{item.label}</span>
-        {!compact && item.description && (
-          <span className="admin-nav-item__description">{item.description}</span>
-        )}
-      </span>
-    </button>
-  )
-}
-
 export function AdminSidebar({
   activeTab,
   controlOpen,
@@ -81,59 +52,62 @@ export function AdminSidebar({
   onTabChange,
 }: AdminSidebarProps) {
   return (
-    <aside className="admin-sidebar">
-      <div className="admin-sidebar__brand">
-        <div className="admin-sidebar__eyebrow">SIMVERSE WORLD</div>
-        <div className="admin-sidebar__title">小镇观测站</div>
-        <div className="admin-sidebar__subtitle">Town Observatory</div>
-      </div>
+    <header className="admin-sidebar">
+      <div className="admin-sidebar__inner">
+        <div className="admin-sidebar__brand">
+          <span className="admin-sidebar__mark" aria-hidden="true">S</span>
+          <span className="admin-sidebar__title">Simverse</span>
+          <span className="admin-sidebar__subtitle">小镇观测站</span>
+        </div>
 
-      <nav className="admin-sidebar__nav" aria-label="小镇分析导航">
-        <div className="admin-sidebar__section-label">分析视图</div>
-        {ANALYTICS_ITEMS.map((item) => (
-          <NavButton
-            key={item.key}
-            item={item}
-            active={activeTab === item.key}
-            onClick={() => onTabChange(item.key)}
-          />
-        ))}
-      </nav>
+        <nav className="admin-sidebar__nav" aria-label="小镇分析导航">
+          {ANALYTICS_ITEMS.map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              className={`admin-nav-item${activeTab === item.key ? ' admin-nav-item--active' : ''}`}
+              onClick={() => onTabChange(item.key)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </nav>
 
-      <div className="admin-sidebar__controls">
-        <button
-          type="button"
-          className={`admin-control-toggle${controlOpen ? ' admin-control-toggle--open' : ''}`}
-          onClick={onControlToggle}
-          aria-expanded={controlOpen}
-          aria-controls="admin-control-nav"
-        >
-          <span>
+        <div className="admin-sidebar__controls">
+          <div className="admin-sidebar__foot">
+            <span className="admin-live-dot" aria-hidden="true" />
+            <span>数据已同步</span>
+          </div>
+          <button
+            type="button"
+            className={`admin-control-toggle${controlOpen ? ' admin-control-toggle--open' : ''}`}
+            onClick={onControlToggle}
+            aria-expanded={controlOpen}
+            aria-controls="admin-control-nav"
+          >
             <span className="admin-control-toggle__label">控制中心</span>
-            <span className="admin-control-toggle__hint">写操作集中区域</span>
-          </span>
-          <span aria-hidden="true">{controlOpen ? '−' : '+'}</span>
-        </button>
+            <span aria-hidden="true">{controlOpen ? '↑' : '↓'}</span>
+          </button>
 
-        {controlOpen && (
-          <nav id="admin-control-nav" className="admin-control-nav" aria-label="管理控制导航">
-            {CONTROL_ITEMS.map((item) => (
-              <NavButton
-                key={item.key}
-                item={item}
-                compact
-                active={activeTab === item.key}
-                onClick={() => onTabChange(item.key)}
-              />
-            ))}
-          </nav>
-        )}
+          {controlOpen && (
+            <nav id="admin-control-nav" className="admin-control-nav" aria-label="管理控制导航">
+              <div className="admin-control-nav__title">集中管理</div>
+              {CONTROL_ITEMS.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={`admin-control-item${activeTab === item.key ? ' admin-control-item--active' : ''}`}
+                  onClick={() => onTabChange(item.key)}
+                >
+                  <span aria-hidden="true">{item.icon}</span>
+                  <span>{item.label}</span>
+                  <b aria-hidden="true">›</b>
+                </button>
+              ))}
+            </nav>
+          )}
+        </div>
       </div>
-
-      <div className="admin-sidebar__foot">
-        <span className="admin-live-dot" aria-hidden="true" />
-        <span>数据自动刷新</span>
-      </div>
-    </aside>
+    </header>
   )
 }
