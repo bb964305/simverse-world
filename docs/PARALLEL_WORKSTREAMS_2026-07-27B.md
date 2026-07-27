@@ -9,6 +9,40 @@
 
 ---
 
+## 0. 执行状态（2026-07-27 晚更新）
+
+**基线已从 `c2fff2f` 推到 `6128ecb`** —— F1/F2/F3 三条线在本文定稿后合入并 push。这推翻了本文的三条决策前提，逐条记在下面；正文其余部分仍然有效。
+
+### 0.1 已完成
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| **A3 poll 延期** | ✅ 已执行 | `scripts/postpone_open_polls.py` + 8 个单测；生产三张 poll `closes_at` 已改为 `2026-07-31 23:29:43+00`，完成标记 `system_config.civic_poll_postpone_until`；不可重放防呆在真库上实测拦住且是真 no-op |
+| **A2 静默罢免** | ✅ 由 F2 落地 | `e83ed51` + `93a2573`：`install_mayor` 对查不到的 slug 零写入 `return False`，写入包在 `begin_nested()` SAVEPOINT 里 |
+| **A1 的核心危险** | ✅ 由 F2 覆盖（语义与本文决策 4 相反） | `d89f5fb` 的 `_winner_lost_civic_rights`：对**已删除**的 slug 返回 True → 走流会分支 |
+| **H4 ROADMAP 纠偏** | ✅ 已改 | 四条被生产证伪的断言 + 三处随合并而变的口径，见 `91a4141` |
+| **F2/F3 的「零新增失败」硬门** | ✅ 补验通过 | 合并方明说没跑。本文作者补跑双向差集：`comm -23` = **0**、`comm -13` = **0**，失败集 67 条逐条一致（50 failed + 17 errors），passed 2247 → 2558 |
+
+### 0.2 被推翻的决策前提
+
+| 决策 | 原前提 | 现实 | 处置 |
+|---|---|---|---|
+| **4 次名递补** | A1 与 F2 Task 7 是两个未实现的竞争设计，二选一 | F2 的**流会**实现已合入 master 且测得扎实（红/绿成对 + 三轮复审）。对这三张 poll 两种语义**收敛**（4 个候选全删，次名也递补不出人） | **暂按保留流会执行，不写 A1。** 改它等于重写刚合并的代码，收益只剩「将来有部分候选存活时的世界内规则偏好」。要坚持次名递补须重新拍板 |
+| **5 A2 并进 F2** | A2 待实现 | 已随 F2 合入 | ✅ 自动满足 |
+| **7 lab 先合** | 让 F2 不必重编迁移号 | F2 已占用 `051`。lab 的 `051_add_lab_codex_model_tier` 与主线的 `051_add_civic_standing_history` **都挂在 `050` 上** | **前提反转**：改为 lab 合入前重编号 052/053/054，`down_revision` 改指 `051_add_civic_standing_history` |
+
+### 0.3 合并方留下的三个缺口（本批需接手）
+
+1. **收口未做 → F1/F2/F3 的代码在运行时是死的。** `grep -n "civic_promotion\|office_audit" backend/app/tasks/nightly_cron.py` **零命中**。git log 很热闹，夜间链上什么都不会发生。
+2. **新开关绕过 `config.py`** —— `civic_membership.py:376` 走 `_env_str("CIVIC_PROMOTION_MODE", "off")` 直读 `os.environ`。与本文 D3 标注的代价同型：不进 `Settings` → `test_env_example_consistency.py` 管不到 → `.env.example` 无记录 → 运维看不见。
+3. **F1 第 3 项没做** —— `rep_credit_min_score` 仍是 `-0.3`（`app/config.py:576`），`scripts/rep_calibrate.py` 只建了工具没跑过。`REP_ENABLED` 仍不能开。
+
+### 0.4 新的墙钟
+
+三张 poll 现在于 **2026-08-01 23:00 UTC** 关票（`closes_at` 2026-07-31 之后的第一次夜间 cron）。**T1 部署必须在此之前完成**，否则它们仍会在旧镜像下结票——生产跑的还是 049 的镜像，上面所有修复都不在。
+
+---
+
 ## 1. 已定决策
 
 | # | 决策 | 落到哪条线 | 连锁后果 |
