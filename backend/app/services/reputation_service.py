@@ -3,9 +3,14 @@
 Reputation is a slow, public signal derived without LLM calls. V1 stores the
 projection in Resident.meta_json["reputation"], so the feature is
 migration-free and can remain default-off until production calibration.
+
+Tone is not a constant: each rumor is read through the relation affinity between
+the memory's holder and its subject, so a well-liked resident accrues positive
+evidence. ``rep_gossip_base_tone`` is only the bias for an unknown pair.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from sqlalchemy import select
@@ -15,6 +20,8 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.config import settings
 from app.models.memory import Memory
 from app.models.resident import Resident
+from app.models.resident_relation import ResidentRelation
+from app.services.relation_service import canonical_pair
 
 
 def _clamp(value: float) -> float:
@@ -108,17 +115,46 @@ async def get_many(
     }
 
 
-async def recompute(db: AsyncSession) -> int:
-    """Recompute every NPC's slow reputation projection in two batch reads."""
-    if not settings.rep_enabled:
-        return 0
+@dataclass(frozen=True)
+class ScoreRow:
+    """一个居民的一次声誉投影结果（不含写入）。"""
 
-    residents = (await db.execute(
-        select(Resident).where(Resident.resident_type == "npc")
+    resident_id: str
+    slug: str
+    previous: float
+    score: float
+    samples: int
+
+
+async def _scored_residents(db: AsyncSession) -> list[Resident]:
+    """声誉是社会属性不是政治权利 → 人口口径 ``is_autonomous``（spec §4.4）。"""
+    return list((await db.execute(
+        select(Resident).where(Resident.is_autonomous)
+    )).scalars().all())
+
+
+async def _affinity_lookup(
+    db: AsyncSession, pairs: set[tuple[str, str]]
+) -> dict[tuple[str, str], float]:
+    """一次批量读，把 canonical pair 映射到 affinity。
+
+    ``ids`` 的规模上界是小镇人口（传话人与被议论者都是 residents 行），Postgres
+    的绑定参数上限 65535 远在其上；测试用的 sqlite 只有几十行。
+    """
+    if not pairs:
+        return {}
+    ids = sorted({party for pair in pairs for party in pair})
+    rows = (await db.execute(
+        select(ResidentRelation).where(
+            ResidentRelation.party_a.in_(ids),
+            ResidentRelation.party_b.in_(ids),
+        )
     )).scalars().all()
-    if not residents:
-        return 0
+    return {(row.party_a, row.party_b): float(row.affinity or 0.0) for row in rows}
 
+
+async def _score_all(db: AsyncSession, residents: list[Resident]) -> list[ScoreRow]:
+    """三次批量读（居民已由调用方读入 / 记忆 / 关系），零 LLM，纯规则。"""
     ids = [resident.id for resident in residents]
     memories = (await db.execute(
         select(Memory).where(
@@ -128,6 +164,15 @@ async def recompute(db: AsyncSession) -> int:
         )
     )).scalars().all()
 
+    pairs: set[tuple[str, str]] = set()
+    for memory in memories:
+        if memory.resident_id and memory.related_resident_id:
+            party_a, _, party_b, _ = canonical_pair(
+                memory.resident_id, memory.related_resident_id
+            )
+            pairs.add((party_a, party_b))
+    affinity_by_pair = await _affinity_lookup(db, pairs)
+
     evidence: dict[str, list[float]] = {resident_id: [] for resident_id in ids}
     for memory in memories:
         metadata = memory.metadata_json or {}
@@ -135,16 +180,19 @@ async def recompute(db: AsyncSession) -> int:
             hops = max(0, int(metadata.get("hops", 0)))
         except (TypeError, ValueError):
             hops = 0
-        tone = settings.rep_gossip_base_tone
-        if metadata.get("distorted") is True:
-            tone += settings.rep_distortion_penalty
-        importance = max(0.0, float(memory.importance or 0.0))
+        affinity = 0.0
+        if memory.resident_id:
+            party_a, _, party_b, _ = canonical_pair(
+                memory.resident_id, memory.related_resident_id
+            )
+            affinity = affinity_by_pair.get((party_a, party_b), 0.0)
+        tone = gossip_tone(affinity, distorted=metadata.get("distorted") is True)
         evidence[memory.related_resident_id].append(
-            importance * tone / (1.0 + hops)
+            evidence_weight(memory.importance, hops, tone)
         )
 
-    now = datetime.now(UTC).isoformat()
     alpha = max(0.0, min(1.0, settings.rep_ema_alpha))
+    rows: list[ScoreRow] = []
     for resident in residents:
         samples = evidence[resident.id]
         mood = resident.mood_json or {}
@@ -155,13 +203,34 @@ async def recompute(db: AsyncSession) -> int:
         gossip_signal = sum(samples) / len(samples) if samples else 0.0
         raw = settings.rep_mood_weight * mood_valence + gossip_signal
         previous = score_from_meta(resident.meta_json)
-        score = _clamp((1.0 - alpha) * previous + alpha * raw)
+        rows.append(ScoreRow(
+            resident_id=resident.id,
+            slug=resident.slug,
+            previous=previous,
+            score=_clamp((1.0 - alpha) * previous + alpha * raw),
+            samples=len(samples),
+        ))
+    return rows
 
+
+async def recompute(db: AsyncSession) -> int:
+    """Recompute every simulated resident's slow reputation projection."""
+    if not settings.rep_enabled:
+        return 0
+
+    residents = await _scored_residents(db)
+    if not residents:
+        return 0
+
+    rows = {row.resident_id: row for row in await _score_all(db, residents)}
+    now = datetime.now(UTC).isoformat()
+    for resident in residents:
+        row = rows[resident.id]
         meta = dict(resident.meta_json or {})
         meta["reputation"] = {
-            "score": score,
+            "score": row.score,
             "updated_at": now,
-            "samples": len(samples),
+            "samples": row.samples,
         }
         resident.meta_json = meta
         flag_modified(resident, "meta_json")

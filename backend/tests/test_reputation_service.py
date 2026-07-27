@@ -5,6 +5,7 @@ from app.config import settings
 from app.models.memory import Memory
 from app.models.resident import Resident
 from app.services import election_service
+from app.services import relation_service
 from app.services.reputation_service import (
     credit_allowed,
     evidence_weight,
@@ -145,3 +146,70 @@ def test_evidence_weight_damps_by_hops_and_floors_importance():
     assert evidence_weight(0.6, 0, 0.5) == pytest.approx(0.3)
     assert evidence_weight(-1.0, 0, 0.5) == 0.0
     assert evidence_weight(None, 0, 0.5) == 0.0
+
+
+# ── F1 第 1 项：接进 recompute ─────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_recompute_tone_follows_relation_affinity(db_session, monkeypatch):
+    """同一个传话人、同样的 importance/hops,只有 affinity 不同 → 分数异号。"""
+    monkeypatch.setattr(settings, "rep_enabled", True)
+    teller = _resident("teller")
+    liked = _resident("liked")
+    disliked = _resident("disliked")
+    db_session.add_all([teller, liked, disliked])
+    await db_session.flush()
+    db_session.add_all([
+        Memory(
+            resident_id=teller.id, type="event", content="about liked",
+            importance=0.7, source="gossip", related_resident_id=liked.id,
+            metadata_json={"hops": 1, "distorted": False},
+        ),
+        Memory(
+            resident_id=teller.id, type="event", content="about disliked",
+            importance=0.7, source="gossip", related_resident_id=disliked.id,
+            metadata_json={"hops": 1, "distorted": False},
+        ),
+    ])
+    await db_session.commit()
+    await relation_service.bump(db_session, teller.id, liked.id, d_affinity=0.4)
+    await relation_service.bump(db_session, teller.id, disliked.id, d_affinity=-0.4)
+
+    assert await recompute(db_session) == 3
+    await db_session.refresh(liked)
+    await db_session.refresh(disliked)
+    assert score_from_meta(liked.meta_json) > 0      # 正面互动 → 正分
+    assert score_from_meta(disliked.meta_json) < 0   # 负面互动 → 负分
+
+
+@pytest.mark.anyio
+async def test_recompute_reads_relations_in_one_batch(db_session, monkeypatch):
+    """性能红线:关系读取必须是批量的,不能每条记忆一次查询。"""
+    monkeypatch.setattr(settings, "rep_enabled", True)
+    teller = _resident("batch_teller")
+    subjects = [_resident(f"batch_sub{i}") for i in range(5)]
+    db_session.add_all([teller, *subjects])
+    await db_session.flush()
+    for subject in subjects:
+        db_session.add(Memory(
+            resident_id=teller.id, type="event", content="x",
+            importance=0.7, source="gossip", related_resident_id=subject.id,
+            metadata_json={"hops": 1, "distorted": False},
+        ))
+    await db_session.commit()
+    for subject in subjects:
+        await relation_service.bump(db_session, teller.id, subject.id, d_affinity=0.4)
+
+    calls = {"n": 0}
+    original = db_session.execute
+
+    async def counting_execute(statement, *args, **kwargs):
+        # 用编译后的 SQL 文本判定,不碰 Select.froms(1.4.23 起 deprecated)
+        if "resident_relations" in str(statement):
+            calls["n"] += 1
+        return await original(statement, *args, **kwargs)
+
+    monkeypatch.setattr(db_session, "execute", counting_execute)
+    assert await recompute(db_session) == 6
+    assert calls["n"] == 1, f"关系查询 {calls['n']} 次,应为 1 次批量读"
