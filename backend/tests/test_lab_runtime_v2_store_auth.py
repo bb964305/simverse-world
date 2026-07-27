@@ -276,18 +276,57 @@ def test_service_auth_accepts_current_and_next_keys_with_exact_binding():
     assert extract_bearer_token(f"Bearer {encoded}") == encoded
 
 
-@pytest.mark.parametrize(
-    ("token", "reason"),
-    [
-        (_token(kid="unknown", key="unknown-secret-at-least-32-bytes-long"), "untrusted_key"),
-        (_token(key="wrong-secret-at-least-32-bytes-long"), "invalid_token"),
-        (_token(issuer="other-issuer"), "invalid_token"),
-        (_token(audience="lab-executor"), "invalid_token"),
-        (_token(expires_at=int(time.time()) - 10), "expired_token"),
-        (_token(not_before=int(time.time()) + 60), "token_not_yet_valid"),
-    ],
-)
-def test_service_auth_rejects_untrusted_or_invalid_tokens(token, reason):
+_REJECTED_TOKEN_CASES = [
+    # Descriptors only: `_token(...)` must be minted at *test execution* time
+    # (inside the test body below), not at collection time. Baking absolute
+    # nbf/exp epoch values into a decorator argument list means the clock has
+    # already moved by the time a full-suite run reaches this test, which
+    # silently turns "not yet valid" into "expired" (or worse). See the
+    # `expires_at_delta` / `not_before_delta` handling below.
+    pytest.param(
+        dict(kid="unknown", key="unknown-secret-at-least-32-bytes-long"),
+        "untrusted_key",
+        id="untrusted_key",
+    ),
+    pytest.param(
+        dict(key="wrong-secret-at-least-32-bytes-long"),
+        "invalid_token",
+        id="wrong_signing_key",
+    ),
+    pytest.param(
+        dict(issuer="other-issuer"),
+        "invalid_token",
+        id="wrong_issuer",
+    ),
+    pytest.param(
+        dict(audience="lab-executor"),
+        "invalid_token",
+        id="wrong_audience",
+    ),
+    pytest.param(
+        dict(expires_at_delta=-10),
+        "expired_token",
+        id="expired_token",
+    ),
+    pytest.param(
+        dict(not_before_delta=60),
+        "token_not_yet_valid",
+        id="token_not_yet_valid",
+    ),
+]
+
+
+@pytest.mark.parametrize(("token_kwargs", "reason"), _REJECTED_TOKEN_CASES)
+def test_service_auth_rejects_untrusted_or_invalid_tokens(token_kwargs, reason):
+    kwargs = dict(token_kwargs)
+    expires_at_delta = kwargs.pop("expires_at_delta", None)
+    not_before_delta = kwargs.pop("not_before_delta", None)
+    now = int(time.time())
+    if expires_at_delta is not None:
+        kwargs["expires_at"] = now + expires_at_delta
+    if not_before_delta is not None:
+        kwargs["not_before"] = now + not_before_delta
+    token = _token(**kwargs)
     with pytest.raises(ServiceAuthenticationError) as rejected:
         _validator().validate(token, required_action="tool_result.submit")
     assert rejected.value.reason == reason
