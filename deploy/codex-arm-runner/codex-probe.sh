@@ -18,7 +18,7 @@ fi
 
 exec "$@" \
   --json \
-  --sandbox danger-full-access \
+  --sandbox workspace-write \
   --skip-git-repo-check \
   --model lab-auto \
   --config "model_providers.lab_gateway.base_url=\"$CODEX_PROVIDER_BASE_URL\"" \

@@ -8,8 +8,6 @@ services:
     env_file:
       - path: model-gateway.env
         required: true
-    ports:
-      - "8096:8096"
     volumes:
       - model_gateway_data:/var/lib/simverse
     read_only: true
@@ -39,17 +37,29 @@ services:
     env_file:
       - path: codex-runtime.env
         required: true
-    volumes:
-      - codex_runtime_data:/var/lib/simverse/codex-runs
+    secrets:
+      - source: runtime_api_key
+        target: runtime_api_key
+        mode: 0400
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=256m
+      - /var/lib/simverse/codex-runs:rw,nosuid,size=512m,uid=0,gid=0,mode=0711
+    volumes:
+      # The entrypoint retains a writable bind only to this container's own
+      # Docker scope, then remounts the complete hierarchy read-only.
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
     cap_drop: [ALL]
+    cap_add: [SYS_ADMIN, SETPCAP, SETUID, SETGID, CHOWN]
     security_opt:
       - no-new-privileges:true
+      # Rootless Docker otherwise blocks the user namespace used by bwrap.
+      # Codex reapplies seccomp inside its bubblewrap sandbox.
+      - seccomp:unconfined
     pids_limit: 512
     mem_limit: 8g
     cpus: 4
+    cgroup: host
     networks:
       - runtime-internal
 
@@ -80,7 +90,10 @@ services:
 
 volumes:
   model_gateway_data:
-  codex_runtime_data:
+
+secrets:
+  runtime_api_key:
+    file: ./secrets/runtime_api_key
 
 networks:
   gateway-egress:

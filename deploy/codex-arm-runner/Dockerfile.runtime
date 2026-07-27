@@ -2,28 +2,37 @@ FROM python:3.12-slim-bookworm
 
 ARG CODEX_VERSION=0.144.4
 ARG CODEX_SHA256=4d07243ef4ae6786b8b321d7aea3f9be4e1d2c597ae5407e7c1b9873334082b2
+ARG BWRAP_SHA256=d463266e99d040914973ce082c0b3a6f7c9df39e60ed2440ac47331bfa352a16
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app/backend
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git ripgrep \
+    && apt-get install -y --no-install-recommends ca-certificates curl git libcap2 ripgrep util-linux \
     && curl -fsSL \
       "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-aarch64-unknown-linux-musl.tar.gz" \
       -o /tmp/codex.tar.gz \
     && echo "${CODEX_SHA256}  /tmp/codex.tar.gz" | sha256sum --check - \
     && tar -xzf /tmp/codex.tar.gz -C /usr/local/bin \
     && mv /usr/local/bin/codex-aarch64-unknown-linux-musl /usr/local/bin/codex \
-    && chmod 0555 /usr/local/bin/codex \
-    && rm -rf /var/lib/apt/lists/* /tmp/codex.tar.gz
+    && curl -fsSL \
+      "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/bwrap-aarch64-unknown-linux-musl.tar.gz" \
+      -o /tmp/bwrap.tar.gz \
+    && echo "${BWRAP_SHA256}  /tmp/bwrap.tar.gz" | sha256sum --check - \
+    && mkdir -p /usr/local/bin/codex-resources \
+    && tar -xzf /tmp/bwrap.tar.gz -C /usr/local/bin/codex-resources \
+    && mv /usr/local/bin/codex-resources/bwrap-aarch64-unknown-linux-musl /usr/local/bin/codex-resources/bwrap \
+    && ln -s /usr/local/bin/codex-resources/bwrap /usr/bin/bwrap \
+    && chmod 0555 /usr/local/bin/codex /usr/local/bin/codex-resources/bwrap \
+    && rm -rf /var/lib/apt/lists/* /tmp/codex.tar.gz /tmp/bwrap.tar.gz
 
 COPY backend/pyproject.toml /app/backend/pyproject.toml
 COPY backend/app /app/backend/app
+COPY deploy/codex-arm-runner/runtime-entrypoint.sh /usr/local/bin/runtime-entrypoint
 RUN pip install --no-cache-dir .
 
-RUN useradd --create-home --uid 10001 codex \
-    && mkdir -p /var/lib/simverse/codex-runs \
-    && chown -R codex:codex /var/lib/simverse/codex-runs
+RUN chmod 0555 /usr/local/bin/runtime-entrypoint \
+    && mkdir -p /var/lib/simverse/codex-runs /run/simverse-cgroup
 
-USER codex
-ENTRYPOINT ["python", "-m", "app.lab.codex_runtime.main"]
+ENTRYPOINT ["/usr/local/bin/runtime-entrypoint"]
+CMD ["python", "-m", "app.lab.codex_runtime.main"]
