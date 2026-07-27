@@ -85,15 +85,23 @@ async def test_demoted_resident_score_keeps_moving(db_session, monkeypatch):
 
 
 def _is_resident_type_read(node: ast.expr) -> bool:
-    """`node` 是否读取了 `resident_type`（直接：属性 / 裸名）。
-
-    TODO(评审 Important finding)：还不认 `getattr(obj, "resident_type", ...)`
-    间接读取——这正是本轮 guard-of-the-guard 要钉住的第二个缺口。
-    """
+    """`node` 是否读取了 `resident_type`——直接（属性 / 裸名）或经
+    `getattr(obj, "resident_type", ...)` 间接读取。"""
     if isinstance(node, ast.Attribute) and node.attr == "resident_type":
         return True
     if isinstance(node, ast.Name) and node.id == "resident_type":
         return True
+    if isinstance(node, ast.Call):
+        func = node.func
+        is_getattr = (
+            (isinstance(func, ast.Name) and func.id == "getattr")
+            or (isinstance(func, ast.Attribute) and func.attr == "getattr")
+        )
+        if is_getattr and len(node.args) >= 2:
+            name_arg = node.args[1]
+            if (isinstance(name_arg, ast.Constant)
+                    and name_arg.value == "resident_type"):
+                return True
     return False
 
 
@@ -102,23 +110,24 @@ def _is_npc_constant(node: ast.expr) -> bool:
 
 
 def _npc_literal_offenders(tree: ast.AST, label: str) -> list[str]:
-    """结构性扫描：目前只看 `node.left`。
-
-    TODO(评审 Important finding)：Yoda 写法（`"npc" == resident.resident_type`）
-    的 `resident_type` 读取落在 `node.comparators` 里，`node.left` 是常量
-    `"npc"`——只查 `left` 会静默放过它。
-    """
+    """结构性扫描：任何 `ast.Compare` 里，相邻一对操作数**任一侧**是
+    `resident_type` 读取、**另一侧**是字面量 `"npc"`、运算符是 `==`/`!=`，
+    即报违规——两侧都查，不再只看 `node.left`（评审 Important finding：
+    只查 `left` 会漏掉 Yoda 写法 `"npc" == resident.resident_type`）。"""
     offenders = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Compare):
             continue
-        left = node.left
-        if not _is_resident_type_read(left):
-            continue
-        for op, comparator in zip(node.ops, node.comparators):
+        elements = [node.left, *node.comparators]
+        for i, op in enumerate(node.ops):
             if not isinstance(op, (ast.Eq, ast.NotEq)):
                 continue
-            if _is_npc_constant(comparator):
+            a, b = elements[i], elements[i + 1]
+            hit = (
+                (_is_resident_type_read(a) and _is_npc_constant(b))
+                or (_is_resident_type_read(b) and _is_npc_constant(a))
+            )
+            if hit:
                 offenders.append(f"{label}:{node.lineno}")
     return offenders
 
