@@ -120,6 +120,64 @@ async def test_leak_survives_promote_then_revoke_then_out_of_band_regrant(
 
 
 @pytest.mark.anyio
+async def test_leak_caught_when_tied_history_rows_are_inserted_promotion_first(
+        db_session):
+    """评审复现的变种：`select(CivicStandingHistory)`（burnin_report.py）没有
+    ORDER BY，`last_change` 的归并（修复前）用严格 `>` 比较裸 `world_at`——
+    同一居民两条历史行 `world_at` 完全相同时（backfill 批量写入最容易产生
+    这种打平：一次 pass 里许多行共享同一个时钟读数），"最新一行是谁"由数据库
+    返回的未声明顺序决定，不是显式次级键。这条测试真正构造一次打平（两行共
+    用同一个 datetime 对象，不是分两次调用 world_clock.now_world() 侥幸没撞
+    上），并显式钉死两行的 id 大小关系（不依赖 uuid4() 的随机结果），晋升行
+    先插入、撤销行后插入。这是评审给的确切复现序列，在修复前的代码上必须
+    失败（`leaked == []`）。"""
+    r = _ugc("mole", cm.CIVIC_MEMBER_TYPE)  # 当前 resident_type：npc（带外回授）
+    db_session.add_all([_builtin("b1"), r])
+    await db_session.commit()
+
+    tie_at = world_clock.now_world().astimezone(UTC) - timedelta(days=5)
+    db_session.add(CivicStandingHistory(
+        id="hist-1-promote", resident_id=r.id, old_standing=cm.DENIZEN,
+        new_standing=cm.CITIZEN, reason=None, reason_code="threshold_met",
+        actor="civic_promotion", evidence_json={}, world_at=tie_at))
+    db_session.add(CivicStandingHistory(
+        id="hist-2-revoke", resident_id=r.id, old_standing=cm.CITIZEN,
+        new_standing=cm.DENIZEN, reason=None, reason_code="admin_revoke",
+        actor="admin:ops", evidence_json={}, world_at=tie_at))
+    await db_session.commit()
+
+    snap = await fetch_civic_standing_snapshot(db_session)
+    assert snap["leaked"] == ["mole"]
+
+
+@pytest.mark.anyio
+async def test_leak_caught_when_tied_history_rows_are_inserted_revoke_first(
+        db_session):
+    """同一个打平场景反过来插入（撤销先插入、晋升后插入）——修复后的判据
+    必须给出**同一个**结论。旧判据"谁先被迭代到就是谁赢"在这个插入顺序上
+    会（碰巧）给出正确答案——那是运气，不是设计：把两个插入顺序的结论钉在
+    一起，任何"只在某一种插入顺序下工作"的实现都会在这两条测试之间露馅。
+    修复后的复合键 (world_at, id) 与迭代/插入顺序无关，两条测试必须同绿。"""
+    r = _ugc("mole", cm.CIVIC_MEMBER_TYPE)
+    db_session.add_all([_builtin("b1"), r])
+    await db_session.commit()
+
+    tie_at = world_clock.now_world().astimezone(UTC) - timedelta(days=5)
+    db_session.add(CivicStandingHistory(
+        id="hist-2-revoke", resident_id=r.id, old_standing=cm.CITIZEN,
+        new_standing=cm.DENIZEN, reason=None, reason_code="admin_revoke",
+        actor="admin:ops", evidence_json={}, world_at=tie_at))
+    db_session.add(CivicStandingHistory(
+        id="hist-1-promote", resident_id=r.id, old_standing=cm.DENIZEN,
+        new_standing=cm.CITIZEN, reason=None, reason_code="threshold_met",
+        actor="civic_promotion", evidence_json={}, world_at=tie_at))
+    await db_session.commit()
+
+    snap = await fetch_civic_standing_snapshot(db_session)
+    assert snap["leaked"] == ["mole"]
+
+
+@pytest.mark.anyio
 async def test_legitimately_revoked_resident_is_not_flagged_as_a_leak(
         db_session):
     """修复不能引入新的假阳性：合法撤销、停在 denizen 档、留着完整的
