@@ -10,6 +10,7 @@ import pytest
 from app.lab.model_gateway.config import GatewayConfig
 from app.lab.model_gateway.ledger import RunRevokedError, UsageLedger
 from app.lab.model_gateway.service import ReasoningStore, create_app
+from app.lab.model_gateway.translation import responses_to_chat
 from app.lab.model_policy import MODEL_GATEWAY_AUDIENCE, MODEL_GATEWAY_ISSUER
 
 
@@ -482,3 +483,184 @@ def test_restart_marks_stranded_reservation_unknown_and_revoked(tmp_path):
             max_inflight_requests=1,
         )
     recovered.close()
+
+
+def test_live_peer_does_not_recover_another_instance_reservation(tmp_path):
+    ledger_path = str(tmp_path / "usage.db")
+    config = _config()
+    first = UsageLedger(ledger_path, config)
+    reservation_id = first.reserve(
+        run_id="live-peer-run",
+        model="deepseek-v4-flash",
+        estimated_input_tokens=100,
+        max_output_tokens=200,
+        max_model_tokens=1_000,
+        budget_usd_cents=50,
+        max_inflight_requests=1,
+    )
+
+    peer = UsageLedger(ledger_path, config)
+    totals = peer.get("live-peer-run", "deepseek-v4-flash")
+    assert totals.cost_unknown is False
+    assert totals.revoked is False
+    assert totals.inflight_requests == 1
+    assert totals.reserved_tokens == 300
+
+    first.release(reservation_id)
+    peer.close()
+    first.close()
+
+
+def test_expired_peer_reservation_recovery_commits_before_revocation(
+    tmp_path, monkeypatch
+):
+    now = [100]
+    monkeypatch.setattr("app.lab.model_gateway.ledger.time.time", lambda: now[0])
+    ledger_path = str(tmp_path / "usage.db")
+    config = _config()
+    first = UsageLedger(ledger_path, config)
+    first.reserve(
+        run_id="expired-peer-run",
+        model="deepseek-v4-flash",
+        estimated_input_tokens=100,
+        max_output_tokens=200,
+        max_model_tokens=1_000,
+        budget_usd_cents=50,
+        max_inflight_requests=1,
+    )
+    now[0] = 101
+    peer = UsageLedger(ledger_path, config)
+    now[0] = 200
+
+    with pytest.raises(RunRevokedError, match="revoked"):
+        peer.reserve(
+            run_id="expired-peer-run",
+            model="deepseek-v4-flash",
+            estimated_input_tokens=1,
+            max_output_tokens=1,
+            max_model_tokens=1_000,
+            budget_usd_cents=50,
+            max_inflight_requests=1,
+        )
+
+    totals = peer.get("expired-peer-run", "deepseek-v4-flash")
+    assert totals.cost_unknown is True
+    assert totals.revoked is True
+    assert totals.inflight_requests == 0
+    assert totals.reserved_tokens == 0
+    peer.close()
+    first.close()
+
+
+@pytest.mark.anyio
+async def test_unclassified_upstream_exception_marks_reservation_unknown():
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        raise RuntimeError("unexpected client or serialization failure")
+
+    config = _config()
+    upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    ledger = UsageLedger(":memory:", config)
+    app = create_app(config, http_client=upstream_client, ledger=ledger)
+    token = _token(run_id="unexpected-upstream-error")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://gateway"
+    ) as client:
+        with pytest.raises(RuntimeError, match="unexpected client"):
+            await client.post(
+                "/v1/responses",
+                headers=_headers(token),
+                json={"model": "lab-auto", "input": "trigger unexpected failure"},
+            )
+
+    totals = ledger.get("unexpected-upstream-error", "deepseek-v4-flash")
+    assert totals.cost_unknown is True
+    assert totals.revoked is True
+    assert totals.inflight_requests == 0
+    assert totals.reserved_tokens == 0
+    await upstream_client.aclose()
+    ledger.close()
+
+
+def test_reasoning_injection_is_deduplicated_and_byte_bounded():
+    body = {
+        "model": "lab-auto",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "repeated-call",
+                "name": "shell",
+                "arguments": "{}",
+            },
+            {
+                "type": "function_call",
+                "call_id": "repeated-call",
+                "name": "shell",
+                "arguments": "{}",
+            },
+        ],
+        "tools": [{"type": "function", "name": "shell"}],
+    }
+
+    chat, _registry = responses_to_chat(
+        body,
+        model="deepseek-v4-pro",
+        max_output_tokens=100,
+        reasoning_for_call=lambda _call_id: "abcdefghijklmnop",
+        max_reasoning_bytes=8,
+    )
+
+    injected = [
+        message["reasoning_content"]
+        for message in chat["messages"]
+        if "reasoning_content" in message
+    ]
+    assert injected == ["abcdefgh"]
+    assert sum(len(value.encode("utf-8")) for value in injected) <= 8
+
+
+@pytest.mark.anyio
+async def test_budget_reservation_estimates_translated_chat_bytes(monkeypatch):
+    config = _config()
+    object.__setattr__(config, "reasoning_max_injected_bytes", 4096)
+    observed: list[int] = []
+    ledger = UsageLedger(":memory:", config)
+    original_reserve = ledger.reserve
+
+    def capture_reserve(**kwargs):
+        observed.append(kwargs["estimated_input_tokens"])
+        return original_reserve(**kwargs)
+
+    monkeypatch.setattr(ledger, "reserve", capture_reserve)
+    upstream_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={
+            "choices": [{"message": {"role": "assistant", "content": "done"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 1},
+        }))
+    )
+    app = create_app(config, http_client=upstream_client, ledger=ledger)
+    app.state.reasoning.put_many("translated-estimate", {"call-1": "x" * 4000})
+    token = _token(run_id="translated-estimate", max_model_tokens=20_000)
+    body = {
+        "model": "lab-auto",
+        "input": [{
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "shell",
+            "arguments": "{}",
+        }],
+        "tools": [{"type": "function", "name": "shell"}],
+        "max_output_tokens": 100,
+    }
+    raw_size = len(json.dumps(body, separators=(",", ":")).encode("utf-8"))
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://gateway"
+    ) as client:
+        response = await client.post(
+            "/v1/responses", headers=_headers(token), content=json.dumps(body)
+        )
+        assert response.status_code == 200, response.text
+
+    assert observed and observed[0] > raw_size + 3500
+    await upstream_client.aclose()
+    ledger.close()

@@ -112,6 +112,15 @@ def _sse(events: Iterator[dict]) -> Iterator[bytes]:
     yield b"data: [DONE]\n\n"
 
 
+async def _mark_unknown_uninterruptibly(ledger: UsageLedger, reservation_id: str) -> None:
+    task = asyncio.create_task(asyncio.to_thread(ledger.mark_unknown, reservation_id))
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await task
+        raise
+
+
 def create_app(
     config: GatewayConfig,
     *,
@@ -206,6 +215,7 @@ def create_app(
                 reasoning_for_call=lambda call_id: app.state.reasoning.get(
                     claims.run_id, call_id
                 ),
+                max_reasoning_bytes=config.reasoning_max_injected_bytes,
             )
         except TranslationError as exc:
             return _error(400, str(exc), "unsupported_responses_shape")
@@ -215,7 +225,11 @@ def create_app(
                 app.state.ledger.reserve,
                 run_id=claims.run_id,
                 model=claims.model,
-                estimated_input_tokens=_estimated_input_tokens(raw),
+                estimated_input_tokens=_estimated_input_tokens(json.dumps(
+                    chat_body,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")),
                 max_output_tokens=max_output,
                 max_model_tokens=claims.max_model_tokens,
                 budget_usd_cents=claims.budget_usd_cents,
@@ -230,60 +244,75 @@ def create_app(
         except BudgetReservationError:
             return _error(402, "run model budget is exhausted", "budget_exhausted")
 
+        reservation_open = True
         try:
-            upstream = await app.state.http_client.post(
-                f"{config.upstream_base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {config.upstream_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=chat_body,
-                timeout=config.request_timeout_s,
+            try:
+                upstream = await app.state.http_client.post(
+                    f"{config.upstream_base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {config.upstream_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=chat_body,
+                    timeout=config.request_timeout_s,
+                )
+            except httpx.TimeoutException:
+                await asyncio.to_thread(app.state.ledger.mark_unknown, reservation_id)
+                reservation_open = False
+                return _error(504, "model provider timed out", "upstream_timeout")
+            except httpx.TransportError:
+                await asyncio.to_thread(app.state.ledger.mark_unknown, reservation_id)
+                reservation_open = False
+                return _error(502, "model provider is unavailable", "upstream_unavailable")
+            if upstream.status_code >= 400:
+                await asyncio.to_thread(app.state.ledger.release, reservation_id)
+                reservation_open = False
+                status = 429 if upstream.status_code == 429 else 502
+                return _error(status, "model provider rejected the request", "upstream_rejected")
+            try:
+                upstream_payload = upstream.json()
+            except ValueError:
+                await asyncio.to_thread(app.state.ledger.mark_unknown, reservation_id)
+                reservation_open = False
+                return _error(502, "model provider returned unmetered output", "usage_unknown")
+            usage = _upstream_usage(upstream_payload)
+            if usage is None:
+                await asyncio.to_thread(app.state.ledger.mark_unknown, reservation_id)
+                reservation_open = False
+                return _error(502, "model provider returned unmetered output", "usage_unknown")
+            settled = await asyncio.to_thread(
+                app.state.ledger.settle,
+                reservation_id,
+                input_tokens=usage[0],
+                output_tokens=usage[1],
+                reasoning_tokens=usage[2],
             )
-        except httpx.TimeoutException:
-            await asyncio.to_thread(app.state.ledger.mark_unknown, reservation_id)
-            return _error(504, "model provider timed out", "upstream_timeout")
-        except httpx.TransportError:
-            await asyncio.to_thread(app.state.ledger.mark_unknown, reservation_id)
-            return _error(502, "model provider is unavailable", "upstream_unavailable")
-        if upstream.status_code >= 400:
-            await asyncio.to_thread(app.state.ledger.release, reservation_id)
-            status = 429 if upstream.status_code == 429 else 502
-            return _error(status, "model provider rejected the request", "upstream_rejected")
-        try:
-            upstream_payload = upstream.json()
-        except ValueError:
-            await asyncio.to_thread(app.state.ledger.mark_unknown, reservation_id)
-            return _error(502, "model provider returned unmetered output", "usage_unknown")
-        usage = _upstream_usage(upstream_payload)
-        if usage is None:
-            await asyncio.to_thread(app.state.ledger.mark_unknown, reservation_id)
-            return _error(502, "model provider returned unmetered output", "usage_unknown")
-        settled = await asyncio.to_thread(
-            app.state.ledger.settle,
-            reservation_id,
-            input_tokens=usage[0],
-            output_tokens=usage[1],
-            reasoning_tokens=usage[2],
-        )
-        if (
-            settled.total_tokens > claims.max_model_tokens
-            or settled.cost_usd_micros > claims.budget_usd_cents * 10_000
-        ):
-            await asyncio.to_thread(
-                app.state.ledger.revoke, claims.run_id, claims.model
-            )
-            return _error(402, "upstream usage exceeded the run budget", "budget_exhausted")
-        try:
-            normalized, reasoning = chat_to_response(
-                upstream_payload, public_model="lab-auto", tool_registry=registry
-            )
-        except (ValueError, TranslationError):
-            return _error(502, "model provider returned an invalid response", "upstream_invalid")
-        app.state.reasoning.put_many(claims.run_id, reasoning)
-        if body.get("stream") is True:
-            return StreamingResponse(_sse(response_events(normalized)), media_type="text/event-stream")
-        return normalized
+            reservation_open = False
+            if (
+                settled.total_tokens > claims.max_model_tokens
+                or settled.cost_usd_micros > claims.budget_usd_cents * 10_000
+            ):
+                await asyncio.to_thread(
+                    app.state.ledger.revoke, claims.run_id, claims.model
+                )
+                return _error(402, "upstream usage exceeded the run budget", "budget_exhausted")
+            try:
+                normalized, reasoning = chat_to_response(
+                    upstream_payload, public_model="lab-auto", tool_registry=registry
+                )
+            except (ValueError, TranslationError):
+                return _error(502, "model provider returned an invalid response", "upstream_invalid")
+            app.state.reasoning.put_many(claims.run_id, reasoning)
+            if body.get("stream") is True:
+                return StreamingResponse(
+                    _sse(response_events(normalized)), media_type="text/event-stream"
+                )
+            return normalized
+        finally:
+            if reservation_open:
+                await _mark_unknown_uninterruptibly(
+                    app.state.ledger, reservation_id
+                )
 
     @app.exception_handler(HTTPException)
     async def _http_exception(_request: Request, exc: HTTPException):

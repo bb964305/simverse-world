@@ -61,6 +61,7 @@ class GatewayConfig:
     max_inflight_per_run: int = 2
     reasoning_ttl_s: int = 900
     reasoning_max_entries: int = 4096
+    reasoning_max_injected_bytes: int = 262_144
     token_renewal_ttl_s: int = 300
 
     @classmethod
@@ -79,12 +80,18 @@ class GatewayConfig:
             max_inflight = int(env.get("LAB_MODEL_GATEWAY_MAX_INFLIGHT_PER_RUN", "2"))
             reasoning_ttl = int(env.get("LAB_MODEL_GATEWAY_REASONING_TTL_S", "900"))
             reasoning_entries = int(env.get("LAB_MODEL_GATEWAY_REASONING_MAX_ENTRIES", "4096"))
+            reasoning_bytes = int(
+                env.get("LAB_MODEL_GATEWAY_REASONING_MAX_INJECTED_BYTES", "262144")
+            )
             renewal_ttl = int(env.get("LAB_MODEL_GATEWAY_TOKEN_RENEWAL_TTL_S", "300"))
         except ValueError as exc:
             raise ValueError("model gateway numeric configuration is invalid") from exc
         if (
             not 1 <= port <= 65535
-            or min(max_bytes, max_output, max_inflight, reasoning_ttl, reasoning_entries) <= 0
+            or min(
+                max_bytes, max_output, max_inflight, reasoning_ttl,
+                reasoning_entries, reasoning_bytes,
+            ) <= 0
             or not 60 <= renewal_ttl <= 900
             or timeout <= 0
         ):
@@ -123,6 +130,7 @@ class GatewayConfig:
             max_inflight_per_run=max_inflight,
             reasoning_ttl_s=reasoning_ttl,
             reasoning_max_entries=reasoning_entries,
+            reasoning_max_injected_bytes=reasoning_bytes,
             token_renewal_ttl_s=renewal_ttl,
         )
 

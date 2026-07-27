@@ -57,6 +57,8 @@ class UsageTotals:
 class UsageLedger:
     def __init__(self, path: str, config: GatewayConfig) -> None:
         self.config = config
+        self.instance_id = str(uuid.uuid4())
+        self._reservation_lease_s = max(60, int(config.request_timeout_s) + 60)
         self._lock = threading.Lock()
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -93,29 +95,39 @@ class UsageLedger:
                 reserved_tokens INTEGER NOT NULL,
                 reserved_cost_usd_micros INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
+                owner_id TEXT NOT NULL,
+                lease_expires_at INTEGER NOT NULL,
                 FOREIGN KEY(run_id) REFERENCES run_usage(run_id) ON DELETE CASCADE
             )
             """
         )
+        self._upgrade_usage_reservations()
         self._recover_inflight()
         self._db.commit()
 
     def _recover_inflight(self) -> None:
-        run_ids = [
-            row[0] for row in self._db.execute(
-                "SELECT DISTINCT run_id FROM usage_reservations"
-            )
-        ]
-        if not run_ids:
+        now = int(time.time())
+        expired = list(self._db.execute(
+            "SELECT run_id, SUM(reserved_tokens), "
+            "SUM(reserved_cost_usd_micros), COUNT(*) "
+            "FROM usage_reservations WHERE lease_expires_at <= ? GROUP BY run_id",
+            (now,),
+        ))
+        if not expired:
             return
-        placeholders = ",".join("?" for _ in run_ids)
+        for run_id, reserved_tokens, reserved_cost, inflight in expired:
+            self._db.execute(
+                "UPDATE run_usage SET cost_unknown = 1, revoked = 1, "
+                "reserved_tokens = MAX(0, reserved_tokens - ?), "
+                "reserved_cost_usd_micros = "
+                "MAX(0, reserved_cost_usd_micros - ?), "
+                "inflight_requests = MAX(0, inflight_requests - ?), "
+                "updated_at = ? WHERE run_id = ?",
+                (reserved_tokens, reserved_cost, inflight, now, run_id),
+            )
         self._db.execute(
-            f"UPDATE run_usage SET cost_unknown = 1, revoked = 1, "
-            f"reserved_tokens = 0, reserved_cost_usd_micros = 0, "
-            f"inflight_requests = 0 WHERE run_id IN ({placeholders})",
-            run_ids,
+            "DELETE FROM usage_reservations WHERE lease_expires_at <= ?", (now,)
         )
-        self._db.execute("DELETE FROM usage_reservations")
 
     def _upgrade_run_usage(self) -> None:
         columns = {
@@ -132,6 +144,21 @@ class UsageLedger:
             if name not in columns:
                 self._db.execute(
                     f"ALTER TABLE run_usage ADD COLUMN {name} {declaration}"
+                )
+
+    def _upgrade_usage_reservations(self) -> None:
+        columns = {
+            row[1]
+            for row in self._db.execute("PRAGMA table_info(usage_reservations)")
+        }
+        additions = {
+            "owner_id": "TEXT NOT NULL DEFAULT ''",
+            "lease_expires_at": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for name, declaration in additions.items():
+            if name not in columns:
+                self._db.execute(
+                    f"ALTER TABLE usage_reservations ADD COLUMN {name} {declaration}"
                 )
 
     def _cost_micros(self, model: str, input_tokens: int, output_tokens: int) -> int:
@@ -203,6 +230,13 @@ class UsageLedger:
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
+                self._recover_inflight()
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+                raise
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
                 self._db.execute(
                     "INSERT INTO run_usage (run_id, model, updated_at) VALUES (?, ?, ?) "
                     "ON CONFLICT(run_id) DO NOTHING",
@@ -248,8 +282,15 @@ class UsageLedger:
                 if changed.rowcount != 1:
                     raise BudgetReservationError("run budget reservation raced")
                 self._db.execute(
-                    "INSERT INTO usage_reservations VALUES (?, ?, ?, ?, ?, ?)",
-                    (reservation_id, run_id, model, reserved_tokens, reserved_cost, now),
+                    "INSERT INTO usage_reservations "
+                    "(reservation_id, run_id, model, reserved_tokens, "
+                    "reserved_cost_usd_micros, created_at, owner_id, lease_expires_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        reservation_id, run_id, model, reserved_tokens,
+                        reserved_cost, now, self.instance_id,
+                        now + self._reservation_lease_s,
+                    ),
                 )
                 self._db.commit()
             except Exception:
@@ -369,5 +410,18 @@ class UsageLedger:
         return self._totals(row)
 
     def close(self) -> None:
+        with self._lock:
+            reservation_ids = [
+                row[0]
+                for row in self._db.execute(
+                    "SELECT reservation_id FROM usage_reservations WHERE owner_id = ?",
+                    (self.instance_id,),
+                )
+            ]
+        for reservation_id in reservation_ids:
+            try:
+                self.mark_unknown(reservation_id)
+            except ValueError:
+                pass
         with self._lock:
             self._db.close()

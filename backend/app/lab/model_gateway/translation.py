@@ -139,6 +139,7 @@ def responses_to_chat(
     model: str,
     max_output_tokens: int,
     reasoning_for_call: Callable[[str], str | None],
+    max_reasoning_bytes: int,
 ) -> tuple[dict, dict[str, ToolTarget]]:
     raw_input = body.get("input", "")
     items = [{"role": "user", "content": raw_input}] if isinstance(raw_input, str) else raw_input
@@ -152,6 +153,8 @@ def responses_to_chat(
         raise TranslationError("instructions must be text")
 
     tools, registry = _chat_tools(body.get("tools"))
+    reasoning_call_ids: set[str] = set()
+    reasoning_bytes = 0
     for item in items:
         if not isinstance(item, dict):
             raise TranslationError("input items must be objects")
@@ -190,9 +193,16 @@ def responses_to_chat(
                     "function": {"name": chat_name, "arguments": arguments},
                 }],
             }
-            reasoning = reasoning_for_call(call_id)
-            if reasoning:
-                message["reasoning_content"] = reasoning
+            if call_id not in reasoning_call_ids:
+                reasoning_call_ids.add(call_id)
+                reasoning = reasoning_for_call(call_id)
+                if reasoning and reasoning_bytes < max_reasoning_bytes:
+                    remaining = max_reasoning_bytes - reasoning_bytes
+                    encoded = reasoning.encode("utf-8")[:remaining]
+                    bounded = encoded.decode("utf-8", errors="ignore")
+                    if bounded:
+                        message["reasoning_content"] = bounded
+                        reasoning_bytes += len(bounded.encode("utf-8"))
             messages.append(message)
             continue
         if kind in {"function_call_output", "custom_tool_call_output"}:
