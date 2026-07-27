@@ -340,6 +340,9 @@ async def test_vacate_audits_only_when_asked(db_session):
     audits = await office_audit.list_term_audits(db_session)
     assert len(audits) == 1
     assert audits[0]["holder_slug"] == "ex-mayor"
+    # fix round 1(评审):锁住 vacate() 预读的 term_started_at 真的被传给了
+    # 审计——硬编码成 None 不会被 brief 给定的任何断言抓到(M6 幸存变异)。
+    assert audits[0]["term_started_at"] is not None
 
 
 @pytest.mark.anyio
