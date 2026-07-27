@@ -566,6 +566,9 @@ async def test_codex_cancel_waits_for_usage_then_refunds_net_cost(
     task_id, run_id = await _make_task(
         factory, scopes=["code"], reward_sc=100, title="取消真实任务"
     )
+    # Refund conversion is part of the immutable run grant. A later operator
+    # config change must not rewrite the economics of an already funded run.
+    monkeypatch.setattr(settings, "lab_sc_per_usd", 200)
 
     async with factory() as db:
         task = await svc.cancel_task(db, task_id, "issuer")

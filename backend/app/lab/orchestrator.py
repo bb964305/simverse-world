@@ -712,7 +712,7 @@ class _Orchestrator:
                     run_id=self.run_id,
                     task_id=self.task_id,
                     kind=declaration.kind,
-                    title=declaration.title,
+                    title=guard.redact_text(declaration.title) or "",
                     uri=None,
                     text_md=None,
                     meta_json={_EXECUTOR_OUTPUT_META_KEY: marker},
@@ -2005,7 +2005,8 @@ class _Orchestrator:
         built = []
         for a in artifacts:
             artifact = LabArtifact(
-                run_id=self.run_id, task_id=self.task_id, kind=a.kind, title=a.title,
+                run_id=self.run_id, task_id=self.task_id, kind=a.kind,
+                title=guard.redact_text(a.title) or "",
                 uri=guard.redact_text(a.uri),
                 text_md=guard.redact_text(a.text_md),
                 meta_json=(guard.redact_payload(a.meta) or None),
@@ -2040,7 +2041,9 @@ class _Orchestrator:
             await budgets.confirm(db, run_id=self.run_id, dimension="artifact_count")
         await self._stop_after_success()
 
-        summary = "; ".join(a.title for a in artifacts) if artifacts else _SUMMARY_FALLBACK
+        summary = guard.redact_text(
+            "; ".join(a.title for a in artifacts) if artifacts else _SUMMARY_FALLBACK
+        ) or ""
         await self._emit(type="artifact.emitted",
                          payload={"count": len(artifacts), "summary": guard.redact_text(summary) or ""})
 
@@ -2094,9 +2097,9 @@ class _Orchestrator:
             self.run.status = "failed"
             self.run.ended_at = datetime.now(UTC)
             self.run.cost_usd_cents = self.cost_cents
-            self.run.error = (
+            self.run.error = (guard.redact_text(
                 str(reason) if cost_trusted else f"cost_unknown: {reason}"
-            )[:500]
+            ) or "")[:500]
             await db.commit()
         try:
             await self._emit(type="run.failed", payload={"reason": str(reason)[:200]})
@@ -2995,7 +2998,7 @@ class _V2Orchestrator(_Orchestrator):
                 run_id=self.run_id,
                 task_id=self.task_id,
                 kind=artifact_spec.kind,
-                title=artifact_spec.title,
+                title=guard.redact_text(artifact_spec.title) or "",
                 uri=None,
                 text_md=None,
                 meta_json=meta,

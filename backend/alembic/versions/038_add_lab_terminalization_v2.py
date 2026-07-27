@@ -84,6 +84,7 @@ AS $function$
 DECLARE
     v_task public.lab_tasks%ROWTYPE;
     v_hold public.coin_holds%ROWTYPE;
+    v_run record;
     v_expected_statuses jsonb;
     v_target_status text;
     v_terminal_action text;
@@ -95,6 +96,9 @@ DECLARE
     v_treasury_amount bigint;
     v_splits jsonb := '[]'::jsonb;
     v_total bigint;
+    v_model_cost_sc bigint := 0;
+    v_refund_sc bigint;
+    v_cost_rate bigint;
 BEGIN
     SELECT * INTO v_task FROM public.lab_tasks WHERE id = p_task_id;
     IF NOT FOUND THEN
@@ -148,11 +152,50 @@ BEGIN
     );
 
     IF v_terminal_action = 'refund' THEN
-        v_splits := jsonb_build_array(jsonb_build_object(
-            'recipient_key', v_hold.user_id,
-            'amount', v_hold.amount,
-            'reason', v_reason
-        ));
+        IF p_operation IN ('fail', 'cancel', 'expire')
+           AND v_task.accepted_run_id IS NOT NULL THEN
+            SELECT * INTO v_run
+              FROM public.lab_runs
+             WHERE id = v_task.accepted_run_id AND task_id = v_task.id;
+            IF FOUND AND v_run.adapter <> 'mock' THEN
+                IF COALESCE(v_run.error, '') LIKE 'cost_unknown:%' THEN
+                    RAISE EXCEPTION 'model cost is unknown; refund settlement is blocked'
+                        USING ERRCODE = '55000';
+                END IF;
+                -- The rate is frozen by migration 053. The fallback keeps a
+                -- standalone 038 cohort on the declared 100 SC/USD baseline.
+                v_cost_rate := COALESCE(
+                    NULLIF(to_jsonb(v_run)->>'model_cost_sc_per_usd', '')::bigint,
+                    100
+                );
+                IF v_cost_rate <= 0 THEN
+                    RAISE EXCEPTION 'model cost conversion rate is invalid'
+                        USING ERRCODE = '23514';
+                END IF;
+                v_model_cost_sc := LEAST(
+                    v_hold.amount,
+                    CEIL(
+                        GREATEST(COALESCE(v_run.cost_usd_cents, 0), 0)::numeric
+                        * v_cost_rate::numeric / 100
+                    )::bigint
+                );
+            END IF;
+        END IF;
+        v_refund_sc := v_hold.amount - v_model_cost_sc;
+        IF v_refund_sc > 0 THEN
+            v_splits := v_splits || jsonb_build_array(jsonb_build_object(
+                'recipient_key', v_hold.user_id,
+                'amount', v_refund_sc,
+                'reason', v_reason
+            ));
+        END IF;
+        IF v_model_cost_sc > 0 THEN
+            v_splits := v_splits || jsonb_build_array(jsonb_build_object(
+                'recipient_key', 'sink',
+                'amount', v_model_cost_sc,
+                'reason', 'lab_model_cost:' || v_task.id
+            ));
+        END IF;
     ELSE
         IF v_task.terminal_creator_share_bps IS NULL
            OR v_task.terminal_creator_share_bps NOT BETWEEN 0 AND 10000 THEN
@@ -420,6 +463,10 @@ DECLARE
     v_completed_at boolean;
     v_effect jsonb;
     v_run record;
+    v_expected_model_cost_sc bigint := 0;
+    v_expected_refund_sc bigint;
+    v_expected_refund_count integer;
+    v_cost_rate bigint;
 BEGIN
     IF p_command_id IS NULL OR p_command_id = '' OR p_expected_epoch < 0 THEN
         RAISE EXCEPTION 'invalid terminalization identity or epoch'
@@ -659,16 +706,6 @@ BEGIN
         RAISE EXCEPTION 'split recipients are duplicated or not conservative'
             USING ERRCODE = '23514';
     END IF;
-    IF v_terminal_action = 'refund' AND (
-        v_count <> 1
-        OR v_payload->'splits'->0->>'recipient_key' <> v_hold.user_id
-        OR (v_payload->'splits'->0->>'amount')::bigint <> v_hold.amount
-        OR v_payload->'splits'->0->>'reason' <> v_payload->>'reason'
-    ) THEN
-        RAISE EXCEPTION 'refund must contain exactly the frozen issuer distribution'
-            USING ERRCODE = '23514';
-    END IF;
-
     -- Lock all existing user recipients in stable id order, then verify none are missing.
     PERFORM 1
       FROM public.users
@@ -746,13 +783,14 @@ BEGIN
     END IF;
 
     IF v_task.accepted_run_id IS NOT NULL THEN
-        SELECT status INTO v_run_status
+        SELECT * INTO v_run
           FROM public.lab_runs
          WHERE id = v_task.accepted_run_id AND task_id = v_task.id;
         IF NOT FOUND THEN
             RAISE EXCEPTION 'accepted run binding is missing'
                 USING ERRCODE = '23514';
         END IF;
+        v_run_status := v_run.status;
         SELECT fencing_epoch INTO v_lease_epoch
           FROM public.lab_run_leases
          WHERE run_id = v_task.accepted_run_id;
@@ -767,6 +805,56 @@ BEGIN
     ELSIF p_expected_epoch <> 0 THEN
         RAISE EXCEPTION 'nonzero epoch without an accepted run'
             USING ERRCODE = '23514';
+    END IF;
+
+    IF v_terminal_action = 'refund' THEN
+        IF v_command.operation IN ('fail', 'cancel', 'expire')
+           AND v_task.accepted_run_id IS NOT NULL
+           AND v_run.adapter <> 'mock' THEN
+            IF COALESCE(v_run.error, '') LIKE 'cost_unknown:%' THEN
+                RAISE EXCEPTION 'model cost is unknown; refund settlement is blocked'
+                    USING ERRCODE = '55000';
+            END IF;
+            v_cost_rate := COALESCE(
+                NULLIF(to_jsonb(v_run)->>'model_cost_sc_per_usd', '')::bigint,
+                100
+            );
+            IF v_cost_rate <= 0 THEN
+                RAISE EXCEPTION 'model cost conversion rate is invalid'
+                    USING ERRCODE = '23514';
+            END IF;
+            v_expected_model_cost_sc := LEAST(
+                v_hold.amount,
+                CEIL(
+                    GREATEST(COALESCE(v_run.cost_usd_cents, 0), 0)::numeric
+                    * v_cost_rate::numeric / 100
+                )::bigint
+            );
+        END IF;
+        v_expected_refund_sc := v_hold.amount - v_expected_model_cost_sc;
+        v_expected_refund_count :=
+            CASE WHEN v_expected_refund_sc > 0 THEN 1 ELSE 0 END
+            + CASE WHEN v_expected_model_cost_sc > 0 THEN 1 ELSE 0 END;
+        IF v_count <> v_expected_refund_count
+           OR (
+               v_expected_refund_sc > 0 AND NOT EXISTS (
+                   SELECT 1 FROM jsonb_array_elements(v_payload->'splits') split(value)
+                    WHERE split.value->>'recipient_key' = v_hold.user_id
+                      AND (split.value->>'amount')::bigint = v_expected_refund_sc
+                      AND split.value->>'reason' = v_payload->>'reason'
+               )
+           )
+           OR (
+               v_expected_model_cost_sc > 0 AND NOT EXISTS (
+                   SELECT 1 FROM jsonb_array_elements(v_payload->'splits') split(value)
+                    WHERE split.value->>'recipient_key' = 'sink'
+                      AND (split.value->>'amount')::bigint = v_expected_model_cost_sc
+                      AND split.value->>'reason' = 'lab_model_cost:' || v_task.id
+               )
+           ) THEN
+            RAISE EXCEPTION 'refund does not match the kernel-computed net distribution'
+                USING ERRCODE = '23514';
+        END IF;
     END IF;
 
     IF v_terminal_action = 'settle' AND (

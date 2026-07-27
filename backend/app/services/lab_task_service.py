@@ -20,7 +20,7 @@ from sqlalchemy import select, func
 from app.config import settings
 from app.database import async_session
 from app.events.bus import on, emit
-from app.lab import transitions
+from app.lab import guard, transitions
 from app.models.lab_artifact import LabArtifact
 from app.models.lab_run import LabRun
 from app.models.lab_task import LabTask
@@ -379,9 +379,10 @@ async def _start_run(
 
     protocol_version = _require_execution_consumer(protocol_version)
     _require_v2_tenant_admitted(protocol_version, task.issuer_user_id)
-    from app.lab.model_policy import assignment_for_reward
+    from app.lab.model_policy import assignment_for_reward, cost_usd_cents_to_sc
 
     model = assignment_for_reward(task.reward_sc)
+    cost_usd_cents_to_sc(0, sc_per_usd=settings.lab_sc_per_usd)
     run = LabRun(
         task_id=task.id, researcher_slug=task.researcher_slug, adapter=settings.lab_adapter,
         status="queued", scopes_json=list(task.scopes_json or []),
@@ -390,6 +391,7 @@ async def _start_run(
         resource_cpu_cores=model.cpu_cores,
         resource_memory_mb=model.memory_mb,
         budget_usd_cents=model.budget_usd_cents,
+        model_cost_sc_per_usd=settings.lab_sc_per_usd,
         protocol_version=protocol_version,
     )
     db.add(run)
@@ -454,10 +456,11 @@ async def mark_review(
     actually moved to review; False (no-op) means it was already terminal — the
     caller owns no completion for it. Belt-and-braces with the orchestrator's
     epoch fence."""
+    safe_summary = guard.redact_text(result_summary or task.result_summary_md)
     moved = await transitions.cas_task_status(
         db, task_id=task.id, expected=("assigned", "running"), new="review",
         accepted_run_id=run.id,
-        result_summary_md=result_summary or task.result_summary_md,
+        result_summary_md=safe_summary,
         review_deadline_at=datetime.now(UTC) + timedelta(hours=settings.lab_auto_release_hours),
     )
     if commit:
@@ -508,6 +511,9 @@ async def accept_result(db, task_id: str, user_id: str) -> LabTask:
     task = await _require_own_task(db, task_id, user_id)
     if task.status != "review":
         raise LabTaskError("task is not awaiting acceptance")
+    from app.services import lab_artifact_service
+
+    await lab_artifact_service.release_accepted_v1_text_artifacts(db, task=task)
     await _require_required_artifacts_releasable(db, task)
     try:
         await lab_terminalization_service.submit_for_caller(

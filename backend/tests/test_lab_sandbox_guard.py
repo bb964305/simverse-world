@@ -13,6 +13,7 @@ from app.lab.sandbox.base import StepEvent, ArtifactSpec, RunSpec, LabAdapterUnc
 from app.lab.sandbox.openclaw import OpenClawAdapter
 from app.models.user import User
 from app.models.resident import Resident
+from app.models.lab_artifact import LabArtifact
 from app.models.lab_run import LabRun, LabRunStep
 from app.models.lab_task import LabTask
 from app.services import coin_service
@@ -67,6 +68,12 @@ def test_redaction_scrubs_secrets():
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJydW4tMSJ9.signature123",
     ):
         assert guard.redact_text(value) == "[REDACTED]"
+
+
+def test_redaction_handles_punctuation_boundaries_and_quoted_keys():
+    bare = "QWxhZGRpbjpPcGVuU2VzYW1lMTIzNDU2Nzg5MDEyMzQ1Njc4OTA="
+    assert guard.redact_text(f'credential="{bare}",next') == 'credential="[REDACTED]",next'
+    assert guard.redact_text('"api_key": "plain-secret-value"') == '"[REDACTED]'
 
 
 # ── isolation: egress allowlist + SSRF ────────────────────────────────
@@ -200,6 +207,47 @@ async def test_step_redacted_before_persist(guard_env):
     async with factory() as s:
         steps = (await s.execute(select(LabRunStep).where(LabRunStep.run_id == rid))).scalars().all()
         assert any("[REDACTED]" in st.summary and "sk-ABCDEF" not in st.summary for st in steps)
+
+
+@pytest.mark.anyio
+async def test_artifact_title_and_task_summary_are_redacted(guard_env):
+    factory = guard_env
+    secret = "sk-ABCDEF0123456789ghijkl"
+    fake = _FakeAdapter([], [
+        ArtifactSpec(kind="text", title=f"report {secret}", text_md="safe body")
+    ])
+    task_id, run_id = await _seed_and_publish(factory, ["web_search"])
+    with patch("app.lab.runner.get_adapter", return_value=fake):
+        await run_one(run_id)
+
+    async with factory() as db:
+        artifact = await db.scalar(
+            select(LabArtifact).where(LabArtifact.run_id == run_id)
+        )
+        task = await db.get(LabTask, task_id)
+        assert artifact is not None
+        assert secret not in artifact.title
+        assert "[REDACTED]" in artifact.title
+        assert secret not in (task.result_summary_md or "")
+
+
+@pytest.mark.anyio
+async def test_run_error_is_redacted_before_player_api_persistence(guard_env):
+    class ExplodingAdapter(_FakeAdapter):
+        async def step_stream(self, _handle):
+            raise RuntimeError("token: sk-ABCDEF0123456789ghijkl")
+            yield  # pragma: no cover
+
+    factory = guard_env
+    _task_id, run_id = await _seed_and_publish(factory, ["web_search"])
+    with patch("app.lab.runner.get_adapter", return_value=ExplodingAdapter([])):
+        await run_one(run_id)
+
+    async with factory() as db:
+        run = await db.get(LabRun, run_id)
+        assert run is not None
+        assert "sk-ABCDEF" not in (run.error or "")
+        assert "[REDACTED]" in (run.error or "")
 
 
 @pytest.mark.anyio

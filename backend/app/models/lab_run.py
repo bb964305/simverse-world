@@ -40,6 +40,10 @@ class LabRun(Base):
             "(model_tier = 'high' AND resource_cpu_cores = 4 AND resource_memory_mb = 4096)",
             name="ck_lab_runs_resource_profile",
         ),
+        CheckConstraint(
+            "model_cost_sc_per_usd > 0",
+            name="ck_lab_runs_model_cost_sc_per_usd_positive",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -60,6 +64,9 @@ class LabRun(Base):
     resource_memory_mb: Mapped[int] = mapped_column(Integer, default=2048, nullable=False)
     budget_usd_cents: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd_cents: Mapped[int] = mapped_column(Integer, default=0)
+    model_cost_sc_per_usd: Mapped[int] = mapped_column(
+        Integer, default=100, nullable=False
+    )
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -86,6 +93,7 @@ def _reject_immutable_run_configuration_update(
         "model_policy_version",
         "resource_cpu_cores",
         "resource_memory_mb",
+        "model_cost_sc_per_usd",
     )
     changed = [name for name in immutable_fields if state[name].history.has_changes()]
     if changed:

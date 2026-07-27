@@ -315,6 +315,9 @@ async def _seed_kernel_command(
     epoch: int = 0,
     terminalization_version: str = "v2",
     actor: str | None = None,
+    adapter: str = "mock",
+    cost_usd_cents: int = 0,
+    model_cost_sc_per_usd: int = 100,
 ) -> dict[str, str | int]:
     prefix = uuid.uuid4().hex
     issuer_id = f"kernel-issuer-{prefix}"
@@ -399,6 +402,9 @@ async def _seed_kernel_command(
                     task_id=task_id,
                     researcher_slug=resident_slug,
                     status=run_status,
+                    adapter=adapter,
+                    cost_usd_cents=cost_usd_cents,
+                    model_cost_sc_per_usd=model_cost_sc_per_usd,
                 ),
                 LabRunLease(
                     run_id=run_id,
@@ -840,6 +846,8 @@ async def test_database_kernel_uses_service_commands_and_fences_refunds(
         task_status="assigned",
         run_status="running",
         epoch=7,
+        adapter="codex",
+        cost_usd_cents=8,
     )
     async with admin_factory() as db:
         stale_token, stale_claims = await grants.issue_run_grant(
@@ -869,12 +877,13 @@ async def test_database_kernel_uses_service_commands_and_fences_refunds(
     assert refunded["hold"][0] == "refunded"
     assert refunded["run"] == ("cancelled", 8)
     assert refunded["balances"] == {
-        cancelled["issuer_id"]: 110,
+        cancelled["issuer_id"]: 102,
         cancelled["recipient_id"]: 0,
     }
     assert refunded["treasury"] is None
     assert refunded["entries"] == [
-        ("refund", cancelled["issuer_id"], 110)
+        ("refund", cancelled["issuer_id"], 102),
+        ("refund", "sink", 8),
     ]
     assert len(refunded["receipts"]) == len(refunded["outbox"]) == 1
 

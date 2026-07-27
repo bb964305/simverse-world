@@ -1,5 +1,10 @@
 """Add immutable model-routing snapshot fields to Lab runs.
 
+Integration note: this revision and the parallel civic-standing revision both
+descend from 050, producing two Alembic heads when combined. Integration must
+re-chain one branch (or add an intentional merge revision); renaming revision
+files or IDs alone does not resolve the graph fork.
+
 Revision ID: 051_add_lab_codex_model_tier
 Revises: 050_add_resident_sprites
 Create Date: 2026-07-27

@@ -313,7 +313,8 @@ async def run_one(run_id: str) -> None:
             artifacts = await adapter.collect_artifacts(handle)
             for a in artifacts:
                 artifact = LabArtifact(
-                    run_id=run.id, task_id=task.id, kind=a.kind, title=a.title,
+                    run_id=run.id, task_id=task.id, kind=a.kind,
+                    title=guard.redact_text(a.title) or "",
                     uri=guard.redact_text(a.uri), text_md=guard.redact_text(a.text_md),
                     meta_json=(guard.redact_payload(a.meta) or None),
                 )
@@ -332,7 +333,9 @@ async def run_one(run_id: str) -> None:
             await adapter.stop(handle)
             adapter_stopped = True
 
-            summary = "; ".join(a.title for a in artifacts) if artifacts else "研究完成"
+            summary = guard.redact_text(
+                "; ".join(a.title for a in artifacts) if artifacts else "研究完成"
+            ) or ""
             from app.services.lab_task_service import mark_review
             # CAS-guarded: if the task was cancelled/finalized concurrently this is
             # a no-op (returns False) and we must NOT overwrite the cancel path's
@@ -396,9 +399,9 @@ async def run_one(run_id: str) -> None:
             run.status = "failed"
             run.ended_at = datetime.now(UTC)
             run.cost_usd_cents = cost_cents
-            run.error = (
+            run.error = (guard.redact_text(
                 f"cost_unknown: {e}" if not cost_trusted else str(e)
-            )[:500]
+            ) or "")[:500]
             await db.commit()
             if not cost_trusted:
                 return

@@ -5,9 +5,11 @@ is ACL-owned, digest-intact, scan-clean+verified, and whose task is released.
 import pytest
 
 from app.models.lab_artifact import LabArtifact
+from app.models.lab_run import LabRun
 from app.models.lab_task import LabTask
 from app.models.user import User
 from app.services import lab_artifact_service as arts
+from app.services import lab_task_service
 from app.services.auth_service import create_token
 
 
@@ -63,3 +65,61 @@ async def test_download_locked_until_task_released(client, dl_env):
 async def test_download_cross_tenant_is_404(client, dl_env):
     r = await client.get(f"/lab/artifacts/{dl_env['clean']}/download", headers=_h("other"))
     assert r.status_code == 404  # anti-probing: not 403
+
+
+@pytest.mark.anyio
+async def test_accepting_v1_result_releases_its_quarantined_text_download(
+    client, db_session, monkeypatch
+):
+    db_session.add(User(id="accept-owner", name="A", email="accept@t.com"))
+    task = LabTask(
+        id="accept-task",
+        issuer_user_id="accept-owner",
+        researcher_slug="sage",
+        title="accepted report",
+        status="review",
+        accepted_run_id="accept-run",
+    )
+    run = LabRun(
+        id="accept-run",
+        task_id=task.id,
+        researcher_slug="sage",
+        adapter="codex",
+        protocol_version=1,
+        status="succeeded",
+    )
+    artifact = LabArtifact(
+        run_id=run.id,
+        task_id=task.id,
+        kind="text",
+        title="Codex report",
+        text_md="accepted real report",
+    )
+    await arts.finalize_artifact(
+        db_session,
+        artifact=artifact,
+        tenant_id="accept-owner",
+        scanned_clean=False,
+    )
+    db_session.add_all([task, run, artifact])
+    await db_session.commit()
+
+    async def complete(_db, *, task, **_kwargs):
+        task.status = "completed"
+        await _db.commit()
+
+    monkeypatch.setattr(
+        lab_task_service.lab_terminalization_service,
+        "submit_for_caller",
+        complete,
+    )
+
+    accepted = await client.post(
+        "/lab/tasks/accept-task/accept-result", headers=_h("accept-owner")
+    )
+    assert accepted.status_code == 200, accepted.text
+    downloaded = await client.get(
+        f"/lab/artifacts/{artifact.id}/download", headers=_h("accept-owner")
+    )
+    assert downloaded.status_code == 200, downloaded.text
+    assert downloaded.text == "accepted real report"

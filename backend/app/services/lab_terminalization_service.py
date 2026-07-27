@@ -231,7 +231,13 @@ async def refund_splits(
                 )
             from app.lab.model_policy import cost_usd_cents_to_sc
 
-            cost_sc = min(hold.amount, cost_usd_cents_to_sc(run.cost_usd_cents or 0))
+            cost_sc = min(
+                hold.amount,
+                cost_usd_cents_to_sc(
+                    run.cost_usd_cents or 0,
+                    sc_per_usd=run.model_cost_sc_per_usd,
+                ),
+            )
     refund_sc = hold.amount - cost_sc
     splits: list[coin_service.Split] = []
     if refund_sc > 0:
