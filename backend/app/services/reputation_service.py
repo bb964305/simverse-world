@@ -66,12 +66,20 @@ async def get_many(
 
 
 async def recompute(db: AsyncSession) -> int:
-    """Recompute every NPC's slow reputation projection in two batch reads."""
+    """Recompute every inhabitant's slow reputation projection in two batch reads.
+
+    口径是**世界人口**（``Resident.is_autonomous``），不是选民集
+    （``is_civic_voter``）——声誉是社会属性，不是政治权利。这行原本是裸的
+    ``resident_type == "npc"``，是 ``civic_membership`` 收口时漏掉的第 11 处读；
+    留着它的后果是被降级者退出夜间重算、分数永久冻结在降级前那一刻，而
+    ``election_service.py:53-60`` 的候选排序读的正是这个冻结值；未来「违规扣
+    声誉」若先改档位再扣分，扣分动作也会因这行字面量永远不生效。
+    """
     if not settings.rep_enabled:
         return 0
 
     residents = (await db.execute(
-        select(Resident).where(Resident.resident_type == "npc")
+        select(Resident).where(Resident.is_autonomous)
     )).scalars().all()
     if not residents:
         return 0
