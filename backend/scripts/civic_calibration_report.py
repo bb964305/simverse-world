@@ -136,9 +136,13 @@ def attribute_gates(snap, denizens, edges_by_id: dict[str, list[float]], *,
     ``decorative_gates`` 列出拒绝面为 0 的可调门槛。
 
     ``peers_breakdown`` 把门槛②的失败再拆一层，因为它是**两个**旋钮共用的一道
-    闸：``too_few_anchored_edges``（锚定边总数就不够 k 条，此时 θ 再怎么调都没
-    用，绑住的是 ``MIN_PEERS``）vs ``kth_best_below_theta``（边够多但第 k 高不到
-    θ，绑住的是 ``MIN_FAMILIARITY``）。不拆开就分不清该动哪个旋钮。
+    闸：``too_few_anchored_edges``（锚定边总数就不够 k 条，此时**只有** k 救得
+    了他，θ 归零也没用）vs ``kth_best_below_theta``（边够多但第 k 高不到 θ，此时
+    **降 k 或降 θ 都救得了他**）。拆开是为了看出「该动哪个旋钮更划算」。
+
+    ⚠️ 拆开的是**成因**，不是拒绝面的归属：两个桶里的人都是被门槛② 拒的，所以
+    ``rejected_by["peers"]`` 是两桶之和，``min_peers`` 是否装饰也按这个和判。
+    只按 ``too_few`` 判会在 k>1 时把一道正在拒人的闸报成装饰性。
 
     ``passed`` 必须等于 ``select_promotions`` 的输出长度——有测试逐场景核对，
     ``agrees_with_select_promotions`` 是运行期的同一条核对。
@@ -170,17 +174,24 @@ def attribute_gates(snap, denizens, edges_by_id: dict[str, list[float]], *,
             peers_only += 1
         else:
             passed += 1
+    peers_rejected = too_few + kth_below
     decorative = []
     if rej_days == 0:
         decorative.append(GATE_WORLD_DAYS)
-    if too_few == 0:
+    if peers_rejected == 0:
+        # 门槛②的拒绝条件是 `qualified < k`。判据必须是**整道闸的**拒绝面，不能
+        # 只看 too_few：「边够多但达标边不够」的人（记在 kth_below 里）同样是被
+        # k 拒的——把 k 降到他的 qualified 就能救他。只看 too_few 会在
+        # k>1 时把一道正在拒人的闸报成装饰性，运维照着挑不出该抄哪一行。
         decorative.append(GATE_PEERS)
     if kth_below == 0:
+        # θ 的独立贡献：边够多（len ≥ k）却因为达标线被拒。为 0 说明把 θ 归零
+        # 也不会多放行一个人。
         decorative.append(GATE_FAMILIARITY)
     return {
         "passed": passed,
         "rejected_by": {"world_days": rej_days,
-                        "peers": too_few + kth_below,
+                        "peers": peers_rejected,
                         "banned": banned},
         "blocked": {"world_days_only": days_only, "peers_only": peers_only,
                     "both": both},
@@ -198,9 +209,32 @@ def _verdict(size: int, total: int) -> str:
     return "full" if size == total else "partial"
 
 
+def numeric_gates(citizen_count: int) -> dict:
+    """候选面**之后**的两道数值闸（``civic_membership.py:398-421`` 的旋钮）。
+
+    - ``max_per_run``：单夜上限，超出按确定性顺序**截断**，余量下夜再来；
+    - ``breaker_threshold`` = ``max(breaker_min_abs, 公民数 × breaker_fraction)``，
+      候选集**大于**它 → **整批拒绝且不截断**（截断会掩盖「阈值写反」这类全量误判）。
+
+    为什么标定报告要管它：晋升面大小 ``size`` 不等于当晚真会放行的人数。一组
+    ``size`` 远超熔断线的取值抄进 env，开闸当晚是**晋升 0 人**，而报告只说
+    「非空且非全量」——形状对、结果空。这两个旋钮当前还没有消费点（promotion
+    pass 尚未接进 ``nightly_cron``），所以这里给的是**开闸预告**：数值由旋钮函数
+    现读，组合规则照抄上述 docstring，真接线时两边必须一起看。
+    """
+    return {
+        "max_per_run": cm.promotion_max_per_run(),
+        "breaker_threshold": float(max(
+            cm.promotion_breaker_min_abs(),
+            citizen_count * cm.promotion_breaker_fraction())),
+        "breaker_fraction": cm.promotion_breaker_fraction(),
+        "breaker_min_abs": cm.promotion_breaker_min_abs(),
+    }
+
+
 def sweep_thresholds(snap, denizens, edges_by_id, *, seasoning: float,
                      days_candidates: list[float], peers_candidates: list[int],
-                     theta_candidates: list[float]) -> list[dict]:
+                     theta_candidates: list[float], gates: dict) -> list[dict]:
     """网格扫描：每一组候选阈值下的晋升面，用 ``select_promotions`` 本尊算。
 
     候选值由调用方从**实测分布**推出（见 :func:`collect_calibration`）——本函数
@@ -217,13 +251,16 @@ def sweep_thresholds(snap, denizens, edges_by_id, *, seasoning: float,
                 attr = attribute_gates(
                     snap, denizens, edges_by_id, min_world_days=days,
                     min_peers=peers, min_familiarity=theta)
+                size = len(picked)
                 grid.append({
                     GATE_WORLD_DAYS: days,
                     GATE_PEERS: peers,
                     GATE_FAMILIARITY: theta,
-                    "size": len(picked),
-                    "verdict": _verdict(len(picked), total),
+                    "size": size,
+                    "verdict": _verdict(size, total),
                     "decorative_gates": attr["decorative_gates"],
+                    "exceeds_max_per_run": size > gates["max_per_run"],
+                    "trips_breaker": size > gates["breaker_threshold"],
                 })
     return grid
 
@@ -282,14 +319,17 @@ async def collect_calibration(db, *, top_n: int = 5) -> dict:
         _MAX_CANDIDATES_PER_AXIS)
     max_edges = max((len(e) for e in edges_by_id.values()), default=0)
     peers_candidates = list(range(1, min(max_edges, _MAX_CANDIDATES_PER_AXIS) + 1))
+    gates = numeric_gates(len(citizens))
     grid = sweep_thresholds(
         snap, denizens, edges_by_id, seasoning=seasoning,
         days_candidates=days_candidates, peers_candidates=peers_candidates,
-        theta_candidates=theta_candidates)
-    # 排序把「三闸皆有拒绝面」的取值顶到最前：形状对（partial）只是必要条件，
-    # 一组让两道闸空转的取值等于开着两个装饰性闸门上线。
+        theta_candidates=theta_candidates, gates=gates)
+    # 排序：① 越过熔断线的取值垫底（它当晚放行 0 人，比「形状不对」还糟）；
+    # ② 再把「三闸皆有拒绝面」的顶到最前——形状对（partial）只是必要条件，一组
+    # 让两道闸空转的取值等于开着两个装饰性闸门上线。
     partial = sorted((row for row in grid if row["verdict"] == "partial"),
-                     key=lambda r: (len(r["decorative_gates"]), r["size"],
+                     key=lambda r: (r["trips_breaker"],
+                                    len(r["decorative_gates"]), r["size"],
                                     r[GATE_WORLD_DAYS], r[GATE_PEERS],
                                     r[GATE_FAMILIARITY]))
 
@@ -325,6 +365,7 @@ async def collect_calibration(db, *, top_n: int = 5) -> dict:
             "verdict": verdict,
         },
         "gate_attribution": attribution,
+        "numeric_gates": gates,
         "sweep": {
             "candidates": {
                 GATE_WORLD_DAYS: days_candidates,
@@ -404,21 +445,33 @@ def _render_sweep(data: dict) -> list[str]:
                    "这不是「阈值没调好」，是**这批读数标定不出阈值**"
                    "（样本太少 / 锚定边缺失 / 全部落在同一边界情形上）。")
         return out
-    out.append("  ✅ 可用取值（照抄任意一行进 env，size 就是当晚真会晋升的人数）：")
+    gates = data["numeric_gates"]
+    out.append("  ✅ 可用取值（照抄任意一行进 env）——注意 **size 是候选面大小**，"
+               "不是当晚真会放行的人数：")
+    out.append(f"     候选面之后还有两道数值闸：单夜上限 "
+               f"MAX_PER_RUN={gates['max_per_run']}（超出**截断**）、熔断线 "
+               f"{gates['breaker_threshold']:g}"
+               f"（= max({gates['breaker_min_abs']}, 公民数 × "
+               f"{gates['breaker_fraction']:g})，候选集大于它 → **整批拒绝、"
+               f"不截断**，当晚放行 0 人）。")
     for row in partial[:10]:
         deco = row["decorative_gates"]
-        note = ("三闸皆有拒绝面" if not deco
-                else "空转：" + "/".join(deco))
+        tags = ["三闸皆有拒绝面"] if not deco else ["空转：" + "/".join(deco)]
+        if row["trips_breaker"]:
+            tags.append("⚠️ 越熔断线→整批拒绝")
+        elif row["exceeds_max_per_run"]:
+            tags.append("单夜上限截断")
         out.append(
             f"    CIVIC_PROMOTION_MIN_WORLD_DAYS={row[GATE_WORLD_DAYS]:<10}"
             f"MIN_PEERS={row[GATE_PEERS]:<3}"
             f"MIN_FAMILIARITY={row[GATE_FAMILIARITY]:<8}"
-            f"→ {row['size']}/{total} 人  [{note}]")
+            f"→ {row['size']}/{total} 人  [{' · '.join(tags)}]")
     if len(partial) > 10:
         out.append(f"    …… 另有 {len(partial) - 10} 组"
                    "（完整网格在 collect_calibration 返回的 sweep.grid 里）")
-    out.append("  注：扫描只保证「形状对」。选行时优先取「三闸皆有拒绝面」的那几行——"
-               "否则等于开着两个空转的闸门上线。")
+    out.append("  注：扫描只保证「形状对」。选行时优先取「三闸皆有拒绝面」且不带"
+               "熔断标记的那几行——空转的闸门等于没上线，越熔断线的取值当晚放行 "
+               "0 人。")
     return out
 
 

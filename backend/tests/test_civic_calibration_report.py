@@ -222,9 +222,12 @@ async def test_a_gate_that_rejects_nobody_is_named_decorative(db_session,
     data = await collect_calibration(db_session)
     assert data["candidate_face"]["verdict"] == "partial"     # 形状是对的……
     ga = data["gate_attribution"]
-    assert ga["rejected_by"]["world_days"] == 0               # ……但两道闸空转
+    assert ga["rejected_by"]["world_days"] == 0               # ……但世界日空转
+    # 「锚定边总数够 k 条」不等于 MIN_PEERS 装饰：u2 被门槛② 拒了（达标边 0 <
+    # k），这道闸有拒绝面，k 与 θ 同为它的参数。装饰与否按整道闸的拒绝面判。
     assert ga["peers_breakdown"]["too_few_anchored_edges"] == 0
-    assert ga["decorative_gates"] == ["min_world_days", "min_peers"]
+    assert ga["rejected_by"]["peers"] == 1
+    assert ga["decorative_gates"] == ["min_world_days"]
     out = render_calibration(data)
     assert "装饰性" in out
     assert "🔴" not in out
@@ -354,7 +357,7 @@ async def test_sweep_rows_flag_the_numeric_gates_that_size_alone_hides(
 #: ``build_snapshot`` → ``_backfill_mark_world`` → ``ConfigService.get`` 摸到的
 #: （``civic_promotion.py:287``）。漏掉它，一次 ``ConfigService.set`` 的写入变异
 #: 能完整地静默通过——这正是「断言写窄了」的同一类洞。
-_TOUCHED_TABLES = (Resident, ResidentRelation, CivicStandingHistory)
+_TOUCHED_TABLES = (Resident, ResidentRelation, CivicStandingHistory, SystemConfig)
 
 
 async def _fingerprint(db):
