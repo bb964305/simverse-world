@@ -134,11 +134,11 @@ def _codex_config(base_url: str) -> str:
     )
 
 
-async def _gateway_usage(session: RuntimeSession) -> dict:
+async def _gateway_usage(session: RuntimeSession, base_url: str) -> dict:
     try:
         async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
             response = await client.get(
-                session.request.model_gateway_base_url.rstrip("/") + "/lab/usage",
+                base_url.rstrip("/") + "/lab/usage",
                 headers={"Authorization": f"Bearer {session.request.model_gateway_token}"},
             )
             response.raise_for_status()
@@ -161,7 +161,7 @@ async def _consume_codex(
         codex_home = session.workspace / ".codex"
         codex_home.mkdir(mode=0o700)
         (codex_home / "config.toml").write_text(
-            _codex_config(session.request.model_gateway_base_url), encoding="utf-8"
+            _codex_config(config.model_gateway_base_url), encoding="utf-8"
         )
         prompt = (
             "You are the assigned Simverse Lab researcher. Complete the task inside "
@@ -195,6 +195,7 @@ async def _consume_codex(
             "--model", "lab-auto",
             prompt,
         ]
+        terminal_error = ""
         try:
             session.process = await asyncio.create_subprocess_exec(
                 *command,
@@ -217,6 +218,18 @@ async def _consume_codex(
                     event_type = event.get("type")
                     item = event.get("item") if isinstance(event.get("item"), dict) else {}
                     item_type = item.get("type")
+                    if event_type == "error":
+                        terminal_error = _safe_text(
+                            event.get("message", "Codex reported an error"), 2000
+                        )
+                    elif event_type == "turn.failed":
+                        raw_error = event.get("error")
+                        terminal_error = _safe_text(
+                            raw_error.get("message")
+                            if isinstance(raw_error, dict)
+                            else raw_error or "Codex turn failed",
+                            2000,
+                        )
                     if event_type == "item.started" and item_type == "command_execution":
                         await session.append(
                             phase="tool_call",
@@ -242,10 +255,11 @@ async def _consume_codex(
                 stderr = ""
                 if session.process.stderr is not None:
                     stderr = _safe_text(await session.process.stderr.read(), 2000)
-                raise RuntimeError(f"Codex exited with status {return_code}: {stderr}")
+                detail = terminal_error or stderr
+                raise RuntimeError(f"Codex exited with status {return_code}: {detail}")
             if not session.final_text:
                 raise RuntimeError("Codex completed without a final report")
-            usage = await _gateway_usage(session)
+            usage = await _gateway_usage(session, config.model_gateway_base_url)
             await session.append(
                 phase="message",
                 tool=None,

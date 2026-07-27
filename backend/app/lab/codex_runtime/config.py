@@ -23,6 +23,7 @@ class CodexRuntimeConfig:
     max_active_runs: int
     run_timeout_s: int
     max_step_text_chars: int
+    model_gateway_base_url: str
     codex_sandbox: str = "workspace-write"
     total_cpu_cores: int = 4
     total_memory_mb: int = 8192
@@ -59,6 +60,13 @@ class CodexRuntimeConfig:
         codex_sandbox = env.get("LAB_CODEX_RUNTIME_SANDBOX", "workspace-write")
         if codex_sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
             raise ValueError("LAB_CODEX_RUNTIME_SANDBOX is invalid")
+        model_gateway_base_url = _required(
+            env, "LAB_CODEX_RUNTIME_MODEL_GATEWAY_BASE_URL"
+        ).rstrip("/")
+        if not model_gateway_base_url.startswith(("http://", "https://")):
+            raise ValueError(
+                "LAB_CODEX_RUNTIME_MODEL_GATEWAY_BASE_URL must be an HTTP URL"
+            )
         return cls(
             bind_host=env.get("LAB_CODEX_RUNTIME_BIND_HOST", "0.0.0.0"),
             bind_port=port,
@@ -68,6 +76,7 @@ class CodexRuntimeConfig:
             max_active_runs=max_runs,
             run_timeout_s=timeout,
             max_step_text_chars=max_chars,
+            model_gateway_base_url=model_gateway_base_url,
             codex_sandbox=codex_sandbox,
             total_cpu_cores=total_cpu,
             total_memory_mb=total_memory,

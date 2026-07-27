@@ -27,9 +27,10 @@ async def test_codex_runtime_exposes_lab_adapter_protocol(tmp_path, monkeypatch)
         bind_host="127.0.0.1", bind_port=8097, api_key=API_KEY,
         codex_binary=str(executable), workspace_root=str(tmp_path / "runs"),
         max_active_runs=1, run_timeout_s=10, max_step_text_chars=1000,
+        model_gateway_base_url="http://trusted-gateway:8096/v1",
     )
 
-    async def fake_usage(_session):
+    async def fake_usage(_session, _base_url):
         return {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
                 "cost_usd_cents": 1}
 
@@ -83,6 +84,9 @@ async def test_codex_runtime_exposes_lab_adapter_protocol(tmp_path, monkeypatch)
         artifact = await client.get(f"/runs/{session_id}/artifacts", headers=headers)
         assert artifact.json()["artifacts"][0]["text_md"] == "ARM task complete"
         assert artifact.json()["artifacts"][0]["meta"]["resource_cpu_cores"] == 2
+        rendered = (Path(config.workspace_root) / session_id / ".codex/config.toml").read_text()
+        assert 'base_url = "http://trusted-gateway:8096/v1"' in rendered
+        assert 'base_url = "http://gateway/v1"' not in rendered
         stopped = await client.post(f"/runs/{session_id}/stop", headers=headers)
         assert stopped.status_code == 200
         assert not (Path(config.workspace_root) / session_id).exists()
@@ -102,6 +106,7 @@ async def test_codex_runtime_rejects_non_code_scope(tmp_path):
         bind_host="127.0.0.1", bind_port=8097, api_key=API_KEY,
         codex_binary="/bin/false", workspace_root=str(tmp_path / "runs"),
         max_active_runs=1, run_timeout_s=10, max_step_text_chars=1000,
+        model_gateway_base_url="http://trusted-gateway:8096/v1",
     )
     app = create_app(config)
     async with httpx.AsyncClient(
@@ -124,6 +129,7 @@ async def test_runtime_rejects_resource_tier_escalation(tmp_path):
         bind_host="127.0.0.1", bind_port=8097, api_key=API_KEY,
         codex_binary="/bin/false", workspace_root=str(tmp_path / "runs"),
         max_active_runs=2, run_timeout_s=10, max_step_text_chars=1000,
+        model_gateway_base_url="http://trusted-gateway:8096/v1",
     )
     app = create_app(config)
     async with httpx.AsyncClient(
