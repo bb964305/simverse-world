@@ -29,6 +29,18 @@ from app.models.season import Poll, Vote
 
 logger = logging.getLogger(__name__)
 
+#: F2 —— 开票那一刻的合格选民数，冻结在 ``options_json[0]`` 上（同
+#: ``_npc_voters`` / ``_proposer_slug`` 的 blob-on-opts[0] 约定）。
+#:
+#: 晋升与撤销都会在投票窗口内移动选民集。若法定人数的分母读结票时的实时
+#: :func:`_eligible_voter_count`，一张已经开出去的 poll 的判决门槛会在中途改变。
+#: 冻结分母对晋升与撤销**同时免疫**，且改动局限在本模块。
+#:
+#: 配套的语义决定：**幽灵票保留，不实现撤票**——「投票时具备资格即计票」。
+#: ``_npc_voters`` 是扁平 slug 列表，物理上没存票的归属，撤票要改
+#: ``options_json`` 的形状且要兼容存量 poll。
+META_ELIGIBLE_AT_OPEN = "_eligible_at_open"
+
 
 async def propose(
     db,
@@ -55,6 +67,10 @@ async def propose(
         # with the poll so NPC voting can weigh the relationship (option 0 is
         # the proposer's lead option by convention).
         opts[0]["_proposer_slug"] = proposer_slug
+    if opts:
+        # F2: freeze the quorum denominator at open time (see
+        # META_ELIGIBLE_AT_OPEN). Cheap — one COUNT on the same session.
+        opts[0][META_ELIGIBLE_AT_OPEN] = await _eligible_voter_count(db)
     poll = Poll(
         question=topic,
         options_json=opts,
@@ -488,7 +504,8 @@ async def _close_one(db, poll: Poll) -> None:
     # byte-for-byte as before S2-5.
     verdict = None
     if settings.polis_policy_approval_enabled:
-        verdict = await _policy_threshold_verdict(db, opts, tally, win)
+        verdict = await _policy_threshold_verdict(db, opts, tally, win,
+                                                  poll_id=poll.id)
     if verdict is not None:
         from app.services.policy_service import META_OUTCOME
         opts[0][META_OUTCOME] = verdict
@@ -513,7 +530,16 @@ async def _close_one(db, poll: Poll) -> None:
     result_note = f"「{poll.question}」投票结束,「{opts[win]['label']}」以 {tally[win]} 票胜出。"
     if effect:
         applied = await _execute_outcome(db, effect, poll_id=poll.id)
-        result_note += "议案已生效。" if applied else "议案生效时遇到问题,已记录。"
+        if applied:
+            result_note += "议案已生效。"
+        elif (effect.get("type") == "mayor"
+              and await _winner_lost_civic_rights(db, effect.get("slug"))):
+            # F2: install_mayor 的结票复核不通过 —— 当选人在投票窗口内被撤销了
+            # 公民权（或已不在名册上）。它是零写入的 return False，所以本案只是
+            # 流会，不是「生效时出了问题」。
+            result_note += f"{_VERDICT_NOTE['winner_ineligible']},本案流会。"
+        else:
+            result_note += "议案生效时遇到问题,已记录。"
     await _clerk_announce(db, f"镇务结果:{poll.question}", result_note)
 
 
@@ -522,7 +548,41 @@ _VERDICT_NOTE = {
     "threshold_not_met": "未达本级审批所需的票数门槛",
     "quorum_not_met": "投票人数未达法定出席门槛",
     "no_votes": "无人投票",
+    # F2：install_mayor 结票复核不通过（当选人在投票窗口内失去了公民资格）。
+    #     只有 :func:`_winner_lost_civic_rights` 复核确认后才说得出口。
+    "winner_ineligible": "当选人已失去公民资格",
 }
+
+
+async def _winner_lost_civic_rights(db, slug: str | None) -> bool:
+    """结票复核的**复核**：仅当 ``slug`` 指名的居民确实不在政治权利集合里时
+    才返回 True。
+
+    ``install_mayor`` 的 ``return False`` 不止「不合格」一种原因——写入故障也被
+    本模块 :func:`_execute_outcome` 的 ``except Exception`` 吞成 ``False``。若按
+    effect 类型无条件归因，一次基础设施故障就会被翻译成对一位具名角色的名誉
+    裁决；``BulletinPost`` 不进 NPC prompt / memory，但会经
+    ``app/routers/bulletin.py`` 永久呈现在玩家 UI 上，是世界内的假信息。
+
+    两条兜底一律返回 False（= 不下这个裁决，回落到通用措辞）：
+
+    - ``slug`` 为空：没有具名对象，说什么都是冤枉；
+    - 查询本身出错：session 可能已经因为前一步的故障进了 aborted 状态。措辞
+      助手永远不得反过来掀翻结票（本模块通行的 fail-open）。
+
+    代价是选举结票路径上多一次 SELECT，且只在 ``applied is False`` 的分支里跑。
+    """
+    if not slug:
+        return False
+    try:
+        return int((await db.execute(
+            select(func.count()).select_from(Resident).where(
+                Resident.slug == slug, Resident.is_civic_voter)
+        )).scalar() or 0) == 0
+    except Exception:
+        logger.warning("winner eligibility re-check failed for %r — falling "
+                       "back to the generic wording", slug, exc_info=True)
+        return False
 
 
 async def _eligible_voter_count(db) -> int:
@@ -538,12 +598,26 @@ async def _eligible_voter_count(db) -> int:
 
 
 async def _policy_threshold_verdict(db, opts: list[dict], tally: list[int],
-                                    win: int) -> str | None:
+                                    win: int, *,
+                                    poll_id: str | None) -> str | None:
     """S2-5 §2 任务 4 — threshold / quorum judgement for a tier-governed poll.
 
     Returns ``None`` when the poll may execute (either it carries no tier
     metadata at all — an ordinary civic poll keeps pure plurality — or the
     winner cleared its bar), otherwise a 流会 reason code.
+
+    ``poll_id`` is keyword-only and **required** (it may be ``None`` only for a
+    poll that genuinely has no id yet): the sole thing this function emits
+    besides its return value is the empty-electorate WARNING below, and an
+    operator who cannot tell *which* poll it fired on has no trail at all.
+
+    F2 冻结分母：法定人数的分母取 **开票那一刻** 的快照
+    (``options_json[0][META_ELIGIBLE_AT_OPEN]``，由 :func:`propose` 写入)，
+    而不是结票时的实时 :func:`_eligible_voter_count`。适用面：整段只在
+    ``polis_policy_approval_enabled`` 为真（``_close_one`` 的 gate）、且 opts[0]
+    带 ``META_THRESHOLD`` 时才计算；quorum 还要额外带 ``META_QUORUM``。普通
+    civic poll 与镇长选举 poll 走纯 plurality，分母不参与判决——撤销对它们的
+    影响是票差而非流会。
     """
     from app.services.policy_service import META_THRESHOLD, META_QUORUM
 
@@ -555,8 +629,20 @@ async def _policy_threshold_verdict(db, opts: list[dict], tally: list[int],
     if total <= 0:
         return "no_votes"
     if blob.get(META_QUORUM):
-        eligible = await _eligible_voter_count(db)
-        if eligible > 0 and total < eligible * settings.polis_policy_quorum_fraction:
+        # F2: 分母取开票那一刻的快照；存量 poll（本改动之前开的）没有快照，
+        # 回落实时计数 —— 行为与改动前逐字节一致。
+        frozen = blob.get(META_ELIGIBLE_AT_OPEN)
+        eligible = int(frozen if frozen is not None
+                       else await _eligible_voter_count(db))
+        if eligible <= 0:
+            # 行为不变（跳过法定人数判定），但不再是一句沉默的 `eligible > 0`
+            # 短路：安全阀在分母为 0 时自己关掉，语义上说不通，至少要留痕。
+            logger.warning(
+                "poll %s: quorum check skipped, eligible electorate is %d "
+                "(frozen=%r) — an empty electorate makes the quorum "
+                "denominator meaningless",
+                poll_id, eligible, frozen)
+        elif total < eligible * settings.polis_policy_quorum_fraction:
             return "quorum_not_met"
     if (tally[win] / total) < float(threshold):
         return "threshold_not_met"

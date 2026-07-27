@@ -64,3 +64,5 @@ import app.models.issue_stance  # noqa: F401
 import app.models.town_treasury  # noqa: F401
 # S2-5 policies — typed/tiered/versioned policy table (四级分级审批)
 import app.models.policy  # noqa: F401
+# F2 公民权档位变更历史 —— 可回滚硬门 + 公民时钟锚点的载体
+import app.models.civic_standing_history  # noqa: F401

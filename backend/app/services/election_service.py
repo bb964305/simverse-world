@@ -15,6 +15,7 @@ Gated by ``settings.election_enabled``. Fail-open.
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, UTC
 
@@ -23,6 +24,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import settings
 from app.models.resident import Resident
+from app.models.system_config import SystemConfig
 
 logger = logging.getLogger(__name__)
 
@@ -129,40 +131,102 @@ async def maybe_open_seasonal_election(db):
     return poll
 
 
+async def _record_current_mayor(db, slug: str) -> None:
+    """Stage ``system_config['current_mayor'] = slug`` in the *caller's*
+    transaction — deliberately not ``ConfigService.set()``, which commits
+    (``config_service.py:48``) and would split the install back into two
+    transactions. Value encoding is byte-identical to ConfigService's
+    (``json.dumps``), so ``ConfigService.get`` keeps reading it.
+    """
+    cfg = (await db.execute(
+        select(SystemConfig).where(SystemConfig.key == "current_mayor")
+    )).scalar_one_or_none()
+    if cfg is None:
+        db.add(SystemConfig(key="current_mayor", value=json.dumps(slug),
+                            group="civic", updated_by="election"))
+    else:
+        cfg.value = json.dumps(slug)
+        cfg.updated_by = "election"
+        cfg.updated_at = datetime.now(UTC)
+
+
 async def install_mayor(db, slug: str | None) -> bool:
     """Set ``slug`` as the sitting mayor (clearing any previous one) and record
-    it in system_config. Returns True on success."""
+    it in system_config. Returns True on success.
+
+    F2 收口的两条语义（原实现的两个坑）：
+
+    1. **结票时复核资格**。winner 用 ``Resident.is_civic_voter``（政治权利）
+       解析，不是 ``is_autonomous``（世界人口）——候选名单是开票那一刻的快照，
+       中途可能有人被降级，**快照不构成信任**。不合格立即 ``return False`` 且
+       零写入（三个表示 meta_json / system_config / offices 一个都不碰），由
+       ``civic_service._close_one`` 走流会公告分支。
+    2. **事务化**。原实现先 ``commit()`` 再判 ``winner is None``：winner 解析
+       失败时旧镇长的 ``meta_json`` 已被清掉、``system_config`` 与 offices 却
+       仍指向他，留下三向分歧（触发条件今天就可达：目标 slug 查不到即可）。
+       现在旧镇长清理、新镇长安装、``current_mayor`` 记录在同一个 SAVEPOINT +
+       同一次 commit 里，失败时**自己把 savepoint 回掉**——调用方会把异常吞掉
+       并紧接着为公告 ``commit()``，留在 session 里的脏对象会被那次 commit
+       顺手落盘（判据见函数体内的注释）。
+
+    清扫面是「全表带 ``meta_json`` 的居民」而不是 ``is_autonomous``——通用约束：
+    凡是清理「已离开集合 S 的居民」的扫描，都不能用 S 本身做 WHERE（逐出档
+    落地时无需回来改这里）。
+    """
     if not slug:
         return False
-    residents = (await db.execute(
-        select(Resident).where(Resident.is_autonomous)
-    )).scalars().all()
-    winner = None
-    for r in residents:
-        meta = dict(r.meta_json or {})
-        was = bool(meta.get("mayor"))
-        should = (r.slug == slug)
-        if was != should:
-            if should:
-                meta["mayor"] = True
-                winner = r
-            else:
-                meta.pop("mayor", None)
-            r.meta_json = meta
-            flag_modified(r, "meta_json")
-        elif should:
-            winner = r
+
+    winner = (await db.execute(
+        select(Resident).where(Resident.slug == slug, Resident.is_civic_voter)
+    )).scalar_one_or_none()
+    if winner is None:
+        logger.warning(
+            "install_mayor refused: %r is not (or is no longer) a civic voter "
+            "— zero writes, the poll fails over to the 流会 branch", slug)
+        return False
+
+    # 两个表示的写入跑在同一个 SAVEPOINT 里。**必须是 savepoint 而不是顶层
+    # ``db.rollback()``**：本函数的直接调用方 ``civic_service._execute_outcome``
+    # 把异常吞成 False，紧接着 ``_close_one`` 用它自己更早加载的 ``poll`` 拼公告
+    # 标题（``civic_service.py`` 的 ``poll.question``）。顶层 rollback 会
+    # ``_restore_snapshot(dirty_only=False)`` expire **整个** identity map，
+    # 包含那个本函数从没碰过的 ``poll``，那次同步属性读随即在没有 greenlet
+    # 上下文的地方炸 ``MissingGreenlet``（已实测复现，判据同
+    # ``civic_membership.revoke_citizenship`` 的「异常路径调用方契约」）。
+    # savepoint 的自动回滚只 ``_restore_snapshot(dirty_only=True)``，旁观对象
+    # 不受影响。
+    #
+    # 而回滚本身不能省：调用方吞掉异常后 ``_clerk_announce`` → ``create_post``
+    # 会自己 ``commit()``（``bulletin_service.py``），留在 session 里的清扫
+    # 写入会被那次 commit 顺手落盘，「同一次 commit」的保证就破了。
+    async with db.begin_nested():
+        # ⚠️ 这个 WHERE **几乎不筛掉任何行**，别误读成一次有意义的窄化：
+        # SQLAlchemy 的 ``JSON`` 类型默认 ``none_as_null=False``，Python ``None``
+        # 被序列化成 JSON 字面量 ``null`` 而不是 SQL NULL，所以 ``meta_json``
+        # 为空的居民这一列也是 ``'null'``、``IS NOT NULL`` 依然为真（实测：
+        # 两行两命中）。留着它是因为它是所需集合的**超集**——扫多了无害（多一次
+        # 无 mayor 键的 dict 拷贝），扫漏了才会留下第二个镇长。要点是**不能**
+        # 换成 ``is_autonomous`` 之类的成员谓词：那是「用集合 S 去清理刚离开 S
+        # 的人」。
+        others = (await db.execute(
+            select(Resident).where(Resident.meta_json.isnot(None))
+        )).scalars().all()
+        for r in others:
+            if r.slug == slug:
+                continue
+            meta = dict(r.meta_json or {})
+            if meta.pop("mayor", None) is not None:
+                r.meta_json = meta
+                flag_modified(r, "meta_json")
+        winner_meta = dict(winner.meta_json or {})
+        if not winner_meta.get("mayor"):
+            winner_meta["mayor"] = True
+            winner.meta_json = winner_meta
+            flag_modified(winner, "meta_json")
+
+        await _record_current_mayor(db, slug)
     await db.commit()
 
-    if winner is None:
-        return False
-    try:
-        from app.services.config_service import ConfigService
-        await ConfigService(db).set(
-            "current_mayor", slug, group="civic", updated_by="election",
-        )
-    except Exception:
-        logger.warning("recording current_mayor failed", exc_info=True)
     # S2-1: dual-write the offices row when the gate is on. Both legacy
     # stores above stay alive — meta_json['mayor'] is the wage multiplier
     # (gotcha #1), system_config the read fallback. Fail-open: an offices

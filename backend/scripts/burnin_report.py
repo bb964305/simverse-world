@@ -34,6 +34,8 @@ from datetime import datetime, timedelta, UTC
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy import select, func  # noqa: E402
+from sqlalchemy.exc import SQLAlchemyError  # noqa: E402
+import json  # noqa: E402
 
 from app.models.llm_usage import LLMUsage  # noqa: E402
 from app.services.civic_membership import (  # noqa: E402
@@ -1276,9 +1278,276 @@ def render_probes_civic_boundary(
         out.append("  🔴 玩家创作的居民重新获得了政治权利——回归到 07-25 的泄漏状态，"
                    "查 CIVIC_VOTER_TYPES 与 5 处创建路径")
     if d["unknown_types"]:
-        out.append(f"  ⚠️ 两列之外的取值 {d['unknown_types']}"
+        # F2：从 ⚠️ 升为 🔴。这是未来引入新 resident_type 取值时唯一的自动
+        # 发现口，也是「写错一个字符（"npc "）就同时掉出两个集合」的唯一兜底
+        # ——写错的那一位居民会从 agent loop、市政厅名册、职务查找与 mayor
+        # 清扫里一起消失，除了这一行没有任何地方会喊。
+        out.append(f"  🔴 两列之外的取值 {d['unknown_types']}"
                    "——既不投票也不算世界人口。'preset'（admin 创建）是已知的"
-                   "待决项，不是 bug;其它取值请查来源")
+                   "待决项;其它取值一律按事故处理:查 5 处创建路径与 "
+                   "_BOUNDARY_KNOWN_OUTSIDE，并同步 SIM_RESIDENT_TYPES 的决定")
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# F2 公民权档位探针（晋升/撤销可观测）—— 只读、零 LLM
+# ---------------------------------------------------------------------------
+#
+# 现有的政治层边界探针判泄漏的条件是「常量集合被拓宽」（civic_boundary_
+# breakdown），而 F2 只改行值不改集合，那条永远不会触发；误升只会让 npc 计数
+# 合法增长，07-25 靠人眼看出「npc 该是 10 人却有 13 人」的嗅觉也一起失效。
+# 所以这里把判据改成「provenance=UGC 且 is_civic_voter 为真、但
+# civic_standing_history 里查不到晋升记录」。
+
+#: 「最近 N 世界日内发生翻转」的窗口。滞后设计生效后稳态下这个数应恒为 0，
+#: 所以它是**告警条件**，不是信息项。
+CIVIC_FLIP_WINDOW_WORLD_DAYS = 7.0
+
+
+async def fetch_civic_standing_snapshot(
+    session, *, gate_office_on: bool = False,
+    flip_window_world_days: float = CIVIC_FLIP_WINDOW_WORLD_DAYS,
+) -> dict:
+    """交叉表 / 晋升队列 / 翻转统计 / 交叉一致性。表不存在 → available=False。"""
+    try:
+        from app.models.civic_standing_history import CivicStandingHistory
+        from app.models.office import Office
+        from app.models.resident import Resident
+        from app.models.season import Poll
+        from app.models.system_config import SystemConfig
+        from app.services.civic_membership import (
+            CITIZEN, CIVIC_VOTER_TYPES as _VOTERS, POLITICAL_FILL_STRATEGY,
+            SYSTEM_CREATOR_ID, UGC_RESIDENT_TYPE, is_ugc_resident,
+            min_familiarity, min_peers, min_tenure_world_days, min_world_days,
+            peer_seasoning_world_days, promotion_cooldown_world_days,
+        )
+        from app.tasks import civic_promotion as cp
+
+        residents = (await session.execute(select(Resident))).scalars().all()
+        history = (await session.execute(
+            select(CivicStandingHistory))).scalars().all()
+        offices = (await session.execute(select(Office))).scalars().all()
+        polls = (await session.execute(
+            select(Poll).where(Poll.status == "open"))).scalars().all()
+        mayor_cfg_raw = (await session.execute(
+            select(SystemConfig.value)
+            .where(SystemConfig.key == "current_mayor"))).scalar_one_or_none()
+    except Exception:
+        return {"available": False}
+
+    by_id = {r.id: r for r in residents}
+    voter_slugs = {r.slug for r in residents if r.resident_type in _VOTERS}
+
+    # 单一「当前档位（按历史）」来源，①交叉表/泄漏判据与③翻转统计共用——
+    # 不能有两套独立算法都在回答「这个人现在是什么档位」，这正是评审揪出的
+    # 假阴性复发的根因：F2 的 revoke_citizenship 上线之前，「历史里有没有过
+    # new_standing==CITIZEN 的行」和「现在是不是公民」是同一句话，按存在性判
+    # 定是对的；revoke 上线后两者分道扬镳——晋升→合法撤销→带外非法回授（不
+    # 写新历史行）序列里，「有没有过」仍然为真，「最新一行是什么」才是真相。
+    # 归并键是 (world_at, id) 复合键，不是裸 world_at：select(CivicStanding
+    # History) 没有 ORDER BY，行序未声明；id 是每行唯一的主键，两行的 id 不
+    # 可能相等，所以复合键里结构性地不存在平局——严格 `>` 就是「取运行时最
+    # 大值」的标准写法，其结果与 history 列表的迭代/DB 返回顺序无关。评审复
+    # 现的变种：同一居民两条历史行 world_at 完全相同时（backfill 批量写入
+    # 最容易产生这种打平——一次 pass 里许多行共享同一个时钟读数），裸
+    # world_at 比较靠严格 `>` 会让「先被迭代到的那行」赢，而谁先被迭代到由
+    # 数据库未声明的行序决定——这正是上面刚修复的假阴性的一个变体复发。
+    # id 是 UUID，比较结果对「谁在真实时间上更晚」没有语义含义（打平之下这
+    # 件事本来就不可判定，两条历史行的 world_at 完全相同时不存在可以恢复的
+    # 真相），但它保证了同一份数据在任意迭代顺序下都收敛到同一个答案——这
+    # 才是这里要修的性质（「良定义」，不是「猜对真实先后」）。不改用 >=：
+    # 复合键里没有平局可言，`>` 本来就是「取最大值」的正确比较符，`>=` 在
+    # 这里不会改变任何结果，换了反而暗示"存在需要覆盖的相同键"，误导读者。
+    changes: dict[str, int] = {}
+    last_change: dict[str, tuple] = {}
+    for h in history:
+        changes[h.resident_id] = changes.get(h.resident_id, 0) + 1
+        when = cp._as_aware(h.world_at)
+        key = (when, h.id)
+        prev = last_change.get(h.resident_id)
+        if prev is None or key > (prev[0], prev[1]):
+            last_change[h.resident_id] = (when, h.id, h.new_standing)
+    promoted_ids = {rid for rid, (_when, _id, standing) in last_change.items()
+                    if standing == CITIZEN}
+
+    cross = {"builtin_citizen": 0, "ugc_citizen_promoted": 0,
+             "ugc_citizen_unrecorded": 0, "ugc_denizen": 0, "other": 0}
+    leaked: list[str] = []
+    for r in residents:
+        is_voter = r.resident_type in _VOTERS
+        if r.creator_id == SYSTEM_CREATOR_ID and is_voter:
+            cross["builtin_citizen"] += 1
+        elif is_ugc_resident(r) and is_voter:
+            if r.id in promoted_ids:
+                cross["ugc_citizen_promoted"] += 1
+            else:
+                cross["ugc_citizen_unrecorded"] += 1
+                leaked.append(r.slug)
+        elif is_ugc_resident(r) and r.resident_type == UGC_RESIDENT_TYPE:
+            cross["ugc_denizen"] += 1
+        else:
+            cross["other"] += 1
+
+    # ② 晋升队列（= shadow 模式的候选名单大小）
+    try:
+        snap = await cp.build_snapshot(session)
+        queue_ids = cp.select_promotions(
+            snap, min_world_days=min_world_days(), min_peers=min_peers(),
+            min_familiarity=min_familiarity(),
+            seasoning_days=peer_seasoning_world_days())
+        queue = {"size": len(queue_ids),
+                 "slugs": sorted(by_id[i].slug for i in queue_ids
+                                 if i in by_id)}
+        now_world = snap.now_world
+    except SQLAlchemyError:
+        # 只吞「底层数据不在」（关系表迁移未跑等）——这是探针的既有约定
+        # （同上面「表不存在」的整函数级 try/except），不是给任意异常兜底。
+        # 真代码 bug（AttributeError/TypeError/…）必须原样炸出来，不能藏在
+        # 一句「计算失败」背后。
+        queue = {"size": None, "slugs": []}
+        from app import world_clock
+        now_world = world_clock.now_world()
+
+    # ③ 翻转统计——复用①已经算好的 changes / last_change，不重新定义第二套
+    # 「当前档位」（见①上方注释：两套独立判据正是假阴性复发的根因）。
+    recent = {rid for rid, (when, _id, _standing) in last_change.items()
+              if (now_world - when) <= timedelta(days=flip_window_world_days)}
+    in_min_tenure = sum(
+        1 for (when, _id, new) in last_change.values()
+        if new == CITIZEN
+        and (now_world - when) < timedelta(days=min_tenure_world_days()))
+    in_cooldown = sum(
+        1 for (when, _id, new) in last_change.values()
+        if new != CITIZEN
+        and (now_world - when) < timedelta(days=promotion_cooldown_world_days()))
+    flips = {
+        "window_world_days": flip_window_world_days,
+        "residents_with_history": len(changes),
+        "max_changes_per_resident": max(changes.values()) if changes else 0,
+        "recent_flip_residents": len(recent),
+        "in_min_tenure": in_min_tenure,
+        "in_cooldown": in_cooldown,
+    }
+
+    # ④ 交叉一致性
+    resident_slugs = {r.slug for r in residents}
+    election_office_non_voter = [
+        [o.office_key, o.holder_slug] for o in offices
+        if o.fill_strategy == POLITICAL_FILL_STRATEGY and o.holder_slug
+        and o.holder_slug not in voter_slugs
+    ]
+    dangling = sorted({o.holder_slug for o in offices
+                       if o.holder_slug and o.holder_slug not in resident_slugs})
+    meta_mayors = sorted(r.slug for r in residents
+                         if (r.meta_json or {}).get("mayor"))
+    office_mayor = next((o.holder_slug for o in offices
+                         if o.office_key == "mayor"), None)
+    cfg_mayor = None
+    if mayor_cfg_raw is not None:
+        try:
+            cfg_mayor = json.loads(mayor_cfg_raw)
+        except (TypeError, ValueError):
+            cfg_mayor = None
+    # ⚠️ 按 polis_office_enabled 分档：gate 关时 offices 是迁移 046 的遗留值，
+    # 不分档会在 T2 前直接报红并被当噪声关掉。
+    mayor_reps = {
+        "checked": bool(gate_office_on),
+        "meta": meta_mayors,
+        "office": office_mayor,
+        "config": cfg_mayor,
+        "consistent": None,
+    }
+    if gate_office_on:
+        reps = {tuple(meta_mayors),
+                tuple([office_mayor] if office_mayor else []),
+                tuple([cfg_mayor] if cfg_mayor else [])}
+        mayor_reps["consistent"] = len(reps) == 1
+
+    ghost_votes = []
+    for poll in polls:
+        opts = list(poll.options_json or [])
+        if not opts:
+            continue
+        voters = list((opts[0] or {}).get("_npc_voters", []))
+        ghosts = sorted(s for s in voters if s not in voter_slugs)
+        if ghosts:
+            ghost_votes.append({"question": poll.question,
+                                "ghosts": len(ghosts), "slugs": ghosts})
+
+    return {
+        "available": True,
+        "cross": cross,
+        "leaked": sorted(leaked),
+        "queue": queue,
+        "flips": flips,
+        "crosscheck": {
+            "election_office_non_voter": election_office_non_voter,
+            "mayor_reps": mayor_reps,
+            "ghost_votes": ghost_votes,
+            "dangling_holders": dangling,
+        },
+    }
+
+
+def render_probes_civic_standing(snapshot: dict) -> str:
+    out = ["== 公民权档位探针（provenance × standing · 只读零 LLM）=="]
+    if not snapshot.get("available"):
+        out.append("  civic_standing_history 表不存在（迁移未跑）——探针跳过")
+        return "\n".join(out)
+
+    c = snapshot["cross"]
+    out.append(f"  内置公民 {c['builtin_citizen']}；已晋升 UGC 公民 "
+               f"{c['ugc_citizen_promoted']}；未晋升 UGC 居民 {c['ugc_denizen']}；"
+               f"其它（player/preset）{c['other']}")
+    if snapshot["leaked"]:
+        out.append(f"  🔴 provenance=UGC 且有投票权、但查不到晋升记录："
+                   f"{snapshot['leaked']}")
+        out.append("     —— 要么是泄漏复发，要么是 admin 手工改回了 npc"
+                   "（后者是有用的红旗，不是噪声）")
+    else:
+        out.append("  ✅ 每一位有投票权的 UGC 居民都有对应的晋升记录")
+
+    q = snapshot["queue"]
+    if q["size"] is None:
+        out.append("  晋升队列：计算失败（关系表或 world_clock 不可用）")
+    else:
+        out.append(f"  晋升队列（满足门槛但仍是 denizen）：{q['size']} 人 "
+                   f"{q['slugs'][:20]}")
+
+    f = snapshot["flips"]
+    flip_flag = "🔴" if f["recent_flip_residents"] > 0 else "✅"
+    out.append(f"  翻转统计：有档位历史的居民 {f['residents_with_history']}；"
+               f"单人最多变更 {f['max_changes_per_resident']} 次")
+    out.append(f"  {flip_flag} 最近 {f['window_world_days']:.0f} 世界日内发生"
+               f"翻转的居民 = {f['recent_flip_residents']}"
+               "（滞后设计生效后稳态应恒为 0，>0 是告警不是信息）")
+    out.append(f"  当前处于最短任期内 {f['in_min_tenure']} 人 / 冷却期内 "
+               f"{f['in_cooldown']} 人")
+
+    x = snapshot["crosscheck"]
+    if x["election_office_non_voter"]:
+        out.append(f"  🔴 民选职位被非公民占据：{x['election_office_non_voter']}"
+                   "（只对 fill_strategy='election' 断言；劳动职务不算）")
+    else:
+        out.append("  ✅ 民选职位的在任者都持有政治权利")
+    mr = x["mayor_reps"]
+    if not mr["checked"]:
+        out.append("  ⏸ 三处镇长表示一致性：polis_office_enabled=False，"
+                   "offices 可能是迁移 046 的遗留值——本档不判定")
+    elif mr["consistent"]:
+        out.append(f"  ✅ 三处镇长表示一致（meta={mr['meta']}）")
+    else:
+        out.append(f"  🔴 三处镇长表示分歧：meta={mr['meta']} / "
+                   f"offices={mr['office']!r} / config={mr['config']!r}")
+    if x["ghost_votes"]:
+        out.append("  ⚠️ 幽灵票（投票时具备资格即计票，是设计语义不是 bug）：")
+        for g in x["ghost_votes"]:
+            out.append(f"    {g['question'][:28]:<28} {g['ghosts']} 张 "
+                       f"{g['slugs'][:10]}")
+    if x["dangling_holders"]:
+        out.append(f"  🔴 offices.holder_slug 在 residents 表里查不到："
+                   f"{x['dangling_holders']}"
+                   "（purge_residents 不清 offices 与 current_mayor）")
     return "\n".join(out)
 
 
@@ -1305,6 +1574,8 @@ async def _run(days_window: int, residents: int, budget: float | None,
         policy_snap = await fetch_policy_snapshot(session)
         poll_snap = await fetch_poll_vote_snapshot(session, limit=polls_window)
         boundary_snap = await fetch_civic_boundary_snapshot(session)
+        standing_snap = await fetch_civic_standing_snapshot(
+            session, gate_office_on=settings.polis_office_enabled)
     report = render_report(
         aggregate(rows), residents=residents, budget=budget, window_days=days_window
     )
@@ -1322,7 +1593,8 @@ async def _run(days_window: int, residents: int, budget: float | None,
             + "\n\n" + render_probes_npc_vote(
                 poll_snap, legacy_on=settings.civic_npc_choice_legacy,
                 limit=polls_window)
-            + "\n\n" + render_probes_civic_boundary(boundary_snap))
+            + "\n\n" + render_probes_civic_boundary(boundary_snap)
+            + "\n\n" + render_probes_civic_standing(standing_snap))
 
 
 def main(argv: list[str] | None = None) -> None:
