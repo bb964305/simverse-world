@@ -25,6 +25,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -422,9 +423,58 @@ PROMOTION_REASON_CODE = "threshold_met"
 PROMOTION_REASON = "满足公民权晋升门槛（在镇世界日 + 与锚定公民的熟识度）"
 
 #: 每次运行的摘要落点。shadow 态不产生历史行，探针只能从这里读候选名单。
-#: ``SystemConfig.value`` 是 ``String(2000)``，所以名单截断到 50 个 slug。
 RUN_SUMMARY_KEY = "civic_promotion_last_run"
-_SUMMARY_MAX_SLUGS = 50
+
+#: ``SystemConfig.value`` 是 ``String(2000)``——Postgres 的 ``VARCHAR(n)``
+#: 按**字符数**（不是字节数）计；JSON 序列化用 ``json.dumps`` 的默认设置
+#: （``ensure_ascii=True``，和 ``ConfigService.set`` 完全一致），预算按真实
+#: 会落库的那个字符串量算，不是估算值（复审 Minor 1，因生产是 Postgres而
+#: 升级：按 slug **个数**截断在 ``Resident.slug`` 的 ``String(100)`` 列宽
+#: 上限下稳超这个预算——50 × 100 + JSON 开销 ≈ 5 KB）。
+_SUMMARY_VALUE_MAX_CHARS = 2000
+
+#: 拒绝原因的自由文本（``CivicStandingRefused`` 的异常消息）单独限长，不占
+#: 用给 ``candidates`` 的预算——否则一条异常消息就能把整份候选名单挤没。
+_REFUSED_DETAIL_MAX_CHARS = 300
+
+
+def _bounded_summary_payload(result: dict) -> dict:
+    """按**序列化后的字符预算**（不是 slug 个数）截断 ``candidates``，使
+    ``json.dumps(payload)`` 落在 ``SystemConfig.value`` 的 ``String(2000)``
+    列宽内——超限在 Postgres 上是 ``StringDataRightTruncation``，
+    ``_record_run`` 是 fail-open，会把那次异常整个吞掉只留一条 warning，
+    shadow 三夜观察期的名单就无声无息地从没写进去过。
+
+    ``candidate_count`` 永远是真实候选总数，不受截断影响；
+    ``candidates_truncated`` 显式标记「这份名单被砍过」——读者才分得清
+    「刚好 50 个候选」和「300 个候选只看到一部分」。
+    """
+    candidates = list(result.get("candidates") or [])
+    refused_detail = result.get("refused_detail")
+    if refused_detail is not None:
+        refused_detail = str(refused_detail)[:_REFUSED_DETAIL_MAX_CHARS]
+
+    payload = {
+        "mode": result.get("mode"),
+        "world_at": result.get("world_at"),
+        "citizens_before": result.get("citizens_before"),
+        "candidates": candidates,
+        "candidate_count": len(candidates),
+        "candidates_truncated": False,
+        "promoted": result.get("promoted", 0),
+        "refused": result.get("refused"),
+        "refused_detail": refused_detail,
+    }
+
+    kept = len(candidates)
+    while kept > 0 and len(json.dumps(payload)) > _SUMMARY_VALUE_MAX_CHARS:
+        kept -= 1
+        payload["candidates"] = candidates[:kept]
+        payload["candidates_truncated"] = True
+    if kept == 0 and candidates:
+        payload["candidates_truncated"] = True
+
+    return payload
 
 
 async def _player_avatar_ids(db, resident_ids) -> frozenset[str]:
@@ -487,16 +537,7 @@ async def _record_run(db, result: dict) -> None:
 
         from app.services.config_service import ConfigService
 
-        payload = {
-            "mode": result.get("mode"),
-            "world_at": result.get("world_at"),
-            "citizens_before": result.get("citizens_before"),
-            "candidates": list(result.get("candidates") or [])[:_SUMMARY_MAX_SLUGS],
-            "candidate_count": len(result.get("candidates") or []),
-            "promoted": result.get("promoted", 0),
-            "refused": result.get("refused"),
-            "refused_detail": result.get("refused_detail"),
-        }
+        payload = _bounded_summary_payload(result)
         scratch_factory = async_sessionmaker(
             AsyncEngine(db.get_bind()), class_=AsyncSession,
             expire_on_commit=False)
