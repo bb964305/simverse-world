@@ -1,15 +1,27 @@
 """F1 第 3 项:rep_credit_min_score 重标定。
 
-纯函数单测在此;用真实机制跑出分布的 harness 在本文件下半部分(Task 9)。
+纯函数单测在上半部分;用真实机制跑出分布的 harness 在下半部分(Task 9)。
 """
-import pytest
+import random
 
+import pytest
+from sqlalchemy.orm.attributes import flag_modified
+
+from app.config import settings
+from app.models.memory import Memory
+from app.models.resident import Resident
+from app.services import gossip_service, relation_service
 from app.services.reputation_service import (
     CalibrationError,
+    ScoreRow,
+    credit_allowed,
     describe,
     describe_affinity_coverage,
+    recompute,
     recommend_credit_min_score,
+    score_from_meta,
 )
+from scripts.rep_calibrate import build_report, render
 
 
 def test_describe_reports_the_shape_of_the_distribution():
@@ -117,8 +129,8 @@ from sqlalchemy import select  # noqa: E402
 from app.models.memory import Memory  # noqa: E402
 from app.models.resident import Resident  # noqa: E402
 from app.services import relation_service  # noqa: E402
-from app.services.reputation_service import ScoreRow, project  # noqa: E402
-from scripts.rep_calibrate import _gossip_affinities, _run, build_report, render  # noqa: E402
+from app.services.reputation_service import project  # noqa: E402
+from scripts.rep_calibrate import _gossip_affinities, _run  # noqa: E402
 
 
 def _rows(scores):
@@ -332,3 +344,139 @@ def test_main_returns_2_when_the_distribution_is_degenerate(monkeypatch, capsys)
     monkeypatch.setattr(rep_calibrate, "_run", _fake_run)
     assert rep_calibrate.main([]) == 2
     assert "无法标定" in capsys.readouterr().out
+
+
+# ── Task 9: 真实机制驱动的分布 harness(第 3 项验收)──────────────────────
+
+CAST = 12
+ROUNDS = 12
+SEED = 20260727
+#: 收口建议值。本线不改 config.py,测试用 monkeypatch 复现收口取值。
+RECOMMENDED_BASE_TONE = -0.05
+
+
+def _sim_resident(index: int) -> Resident:
+    # creator_id 必须是 None:Resident.creator_id 是 ForeignKey("users.id")
+    # (app/models/resident.py:27-29,nullable),而 harness 从不建 users 行。
+    # sqlite 默认不校验外键所以填什么都"能过",但 Task 10 Step 2 允许把
+    # DATABASE_URL 指向 Postgres,填字符串就是 ForeignKeyViolation。
+    # 与本文件既有的 _resident 助手(tests/test_reputation_service.py)一致。
+    return Resident(
+        slug=f"sim{index:02d}", name=f"居民{index:02d}", district="central_plaza",
+        status="idle", resident_type="npc", creator_id=None,
+        tile_x=70, tile_y=56,
+        mood_json={"valence": 0.0, "arousal": 0.2, "label": "calm"},
+        meta_json={"sbti": {"dimensions": {"Ac1": "H"}}},
+    )
+
+
+async def simulate_world(db, *, cast: int = CAST, rounds: int = ROUNDS,
+                         seed: int = SEED) -> list[Resident]:
+    """用**真实机制**跑出一个小镇:关系走 relation_service.bump,传闻走
+    gossip_service.maybe_gossip。所有数值都是生产常量(闲聊 familiarity +0.05 /
+    affinity ±0.03,app/agent/chat.py:64-68),没有一个分数是手写的。
+
+    调用方须先:settings.realism_relations_enabled=True、
+    gossip_service.GOSSIP_PROBABILITY=1.0、stub 掉 gossip_service._distort
+    (唯一被替换的是那次 LLM 改写调用,测试不联网)。
+    """
+    residents = [_sim_resident(i) for i in range(cast)]
+    db.add_all(residents)
+    await db.commit()
+
+    rng = random.Random(seed)
+    random.seed(seed)   # maybe_gossip 直接用模块级 random
+
+    # 一手见闻:每个人手里有一条关于别人的高重要性事件记忆(传闻链的源头)
+    for index, resident in enumerate(residents):
+        subject = residents[(index + 1) % cast]
+        db.add(Memory(
+            resident_id=resident.id, type="event",
+            content=f"{subject.name}在广场上做了件事",
+            importance=0.8, source="observation",
+            related_resident_id=subject.id,
+        ))
+    await db.commit()
+
+    pairs = [(a, b) for a in range(cast) for b in range(a + 1, cast)]
+    for _ in range(rounds):
+        for a, b in pairs:
+            if rng.random() >= 0.5:      # 这轮这两人没碰上
+                continue
+            positive = rng.random() < 0.65
+            await relation_service.bump(
+                db, residents[a].id, residents[b].id,
+                d_familiarity=settings.realism_rel_familiarity_chat,
+                d_affinity=(settings.realism_rel_affinity_chat if positive
+                            else -settings.realism_rel_affinity_chat),
+            )
+            await gossip_service.maybe_gossip(db, residents[a], residents[b], rng)
+            await gossip_service.maybe_gossip(db, residents[b], residents[a], rng)
+    return residents
+
+
+async def _steady_state(db, residents, nights: int = 3) -> list[float]:
+    for _ in range(nights):
+        await recompute(db)
+    for resident in residents:
+        await db.refresh(resident)
+    return [score_from_meta(resident.meta_json) for resident in residents]
+
+
+async def _clear_scores(db, residents) -> None:
+    for resident in residents:
+        meta = dict(resident.meta_json or {})
+        meta.pop("reputation", None)
+        resident.meta_json = meta
+        flag_modified(resident, "meta_json")
+    await db.commit()
+
+
+@pytest.mark.anyio
+async def test_emergent_distribution_is_two_sided_and_has_a_reject_face(
+    db_session, monkeypatch
+):
+    """第 3 项验收:阈值必须由**跑出来的**分布决定,不是构造数据凑。
+
+    注意:这条用例要跑 ~500 次真实的 bump/maybe_gossip,耗时以十秒计,是本仓最慢
+    的单测之一。迭代时用 ``-k emergent`` 单独跑。
+    """
+    monkeypatch.setattr(settings, "rep_enabled", True)
+    monkeypatch.setattr(settings, "realism_relations_enabled", True)
+    monkeypatch.setattr(gossip_service, "GOSSIP_PROBABILITY", 1.0)
+
+    async def _fake_distort(content: str) -> str:
+        return f"据说{content}"
+
+    monkeypatch.setattr(gossip_service, "_distort", _fake_distort)
+
+    residents = await simulate_world(db_session)
+
+    # ① 冻结常量(rep_gossip_base_tone=-0.3)下的稳态分布
+    frozen = await _steady_state(db_session, residents)
+    frozen_stats = describe(frozen)
+    assert all(score > -0.3 for score in frozen), (
+        f"-0.3 竟然拒绝到了人,spec 的判断需要重新核对: {sorted(frozen)}")
+
+    # ② 收口建议常量下的稳态分布(同一个世界,清空分数重算)
+    await _clear_scores(db_session, residents)
+    monkeypatch.setattr(settings, "rep_gossip_base_tone", RECOMMENDED_BASE_TONE)
+    fixed = await _steady_state(db_session, residents)
+    fixed_stats = describe(fixed)
+
+    print("\n[frozen  base=-0.3 ]", frozen_stats)
+    print("[fixed   base=%.2f]" % RECOMMENDED_BASE_TONE, fixed_stats)
+
+    assert min(fixed) < 0.0 < max(fixed), f"分布仍是单边: {sorted(fixed)}"
+    assert fixed_stats["negative_share"] < frozen_stats["negative_share"]
+
+    # ③ 用②的真实分布标定阈值,拒绝面必须非空且非全量
+    threshold = recommend_credit_min_score(fixed, 0.15)
+    print("[recommended REP_CREDIT_MIN_SCORE] %+.4f" % threshold)
+    monkeypatch.setattr(settings, "rep_credit_min_score", threshold)
+    rejected = [score for score in fixed if not credit_allowed(score)]
+    assert 0 < len(rejected) < len(fixed)
+
+    # ④ 现行 -0.3 在同一分布上仍然谁也拒绝不了 —— 装饰性闸门
+    monkeypatch.setattr(settings, "rep_credit_min_score", -0.3)
+    assert all(credit_allowed(score) for score in fixed)
