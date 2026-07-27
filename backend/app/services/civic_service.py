@@ -505,7 +505,8 @@ async def _close_one(db, poll: Poll) -> None:
     # byte-for-byte as before S2-5.
     verdict = None
     if settings.polis_policy_approval_enabled:
-        verdict = await _policy_threshold_verdict(db, opts, tally, win)
+        verdict = await _policy_threshold_verdict(db, opts, tally, win,
+                                                  poll_id=poll.id)
     if verdict is not None:
         from app.services.policy_service import META_OUTCOME
         opts[0][META_OUTCOME] = verdict
@@ -598,12 +599,18 @@ async def _eligible_voter_count(db) -> int:
 
 
 async def _policy_threshold_verdict(db, opts: list[dict], tally: list[int],
-                                    win: int) -> str | None:
+                                    win: int, *,
+                                    poll_id: str | None) -> str | None:
     """S2-5 §2 任务 4 — threshold / quorum judgement for a tier-governed poll.
 
     Returns ``None`` when the poll may execute (either it carries no tier
     metadata at all — an ordinary civic poll keeps pure plurality — or the
     winner cleared its bar), otherwise a 流会 reason code.
+
+    ``poll_id`` is keyword-only and **required** (it may be ``None`` only for a
+    poll that genuinely has no id yet): the sole thing this function emits
+    besides its return value is the empty-electorate WARNING below, and an
+    operator who cannot tell *which* poll it fired on has no trail at all.
 
     F2 冻结分母：法定人数的分母取 **开票那一刻** 的快照
     (``options_json[0][META_ELIGIBLE_AT_OPEN]``，由 :func:`propose` 写入)，
@@ -632,9 +639,10 @@ async def _policy_threshold_verdict(db, opts: list[dict], tally: list[int],
             # 行为不变（跳过法定人数判定），但不再是一句沉默的 `eligible > 0`
             # 短路：安全阀在分母为 0 时自己关掉，语义上说不通，至少要留痕。
             logger.warning(
-                "quorum check skipped: eligible electorate is %d "
-                "(frozen=%r) — 选民集为空，法定人数分母无意义",
-                eligible, frozen)
+                "poll %s: quorum check skipped, eligible electorate is %d "
+                "(frozen=%r) — an empty electorate makes the quorum "
+                "denominator meaningless",
+                poll_id, eligible, frozen)
         elif total < eligible * settings.polis_policy_quorum_fraction:
             return "quorum_not_met"
     if (tally[win] / total) < float(threshold):
