@@ -273,6 +273,19 @@ async def test_sweep_names_the_measured_triples_that_make_the_face_partial(
 
 # ── 只读 ───────────────────────────────────────────────────────────────
 
+async def _fingerprint(db):
+    """脚本碰过的三张表的**全部列**指纹。
+
+    只比 slug/type/meta 三列会漏掉「改了 familiarity」「插了一行历史」这类间接
+    写入——F1 的复审用 delete 变异实测过：断言写窄了，变异能静默通过。
+    """
+    out = {}
+    for model in (Resident, ResidentRelation, CivicStandingHistory):
+        rows = (await db.execute(select(model.__table__))).all()
+        out[model.__tablename__] = sorted(repr(r) for r in rows)
+    return out
+
+
 @pytest.mark.anyio
 async def test_the_report_is_read_only(db_session):
     """标定是只读动作。写一行都不许——它跑在生产库上。"""
@@ -280,12 +293,18 @@ async def test_the_report_is_read_only(db_session):
     db_session.add_all([b1, u1])
     await db_session.commit()
     await _edge(db_session, u1, b1, 0.5)
-    before = (await db_session.execute(
+    before_narrow = (await db_session.execute(
         select(Resident.slug, Resident.resident_type, Resident.meta_json))).all()
+    before = await _fingerprint(db_session)
 
     await collect_calibration(db_session)
 
-    after = (await db_session.execute(
-        select(Resident.slug, Resident.resident_type, Resident.meta_json))).all()
-    assert after == before
+    # 三个集合必须在**任何后续查询之前**断言：session.execute 会 autoflush，把
+    # pending 的 new/dirty/deleted 冲进库并清空这三个集合——证据先被抹掉，
+    # 断言再跑就永远是绿的。写在最后等于没写。
     assert not db_session.dirty and not db_session.new and not db_session.deleted
+
+    assert await _fingerprint(db_session) == before
+    after_narrow = (await db_session.execute(
+        select(Resident.slug, Resident.resident_type, Resident.meta_json))).all()
+    assert after_narrow == before_narrow
