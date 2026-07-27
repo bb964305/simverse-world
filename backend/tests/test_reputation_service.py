@@ -213,3 +213,32 @@ async def test_recompute_reads_relations_in_one_batch(db_session, monkeypatch):
     monkeypatch.setattr(db_session, "execute", counting_execute)
     assert await recompute(db_session) == 6
     assert calls["n"] == 1, f"关系查询 {calls['n']} 次,应为 1 次批量读"
+
+
+# ── F1 第 3 项:人口口径 is_autonomous(spec §4.4 第 11 处读点) ──────────
+
+
+@pytest.mark.anyio
+async def test_recompute_covers_ugc_residents_but_never_the_player_avatar(
+    db_session, monkeypatch
+):
+    """spec §4.4 第 11 处读点:声誉是社会属性,人口口径不是政治口径。
+
+    不改的后果是被降级者退出夜间重算、分数永久冻结在降级前那一刻。
+    """
+    from app.services.civic_membership import UGC_RESIDENT_TYPE
+
+    monkeypatch.setattr(settings, "rep_enabled", True)
+    builtin = _resident("builtin")
+    ugc = _resident("ugc")
+    ugc.resident_type = UGC_RESIDENT_TYPE
+    avatar = _resident("avatar")
+    avatar.resident_type = "player"
+    db_session.add_all([builtin, ugc, avatar])
+    await db_session.commit()
+
+    assert await recompute(db_session) == 2
+    await db_session.refresh(ugc)
+    await db_session.refresh(avatar)
+    assert "reputation" in (ugc.meta_json or {})
+    assert "reputation" not in (avatar.meta_json or {})
