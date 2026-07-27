@@ -385,15 +385,38 @@ async def _rollback_quietly(db: AsyncSession) -> None:
 
 
 async def _fill_strategy(db: AsyncSession, office_key: str) -> str:
-    """The office's refill procedure, read off the offices row."""
-    row = (await db.execute(
-        select(Office.fill_strategy).where(Office.office_key == office_key)
-    )).scalar_one_or_none()
-    return str(row or "")
+    """The office's refill procedure.
+
+    Falls back to OFFICE_DEFS when the row is missing: with
+    ``polis_office_enabled`` off the migration-046 seed may never have run in
+    this world, and "no row" must not be read as "not an elected office".
+    """
+    try:
+        row = (await db.execute(
+            select(Office.fill_strategy).where(Office.office_key == office_key)
+        )).scalar_one_or_none()
+    except Exception:
+        logger.warning("offices fill_strategy lookup failed: %s", office_key,
+                       exc_info=True)
+        row = None
+    if row:
+        return str(row)
+    return str(OFFICE_DEFS.get(office_key, {}).get("fill_strategy") or "")
 
 
 async def _effective_holder(db: AsyncSession, office_key: str) -> str | None:
-    """Who holds ``office_key`` right now."""
+    """Who effectively holds ``office_key`` right now, under EITHER gate state.
+
+    For the mayor this must NOT be a raw ``offices`` read: correctness may not
+    depend on ``polis_office_enabled``. With the gate off the offices row can
+    be absent entirely, or carry a stale migration-046 holder_slug that no
+    business path honours. ``election_service.current_mayor`` is the one read
+    that already encodes both worlds (offices when the gate is on, then the
+    ``system_config['current_mayor']`` fallback).
+    """
+    if office_key == "mayor":
+        from app.services import election_service
+        return await election_service.current_mayor(db)
     return await OfficeService(db).get_holder(office_key)
 
 
@@ -406,6 +429,11 @@ async def trigger_backfill(
     already open / election|civic gates off / not enough candidates / an
     internal failure (fail-open — a broken election must never break the
     vacate that called us).
+
+    CALL ORDER (F2 contract): call this only after both legacy mayor stores
+    (``meta_json['mayor']`` and ``system_config['current_mayor']``) have been
+    cleared. ``_effective_holder`` reads the fallback on purpose, so calling
+    too early reports "still occupied" and silently skips the backfill.
     """
     try:
         if not office_key:

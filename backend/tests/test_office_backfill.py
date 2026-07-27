@@ -343,3 +343,106 @@ async def test_term_check_survives_rollback_from_prior_office_backfill_failure(
     assert n == 2
     assert await svc.get_holder("mayor") is None
     assert await svc.get_holder("town_clerk") is None
+
+
+# ── Task 7: gate 开/关两态矩阵 ──────────────────────────────────────
+
+@pytest.mark.anyio
+async def test_backfill_works_with_gate_off_and_no_office_row(db_session, monkeypatch):
+    """gate 关时迁移 046 的 seed 可能从未跑过:offices 里根本没有 mayor 行。
+    「没有行」不等于「不是民选职位」——必须回落 OFFICE_DEFS。"""
+    monkeypatch.setattr(settings, "polis_office_enabled", False)
+    await _seed_voters(db_session)
+    assert (await db_session.execute(select(Office))).scalars().all() == []
+
+    poll_id = await trigger_backfill(db_session, "mayor", reason=REASON_MANUAL)
+    assert poll_id
+    assert len(await _open_election_polls(db_session)) == 1
+
+
+@pytest.mark.anyio
+async def test_backfill_ignores_stale_migration046_holder_when_gate_off(
+    db_session, monkeypatch,
+):
+    """gate 关时 offices 里可能留着迁移 046 的陈旧 holder_slug,但没有任何
+    业务路径认它。判「是否在任」必须走 gate-aware 的 current_mayor,否则被
+    陈旧行骗过、永远不补选。"""
+    monkeypatch.setattr(settings, "polis_office_enabled", False)
+    await _seed_voters(db_session)
+    db_session.add(Office(
+        office_key="mayor", institution="town_hall", fill_strategy="election",
+        holder_slug="stale-046-holder",
+    ))
+    await db_session.commit()
+
+    poll_id = await trigger_backfill(db_session, "mayor", reason=REASON_MANUAL)
+    assert poll_id
+    assert len(await _open_election_polls(db_session)) == 1
+
+
+@pytest.mark.anyio
+async def test_backfill_respects_legacy_mayor_when_gate_off(db_session, monkeypatch):
+    """gate 关时唯一权威是 system_config['current_mayor'];它有人就是有人。"""
+    from app.services.config_service import ConfigService
+
+    monkeypatch.setattr(settings, "polis_office_enabled", False)
+    await _seed_voters(db_session)
+    await ConfigService(db_session).set(
+        "current_mayor", "a", group="civic", updated_by="test")
+
+    assert await trigger_backfill(db_session, "mayor", reason=REASON_MANUAL) is None
+    assert await _open_election_polls(db_session) == []
+
+
+@pytest.mark.anyio
+async def test_backfill_respects_offices_holder_when_gate_on(db_session, monkeypatch):
+    """gate 开时 offices 是权威:有人在任就不补选。"""
+    monkeypatch.setattr(settings, "polis_office_enabled", True)
+    await _seed_voters(db_session)
+    svc = OfficeService(db_session)
+    await svc.appoint("mayor", "a", fill_strategy="election")
+
+    assert await trigger_backfill(db_session, "mayor", reason=REASON_MANUAL) is None
+    assert await _open_election_polls(db_session) == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("gate_on", [True, False])
+async def test_zero_term_days_has_no_auto_recall_under_either_gate(
+    db_session, monkeypatch, gate_on,
+):
+    """polis_office_mayor_term_days = 0 = 无限任期:两种 gate 态下都没有自动
+    收回路径,term_check 什么都不做,撤销是唯一的下台方式(§5 硬门备注)。"""
+    monkeypatch.setattr(settings, "polis_office_enabled", gate_on)
+    monkeypatch.setattr(settings, "polis_office_mayor_term_days", 0)
+    await _seed_voters(db_session)
+
+    svc = OfficeService(db_session)
+    await svc.appoint("mayor", "a", fill_strategy="election",
+                      term_days=settings.polis_office_mayor_term_days)
+    assert await svc.term_check(now=datetime.now(UTC) + timedelta(days=10000)) == 0
+    assert await svc.get_holder("mayor") == "a"
+    assert await _open_election_polls(db_session) == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("gate_on", [True, False])
+async def test_revocation_style_vacate_then_backfill_under_either_gate(
+    db_session, monkeypatch, gate_on,
+):
+    """F2 的撤销形态回放:清干净两个遗留存储后调钩子,两种 gate 态都要补选。"""
+    from app.services.config_service import ConfigService
+
+    monkeypatch.setattr(settings, "polis_office_enabled", gate_on)
+    await _seed_voters(db_session)
+    await ConfigService(db_session).set(
+        "current_mayor", "a", group="civic", updated_by="test")
+
+    svc = OfficeService(db_session)
+    await svc.appoint("mayor", "a", fill_strategy="election")
+    assert await svc.vacate("mayor", audit=True) is True   # 清 holder + 两个遗留存储
+
+    poll_id = await trigger_backfill(
+        db_session, "mayor", reason=REASON_CIVIC_REVOCATION)
+    assert poll_id
+    assert len(await _open_election_polls(db_session)) == 1
