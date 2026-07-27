@@ -13,6 +13,7 @@ a dedicated entry point with ``mode='on'`` hardcoded (e.g.
 shadow-defaulting signature.」—— 本文件「写路径的结构性收口」一节用 spy /
 桩两种手法直接证明这个洞已经补上，而不是只靠 DB 状态断言侧面印证。
 """
+import json
 import pathlib
 from datetime import UTC, datetime, timedelta
 
@@ -22,6 +23,7 @@ from sqlalchemy import func, select
 from app.models.civic_standing_history import CivicStandingHistory
 from app.models.resident import Resident
 from app.models.resident_relation import ResidentRelation
+from app.models.user import User
 from app.services import civic_membership as cm
 from app.services.config_service import ConfigService
 from app.tasks import civic_promotion as cp
@@ -212,6 +214,86 @@ async def test_auto_demotion_flag_raises_instead_of_running_unhedged(
     await _world(db_session)
     with pytest.raises(NotImplementedError, match="滞后"):
         await cp.run_promotion_pass(db_session)
+
+
+# ── 候选面纪律与拒绝容错（复审 Important 1）───────────────────────────────
+#
+# 复现的真实路径：admin 手滑把玩家化身的 resident_type 改成 denizen 档，且
+# meta_json 没有 origin 键——is_ugc_resident 第 5 条兜底（creator_id is not
+# None）会把它判成 UGC，候选面因此收它；写入口（grant_citizenship_batch）
+# 查 users.player_resident_id 拒绝整批是防线在生效，但候选面把它端上来这件
+# 事本身就是 bug——CivicStandingRefused 是整批拒绝，会让同一批里合法候选跟
+# 着永久卡死，而且在当前实现下这个异常不会被捕获，一路抛出 run_promotion_
+# pass，接进 nightly_cron 后会中断整条夜间链，run summary 也因为 _record_run
+# 从未被调用到而不写——运维在探针上看不到任何线索。
+
+@pytest.mark.anyio
+async def test_batch_with_a_player_avatar_promotes_the_rest_and_skips_the_avatar(
+        db_session, monkeypatch):
+    """候选面必须在自己的防线上把玩家化身筛掉，不能指望写入口的射程检查
+    兜底——写入口是整批拒绝，会连累同一批里的合法候选一起卡死。"""
+    monkeypatch.setenv("CIVIC_PROMOTION_MODE", "on")
+    bs, us = await _world(db_session, builtins=4, denizens=2)
+
+    avatar = _res("avatar_gone_denizen", cm.UGC_RESIDENT_TYPE, meta=None)
+    db_session.add(avatar)
+    await db_session.flush()
+    for b in bs[:2]:
+        a_id, b_id = sorted([avatar.id, b.id])
+        db_session.add(ResidentRelation(party_a=a_id, party_b=b_id,
+                                        familiarity=0.6))
+    db_session.add(User(name="玩家", email="avatar-owner@t.example",
+                        player_resident_id=avatar.id))
+    await db_session.commit()
+
+    result = await cp.run_promotion_pass(db_session)
+    assert result["refused"] is None
+    assert result["promoted"] == 2
+
+    voters = (await db_session.execute(
+        select(Resident.slug).where(Resident.is_civic_voter))).scalars().all()
+    assert {"u0", "u1"} <= set(voters)
+    assert "avatar_gone_denizen" not in voters
+
+    avatar_type = (await db_session.execute(
+        select(Resident.resident_type)
+        .where(Resident.slug == "avatar_gone_denizen"))).scalar_one()
+    assert avatar_type == cm.UGC_RESIDENT_TYPE   # 化身档位原封不动
+
+    rows = (await db_session.execute(
+        select(CivicStandingHistory))).scalars().all()
+    assert len(rows) == 2
+    assert avatar.id not in {r.resident_id for r in rows}
+
+
+@pytest.mark.anyio
+async def test_grant_refusal_writes_a_summary_naming_the_reason_instead_of_vanishing(
+        db_session, monkeypatch):
+    """闸门之外的任何拒绝类都不能让 pass 静默消失——不得把异常抛给调用方
+    （nightly_cron 里一炸会中断整条夜间链），run summary 必须带上拒绝原因，
+    不是「_record_run 在异常路径之后，从未被调用到」那种半吊子。用 spy 顶替
+    grant_citizenship_batch 本身直接模拟拒绝，证明这条容错对**任何**
+    CivicStandingRefused 都成立，不只是玩家化身这一类。"""
+    monkeypatch.setenv("CIVIC_PROMOTION_MODE", "on")
+    await _world(db_session, denizens=2)
+
+    async def _boom(*args, **kwargs):
+        raise cm.CivicStandingRefused("grant refused: simulated race")
+
+    monkeypatch.setattr(cm, "grant_citizenship_batch", _boom)
+
+    result = await cp.run_promotion_pass(db_session)
+    assert result["promoted"] == 0
+    assert result["refused"] == "grant_refused"
+    assert "simulated race" in (result.get("refused_detail") or "")
+
+    assert (await db_session.execute(
+        select(func.count()).select_from(CivicStandingHistory))).scalar() == 0
+
+    summary = await ConfigService(db_session).get(cp.RUN_SUMMARY_KEY)
+    assert summary is not None, "拒绝路径必须也写运行摘要，不能静默消失"
+    assert summary["refused"] == "grant_refused"
+    assert len(summary.get("refused_detail") or "") <= 300
 
 
 # ── 写路径的结构性收口（Task 6 评审硬要求）───────────────────────────────
