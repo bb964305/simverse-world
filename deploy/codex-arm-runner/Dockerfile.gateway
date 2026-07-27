@@ -13,4 +13,3 @@ RUN useradd --create-home --uid 10002 gateway \
 
 USER gateway
 ENTRYPOINT ["python", "-m", "app.lab.model_gateway.main"]
-

@@ -122,4 +122,3 @@ class UsageLedger:
     def close(self) -> None:
         with self._lock:
             self._db.close()
-

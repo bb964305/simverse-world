@@ -184,4 +184,3 @@ def create_app(
         return _error(exc.status_code, str(exc.detail), "authentication_failed")
 
     return app
-

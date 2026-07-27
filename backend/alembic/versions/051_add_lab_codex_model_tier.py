@@ -49,4 +49,3 @@ def downgrade() -> None:
         batch.drop_column("model_policy_version")
         batch.drop_column("model_name")
         batch.drop_column("model_tier")
-

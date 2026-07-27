@@ -27,4 +27,3 @@ RUN useradd --create-home --uid 10001 codex \
 
 USER codex
 ENTRYPOINT ["python", "-m", "app.lab.codex_runtime.main"]
-
