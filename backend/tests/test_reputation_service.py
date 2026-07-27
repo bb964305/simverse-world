@@ -7,7 +7,9 @@ from app.models.resident import Resident
 from app.services import election_service
 from app.services.reputation_service import (
     credit_allowed,
+    evidence_weight,
     get_many,
+    gossip_tone,
     recompute,
     score_from_meta,
 )
@@ -111,3 +113,35 @@ async def test_open_election_ranks_reputation_when_enabled(db_session, monkeypat
         candidate_slugs=["low", "high"],
     )
     assert poll.options_json[0]["effect"]["slug"] == "high"
+
+
+# ── F1 第 1 项：tone 由关系 affinity 决定 ──────────────────────────────
+
+
+def test_gossip_tone_follows_affinity_sign():
+    assert gossip_tone(0.2) > 0
+    assert gossip_tone(-0.2) < 0
+    assert gossip_tone(0.5) > gossip_tone(0.1) > gossip_tone(-0.1)
+
+
+def test_gossip_tone_without_relation_keeps_the_legacy_constant():
+    # 无关系行 / affinity=0 → 与修复前逐字节相同，base_tone 退化为偏置项
+    assert gossip_tone(None) == settings.rep_gossip_base_tone
+    assert gossip_tone(0.0) == settings.rep_gossip_base_tone
+    assert gossip_tone("nonsense") == settings.rep_gossip_base_tone
+
+
+def test_gossip_tone_applies_distortion_penalty_and_clamps():
+    assert gossip_tone(0.0, distorted=True) == pytest.approx(
+        settings.rep_gossip_base_tone + settings.rep_distortion_penalty
+    )
+    assert gossip_tone(1.0) == settings.rep_max
+    assert gossip_tone(-1.0, distorted=True) == settings.rep_min
+
+
+def test_evidence_weight_damps_by_hops_and_floors_importance():
+    assert evidence_weight(0.6, 0, -0.5) == pytest.approx(-0.3)
+    assert evidence_weight(0.6, 3, -0.5) == pytest.approx(-0.075)
+    assert evidence_weight(0.6, 0, 0.5) == pytest.approx(0.3)
+    assert evidence_weight(-1.0, 0, 0.5) == 0.0
+    assert evidence_weight(None, 0, 0.5) == 0.0
