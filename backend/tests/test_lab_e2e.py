@@ -19,12 +19,14 @@ import os
 import tempfile
 from unittest.mock import AsyncMock, patch
 
+import jwt
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession, create_async_engine
 
 from app.database import Base
 from app.lab import grants, leases
+from app.lab.model_policy import MODEL_GATEWAY_AUDIENCE
 from app.lab.runner import run_one
 from app.lab.sandbox.base import ArtifactSpec, SandboxHandle, StepEvent
 from app.models.lab_action import LabApproval, LabToolAction
@@ -227,6 +229,45 @@ class FakeDelegatingAdapter(_BaseFake):
         yield StepEvent(phase="message", summary="收尾")
 
 
+class FakeCodexAdapter(_BaseFake):
+    name = "codex"
+
+    def __init__(self):
+        self.spec = None
+
+    async def start(self, spec):
+        self.spec = spec
+        return _FakeHandle(spec)
+
+    async def step_stream(self, handle):
+        yield StepEvent(phase="message", summary="真实模型完成", model_tokens=7)
+
+    async def collect_artifacts(self, handle):
+        return [ArtifactSpec(
+            kind="text",
+            title="Codex report",
+            text_md="result token: secret-value and 0123456789abcdef0123456789abcdef",
+        )]
+
+
+class FakeMeteredFailureAdapter(_BaseFake):
+    async def step_stream(self, handle):
+        yield StepEvent(
+            phase="message", summary="provider charged before failure",
+            cost_usd_cents=7, model_tokens=10,
+        )
+        raise RuntimeError("provider failed after charging")
+
+
+class FakeUnknownCostCodexAdapter(FakeCodexAdapter):
+    async def step_stream(self, handle):
+        raise RuntimeError("runtime failed before reporting terminal usage")
+        yield  # pragma: no cover - keeps this an async generator
+
+    async def cancel_and_collect_usage(self, run_id):
+        raise RuntimeError("gateway ledger unavailable")
+
+
 # ── 1. happy path v1 ──────────────────────────────────────────────────
 
 @pytest.mark.anyio
@@ -282,6 +323,53 @@ async def test_happy_path_v1(lab_env):
     async with factory() as s:
         assert await coin_service.get_balance(s, "creator_user") == 20
         assert await coin_service.treasury_balance(s, "sage") == 80
+
+
+@pytest.mark.anyio
+async def test_codex_control_plane_sends_high_tier_grant_and_quarantines_output(
+    lab_env, monkeypatch
+):
+    from app.config import settings
+
+    factory = lab_env
+    await _seed(factory)
+    monkeypatch.setattr(settings, "lab_adapter", "codex")
+    monkeypatch.setattr(settings, "lab_model_gateway_base_url", "http://gateway/v1")
+    monkeypatch.setattr(
+        settings,
+        "lab_model_gateway_auth_secret",
+        "control-plane-test-secret-at-least-32-bytes",
+    )
+    adapter = FakeCodexAdapter()
+    monkeypatch.setattr("app.lab.orchestrator.get_adapter", lambda _name: adapter)
+    task_id, run_id = await _make_task(factory, scopes=["code"], reward_sc=100)
+
+    await run_one(run_id)
+
+    assert adapter.spec is not None
+    assert adapter.spec.model_tier == "high"
+    assert adapter.spec.model_name == "deepseek-v4-pro"
+    assert adapter.spec.resource_cpu_cores == 4
+    assert adapter.spec.resource_memory_mb == 4096
+    assert adapter.spec.model_gateway_base_url == "http://gateway/v1"
+    assert adapter.spec.model_gateway_token
+    claims = jwt.decode(
+        adapter.spec.model_gateway_token,
+        settings.lab_model_gateway_auth_secret,
+        algorithms=["HS256"],
+        audience=MODEL_GATEWAY_AUDIENCE,
+    )
+    assert claims["run_id"] == run_id
+    assert claims["model_tier"] == "high"
+
+    async with factory() as db:
+        artifact = await db.scalar(
+            select(LabArtifact).where(LabArtifact.task_id == task_id)
+        )
+        assert artifact is not None
+        assert artifact.text_md == "result [REDACTED] and [REDACTED]"
+        assert artifact.scan_status == "pending"
+        assert artifact.verification_status == "unverified"
 
 
 # ── 2. approval chain v1: owner approves → run resumes → succeeds ──────
@@ -389,6 +477,158 @@ async def test_scope_violation_v1(lab_env, monkeypatch):
             select(LabCapabilityGrant).where(LabCapabilityGrant.run_id == run_id)
         )).scalars().all()
         assert len(grants) == 1 and grants[0].revoked_at is not None
+
+
+@pytest.mark.anyio
+async def test_failed_run_refunds_deposit_minus_metered_model_cost(
+    lab_env, monkeypatch
+):
+    from app.config import settings
+
+    factory = lab_env
+    await _seed(factory)
+    monkeypatch.setattr(settings, "lab_sc_per_usd", 100)
+    monkeypatch.setattr(settings, "lab_adapter", "codex")
+    monkeypatch.setattr(settings, "lab_model_gateway_base_url", "http://gateway/v1")
+    monkeypatch.setattr(
+        settings,
+        "lab_model_gateway_auth_secret",
+        "metered-failure-test-secret-at-least-32-bytes",
+    )
+    monkeypatch.setattr(
+        "app.lab.orchestrator.get_adapter", lambda _name: FakeMeteredFailureAdapter()
+    )
+    task_id, run_id = await _make_task(
+        factory, scopes=["code"], reward_sc=100, title="计费失败"
+    )
+
+    await run_one(run_id)
+
+    async with factory() as db:
+        run = await db.get(LabRun, run_id)
+        task = await db.get(LabTask, task_id)
+        assert run.status == "failed"
+        assert run.cost_usd_cents == 7
+        assert task.status == "failed"
+        # 110 SC escrow was held; 7 cents at 100 SC/USD retains 7 SC.
+        assert await coin_service.get_balance(db, "issuer") == 993
+
+
+@pytest.mark.anyio
+async def test_failed_codex_run_blocks_refund_when_terminal_usage_is_unknown(
+    lab_env, monkeypatch
+):
+    from app.config import settings
+
+    factory = lab_env
+    await _seed(factory)
+    monkeypatch.setattr(settings, "lab_adapter", "codex")
+    monkeypatch.setattr(settings, "lab_model_gateway_base_url", "http://gateway/v1")
+    monkeypatch.setattr(
+        settings,
+        "lab_model_gateway_auth_secret",
+        "unknown-cost-test-secret-at-least-32-bytes",
+    )
+    monkeypatch.setattr(
+        "app.lab.orchestrator.get_adapter",
+        lambda _name: FakeUnknownCostCodexAdapter(),
+    )
+    task_id, run_id = await _make_task(
+        factory, scopes=["code"], reward_sc=100, title="未知成本失败"
+    )
+
+    await run_one(run_id)
+
+    async with factory() as db:
+        run = await db.get(LabRun, run_id)
+        task = await db.get(LabTask, task_id)
+        assert run.status == "failed"
+        assert run.error.startswith("cost_unknown:")
+        assert task.status == "running"
+        assert await coin_service.get_balance(db, "issuer") == 890
+        with pytest.raises(svc.LabTaskError, match="refund settlement is blocked"):
+            await svc.fail_task(db, task, reason="retry")
+
+
+@pytest.mark.anyio
+async def test_codex_cancel_waits_for_usage_then_refunds_net_cost(
+    lab_env, monkeypatch
+):
+    from app.config import settings
+    from app.lab.sandbox.codex import CodexAdapter
+
+    factory = lab_env
+    await _seed(factory)
+    monkeypatch.setattr(settings, "lab_adapter", "codex")
+    monkeypatch.setattr(settings, "lab_sc_per_usd", 100)
+    collect_usage = AsyncMock(return_value=5)
+    monkeypatch.setattr(CodexAdapter, "cancel_and_collect_usage", collect_usage)
+    task_id, run_id = await _make_task(
+        factory, scopes=["code"], reward_sc=100, title="取消真实任务"
+    )
+
+    async with factory() as db:
+        task = await svc.cancel_task(db, task_id, "issuer")
+        assert task.status == "cancelled"
+
+    collect_usage.assert_awaited_once_with(run_id)
+    async with factory() as db:
+        run = await db.get(LabRun, run_id)
+        assert run.cost_usd_cents == 5
+        assert await coin_service.get_balance(db, "issuer") == 995
+
+
+@pytest.mark.anyio
+async def test_codex_cancel_blocks_refund_when_usage_is_unavailable(
+    lab_env, monkeypatch
+):
+    from app.config import settings
+    from app.lab.sandbox.codex import CodexAdapter
+
+    factory = lab_env
+    await _seed(factory)
+    monkeypatch.setattr(settings, "lab_adapter", "codex")
+    monkeypatch.setattr(
+        CodexAdapter,
+        "cancel_and_collect_usage",
+        AsyncMock(side_effect=RuntimeError("gateway offline")),
+    )
+    task_id, _run_id = await _make_task(
+        factory, scopes=["code"], reward_sc=100, title="取消账本故障"
+    )
+
+    async with factory() as db:
+        with pytest.raises(svc.LabTaskError, match="settlement is blocked"):
+            await svc.cancel_task(db, task_id, "issuer")
+
+    async with factory() as db:
+        task = await db.get(LabTask, task_id)
+        assert task.status == "assigned"
+        assert await coin_service.get_balance(db, "issuer") == 890
+
+
+@pytest.mark.anyio
+async def test_codex_rejects_non_cost_aware_v2_terminalizer_before_funding(
+    lab_env, monkeypatch
+):
+    from app.config import settings
+
+    factory = lab_env
+    await _seed(factory)
+    monkeypatch.setattr(settings, "lab_adapter", "codex")
+    monkeypatch.setattr(settings, "lab_terminalizer_v2_enabled", True)
+    async with factory() as db:
+        with pytest.raises(svc.LabTaskError, match="not yet cost-aware"):
+            await svc.create_task(
+                db,
+                issuer_id="issuer",
+                title="不安全财务组合",
+                brief="must fail before hold",
+                scopes=["code"],
+                reward_sc=100,
+                researcher_slug="sage",
+            )
+        assert await coin_service.get_balance(db, "issuer") == 1000
 
 
 # ── 5. world change v1: success → Compiler drafts a pending proposal ──

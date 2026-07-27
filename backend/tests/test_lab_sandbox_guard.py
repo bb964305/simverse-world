@@ -61,6 +61,12 @@ def test_redaction_scrubs_secrets():
     assert out["api_key"] == "[REDACTED]"
     assert out["nested"]["password"] == "[REDACTED]"
     assert out["q"] == "hello"
+    for value in (
+        "0123456789abcdef0123456789abcdef",
+        "QWxhZGRpbjpPcGVuU2VzYW1lMTIzNDU2Nzg5MDEyMzQ1Njc4OTA=",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJydW4tMSJ9.signature123",
+    ):
+        assert guard.redact_text(value) == "[REDACTED]"
 
 
 # ── isolation: egress allowlist + SSRF ────────────────────────────────

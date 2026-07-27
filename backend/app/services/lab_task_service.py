@@ -61,6 +61,11 @@ def _require_execution_consumer(protocol_version: int | None = None) -> int:
         runner.require_protocol_handler(selected)
     except runner.ProtocolConsumerUnavailable as exc:
         raise LabTaskError(str(exc)) from exc
+    if settings.lab_adapter == "codex" and settings.lab_terminalizer_v2_enabled:
+        raise LabTaskError(
+            "Codex requires the cost-aware v1 escrow terminalizer; "
+            "the PostgreSQL v2 refund kernel is not yet cost-aware"
+        )
     return selected
 
 
@@ -532,6 +537,8 @@ async def cancel_task(db, task_id: str, user_id: str) -> LabTask:
     if task.status in ("completed", "cancelled", "failed", "expired"):
         raise LabTaskError("task already finalized")
 
+    await _sync_codex_terminal_cost(db, task)
+
     try:
         await lab_terminalization_service.submit_for_caller(
             db, task=task, operation="cancel", actor=user_id
@@ -539,6 +546,26 @@ async def cancel_task(db, task_id: str, user_id: str) -> LabTask:
     except lab_terminalization_service.LabTerminalizationError as exc:
         raise LabTaskError(str(exc)) from exc
     return task
+
+
+async def _sync_codex_terminal_cost(db, task: LabTask) -> None:
+    """Fence Codex and persist trusted usage before refund terminalization."""
+    if not task.accepted_run_id:
+        return
+    run = await db.get(LabRun, task.accepted_run_id)
+    if run is None or run.adapter != "codex" or run.status not in ACTIVE_RUN_STATES:
+        return
+    from app.lab.sandbox.codex import CodexAdapter
+
+    try:
+        run.cost_usd_cents = await CodexAdapter().cancel_and_collect_usage(run.id)
+        await db.commit()
+        await db.refresh(task)
+    except Exception as exc:
+        await db.rollback()
+        raise LabTaskError(
+            "Codex usage is unavailable; cancellation settlement is blocked"
+        ) from exc
 
 
 async def arbitrate_result(
@@ -594,6 +621,7 @@ async def expire_lab_tasks(db) -> int:
     )).scalars().all()
     for task in stale:
         try:
+            await _sync_codex_terminal_cost(db, task)
             await lab_terminalization_service.submit_for_caller(
                 db,
                 task=task,

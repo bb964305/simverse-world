@@ -233,7 +233,7 @@ class Settings(BaseSettings):
     lab_pro_budget_usd: float = 0.5
     lab_model_gateway_base_url: str = ""
     lab_model_gateway_auth_secret: str = ""
-    lab_model_gateway_token_ttl_s: int = 3600
+    lab_model_gateway_token_ttl_s: int = 300
     lab_codex_base_url: str = ""
     lab_codex_api_key: str = ""
     lab_approval_timeout_s: int = 1800      # sensitive-action human-review timeout (default: deny)

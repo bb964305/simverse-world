@@ -276,11 +276,20 @@ class _Orchestrator:
                            self.run_id, exc)
             return
         except _RunFailed as exc:
-            await self._fail(exc.reason)
+            cost_trusted = await self._collect_terminal_codex_usage()
+            await self._fail(exc.reason, cost_trusted=cost_trusted)
         except Exception as exc:  # noqa: BLE001 — any adapter/runtime error fails the run
             logger.warning("lab run %s failed: %s", self.run_id, exc, exc_info=True)
-            await self._fail(str(exc))
+            cost_trusted = await self._collect_terminal_codex_usage()
+            await self._fail(str(exc), cost_trusted=cost_trusted)
         finally:
+            if self.adapter is not None and self.handle is not None and not self.fenced:
+                try:
+                    await self.adapter.stop(self.handle)
+                except Exception:  # noqa: BLE001 - terminal cleanup is best effort
+                    logger.warning(
+                        "lab adapter stop failed for %s", self.run_id, exc_info=True
+                    )
             if self._worker_reserved:
                 # Release this owner's active_workers slot on EVERY terminal path,
                 # INCLUDING fenced. This owner reserved exactly one slot at start,
@@ -301,6 +310,24 @@ class _Orchestrator:
     async def _event_loop(self) -> None:
         db = self.db
         adapter = get_adapter(self.run.adapter)
+        model_gateway_token = ""
+        if self.run.adapter == "codex":
+            from app.lab.model_policy import ModelAssignment, issue_gateway_token
+
+            model_gateway_token = issue_gateway_token(
+                tenant_id=self.tenant_id,
+                task_id=self.task_id,
+                run_id=self.run_id,
+                assignment=ModelAssignment(
+                    tier=self.run.model_tier,
+                    model=self.run.model_name,
+                    policy_version=self.run.model_policy_version,
+                    budget_usd_cents=self.run.budget_usd_cents,
+                    cpu_cores=self.run.resource_cpu_cores,
+                    memory_mb=self.run.resource_memory_mb,
+                ),
+                max_model_tokens=settings.lab_budget_model_tokens,
+            )
         spec = RunSpec(
             run_id=self.run_id, task_id=self.task_id, researcher_slug=self.actor,
             brief=(self.task.brief_md or self.task.title or ""),
@@ -309,6 +336,14 @@ class _Orchestrator:
             deadline=self.task.deadline_at,
             egress_allowlist=list(getattr(settings, "lab_egress_allowlist", []) or []),
             secrets={}, deliverable_kind=self.task.deliverable_kind,
+            tenant_id=self.tenant_id,
+            model_tier=self.run.model_tier,
+            model_name=self.run.model_name,
+            model_policy_version=self.run.model_policy_version,
+            resource_cpu_cores=self.run.resource_cpu_cores,
+            resource_memory_mb=self.run.resource_memory_mb,
+            model_gateway_base_url=settings.lab_model_gateway_base_url,
+            model_gateway_token=model_gateway_token,
         )
         self.adapter = adapter
         self.handle = await adapter.start(spec)
@@ -1874,6 +1909,24 @@ class _Orchestrator:
 
     # ── terminal paths ────────────────────────────────────────────────
 
+    async def _collect_terminal_codex_usage(self) -> bool:
+        """Fence a real Codex run and replace streamed estimates with ledger cost."""
+        if self.run.adapter != "codex" or self.handle is None:
+            return True
+        collect_usage = getattr(self.adapter, "cancel_and_collect_usage", None)
+        if collect_usage is None:
+            return True
+        try:
+            self.cost_cents = await collect_usage(self.run_id)
+            return True
+        except Exception:  # noqa: BLE001 - unknown spend must block settlement
+            logger.error(
+                "Codex terminal usage unavailable for run %s; settlement blocked",
+                self.run_id,
+                exc_info=True,
+            )
+            return False
+
     async def _collect_success_artifacts(self):
         return await self.adapter.collect_artifacts(self.handle)
 
@@ -1953,7 +2006,9 @@ class _Orchestrator:
         for a in artifacts:
             artifact = LabArtifact(
                 run_id=self.run_id, task_id=self.task_id, kind=a.kind, title=a.title,
-                uri=a.uri, text_md=a.text_md, meta_json=(a.meta or None),
+                uri=guard.redact_text(a.uri),
+                text_md=guard.redact_text(a.text_md),
+                meta_json=(guard.redact_payload(a.meta) or None),
             )
             # V12: stamp tenant/digest/size/expiry before the row lands (P2-B).
             # finalize only mutates the Python object — nothing is in the session
@@ -1968,6 +2023,9 @@ class _Orchestrator:
                 db, artifact=artifact, tenant_id=self.tenant_id, producer_action_id=None,
                 scanned_clean=(self.run.adapter == "mock"),
             )
+            if self.run.adapter != "mock":
+                artifact.scan_status = "pending"
+                artifact.verification_status = "unverified"
             # Hard budgets, charged BEFORE staging the row: reserve one
             # artifact_count unit, then debit artifact_bytes by the finalized
             # size. An exhaustion of either drives the standard termination with
@@ -2017,7 +2075,7 @@ class _Orchestrator:
         await self._emit(type="run.completed", payload={"summary": guard.redact_text(summary) or ""})
         await _ws_task_update(self.task)
 
-    async def _fail(self, reason: str) -> None:
+    async def _fail(self, reason: str, *, cost_trusted: bool = True) -> None:
         db = self.db
         # Epoch gate: a takeover fences the terminal write. Reconcile against the
         # lease authority BEFORE flipping run.status or refunding — a stale owner
@@ -2035,7 +2093,10 @@ class _Orchestrator:
         if self.run is not None:
             self.run.status = "failed"
             self.run.ended_at = datetime.now(UTC)
-            self.run.error = str(reason)[:500]
+            self.run.cost_usd_cents = self.cost_cents
+            self.run.error = (
+                str(reason) if cost_trusted else f"cost_unknown: {reason}"
+            )[:500]
             await db.commit()
         try:
             await self._emit(type="run.failed", payload={"reason": str(reason)[:200]})
@@ -2048,6 +2109,8 @@ class _Orchestrator:
             return
         except Exception:  # noqa: BLE001
             logger.warning("run.failed event append failed for %s", self.run_id, exc_info=True)
+        if not cost_trusted:
+            return
         self.task = await db.get(LabTask, self.task_id)
         try:
             await lab_task_service.fail_task(db, self.task, reason=f"run_failed:{self.run_id}")

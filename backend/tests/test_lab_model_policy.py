@@ -9,6 +9,7 @@ from app.lab.model_policy import (
     PRO_MODEL,
     ModelPolicyError,
     assignment_for_reward,
+    cost_usd_cents_to_sc,
     issue_gateway_token,
 )
 
@@ -62,3 +63,10 @@ def test_gateway_token_rejects_short_secret(monkeypatch):
             tenant_id="tenant", task_id="task", run_id="run",
             assignment=assignment_for_reward(10), max_model_tokens=100,
         )
+
+
+def test_usd_cents_to_sc_uses_configured_rate_and_rounds_up(monkeypatch):
+    monkeypatch.setattr(settings, "lab_sc_per_usd", 150)
+    assert cost_usd_cents_to_sc(0) == 0
+    assert cost_usd_cents_to_sc(1) == 2
+    assert cost_usd_cents_to_sc(10) == 15

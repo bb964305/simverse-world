@@ -1,6 +1,7 @@
 """HTTP adapter for the isolated Codex runtime deployed on the ARM worker."""
 from __future__ import annotations
 
+import asyncio
 from typing import AsyncIterator
 
 from app.config import settings
@@ -74,3 +75,37 @@ class CodexAdapter(HttpAgentAdapter):
                 if data.get("failed"):
                     raise RuntimeError(data.get("error") or "Codex runtime failed")
                 break
+
+    async def cancel_and_collect_usage(self, run_id: str) -> int:
+        """Stop a known run and return its authoritative terminal cost."""
+        self._require_configured()
+        from app.http import get_client
+
+        response = await get_client().post(
+            f"{self.base_url}/runs/{run_id}/cancel",
+            headers=self._headers(),
+            timeout=self.timeout,
+        )
+        if response.status_code == 404:
+            raise RuntimeError("Codex runtime has no usage record for the known run")
+        response.raise_for_status()
+        deadline = asyncio.get_running_loop().time() + self.timeout
+        while asyncio.get_running_loop().time() < deadline:
+            polled = await get_client().get(
+                f"{self.base_url}/runs/{run_id}/steps",
+                headers=self._headers(),
+                timeout=self.timeout,
+                params={"after": 0},
+            )
+            polled.raise_for_status()
+            data = polled.json() or {}
+            if data.get("done"):
+                usage_steps = [
+                    step for step in data.get("steps", [])
+                    if step.get("summary") == "Codex model usage recorded"
+                ]
+                if not usage_steps:
+                    raise RuntimeError("Codex cancellation has no trusted usage record")
+                return int(usage_steps[-1].get("cost_usd_cents") or 0)
+            await asyncio.sleep(0.1)
+        raise RuntimeError("Codex cancellation usage timed out")

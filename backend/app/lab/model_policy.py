@@ -59,6 +59,16 @@ def assignment_for_reward(reward_sc: int) -> ModelAssignment:
     )
 
 
+def cost_usd_cents_to_sc(cost_usd_cents: int) -> int:
+    """Convert metered model cost to SC, rounding up against the issuer."""
+    if type(cost_usd_cents) is not int or cost_usd_cents < 0:
+        raise ModelPolicyError("cost_usd_cents must be a non-negative integer")
+    rate = settings.lab_sc_per_usd
+    if type(rate) is not int or rate <= 0:
+        raise ModelPolicyError("lab_sc_per_usd must be a positive integer")
+    return math.ceil(cost_usd_cents * rate / 100)
+
+
 def issue_gateway_token(
     *,
     tenant_id: str,
