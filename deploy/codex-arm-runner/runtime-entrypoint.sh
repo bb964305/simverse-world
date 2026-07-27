@@ -12,11 +12,13 @@ scope_root="/sys/fs/cgroup$self_cgroup"
 controller_cgroup="$scope_root/controller"
 run_cgroup="$scope_root/simverse-lab"
 mkdir "$controller_cgroup"
+chmod 0700 "$controller_cgroup"
 while IFS= read -r pid; do
   [ -n "$pid" ] && printf '%s\n' "$pid" > "$controller_cgroup/cgroup.procs"
 done < "$scope_root/cgroup.procs"
 printf '+cpu +memory +pids\n' > "$scope_root/cgroup.subtree_control"
 mkdir "$run_cgroup"
+chmod 0700 "$run_cgroup"
 printf '+cpu +memory +pids\n' > "$run_cgroup/cgroup.subtree_control"
 
 mount --bind "$run_cgroup" /run/simverse-cgroup

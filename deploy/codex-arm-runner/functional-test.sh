@@ -140,7 +140,7 @@ runtime_token="$(issue_token low arm-runtime)"
   --security-opt no-new-privileges --security-opt seccomp=unconfined \
   --cgroupns host \
   --pids-limit 512 --memory 8g --cpus 4 \
-  --tmpfs /tmp:rw,noexec,nosuid,size=256m \
+  --tmpfs /tmp:rw,noexec,nosuid,size=256m,uid=0,gid=0,mode=0700 \
   --tmpfs /var/lib/simverse/codex-runs:rw,nosuid,size=512m,uid=0,gid=0,mode=0711 \
   --mount type=bind,src=/sys/fs/cgroup,dst=/sys/fs/cgroup \
   --mount "type=volume,src=$RUNTIME_SECRET_VOLUME,dst=/run/secrets,readonly" \

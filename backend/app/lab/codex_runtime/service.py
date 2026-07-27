@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import logging
 import os
 import secrets
 import shutil
+import signal
 import sys
 import time
 import uuid
@@ -22,6 +24,9 @@ from app.lab.codex_runtime.config import CodexRuntimeConfig
 from app.lab.codex_runtime.credential_proxy import RunCredentialProxy
 from app.lab import guard
 from app.lab.model_catalog import FLASH_MODEL, PRO_MODEL, RESOURCE_PROFILES
+
+
+logger = logging.getLogger(__name__)
 
 
 class CreateRun(BaseModel):
@@ -136,7 +141,7 @@ def _codex_config(base_url: str) -> str:
         '\n[shell_environment_policy]\n'
         'inherit = "none"\n'
         'ignore_default_excludes = false\n'
-        'include_only = ["PATH", "HOME", "LANG"]\n'
+        'include_only = ["PATH", "HOME", "TMPDIR", "LANG"]\n'
         'exclude = ["LAB_RUN_TOKEN", "*KEY*", "*SECRET*", "*TOKEN*"]\n'
     )
 
@@ -195,7 +200,7 @@ def _validate_process_isolation(config: CodexRuntimeConfig) -> None:
 def _create_run_cgroup(session: RuntimeSession, config: CodexRuntimeConfig) -> Path | None:
     if not config.enforce_process_isolation:
         return None
-    path = Path(config.cgroup_root) / session.workspace.name
+    path = Path(config.cgroup_root) / f"run-{secrets.token_hex(16)}"
     path.mkdir(mode=0o700)
     (path / "cpu.max").write_text(
         f"{session.request.resource_cpu_cores * 100_000} 100000", encoding="ascii"
@@ -215,12 +220,96 @@ def _remove_workspace(
     if resolved_workspace.parent != resolved_root or not resolved_workspace.exists():
         return
     if restore_controller_owner:
-        os.chown(resolved_workspace, 0, 0)
-        for current, directories, _files in os.walk(resolved_workspace):
-            os.chown(current, 0, 0)
+        def restore(path: Path, *, directory: bool) -> None:
+            try:
+                os.chown(path, 0, 0, follow_symlinks=False)
+            except OSError:
+                logger.warning(
+                    "could not restore controller ownership during workspace cleanup",
+                    exc_info=True,
+                )
+            if directory and not path.is_symlink():
+                try:
+                    path.chmod(0o700)
+                except OSError:
+                    logger.warning(
+                        "could not restore directory mode during workspace cleanup",
+                        exc_info=True,
+                    )
+
+        restore(resolved_workspace, directory=True)
+        for current, directories, _files in os.walk(
+            resolved_workspace,
+            topdown=True,
+            followlinks=False,
+            onerror=lambda exc: logger.warning(
+                "could not enumerate part of a run workspace during cleanup",
+                exc_info=(type(exc), exc, exc.__traceback__),
+            ),
+        ):
+            current_path = Path(current)
+            restore(current_path, directory=True)
             for name in directories:
-                os.chown(Path(current) / name, 0, 0)
-    shutil.rmtree(resolved_workspace)
+                restore(current_path / name, directory=True)
+
+    # A run can race cleanup by tightening a directory mode. Restore modes and
+    # retry the complete tree rather than allowing one failed entry to strand it.
+    last_error: OSError | None = None
+    for _attempt in range(3):
+        failures: list[OSError] = []
+
+        def recover_remove(_function: Any, path: str, exc: OSError) -> None:
+            failures.append(exc)
+            candidate = Path(path)
+            try:
+                if not candidate.is_symlink():
+                    candidate.chmod(0o700)
+            except OSError:
+                logger.warning(
+                    "could not restore mode while retrying workspace removal",
+                    exc_info=True,
+                )
+
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(resolved_workspace, onexc=recover_remove)
+        else:
+            shutil.rmtree(
+                resolved_workspace,
+                onerror=lambda function, path, exc_info: recover_remove(
+                    function, path, exc_info[1]
+                ),
+            )
+        if not resolved_workspace.exists():
+            return
+        if failures:
+            last_error = failures[-1]
+    if last_error is not None:
+        raise last_error
+    raise OSError(f"workspace cleanup left residue at {resolved_workspace}")
+
+
+async def _terminate_process_group(
+    process: asyncio.subprocess.Process | None, *, sig: signal.Signals = signal.SIGKILL
+) -> None:
+    if process is None or process.returncode is not None:
+        return
+    try:
+        os.killpg(process.pid, sig)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        logger.exception("failed to signal Codex process group %s", process.pid)
+    if sig == signal.SIGKILL:
+        # Do not release the resource-pool slot or start workspace cleanup until
+        # the kernel has reaped the full run session.
+        await process.wait()
+        return
+    try:
+        await asyncio.wait_for(process.wait(), timeout=5)
+    except TimeoutError:
+        logger.warning(
+            "Codex process group %s ignored graceful termination", process.pid
+        )
 
 
 async def _monitor_budget(
@@ -239,14 +328,12 @@ async def _monitor_budget(
                 cost_cents, int(session.request.budget_usd * 100)
             ):
                 continue
-            if session.process and session.process.returncode is None:
-                session.process.kill()
+            await _terminate_process_group(session.process)
             return "model budget exceeded"
     except asyncio.CancelledError:
         raise
     except Exception:
-        if session.process and session.process.returncode is None:
-            session.process.kill()
+        await _terminate_process_group(session.process)
         return "model usage unavailable"
 
 
@@ -262,6 +349,8 @@ async def _consume_codex(
     ):
         codex_home = session.workspace / ".codex"
         codex_home.mkdir(mode=0o700)
+        run_tmp = session.workspace / ".tmp"
+        run_tmp.mkdir(mode=0o700)
         client_token = secrets.token_urlsafe(32)
         credential_proxy = RunCredentialProxy(
             gateway_base_url=config.model_gateway_base_url,
@@ -277,6 +366,7 @@ async def _consume_codex(
             if config.enforce_process_isolation:
                 os.chown(config_path, session.executor_uid, session.executor_uid)
                 os.chown(codex_home, session.executor_uid, session.executor_uid)
+                os.chown(run_tmp, session.executor_uid, session.executor_uid)
                 os.chown(session.workspace, session.executor_uid, session.executor_uid)
         except BaseException:
             await credential_proxy.close()
@@ -293,6 +383,7 @@ async def _consume_codex(
             "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
             "HOME": str(session.workspace),
             "CODEX_HOME": str(codex_home),
+            "TMPDIR": str(run_tmp),
             # This authenticates only to the per-run loopback proxy. It is not a
             # gateway credential and cannot be used outside this run.
             "LAB_RUN_TOKEN": client_token,
@@ -340,6 +431,7 @@ async def _consume_codex(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=1024 * 1024,
+                start_new_session=True,
             )
             assert session.process.stdout is not None
             budget_monitor = asyncio.create_task(
@@ -405,19 +497,14 @@ async def _consume_codex(
             cancelled = True
             failed = True
             terminal_error = "Codex run cancelled"
-            if session.process and session.process.returncode is None:
-                session.process.kill()
-                await session.process.wait()
         except TimeoutError:
             failed = True
             terminal_error = "Codex run timed out"
-            if session.process and session.process.returncode is None:
-                session.process.kill()
-                await session.process.wait()
         except Exception as exc:
             failed = True
             terminal_error = str(exc)[:1000]
         finally:
+            await _terminate_process_group(session.process)
             if budget_monitor is not None and not budget_monitor.done():
                 budget_monitor.cancel()
                 await asyncio.gather(budget_monitor, return_exceptions=True)
@@ -457,12 +544,22 @@ async def _consume_codex(
                     restore_controller_owner=config.enforce_process_isolation,
                 )
             except OSError:
+                logger.critical(
+                    "run workspace cleanup failed for session %s",
+                    session.session_id,
+                    exc_info=True,
+                )
                 failed = True
                 terminal_error = "run workspace cleanup failed"
             if cgroup_path is not None:
                 try:
                     cgroup_path.rmdir()
                 except OSError:
+                    logger.critical(
+                        "run cgroup cleanup failed for session %s",
+                        session.session_id,
+                        exc_info=True,
+                    )
                     failed = True
                     terminal_error = "run cgroup cleanup failed"
             await session.finish(failed=failed, error=terminal_error)
@@ -508,7 +605,11 @@ def create_app(config: CodexRuntimeConfig) -> FastAPI:
                     restore_controller_owner=config.enforce_process_isolation,
                 )
             except OSError:
-                pass
+                logger.critical(
+                    "emergency workspace cleanup failed for session %s",
+                    session.session_id,
+                    exc_info=True,
+                )
             if not session.done:
                 await session.finish(
                     failed=True,
@@ -638,12 +739,12 @@ def create_app(config: CodexRuntimeConfig) -> FastAPI:
 
     async def stop_process(session: RuntimeSession, *, kill: bool) -> None:
         if session.process and session.process.returncode is None:
-            session.process.kill() if kill else session.process.terminate()
-            try:
-                await asyncio.wait_for(session.process.wait(), timeout=5)
-            except TimeoutError:
-                session.process.kill()
-                await session.process.wait()
+            await _terminate_process_group(
+                session.process,
+                sig=signal.SIGKILL if kill else signal.SIGTERM,
+            )
+            if session.process.returncode is None:
+                await _terminate_process_group(session.process)
 
     @app.post("/runs/{session_id}/approve")
     async def approve(

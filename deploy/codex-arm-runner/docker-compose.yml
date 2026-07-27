@@ -42,7 +42,7 @@ services:
         target: runtime_api_key
     read_only: true
     tmpfs:
-      - /tmp:rw,noexec,nosuid,size=256m
+      - /tmp:rw,noexec,nosuid,size=256m,uid=0,gid=0,mode=0700
       - /var/lib/simverse/codex-runs:rw,nosuid,size=512m,uid=0,gid=0,mode=0711
     volumes:
       # The entrypoint retains a writable bind only to this container's own

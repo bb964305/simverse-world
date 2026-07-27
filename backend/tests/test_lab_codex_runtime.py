@@ -1,20 +1,271 @@
 import asyncio
+import errno
+import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
 from app.lab.codex_runtime.config import CodexRuntimeConfig
 from app.lab.codex_runtime.credential_proxy import RunCredentialProxy
+from app.lab.codex_runtime.launcher import main as launcher_main
 from app.lab.codex_runtime.service import (
+    CreateRun,
+    Goal,
     RuntimeResourcePool,
+    RuntimeSession,
+    _consume_codex,
     _codex_config,
+    _create_run_cgroup,
     _has_hidepid_2,
+    _remove_workspace,
     create_app,
 )
 
 
 API_KEY = "codex-runtime-test-key-that-is-at-least-32-bytes"
+
+
+def test_remove_workspace_does_not_follow_external_directory_symlink(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "runs"
+    workspace = root / "run"
+    outside = tmp_path / "outside"
+    workspace.mkdir(parents=True)
+    outside.mkdir()
+    (workspace / "escape").symlink_to(outside, target_is_directory=True)
+
+    def simulated_chown(path, _uid, _gid, *, follow_symlinks=True):
+        if Path(path).is_symlink() and follow_symlinks:
+            raise FileNotFoundError(errno.ENOENT, "followed dangling link", str(path))
+
+    monkeypatch.setattr(
+        "app.lab.codex_runtime.service.os.chown", simulated_chown
+    )
+
+    _remove_workspace(workspace, str(root), restore_controller_owner=True)
+
+    assert not workspace.exists()
+
+
+def test_remove_workspace_continues_after_unrecoverable_chown(tmp_path, monkeypatch):
+    root = tmp_path / "runs"
+    workspace = root / "run"
+    blocked = workspace / "blocked"
+    blocked.mkdir(parents=True)
+
+    def selective_chown(path, uid, gid, **kwargs):
+        if Path(path) == blocked:
+            raise OSError(errno.EROFS, "read-only target", str(path))
+
+    monkeypatch.setattr("app.lab.codex_runtime.service.os.chown", selective_chown)
+
+    _remove_workspace(workspace, str(root), restore_controller_owner=True)
+
+    assert not workspace.exists()
+
+
+def test_remove_workspace_recovers_mode_zero_directory(tmp_path, monkeypatch):
+    root = tmp_path / "runs"
+    workspace = root / "run"
+    blocked = workspace / "blocked"
+    blocked.mkdir(parents=True)
+    (blocked / "residue").write_text("owned by run", encoding="utf-8")
+    blocked.chmod(0)
+    monkeypatch.setattr(
+        "app.lab.codex_runtime.service.os.chown",
+        lambda _path, _uid, _gid, **_kwargs: None,
+    )
+    try:
+        _remove_workspace(workspace, str(root), restore_controller_owner=True)
+        assert not workspace.exists()
+    finally:
+        if blocked.exists():
+            blocked.chmod(0o700)
+
+
+def test_run_cgroup_name_is_random_and_not_the_workspace_identifier(tmp_path):
+    cgroup_root = tmp_path / "cgroups"
+    workspace = tmp_path / "workspace-visible-id"
+    cgroup_root.mkdir()
+    workspace.mkdir()
+    request = CreateRun(
+        run_id="cgroup-name", tenant_id="tenant", scopes=["code"],
+        budget_usd=1.0, egress_allowlist=[], model_tier="low",
+        model_name="deepseek-v4-flash", model_policy_version="test",
+        resource_cpu_cores=2, resource_memory_mb=2048,
+        model_gateway_base_url="http://ignored/v1",
+        model_gateway_token="run-token",
+    )
+    session = RuntimeSession("cgroup-name", request, workspace)
+    config = CodexRuntimeConfig(
+        bind_host="127.0.0.1", bind_port=8097, api_key=API_KEY,
+        codex_binary="/bin/false", workspace_root=str(tmp_path),
+        max_active_runs=1, run_timeout_s=10, max_step_text_chars=1000,
+        model_gateway_base_url="http://trusted-gateway:8096/v1",
+        enforce_process_isolation=True, cgroup_root=str(cgroup_root),
+    )
+
+    path = _create_run_cgroup(session, config)
+
+    assert path is not None
+    assert path.name.startswith("run-")
+    assert path.name != workspace.name
+    assert path.stat().st_mode & 0o777 == 0o700
+    assert (path / "cpu.max").read_text(encoding="ascii") == "200000 100000"
+    assert (path / "memory.max").read_text(encoding="ascii") == str(2048 * 1024 * 1024)
+
+
+def test_launcher_rejects_system_uid_before_entering_isolation(monkeypatch):
+    entered = []
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "launcher", "--uid", "9999", "--gid", "10000",
+            "--cgroup-path", "/cgroup", "--cwd", "/workspace",
+            "--", "/bin/true",
+        ],
+    )
+    monkeypatch.setattr(
+        "app.lab.codex_runtime.launcher._enter_isolation",
+        lambda **kwargs: entered.append(kwargs),
+    )
+
+    with pytest.raises(SystemExit, match="invalid Codex launcher isolation profile"):
+        launcher_main()
+    assert entered == []
+
+
+def test_launcher_enters_isolation_then_executes_exact_command(monkeypatch):
+    entered = []
+    executed = []
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "launcher", "--uid", "20001", "--gid", "20001",
+            "--cgroup-path", "/cgroup/run-random", "--cwd", "/workspace",
+            "--", "/usr/bin/codex", "exec", "brief",
+        ],
+    )
+    monkeypatch.setattr(
+        "app.lab.codex_runtime.launcher._enter_isolation",
+        lambda **kwargs: entered.append(kwargs),
+    )
+
+    def fake_exec(file, argv, _env):
+        executed.append((file, argv))
+        raise RuntimeError("exec boundary reached")
+
+    monkeypatch.setattr("app.lab.codex_runtime.launcher.os.execvpe", fake_exec)
+
+    with pytest.raises(RuntimeError, match="exec boundary reached"):
+        launcher_main()
+    assert entered == [{
+        "uid": 20001,
+        "gid": 20001,
+        "cgroup_path": "/cgroup/run-random",
+        "cwd": "/workspace",
+    }]
+    assert executed == [
+        ("/usr/bin/codex", ["/usr/bin/codex", "exec", "brief"])
+    ]
+
+
+@pytest.mark.anyio
+async def test_generic_consumer_error_kills_the_entire_process_group(
+    tmp_path, monkeypatch
+):
+    class ExplodingStdout:
+        async def readline(self):
+            raise ValueError("JSONL line exceeded the stream limit")
+
+    class FakeProcess:
+        pid = 43210
+        returncode = None
+        stdout = ExplodingStdout()
+        stderr = SimpleNamespace(read=lambda: b"")
+
+        async def wait(self):
+            self.returncode = -9
+            return self.returncode
+
+    class FakeProxy:
+        def __init__(self, *, gateway_token, **_kwargs):
+            self.gateway_token = gateway_token
+
+        async def start(self):
+            return "http://127.0.0.1:4321/v1"
+
+        def check_healthy(self):
+            return None
+
+        async def close(self):
+            return None
+
+    process = FakeProcess()
+    spawn_kwargs = {}
+    killed_groups = []
+
+    async def fake_spawn(*_args, **kwargs):
+        spawn_kwargs.update(kwargs)
+        run_tmp = Path(kwargs["env"]["TMPDIR"])
+        assert run_tmp.parent == workspace
+        assert run_tmp.stat().st_mode & 0o777 == 0o700
+        return process
+
+    async def fake_usage(_session, _base_url):
+        return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+                "cost_usd_cents": 0}
+
+    async def fake_revoke(_session, _base_url):
+        return None
+
+    def fake_killpg(pgid, signal_number):
+        killed_groups.append((pgid, signal_number))
+
+    monkeypatch.setattr(
+        "app.lab.codex_runtime.service.RunCredentialProxy", FakeProxy
+    )
+    monkeypatch.setattr(
+        "app.lab.codex_runtime.service.asyncio.create_subprocess_exec", fake_spawn
+    )
+    monkeypatch.setattr("app.lab.codex_runtime.service._gateway_usage", fake_usage)
+    monkeypatch.setattr("app.lab.codex_runtime.service._gateway_revoke", fake_revoke)
+    monkeypatch.setattr("app.lab.codex_runtime.service.os.killpg", fake_killpg)
+
+    root = tmp_path / "runs"
+    workspace = root / "run"
+    workspace.mkdir(parents=True)
+    request = CreateRun(
+        run_id="generic-error", tenant_id="tenant", scopes=["code"],
+        budget_usd=1.0, egress_allowlist=[], model_tier="low",
+        model_name="deepseek-v4-flash", model_policy_version="test",
+        resource_cpu_cores=2, resource_memory_mb=2048,
+        model_gateway_base_url="http://ignored/v1",
+        model_gateway_token="real-run-token",
+    )
+    session = RuntimeSession("generic-error", request, workspace)
+    config = CodexRuntimeConfig(
+        bind_host="127.0.0.1", bind_port=8097, api_key=API_KEY,
+        codex_binary="/bin/false", workspace_root=str(root),
+        max_active_runs=1, run_timeout_s=10, max_step_text_chars=1000,
+        model_gateway_base_url="http://trusted-gateway:8096/v1",
+        enforce_process_isolation=False,
+    )
+
+    await _consume_codex(
+        session,
+        Goal(brief="trigger parser failure", scopes=["code"]),
+        config,
+        RuntimeResourcePool(max_runs=1, cpu_cores=2, memory_mb=2048),
+    )
+
+    assert spawn_kwargs["start_new_session"] is True
+    assert killed_groups == [(process.pid, 9)]
+    assert process.returncode == -9
+    assert session.failed is True
 
 
 @pytest.mark.anyio
