@@ -10,11 +10,11 @@ active *and* passive suffrage. The 2026-07-25 audit found real evidence — the
 The five paths (all write ``creator_id`` + ``meta_json['origin']`` and never
 touch ``users.player_resident_id``, i.e. they are *creations*, not avatars):
 
-  app/forge/pipeline.py:155         forge, current main path
-  app/forge/legacy_pipeline.py:147  legacy forge full
-  app/forge/legacy_pipeline.py:298  legacy forge quick
-  app/routers/residents.py:179      POST /residents/import-card
-  app/routers/residents.py:276      POST /residents/import
+  app/forge/pipeline.py:161         forge, current main path
+  app/forge/legacy_pipeline.py:151  legacy forge full
+  app/forge/legacy_pipeline.py:304  legacy forge quick
+  app/routers/residents.py:185      POST /residents/import-card
+  app/routers/residents.py:291      POST /residents/import
 
 The fix types them ``"resident"`` — deliberately *not* ``"player"``, because
 ``"player"`` is the single-FK avatar type (``users.player_resident_id``,
@@ -133,7 +133,7 @@ def _offline_sbti():
 
 @pytest.mark.anyio
 async def test_import_card_path_types_resident_as_ugc(client, db_session, _offline_sbti):
-    """app/routers/residents.py:179 — POST /residents/import-card."""
+    """app/routers/residents.py:185 — POST /residents/import-card."""
     owner = await _make_user(db_session, "card-ugc@t.com")
     resp = await client.post(
         "/residents/import-card",
@@ -153,7 +153,7 @@ async def test_import_card_path_types_resident_as_ugc(client, db_session, _offli
 
 @pytest.mark.anyio
 async def test_import_file_path_types_resident_as_ugc(client, db_session, _offline_sbti):
-    """app/routers/residents.py:276 — POST /residents/import."""
+    """app/routers/residents.py:291 — POST /residents/import."""
     owner = await _make_user(db_session, "file-ugc@t.com")
     skill_md = (
         "# Ability\n## Professional\n- Backend engineering expert, 10 years\n"
