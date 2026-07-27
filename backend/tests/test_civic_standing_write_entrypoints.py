@@ -30,15 +30,23 @@ from app.services.auth_service import create_token
 BACKEND_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
-# ── 写入口守卫探测器（三种写形态）───────────────────────────────────────
+# ── 写入口守卫探测器（四种写形态）───────────────────────────────────────
 #
 # 抽出成独立函数，让「全仓真实扫描」与「喂源码文本的 hermetic 单元测试」共用
 # 同一份判定逻辑，两边不会各写一份而漂移（同 test_reputation_population_scope
 # .py 的 _npc_literal_offenders 抽取姿势）。
 #
-# 三个探测器都不用文件路径白名单——civic_membership.py 能通过纯粹是因为它
+# 四个探测器都不用文件路径白名单——civic_membership.py 能通过纯粹是因为它
 # 的两个写入口结构上不落在任何一个探测器的判据里，见下面
 # test_civic_membership_itself_needs_no_path_exemption 的逐条证明。
+#
+# ⚠️ 已知天花板（2026-07-27 协调者要求原地披露，见本文件末尾「已知残留边界」
+# 小节）：形态②③④的"符号引用即豁免"机制豁免的是**任何符号引用**，不是
+# "官方 civic_membership 常量"——本地绑定 `_ALIAS = "npc"` 之后
+# `.values(resident_type=_ALIAS)` / `setattr(r, "resident_type", _ALIAS)`、
+# 或局部 `v = "npc"` 之后 `Resident(resident_type=v, ...)`，同样能拿到豁免。
+# 这是纯语法 AST 分析（没有做符号解析/常量传播）的固有天花板，不是实现
+# 疏漏；已知机制，不追加測试把它钉成"预期行为"。
 
 
 def _assignment_offenders(tree: ast.AST, label: str) -> list[str]:
@@ -63,10 +71,18 @@ def _assignment_offenders(tree: ast.AST, label: str) -> list[str]:
 
 
 def _is_str_literal(node: ast.expr) -> bool:
-    """任何硬编码字符串，不论内容——批量 UPDATE 探测器（形态②）用它，因为
-    **没有任何已知合法调用会传字面量**：civic_membership.py 自己的两次
-    `.values(resident_type=...)` 传的都是符号常量（`CIVIC_MEMBER_TYPE` /
-    `UGC_RESIDENT_TYPE`），不是 `ast.Constant`。"""
+    """任何硬编码字符串，不论内容——批量 UPDATE 探测器（形态②）与 setattr
+    探测器（形态④）用它，因为**没有任何已知合法调用会传字面量**：
+    civic_membership.py 自己的两次 `.values(resident_type=...)` 传的都是
+    符号常量（`CIVIC_MEMBER_TYPE` / `UGC_RESIDENT_TYPE`），不是
+    `ast.Constant`。
+
+    ⚠️ 已知边界（2026-07-27 协调者要求原地披露）：这里豁免的是**任何非
+    字面量表达式**（`ast.Name`/`ast.Attribute`/...），不是"引用了
+    civic_membership 的官方常量"——纯语法分析分不清 `UGC_RESIDENT_TYPE`
+    这个符号名和某个文件里本地写的 `_ALIAS = "npc"; ...values(resident_type
+    =_ALIAS)`，两者都是 `ast.Name`，都会被豁免。这是没有做符号解析/常量
+    传播的静态分析固有天花板，不是本探测器的实现疏漏。"""
     return isinstance(node, ast.Constant) and isinstance(node.value, str)
 
 
@@ -77,7 +93,11 @@ def _is_npc_literal(node: ast.expr) -> bool:
     `onboarding_service.py` 的玩家化身创建
     `Resident(resident_type="player", ...)`。只认 "npc" 是
     `test_reputation_population_scope.py` 的 `_is_npc_constant` 在读侧已经
-    立下的同一条判据，不是本文件的新发明。"""
+    立下的同一条判据，不是本文件的新发明。
+
+    ⚠️ 同 :func:`_is_str_literal` 的已知边界：豁免任何符号引用，不是只豁免
+    "官方常量"——局部 `v = "npc"; Resident(resident_type=v, ...)` 同样能拿
+    到豁免，与是否真的导入了 `civic_membership.CIVIC_MEMBER_TYPE` 无关。"""
     return isinstance(node, ast.Constant) and node.value == "npc"
 
 
@@ -144,11 +164,43 @@ def _construction_offenders(tree: ast.AST, label: str) -> list[str]:
     return offenders
 
 
+def _setattr_offenders(tree: ast.AST, label: str) -> list[str]:
+    """形态④：`setattr(obj, "resident_type", <字面量>)`——setattr 是属性赋值
+    的函数等价物，绕开形态①只认 `ast.Assign`/`AugAssign`/`AnnAssign` 语法
+    节点的静态扫描（2026-07-27 评审 Important finding，已在真实文件验证：
+    单独植入这一行，加宽前的三形态守卫仍 0 offenders）。
+
+    只在**属性名参数是字面量 `"resident_type"`** 时才可能命中——这一条件
+    本身就是豁免机制，不需要额外代码：仓库里已有的通用字段编辑循环
+    `setattr(event, field, value)`（`app/routers/admin/events.py:105`）、
+    `setattr(item, field, value)`（`app/routers/admin/items.py:73`）里
+    `field` 是循环变量（`ast.Name`），不是这个字面量，天然不落在判据里。
+
+    值参数按形态②同一套判据（`_is_str_literal`，不收窄到 "npc"）：本仓
+    `app/` 下目前没有任何合法的 `setattr(..., "resident_type", ...)` 调用
+    （字面量或符号引用都没有），收窄到"任意字符串字面量"不产生已知误报；
+    传符号引用（比如 `CIVIC_MEMBER_TYPE`）按机制豁免，与形态②③一致。"""
+    offenders = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name) and node.func.id == "setattr"):
+            continue
+        if len(node.args) < 3:
+            continue
+        attr_name, value = node.args[1], node.args[2]
+        if (isinstance(attr_name, ast.Constant)
+                and attr_name.value == "resident_type"
+                and _is_str_literal(value)):
+            offenders.append(f"{label}:{node.lineno}")
+    return offenders
+
+
 def _all_write_offenders(tree: ast.AST, label: str) -> list[str]:
-    """三种写形态合一——「唯一写入口」条款的完整判据。"""
+    """四种写形态合一——「唯一写入口」条款的完整判据。"""
     return (_assignment_offenders(tree, label)
             + _bulk_update_offenders(tree, label)
-            + _construction_offenders(tree, label))
+            + _construction_offenders(tree, label)
+            + _setattr_offenders(tree, label))
 
 
 def _offenders_in_source(source: str, label: str = "<source>") -> list[str]:
@@ -157,7 +209,7 @@ def _offenders_in_source(source: str, label: str = "<source>") -> list[str]:
 
 
 def test_only_civic_membership_writes_resident_type():
-    """真实仓库扫描：三种写形态合一。**不做文件级豁免**——civic_membership
+    """真实仓库扫描：四种写形态合一。**不做文件级豁免**——civic_membership
     .py 能通过纯粹是因为它的两个写入口结构上不落在任何一个探测器的判据里，
     下面 test_civic_membership_itself_needs_no_path_exemption 单独把这句话
     钉成一条可证伪的断言，不靠这条测试的隐式通过。"""
@@ -174,7 +226,7 @@ def test_only_civic_membership_writes_resident_type():
 def test_civic_membership_itself_needs_no_path_exemption():
     """2026-07-27 协调者裁定加宽时点名的最高风险点：civic_membership.py 自己
     的两个写入口会不会被自己的守卫误伤？答案是不需要为它开任何文件级豁免
-    ——直接扫描该文件本身（不跳过），三个探测器分别返回空，原因是三条纯
+    ——直接扫描该文件本身（不跳过），四个探测器分别返回空，原因是四条纯
     结构事实，与文件路径无关：
 
     1. 该文件从不直接给 `x.resident_type` 赋值——两次改档位都走
@@ -185,8 +237,10 @@ def test_civic_membership_itself_needs_no_path_exemption():
        （`CIVIC_MEMBER_TYPE` / `UGC_RESIDENT_TYPE`），不是字面量
        `ast.Constant`——形态②判据要求值必须是字符串字面量。
     3. 它从不构造 `Resident(...)`——只按 id 操作既有行。
+    4. 它从不调用 `setattr(...)`——`grep -n "setattr" app/services/
+       civic_membership.py` 零命中，形态④判据天然不落在这个文件上。
 
-    三条都是 AST 节点类型判定（`ast.Assign` target / `ast.Constant` vs
+    四条都是 AST 节点类型判定（`ast.Assign` target / `ast.Constant` vs
     `ast.Name` / `ast.Call` 的 `func`），不是 `if path == "app/services/
     civic_membership.py"` 这种文件名比较。"""
     path = BACKEND_ROOT / "app" / "services" / "civic_membership.py"
@@ -194,6 +248,7 @@ def test_civic_membership_itself_needs_no_path_exemption():
     assert _assignment_offenders(tree, "civic_membership.py") == []
     assert _bulk_update_offenders(tree, "civic_membership.py") == []
     assert _construction_offenders(tree, "civic_membership.py") == []
+    assert _setattr_offenders(tree, "civic_membership.py") == []
 
 
 # ── Guard-of-the-guard（2026-07-27 协调者裁定加宽）───────────────────────
@@ -222,8 +277,7 @@ _EVASIVE_WRITE_SHAPES = {
     "construction-npc-literal": (
         'Resident(resident_type="npc", creator_id=cid)\n'),
     # 形态④——2026-07-27 评审 Important finding：setattr 是属性赋值的函数
-    # 等价物，绕开形态①的静态 `.attr = value` 扫描。此刻（本轮红提交）还没
-    # 接，应该红。
+    # 等价物，绕开形态①的静态 `.attr = value` 扫描。_setattr_offenders 接住。
     "setattr-literal-field-and-value": (
         'setattr(resident, "resident_type", "npc")\n'),
 }
@@ -284,11 +338,12 @@ _EXEMPT_WRITE_SHAPES = {
 @pytest.mark.parametrize("source", _EXEMPT_WRITE_SHAPES.values(),
                         ids=_EXEMPT_WRITE_SHAPES.keys())
 def test_guard_does_not_flag_mechanism_exempt_write_shapes(source):
-    """这八类『按机制豁免』的写法（两个写入口自己的批量 UPDATE 调用、五个
+    """这十一类『按机制豁免』的写法（两个写入口自己的批量 UPDATE 调用、五个
     UGC 构造站点、admin preset 透传、onboarding 的合法字面量 "player"、既
-    有的 `in` 成员测试、不相关的 `.values()` 调用）都不被误报——豁免全部
-    落在值的 AST 节点类型上（Name / 非 "npc" 常量 / 无关键字），没有一条
-    靠文件路径。"""
+    有的 `in` 成员测试、不相关的 `.values()` 调用、两个真实先例的
+    `setattr(obj, field, value)` 循环变量字段、setattr 传符号引用）都不被
+    误报——豁免全部落在值/属性名参数的 AST 节点类型上（Name / 非 "npc" 常量
+    / 无关键字 / 非字面量属性名），没有一条靠文件路径。"""
     assert _offenders_in_source(source) == []
 
 
@@ -308,6 +363,36 @@ def test_every_resident_construction_still_sets_the_type_explicitly():
                 if not any(kw.arg == "resident_type" for kw in node.keywords):
                     offenders.append(f"{path.relative_to(BACKEND_ROOT)}:{node.lineno}")
     assert offenders == []
+
+
+# ── 已知残留边界（写入口守卫，2026-07-27 协调者要求原地披露）─────────────
+#
+# 本文件的四个探测器（`_assignment_offenders` / `_bulk_update_offenders` /
+# `_construction_offenders` / `_setattr_offenders`）是纯语法 AST 分析——不
+# 做符号解析、不做常量传播、不追踪导入。这决定了两类已知边界，都不是实现
+# 疏漏，都不打算靠加测试把它们钉成"预期行为"（钉住只会让未来更难移除）：
+#
+# 1. **形态③只收窄到字面量 "npc"**（`_construction_offenders` docstring）：
+#    `Resident(resident_type="resident", ...)` / `Resident(resident_type=
+#    "preset", ...)` 这种手写字面量而不导入符号常量的构造不会被拦截——那些
+#    取值不在 `CIVIC_VOTER_TYPES` 里，不构成政治权利绕过，是代码风格问题，
+#    在"唯一写入口＝政治权利变更收敛"的射程之外。
+#
+# 2. **"符号引用即豁免"≠"官方常量即豁免"**（更深、对形态②③④都成立）：
+#    `_is_str_literal` / `_is_npc_literal` 豁免的判据是"这个节点是不是
+#    `ast.Constant`"，不是"这个名字有没有解析到 civic_membership 导出的
+#    真实常量"。任何文件都可以三行代码拿到豁免而不触碰
+#    civic_membership.py：
+#
+#        _LOCAL_NPC_ALIAS = "npc"
+#        ...
+#        update(Resident).where(...).values(resident_type=_LOCAL_NPC_ALIAS)
+#
+#    构造与 setattr 同理（`v = "npc"; Resident(resident_type=v, ...)` /
+#    `setattr(r, "resident_type", v)`）。这是纯语法分析（没有符号解析/常量
+#    传播）的固有天花板，评审 Important finding 明确要求原地披露而不是掩盖
+#    成"机制豁免"这四个字听起来的那种安全感——更准确的表述是"豁免的是符号
+#    引用，不是被验证过的官方常量"。
 
 
 # ── admin 路由的功能验证 ───────────────────────────────────────────────
