@@ -39,6 +39,15 @@ class LabTaskError(Exception):
     """Publish/accept/reject/cancel conflicts (router maps to 400/402/403/409)."""
 
 
+def supported_scopes_for_adapter(adapter: str | None = None) -> list[str]:
+    """Return only capabilities the configured runtime can actually execute."""
+    selected = settings.lab_adapter if adapter is None else adapter
+    if selected == "codex":
+        # The ARM Codex runtime is deliberately no-egress and requires code.
+        return ["code"]
+    return list(ALLOWED_SCOPES)
+
+
 def _require_execution_consumer(protocol_version: int | None = None) -> int:
     """Freeze and validate the execution protocol before any domain mutation."""
     from app.lab import runner
@@ -100,6 +109,11 @@ def serialize_run(r: LabRun) -> dict:
         "adapter": r.adapter,
         "status": r.status,
         "scopes": r.scopes_json or [],
+        "model_tier": r.model_tier,
+        "model_name": r.model_name,
+        "model_policy_version": r.model_policy_version,
+        "resource_cpu_cores": r.resource_cpu_cores,
+        "resource_memory_mb": r.resource_memory_mb,
         "budget_usd_cents": r.budget_usd_cents,
         "cost_usd_cents": r.cost_usd_cents,
         "approvals": r.approvals_json or [],
@@ -236,6 +250,14 @@ async def create_task(
     scopes = [s for s in (scopes or []) if s in ALLOWED_SCOPES]
     if not scopes:
         raise LabTaskError("at least one valid scope is required")
+    unsupported_adapter_scopes = sorted(
+        set(scopes) - set(supported_scopes_for_adapter())
+    )
+    if unsupported_adapter_scopes:
+        raise LabTaskError(
+            f"adapter {settings.lab_adapter} does not support scopes: "
+            + ", ".join(unsupported_adapter_scopes)
+        )
     if protocol_version == 2:
         unsupported_scopes = sorted(set(scopes) - {"code"})
         if unsupported_scopes:
@@ -352,10 +374,17 @@ async def _start_run(
 
     protocol_version = _require_execution_consumer(protocol_version)
     _require_v2_tenant_admitted(protocol_version, task.issuer_user_id)
-    budget_cents = int(round(settings.lab_default_budget_usd * 100))
+    from app.lab.model_policy import assignment_for_reward
+
+    model = assignment_for_reward(task.reward_sc)
     run = LabRun(
         task_id=task.id, researcher_slug=task.researcher_slug, adapter=settings.lab_adapter,
-        status="queued", scopes_json=list(task.scopes_json or []), budget_usd_cents=budget_cents,
+        status="queued", scopes_json=list(task.scopes_json or []),
+        model_tier=model.tier, model_name=model.model,
+        model_policy_version=model.policy_version,
+        resource_cpu_cores=model.cpu_cores,
+        resource_memory_mb=model.memory_mb,
+        budget_usd_cents=model.budget_usd_cents,
         protocol_version=protocol_version,
     )
     db.add(run)
