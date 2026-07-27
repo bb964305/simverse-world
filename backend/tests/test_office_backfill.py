@@ -306,3 +306,40 @@ async def test_backfill_poll_closing_actually_seats_a_successor(db_session, monk
     assert await civic_service.close_due_polls(db_session) == 1
     # 不再是「无限期无镇长」:继任者真的坐上了位置
     assert await svc.get_holder("mayor") == winner_slug
+
+
+# ── Fix round 1/5: 多 office 循环的 rollback 牵连 ──────────────────────
+
+@pytest.mark.anyio
+async def test_term_check_survives_rollback_from_prior_office_backfill_failure(
+    db_session, monkeypatch,
+):
+    """同一批 ``due`` 里有 ≥2 个 office 时,第一个的 ``trigger_backfill``
+    内部失败会经 ``_rollback_quietly`` 调用 ``db.rollback()``——不同于
+    ``commit()``(``expire_on_commit=False`` 时不 expire),``rollback()``
+    无条件 expire 整个 identity map,包括 ``due`` 列表里还没处理的下一个
+    ``Office`` ORM 对象。下一轮循环开头 ``office.office_key`` 这行同步属性
+    读在 AsyncSession 上触发隐式惰性刷新,而这行代码不在任何
+    ``greenlet_spawn`` 上下文里,于是抛 ``MissingGreenlet`` 而不是
+    ``AttributeError``——term_check 直接炸,夜间 cron 的 office 段整段死掉。
+
+    两个 office 都用 fill_strategy="election" 且都 due,保证不管 SELECT
+    返回顺序如何,第一个处理的那个也会撞上 boom → rollback,第二个必然
+    在展示这条崩溃路径。
+    """
+    monkeypatch.setattr(settings, "polis_office_enabled", True)
+    await _seed_voters(db_session)
+
+    svc = OfficeService(db_session)
+    await svc.appoint("mayor", "a", fill_strategy="election", term_days=7)
+    await svc.appoint("town_clerk", "a", fill_strategy="election", term_days=7)
+
+    async def _boom(db, **kwargs):
+        raise RuntimeError("election service down")
+
+    monkeypatch.setattr("app.services.election_service.open_election", _boom)
+
+    n = await svc.term_check(now=datetime.now(UTC) + timedelta(days=365))
+    assert n == 2
+    assert await svc.get_holder("mayor") is None
+    assert await svc.get_holder("town_clerk") is None

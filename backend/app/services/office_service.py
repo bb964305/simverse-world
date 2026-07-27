@@ -176,17 +176,24 @@ class OfficeService:
                 Office.term_ends_at <= now,
             )
         )).scalars().all()
+        # Extracted into plain tuples immediately — the loop below must never
+        # touch these ORM objects again. trigger_backfill's fail-open path
+        # (_rollback_quietly) calls db.rollback(), which — unlike commit()
+        # under expire_on_commit=False — unconditionally expires the WHOLE
+        # identity map, including whichever `due` rows this loop hasn't
+        # reached yet. A later `office.office_key` read on an expired
+        # AsyncSession-loaded instance triggers an implicit lazy-refresh
+        # outside of any greenlet_spawn context and raises MissingGreenlet
+        # (fix round 1: reproduced with 2 due offices where the first's
+        # backfill fails — the second's attribute read crashed term_check
+        # outright, taking down the whole nightly cron office segment).
+        due_rows = [(o.id, o.office_key, o.holder_slug) for o in due]
         n = 0
-        for office in due:
-            # Captured BEFORE the guard UPDATE: synchronize_session=False keeps
-            # the loaded row at its pre-update values on purpose, and the
-            # departing holder is what the legacy-store clear is keyed on.
-            office_key = office.office_key
-            prior_holder = office.holder_slug
+        for office_id, office_key, prior_holder in due_rows:
             res = await self.db.execute(
                 update(Office)
                 .where(
-                    Office.id == office.id,
+                    Office.id == office_id,
                     Office.holder_slug.isnot(None),
                     Office.term_ends_at <= now,
                 )
