@@ -35,6 +35,49 @@ def credit_allowed(score: float) -> bool:
     return float(score) >= settings.rep_credit_min_score
 
 
+#: 八卦语气对关系 affinity 的权重。本线不改 config.py（批次规则 §1-6），先落成
+#: 模块常量，``getattr`` 间接读使收口时「加一行 rep_gossip_affinity_weight」成为
+#: 纯配置改动、代码零 diff。取 3.0 的依据：在冻结的 base_tone=-0.3 下，符号翻转
+#: 点落在 affinity=+0.1 —— 恰是一次送礼/投资（realism_rel_affinity_gift=0.1）或
+#: 约 4 次正向闲聊（realism_rel_affinity_chat=0.03）的增量。
+GOSSIP_AFFINITY_WEIGHT = 3.0
+
+
+def _affinity_weight() -> float:
+    return float(getattr(settings, "rep_gossip_affinity_weight", GOSSIP_AFFINITY_WEIGHT))
+
+
+def gossip_tone(affinity: float | None, *, distorted: bool = False) -> float:
+    """一条传闻的语气 = 传话人对当事人的态度。
+
+    ``affinity`` 取 ``resident_relations`` 上「记忆持有者 × 被议论者」这一对的
+    质量轴（``[-1, 1]``，规则驱动零 LLM）。二人无往来（无关系行）时退化为
+    ``rep_gossip_base_tone`` —— 修复前那个恒定负值现在只是**偏置项**。
+    """
+    try:
+        value = 0.0 if affinity is None else float(affinity)
+    except (TypeError, ValueError):
+        value = 0.0
+    value = max(-1.0, min(1.0, value))
+    tone = settings.rep_gossip_base_tone + _affinity_weight() * value
+    if distorted:
+        tone += settings.rep_distortion_penalty
+    return max(settings.rep_min, min(settings.rep_max, tone))
+
+
+def evidence_weight(importance: float | None, hops: int, tone: float) -> float:
+    """单条传闻的贡献：重要性加权的语气，按传播跳数衰减。"""
+    try:
+        weight = max(0.0, float(importance or 0.0))
+    except (TypeError, ValueError):
+        weight = 0.0
+    try:
+        damping = 1.0 + max(0, int(hops))
+    except (TypeError, ValueError):
+        damping = 1.0
+    return weight * tone / damping
+
+
 async def get(db: AsyncSession, resident_id_or_slug: str) -> float:
     if not settings.rep_enabled:
         return settings.rep_neutral
