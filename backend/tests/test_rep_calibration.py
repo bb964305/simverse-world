@@ -306,6 +306,7 @@ async def test_run_combines_distribution_and_coverage_and_writes_nothing(
     # session 有没有脏对象/待插入对象,把"通过 ORM 间接写库"这整条路径堵死。
     assert not db_session.dirty, f"_run() 弄脏了 ORM 对象: {db_session.dirty!r}"
     assert not db_session.new, f"_run() 往 session 里塞了待插入对象: {db_session.new!r}"
+    assert not db_session.deleted, f"_run() 删了 ORM 对象: {db_session.deleted!r}"
 
     assert report["n"] == 3
     assert report["affinity_coverage"] == {
