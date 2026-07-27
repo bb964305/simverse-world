@@ -471,11 +471,28 @@ def _bounded_summary_payload(result: dict) -> dict:
     忘了折进预算循环，会在测试/burn-in 阶段就近炸出来（``AssertionError``
     会被 ``_record_run`` 的 fail-open 捕获、以 warning + ``exc_info`` 记下
     完整堆栈），而不是变成生产环境里一条无声无息的 Postgres 错误。
+
+    ⚠️ 三次复审：``candidates`` 有 ``candidates_truncated`` 标记
+    ``refused_detail`` 的两轮裁剪（原始字符裁 ``_REFUSED_DETAIL_MAX_CHARS``
+    / 序列化预算逐字符裁）以前没有等价标记——原始异常消息恰好落在裁剪后的
+    长度上时，payload 长得一模一样，读者分不清"完整"还是"被砍过"。现在
+    ``refused_detail_truncated`` 由**两条独立裁剪路径分别**置位（只让第二
+    轮置位会误报第一轮单独命中、序列化仍在预算内的常见情形——比如
+    ``ensure_ascii`` 不展开的纯 ASCII 长消息），``refused_detail_original_
+    length`` 记录裁剪前的原始字符数，让读者能算出"297 之于 5000"还是
+    "297 之于 297"。
     """
     candidates = list(result.get("candidates") or [])
-    refused_detail = result.get("refused_detail")
-    if refused_detail is not None:
-        refused_detail = str(refused_detail)[:_REFUSED_DETAIL_MAX_CHARS]
+    raw_refused_detail = result.get("refused_detail")
+    refused_detail_original_length = None
+    refused_detail_truncated = False
+    refused_detail = None
+    if raw_refused_detail is not None:
+        raw_refused_detail = str(raw_refused_detail)
+        refused_detail_original_length = len(raw_refused_detail)
+        refused_detail = raw_refused_detail[:_REFUSED_DETAIL_MAX_CHARS]
+        if len(refused_detail) < refused_detail_original_length:
+            refused_detail_truncated = True   # 第一轮：原始字符数裁剪
 
     payload = {
         "mode": result.get("mode"),
@@ -487,6 +504,8 @@ def _bounded_summary_payload(result: dict) -> dict:
         "promoted": result.get("promoted", 0),
         "refused": result.get("refused"),
         "refused_detail": refused_detail,
+        "refused_detail_truncated": refused_detail_truncated,
+        "refused_detail_original_length": refused_detail_original_length,
     }
 
     kept = len(candidates)
@@ -498,12 +517,15 @@ def _bounded_summary_payload(result: dict) -> dict:
         payload["candidates_truncated"] = True
 
     # candidates 已经见底（kept == 0）时若仍然超预算，继续砍 refused_detail
-    # ——逐字符砍，直到落进预算或砍空为止。
+    # ——逐字符砍，直到落进预算或砍空为止（第二轮：序列化预算裁剪，与第一
+    # 轮是否已经置位无关，独立判定）。
     while (payload.get("refused_detail")
            and len(json.dumps(payload)) > _SUMMARY_VALUE_MAX_CHARS):
         payload["refused_detail"] = payload["refused_detail"][:-1]
+        payload["refused_detail_truncated"] = True
     if payload.get("refused_detail") == "":
         payload["refused_detail"] = None
+        payload["refused_detail_truncated"] = True
 
     serialized = json.dumps(payload)
     assert len(serialized) <= _SUMMARY_VALUE_MAX_CHARS, (
