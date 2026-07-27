@@ -754,6 +754,220 @@ async def _assert_revocable(db, resident_id: str) -> tuple[str, str]:
     return slug, rtype
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# 写入口 ②：撤销 —— 有序复合事务
+# ═══════════════════════════════════════════════════════════════════════
+
+
+async def _assert_demotion_invariants(db, *, resident_id: str, slug: str) -> None:
+    """步骤 6 的自查：三处镇长表示都不指向他；人口口径不变、政治口径已收回。
+
+    全部用**列级 SELECT**（不是 ORM 实体），绕开 identity map——步骤 4 的
+    ``update()`` 带 ``synchronize_session=False``，会话里的实体对象仍是旧值。
+    """
+    import json
+
+    from sqlalchemy import func, select
+
+    from app.models.office import Office
+    from app.models.resident import Resident
+    from app.models.system_config import SystemConfig
+
+    rtype = (await db.execute(
+        select(Resident.resident_type).where(Resident.id == resident_id)
+    )).scalar_one()
+    if rtype != UGC_RESIDENT_TYPE:
+        raise CivicStandingRefused(
+            f"demotion invariant broken: {slug!r} landed on resident_type "
+            f"{rtype!r}, expected {UGC_RESIDENT_TYPE!r}")
+    if rtype not in SIM_RESIDENT_TYPES:
+        raise CivicStandingRefused(
+            f"demotion invariant broken: {slug!r} fell out of the world "
+            "population (is_autonomous would be False) — 撤销不是移出世界")
+    if rtype in CIVIC_VOTER_TYPES:
+        raise CivicStandingRefused(
+            f"demotion invariant broken: {slug!r} still holds political rights")
+
+    held = (await db.execute(
+        select(func.count()).select_from(Office).where(
+            Office.fill_strategy == POLITICAL_FILL_STRATEGY,
+            Office.holder_slug == slug,
+        )
+    )).scalar() or 0
+    if held:
+        raise CivicStandingRefused(
+            f"demotion invariant broken: {slug!r} still holds {held} elected "
+            "office row(s)")
+
+    meta = (await db.execute(
+        select(Resident.meta_json).where(Resident.id == resident_id)
+    )).scalar_one() or {}
+    if meta.get("mayor"):
+        raise CivicStandingRefused(
+            f"demotion invariant broken: {slug!r} still carries "
+            "meta_json['mayor'] — 工资倍率的唯一读点（duty_service.py:172-173）")
+
+    cfg_value = (await db.execute(
+        select(SystemConfig.value).where(SystemConfig.key == "current_mayor")
+    )).scalar_one_or_none()
+    if cfg_value is not None:
+        try:
+            current = json.loads(cfg_value)
+        except (TypeError, ValueError):
+            current = None
+        if current == slug:
+            raise CivicStandingRefused(
+                f"demotion invariant broken: system_config['current_mayor'] "
+                f"still points at {slug!r}")
+
+
+async def revoke_citizenship(
+    db, resident, *, reason: str, actor: str, tier: str = "demote",
+    reason_code: str = "revoked",
+) -> bool:
+    """撤销公民权。``tier="demote"``（本轮）| ``"exile"``（占位）。
+
+    **有序复合事务，顺序不可颠倒**::
+
+        0. 防呆（第一条 UPDATE 之前全部做完）
+        1. 卸民选职务（fill_strategy='election' 且 holder_slug=:slug）
+        2. 清 meta_json['mayor']（按 slug 直查，不用集合谓词做 WHERE）
+        3. 清 system_config['current_mayor']（仅当指向此人）
+        4. 改档位（guarded UPDATE）
+        5. 写 civic_standing_history 一行
+        6. 断言
+        7. commit + 广播
+
+    若先改档位再清理，``meta_json['mayor']`` 在逐出档会永久卡死（清扫扫不到
+    他），期间 ``install_mayor()`` 清他人标志时也会跳过他，可产生「两个
+    ``meta_json['mayor']=True``」并双份工资倍率。
+
+    三条「不得」：不得调用 ``OfficeService.vacate()``（自带 commit，且 gate 关
+    时命中 0 行会跳过 legacy 清理）；不得复用 ``_clear_mayor_legacy_stores``
+    （用 ``is_autonomous`` 这个集合谓词去清「刚离开集合的人」）；不得用
+    ``ConfigService.set()``（自带 commit，会把复合事务劈成两半）。
+
+    **劳动职务不受影响**：``town_clerk`` / ``postman`` / ``doctor`` 的 offices
+    行与 ``meta_json['duty']`` 一律不动。**永不 DELETE。**
+
+    ⚠️ **调用方契约（成功路径）**（与 :func:`grant_citizenship_batch` 同）：
+    步骤 4 的档位翻转走 ``update(...).execution_options(synchronize_session=
+    False)``，而本仓的会话是 ``expire_on_commit=False``，所以**调用方传进来的
+    ORM 对象在本函数返回后仍是旧值**，``select(Resident)`` 这类实体查询也会把
+    同一个陈旧对象取回来。要读新值就 ``await db.refresh(resident)``（
+    ``_edit_resident`` 就是这么做的），或改用列级 SELECT / SQL 侧谓词。步骤 6
+    的 :func:`_assert_demotion_invariants` 全部用列级 SELECT 正是这个原因。
+
+    ⚠️ **调用方契约（异常路径）**：任何一步失败（防呆之后的 guard UPDATE
+    rowcount 不符、步骤 6 的自查不过）都会命中下面的 ``except Exception:
+    await db.rollback(); raise``——这是真正的错误路径（本函数认为复合事务已经
+    坏了，必须整体回滚，不是某一步「按预期拒绝」还要保留会话继续用），
+    ``db.rollback()`` 在这属于正确用法。但它对**顶层事务** 调用
+    ``_restore_snapshot(dirty_only=False)``，会 expire 整个 identity map——不
+    只是本函数碰过的对象，调用方在同一 session 里更早加载的任何 ORM 实体都会
+    被 expire。之后对它们做一次同步属性读会触发隐式 lazy-reload，在没有
+    greenlet 上下文的地方炸出 ``sqlalchemy.exc.MissingGreenlet``（与
+    F3 线 ``office_audit.py`` 记录的是同一类故障，只是触发点是这里的守卫
+    UPDATE 分支）。**调用方在捕获到本函数抛出的异常之后，不得直接读之前在同一
+    session 里加载过的任何 ORM 对象的属性**——要么 ``await db.refresh(obj)``
+    先刷新，要么重新 SELECT。
+    """
+    if tier == EXILED or tier == "exile":
+        raise NotImplementedError(
+            "revoke_citizenship(tier='exile') 是预留签名：分档清理表已按两档"
+            "写好（住房 home_location_id / tile 占用 / 劳动职务全撤 + is_in_town "
+            "收窄），v1 只实现 demote 档。逐出上线时是填空，不是改签名。"
+        )
+    if tier != "demote":
+        raise ValueError(
+            f"unknown revoke tier {tier!r}; expected 'demote' or 'exile'")
+
+    import json
+    from datetime import datetime, UTC
+
+    from sqlalchemy import select, update
+    from sqlalchemy.orm.attributes import flag_modified
+
+    from app.models.office import Office
+    from app.models.resident import Resident
+    from app.models.system_config import SystemConfig
+
+    resident_id = getattr(resident, "id", None)
+    if not resident_id:
+        raise CivicStandingRefused("revoke refused: resident has no id")
+
+    # 0. Guard first: no UPDATE has run yet
+    slug, current_type = await _assert_revocable(db, resident_id)
+    assert_known_types(current_type, UGC_RESIDENT_TYPE)   # 数值闸门 4
+
+    try:
+        # 1. 卸民选职务。只 election 档；带 holder 校验（gate 关时 offices
+        #    可能留着迁移 046 的陈旧值，无条件 vacate 会罢免错的人）。
+        #    正确性不依赖 polis_office_enabled 的取值。
+        await db.execute(
+            update(Office)
+            .where(Office.fill_strategy == POLITICAL_FILL_STRATEGY,
+                   Office.holder_slug == slug)
+            .values(holder_slug=None, term_ends_at=None,
+                    updated_at=datetime.now(UTC))
+            .execution_options(synchronize_session=False)
+        )
+        # 2. 清 meta_json['mayor'] —— 按 slug 直查（通用约束：清理「已离开
+        #    集合 S 的居民」不得用 S 本身做 WHERE）
+        target = (await db.execute(
+            select(Resident).where(Resident.slug == slug)
+        )).scalar_one()
+        meta = dict(target.meta_json or {})
+        if meta.pop("mayor", None) is not None:
+            target.meta_json = meta
+            flag_modified(target, "meta_json")
+        # 3. 清 system_config['current_mayor'] —— 仅当当前值指向此人
+        cfg = (await db.execute(
+            select(SystemConfig).where(SystemConfig.key == "current_mayor")
+        )).scalar_one_or_none()
+        if cfg is not None:
+            try:
+                current = json.loads(cfg.value)
+            except (TypeError, ValueError):
+                current = None
+            if current == slug:
+                cfg.value = json.dumps(None)
+                cfg.updated_by = actor
+                cfg.updated_at = datetime.now(UTC)
+        # 4. 改档位（guarded UPDATE）
+        res = await db.execute(
+            update(Resident)
+            .where(Resident.id == resident_id,
+                   Resident.resident_type == current_type)
+            .values(resident_type=UGC_RESIDENT_TYPE)
+            .execution_options(synchronize_session=False)
+        )
+        if (res.rowcount or 0) != 1:
+            raise CivicStandingRefused(
+                f"revoke refused: guarded UPDATE touched {res.rowcount} rows "
+                f"for {slug!r} — resident_type changed inside the window")
+        # 5. 历史行
+        await _write_history(
+            db, resident_id=resident_id, old_standing=CITIZEN,
+            new_standing=DENIZEN, reason=reason, reason_code=reason_code,
+            actor=actor, evidence=None,
+        )
+        # 6. 断言（flush 让前面的 ORM 改动落到本事务里再自查）
+        await db.flush()
+        await _assert_demotion_invariants(db, resident_id=resident_id, slug=slug)
+    except Exception:
+        await db.rollback()
+        raise
+    # 7. commit + 广播
+    await db.commit()
+    await _emit_standing_changed(
+        db, slug=slug, old_standing=CITIZEN, new_standing=DENIZEN,
+        reason_code=reason_code,
+    )
+    logger.info("civic revoke: %s demoted by %s (%s)", slug, actor, reason_code)
+    return True
+
+
 __all__ = [
     # 既有的两个集合边界
     "CIVIC_VOTER_TYPES", "SIM_RESIDENT_TYPES", "UGC_RESIDENT_TYPE",
@@ -768,7 +982,7 @@ __all__ = [
     # 防呆
     "CivicStandingRefused",
     # 写入口
-    "grant_citizenship", "grant_citizenship_batch",
+    "grant_citizenship", "grant_citizenship_batch", "revoke_citizenship",
     # 运行时旋钮
     "promotion_mode", "min_world_days", "min_peers", "min_familiarity",
     "peer_seasoning_world_days", "promotion_max_per_run",
