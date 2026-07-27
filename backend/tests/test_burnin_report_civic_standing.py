@@ -85,6 +85,59 @@ async def test_leak_is_a_ugc_voter_without_a_promotion_record(db_session):
     assert "🔴" in out and "sneaky" in out
 
 
+@pytest.mark.anyio
+async def test_leak_survives_promote_then_revoke_then_out_of_band_regrant(
+        db_session):
+    """评审发现的假阴性：`promoted_ids` 曾经只判「有没有过 new_standing==
+    CITIZEN 的历史行」，而不是「*最新一行*是不是 CITIZEN」。F2 自己的
+    revoke_citizenship 上线之前，「曾经晋升过」和「现在是公民」是同一句话，
+    集合成员判定是对的；revoke 一旦上线，两者就分道扬镳了——
+
+        晋升（写 history 行①：denizen→citizen）
+          → 合法撤销（写 history 行②：citizen→denizen，*最新一行*）
+          → 带外非法回授（resident_type 直接改回 npc，不写第③行历史）
+
+    此时历史表里「有没有过 CITIZEN 行」仍然为真（行①还在），旧判据会把这个
+    人误判成「已晋升」而不是「泄漏」——`leaked` 返回 `[]`，`unrecorded` 计数
+    漏记 1，红旗不亮。这条测试用真实序列复现它，钉住修复后的正确行为：泄漏
+    判据必须看*最新*历史行，不是「存在过」。"""
+    r = _ugc("relapsed", cm.CIVIC_MEMBER_TYPE)  # 当前 resident_type：npc
+    db_session.add_all([_builtin("b1"), r])
+    await db_session.commit()
+    # 行①：合法晋升（10 天前）
+    await _history(db_session, r.id, cm.DENIZEN, cm.CITIZEN, world_days_ago=10)
+    # 行②：合法撤销（5 天前）——这是按 world_at 排序的*最新一行*
+    await _history(db_session, r.id, cm.CITIZEN, cm.DENIZEN, world_days_ago=5)
+    # 行③（带外/非法）：没有——resident_type 已经在构造 r 时被"非法回授"成
+    # npc，模拟绕过写入口的一次直接改列，不落任何历史行。
+
+    snap = await fetch_civic_standing_snapshot(db_session)
+    assert snap["leaked"] == ["relapsed"]
+    assert snap["cross"]["ugc_citizen_unrecorded"] == 1
+    assert snap["cross"]["ugc_citizen_promoted"] == 0
+    out = render_probes_civic_standing(snap)
+    assert "🔴" in out and "relapsed" in out
+
+
+@pytest.mark.anyio
+async def test_legitimately_revoked_resident_is_not_flagged_as_a_leak(
+        db_session):
+    """修复不能引入新的假阳性：合法撤销、停在 denizen 档、留着完整的
+    晋升+撤销历史——不应被判成泄漏。泄漏判据只看「现在是不是有票的
+    UGC」，denizen 现在没有票，压根不会进 leaked 分支，这条测试确认
+    修复没有把这一步也判坏。"""
+    r = _ugc("demoted-properly", cm.UGC_RESIDENT_TYPE)  # 当前档：denizen
+    db_session.add_all([_builtin("b1"), r])
+    await db_session.commit()
+    await _history(db_session, r.id, cm.DENIZEN, cm.CITIZEN, world_days_ago=10)
+    await _history(db_session, r.id, cm.CITIZEN, cm.DENIZEN, world_days_ago=5)
+
+    snap = await fetch_civic_standing_snapshot(db_session)
+    assert snap["leaked"] == []
+    assert snap["cross"]["ugc_denizen"] == 1
+    assert snap["cross"]["ugc_citizen_unrecorded"] == 0
+
+
 # ── ② 晋升队列 ─────────────────────────────────────────────────────────
 
 @pytest.mark.anyio
