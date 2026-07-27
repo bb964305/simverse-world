@@ -1344,15 +1344,30 @@ async def fetch_civic_standing_snapshot(
     # new_standing==CITIZEN 的行」和「现在是不是公民」是同一句话，按存在性判
     # 定是对的；revoke 上线后两者分道扬镳——晋升→合法撤销→带外非法回授（不
     # 写新历史行）序列里，「有没有过」仍然为真，「最新一行是什么」才是真相。
+    # 归并键是 (world_at, id) 复合键，不是裸 world_at：select(CivicStanding
+    # History) 没有 ORDER BY，行序未声明；id 是每行唯一的主键，两行的 id 不
+    # 可能相等，所以复合键里结构性地不存在平局——严格 `>` 就是「取运行时最
+    # 大值」的标准写法，其结果与 history 列表的迭代/DB 返回顺序无关。评审复
+    # 现的变种：同一居民两条历史行 world_at 完全相同时（backfill 批量写入
+    # 最容易产生这种打平——一次 pass 里许多行共享同一个时钟读数），裸
+    # world_at 比较靠严格 `>` 会让「先被迭代到的那行」赢，而谁先被迭代到由
+    # 数据库未声明的行序决定——这正是上面刚修复的假阴性的一个变体复发。
+    # id 是 UUID，比较结果对「谁在真实时间上更晚」没有语义含义（打平之下这
+    # 件事本来就不可判定，两条历史行的 world_at 完全相同时不存在可以恢复的
+    # 真相），但它保证了同一份数据在任意迭代顺序下都收敛到同一个答案——这
+    # 才是这里要修的性质（「良定义」，不是「猜对真实先后」）。不改用 >=：
+    # 复合键里没有平局可言，`>` 本来就是「取最大值」的正确比较符，`>=` 在
+    # 这里不会改变任何结果，换了反而暗示"存在需要覆盖的相同键"，误导读者。
     changes: dict[str, int] = {}
     last_change: dict[str, tuple] = {}
     for h in history:
         changes[h.resident_id] = changes.get(h.resident_id, 0) + 1
         when = cp._as_aware(h.world_at)
+        key = (when, h.id)
         prev = last_change.get(h.resident_id)
-        if prev is None or when > prev[0]:
-            last_change[h.resident_id] = (when, h.new_standing)
-    promoted_ids = {rid for rid, (_when, standing) in last_change.items()
+        if prev is None or key > (prev[0], prev[1]):
+            last_change[h.resident_id] = (when, h.id, h.new_standing)
+    promoted_ids = {rid for rid, (_when, _id, standing) in last_change.items()
                     if standing == CITIZEN}
 
     cross = {"builtin_citizen": 0, "ugc_citizen_promoted": 0,
@@ -1395,14 +1410,14 @@ async def fetch_civic_standing_snapshot(
 
     # ③ 翻转统计——复用①已经算好的 changes / last_change，不重新定义第二套
     # 「当前档位」（见①上方注释：两套独立判据正是假阴性复发的根因）。
-    recent = {rid for rid, (when, _standing) in last_change.items()
+    recent = {rid for rid, (when, _id, _standing) in last_change.items()
               if (now_world - when) <= timedelta(days=flip_window_world_days)}
     in_min_tenure = sum(
-        1 for (when, new) in last_change.values()
+        1 for (when, _id, new) in last_change.values()
         if new == CITIZEN
         and (now_world - when) < timedelta(days=min_tenure_world_days()))
     in_cooldown = sum(
-        1 for (when, new) in last_change.values()
+        1 for (when, _id, new) in last_change.values()
         if new != CITIZEN
         and (now_world - when) < timedelta(days=promotion_cooldown_world_days()))
     flips = {
