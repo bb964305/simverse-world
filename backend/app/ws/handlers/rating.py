@@ -7,6 +7,7 @@ from app.config import settings
 from app.database import async_session
 from app.models.resident import Resident
 from app.models.conversation import Conversation
+from app.services.system_users import NON_USER_CREATOR_IDS
 from app.ws.manager import manager
 from app.ws.handlers.context import ConnectionContext
 
@@ -87,7 +88,7 @@ async def handle_rate_chat(ctx: ConnectionContext, data: dict) -> None:
                 select(Resident).where(Resident.id == conv.resident_id)
             )
             resident = res_result.scalar_one_or_none()
-            if resident:
+            if resident and resident.creator_id and resident.creator_id not in NON_USER_CREATOR_IDS:
                 from app.services.coin_service import reward
                 await reward(db, resident.creator_id, 5, f"good_rating:{resident.slug}")
 
