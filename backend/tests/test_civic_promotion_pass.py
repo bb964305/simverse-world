@@ -157,6 +157,45 @@ async def test_shadow_records_the_run_summary_for_the_probe(db_session,
     assert "world_at" in summary
 
 
+@pytest.mark.anyio
+async def test_shadow_summary_write_does_not_commit_unrelated_pending_state(
+        db_session, monkeypatch):
+    """复审 Important 2：shadow 唯一的写（运行摘要）不能借道调用方 session
+    自己的事务边界。``_record_run`` → ``ConfigService.set`` 末尾是
+    ``await self._db.commit()``；``run_promotion_pass`` 对调用方传入什么样
+    的 session 没有任何契约保证——如果 ``db`` 上还有别的未提交改动（比如
+    接进 nightly_cron 后与其它任务共用同一个 session，或是被某个手工脚本
+    复用的长命 session），直接在 ``db`` 上 commit 会把那些改动一并带下去。
+
+    用 rollback 之后还在不在来判定"是不是已经被提交"：同一个 session 内，
+    真正提交过的行 rollback 不掉，这比查第二个连接更直接（不依赖具体的
+    连接池/隔离级别实现细节）。
+    """
+    monkeypatch.setenv("CIVIC_PROMOTION_MODE", "shadow")
+    await _world(db_session, denizens=1)
+
+    intruder = _res("intruder_pending_row", cm.UGC_RESIDENT_TYPE)
+    db_session.add(intruder)   # 故意不 commit——模拟共享 session 里别的任务
+                               # 留下的未提交改动
+
+    result = await cp.run_promotion_pass(db_session)
+    assert result["mode"] == cp.MODE_SHADOW
+
+    await db_session.rollback()
+    intruder_survived = (await db_session.execute(
+        select(Resident.slug).where(Resident.slug == "intruder_pending_row")
+    )).scalar_one_or_none()
+    assert intruder_survived is None, (
+        "shadow 的运行摘要写把 session 里不相关的待提交改动一并 commit 了")
+
+    # shadow 自己那一次写（运行摘要）必须真的落库——不能为了不牵连 intruder
+    # 就干脆什么都不写了
+    summary = await ConfigService(db_session).get(cp.RUN_SUMMARY_KEY)
+    assert summary is not None
+    assert summary["mode"] == cp.MODE_SHADOW
+    assert summary["candidates"] == ["u0"]
+
+
 # ── on ─────────────────────────────────────────────────────────────────
 
 @pytest.mark.anyio
