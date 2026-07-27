@@ -189,6 +189,79 @@ def test_promotion_evidence_records_the_three_numbers():
     assert ev["top_familiarity"][:2] == [0.7, 0.5]
 
 
+# ── 占位门槛值的开闸闸门（本任务是三个旋钮的第一个调用点）─────────────
+#
+# spec §4.2：门槛由实测分布标定，不许拍数字。``rep_credit_min_score = -0.3``
+# 之所以成为装饰性闸门（拒绝面 0/13），正因为它是拍出来的。本任务是三个旋钮
+# 的第一个调用点，所以「占位值不得被当成已标定值走到生产开闸路径」的机制必须
+# 在这里立住。
+
+def _gate_snap():
+    """一个在任何阈值下都能过判定的最小世界（闸门测的是闸门，不是判据）。"""
+    facts = [_builtin("b1"), _builtin("b2"), _builtin("b3"),
+             _fact("u1", age_days=999.0)]
+    edges = [("u1", f"b{i}", 0.99) for i in (1, 2, 3)]
+    return _snap(facts, edges)
+
+
+_PLACEHOLDER_KW = dict(min_world_days=30.0, min_peers=3, min_familiarity=0.20,
+                       seasoning_days=28.0)
+
+
+def test_the_placeholder_fingerprint_tracks_task2_defaults(monkeypatch):
+    """指纹必须与 Task 2 的三个占位默认值逐字相等——这条断言就是绊线：
+    真标定完把 ``_DEFAULT_*`` 改成实测值时本测试会红，改指纹的那一笔 diff
+    就是「这组数字是量出来的」的书面承认，不会被顺手滑过去。"""
+    for name in ("CIVIC_PROMOTION_MIN_WORLD_DAYS", "CIVIC_PROMOTION_MIN_PEERS",
+                 "CIVIC_PROMOTION_MIN_FAMILIARITY"):
+        monkeypatch.delenv(name, raising=False)
+    assert cp.PLACEHOLDER_THRESHOLDS == (
+        cm._DEFAULT_MIN_WORLD_DAYS, cm._DEFAULT_MIN_PEERS,
+        cm._DEFAULT_MIN_FAMILIARITY)
+    # 旋钮今天返回的就是占位值 → 现在开闸必然撞闸门（下一条测的就是它）
+    assert (cm.min_world_days(), cm.min_peers(), cm.min_familiarity()) == \
+        cp.PLACEHOLDER_THRESHOLDS
+
+
+def test_live_promotion_refuses_the_untouched_placeholder_thresholds(monkeypatch):
+    """mode=on（真写库那一态）+ 三个值原封不动 = 「占位值被当成已标定值」，
+    拒绝并告警，而不是照着装饰性闸门整批放行。"""
+    monkeypatch.delenv("CIVIC_THRESHOLDS_CALIBRATED", raising=False)
+    with pytest.raises(cp.UncalibratedThresholds) as err:
+        cp.select_promotions(_gate_snap(), mode="on", **_PLACEHOLDER_KW)
+    assert "标定" in str(err.value)
+
+
+def test_shadow_and_off_still_run_on_placeholder_values(monkeypatch):
+    """闸门只挡开闸，不挡观测：标定报告与 shadow 名单恰恰要在占位值上跑，
+    挡住它们就没人能量出真值了。默认参数（不传 mode）也必须是观测态。"""
+    monkeypatch.delenv("CIVIC_THRESHOLDS_CALIBRATED", raising=False)
+    snap = _gate_snap()
+    assert cp.select_promotions(snap, **_PLACEHOLDER_KW) == ("u1",)
+    for mode in ("shadow", "off"):
+        assert cp.select_promotions(snap, mode=mode, **_PLACEHOLDER_KW) == ("u1",)
+
+
+def test_calibrated_values_open_the_gate(monkeypatch):
+    """任一门槛不再是占位值 → 有人动过手，开闸放行。"""
+    monkeypatch.delenv("CIVIC_THRESHOLDS_CALIBRATED", raising=False)
+    kw = dict(_PLACEHOLDER_KW, min_familiarity=0.34)
+    assert cp.select_promotions(_gate_snap(), mode="on", **kw) == ("u1",)
+
+
+def test_an_explicit_ack_is_the_only_other_way_through(monkeypatch):
+    """唯一的另一条合法出口：实测分布恰好落在占位值上。这时要在环境里显式
+    写下标定凭据（报告日期 / commit），闸门放行并把凭据打进日志。"""
+    monkeypatch.setenv("CIVIC_THRESHOLDS_CALIBRATED", "2026-07-27-vm212-report")
+    assert cp.select_promotions(
+        _gate_snap(), mode="on", **_PLACEHOLDER_KW) == ("u1",)
+    # 空串 / 0 / false 不算凭据——「设了个空变量」不是标定
+    for junk in ("", "  ", "0", "false", "no"):
+        monkeypatch.setenv("CIVIC_THRESHOLDS_CALIBRATED", junk)
+        with pytest.raises(cp.UncalibratedThresholds):
+            cp.select_promotions(_gate_snap(), mode="on", **_PLACEHOLDER_KW)
+
+
 # ── 快照构建（唯一一次 DB 读）───────────────────────────────────────
 
 def _res(slug, rtype, *, creator_id="u1", meta=None, created_at=None):
