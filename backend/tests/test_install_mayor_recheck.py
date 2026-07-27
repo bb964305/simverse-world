@@ -141,8 +141,9 @@ async def test_a_failed_config_write_leaves_the_old_mayor_untouched(
 
     with pytest.raises(RuntimeError):
         await election_service.install_mayor(db_session, "new")
-    await db_session.rollback()          # 错误路径，回滚是对的
-
+    # 这里刻意**不**替 install_mayor 回滚：回滚是它错误路径自己的责任（判据见
+    # ``test_a_failed_install_does_not_leak_into_the_announcement_commit``）。
+    # 它若不收，下面这条 SELECT 的 autoflush 会把脏对象刷进当前事务并被读到。
     metas = await _meta_by_slug(db_session)
     assert metas["old"].get("mayor") is True
     assert metas["new"].get("mayor") in (None, False)

@@ -167,7 +167,10 @@ async def install_mayor(db, slug: str | None) -> bool:
     2. **事务化**。原实现先 ``commit()`` 再判 ``winner is None``：winner 解析
        失败时旧镇长的 ``meta_json`` 已被清掉、``system_config`` 与 offices 却
        仍指向他，留下三向分歧（触发条件今天就可达：目标 slug 查不到即可）。
-       现在旧镇长清理、新镇长安装、``current_mayor`` 记录在同一次 commit 里。
+       现在旧镇长清理、新镇长安装、``current_mayor`` 记录在同一个 SAVEPOINT +
+       同一次 commit 里，失败时**自己把 savepoint 回掉**——调用方会把异常吞掉
+       并紧接着为公告 ``commit()``，留在 session 里的脏对象会被那次 commit
+       顺手落盘（判据见函数体内的注释）。
 
     清扫面是「全表带 ``meta_json`` 的居民」而不是 ``is_autonomous``——通用约束：
     凡是清理「已离开集合 S 的居民」的扫描，都不能用 S 本身做 WHERE（逐出档
@@ -185,23 +188,38 @@ async def install_mayor(db, slug: str | None) -> bool:
             "— zero writes, the poll fails over to the 流会 branch", slug)
         return False
 
-    others = (await db.execute(
-        select(Resident).where(Resident.meta_json.isnot(None))
-    )).scalars().all()
-    for r in others:
-        if r.slug == slug:
-            continue
-        meta = dict(r.meta_json or {})
-        if meta.pop("mayor", None) is not None:
-            r.meta_json = meta
-            flag_modified(r, "meta_json")
-    winner_meta = dict(winner.meta_json or {})
-    if not winner_meta.get("mayor"):
-        winner_meta["mayor"] = True
-        winner.meta_json = winner_meta
-        flag_modified(winner, "meta_json")
+    # 两个表示的写入跑在同一个 SAVEPOINT 里。**必须是 savepoint 而不是顶层
+    # ``db.rollback()``**：本函数的直接调用方 ``civic_service._execute_outcome``
+    # 把异常吞成 False，紧接着 ``_close_one`` 用它自己更早加载的 ``poll`` 拼公告
+    # 标题（``civic_service.py`` 的 ``poll.question``）。顶层 rollback 会
+    # ``_restore_snapshot(dirty_only=False)`` expire **整个** identity map，
+    # 包含那个本函数从没碰过的 ``poll``，那次同步属性读随即在没有 greenlet
+    # 上下文的地方炸 ``MissingGreenlet``（已实测复现，判据同
+    # ``civic_membership.revoke_citizenship`` 的「异常路径调用方契约」）。
+    # savepoint 的自动回滚只 ``_restore_snapshot(dirty_only=True)``，旁观对象
+    # 不受影响。
+    #
+    # 而回滚本身不能省：调用方吞掉异常后 ``_clerk_announce`` → ``create_post``
+    # 会自己 ``commit()``（``bulletin_service.py``），留在 session 里的清扫
+    # 写入会被那次 commit 顺手落盘，「同一次 commit」的保证就破了。
+    async with db.begin_nested():
+        others = (await db.execute(
+            select(Resident).where(Resident.meta_json.isnot(None))
+        )).scalars().all()
+        for r in others:
+            if r.slug == slug:
+                continue
+            meta = dict(r.meta_json or {})
+            if meta.pop("mayor", None) is not None:
+                r.meta_json = meta
+                flag_modified(r, "meta_json")
+        winner_meta = dict(winner.meta_json or {})
+        if not winner_meta.get("mayor"):
+            winner_meta["mayor"] = True
+            winner.meta_json = winner_meta
+            flag_modified(winner, "meta_json")
 
-    await _record_current_mayor(db, slug)
+        await _record_current_mayor(db, slug)
     await db.commit()
 
     # S2-1: dual-write the offices row when the gate is on. Both legacy
