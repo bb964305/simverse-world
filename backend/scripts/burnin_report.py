@@ -34,6 +34,7 @@ from datetime import datetime, timedelta, UTC
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sqlalchemy import select, func  # noqa: E402
+from sqlalchemy.exc import SQLAlchemyError  # noqa: E402
 import json  # noqa: E402
 
 from app.models.llm_usage import LLMUsage  # noqa: E402
@@ -1308,8 +1309,6 @@ async def fetch_civic_standing_snapshot(
     flip_window_world_days: float = CIVIC_FLIP_WINDOW_WORLD_DAYS,
 ) -> dict:
     """交叉表 / 晋升队列 / 翻转统计 / 交叉一致性。表不存在 → available=False。"""
-    from datetime import timedelta
-
     try:
         from app.models.civic_standing_history import CivicStandingHistory
         from app.models.office import Office
@@ -1338,7 +1337,23 @@ async def fetch_civic_standing_snapshot(
 
     by_id = {r.id: r for r in residents}
     voter_slugs = {r.slug for r in residents if r.resident_type in _VOTERS}
-    promoted_ids = {h.resident_id for h in history if h.new_standing == CITIZEN}
+
+    # 单一「当前档位（按历史）」来源，①交叉表/泄漏判据与③翻转统计共用——
+    # 不能有两套独立算法都在回答「这个人现在是什么档位」，这正是评审揪出的
+    # 假阴性复发的根因：F2 的 revoke_citizenship 上线之前，「历史里有没有过
+    # new_standing==CITIZEN 的行」和「现在是不是公民」是同一句话，按存在性判
+    # 定是对的；revoke 上线后两者分道扬镳——晋升→合法撤销→带外非法回授（不
+    # 写新历史行）序列里，「有没有过」仍然为真，「最新一行是什么」才是真相。
+    changes: dict[str, int] = {}
+    last_change: dict[str, tuple] = {}
+    for h in history:
+        changes[h.resident_id] = changes.get(h.resident_id, 0) + 1
+        when = cp._as_aware(h.world_at)
+        prev = last_change.get(h.resident_id)
+        if prev is None or when > prev[0]:
+            last_change[h.resident_id] = (when, h.new_standing)
+    promoted_ids = {rid for rid, (_when, standing) in last_change.items()
+                    if standing == CITIZEN}
 
     cross = {"builtin_citizen": 0, "ugc_citizen_promoted": 0,
              "ugc_citizen_unrecorded": 0, "ugc_denizen": 0, "other": 0}
@@ -1369,23 +1384,19 @@ async def fetch_civic_standing_snapshot(
                  "slugs": sorted(by_id[i].slug for i in queue_ids
                                  if i in by_id)}
         now_world = snap.now_world
-    except Exception:
+    except SQLAlchemyError:
+        # 只吞「底层数据不在」（关系表迁移未跑等）——这是探针的既有约定
+        # （同上面「表不存在」的整函数级 try/except），不是给任意异常兜底。
+        # 真代码 bug（AttributeError/TypeError/…）必须原样炸出来，不能藏在
+        # 一句「计算失败」背后。
         queue = {"size": None, "slugs": []}
         from app import world_clock
         now_world = world_clock.now_world()
 
-    # ③ 翻转统计
-    changes: dict[str, int] = {}
-    recent: set[str] = set()
-    last_change: dict[str, object] = {}
-    for h in history:
-        changes[h.resident_id] = changes.get(h.resident_id, 0) + 1
-        when = cp._as_aware(h.world_at)
-        if (now_world - when) <= timedelta(days=flip_window_world_days):
-            recent.add(h.resident_id)
-        prev = last_change.get(h.resident_id)
-        if prev is None or when > prev[0]:
-            last_change[h.resident_id] = (when, h.new_standing)
+    # ③ 翻转统计——复用①已经算好的 changes / last_change，不重新定义第二套
+    # 「当前档位」（见①上方注释：两套独立判据正是假阴性复发的根因）。
+    recent = {rid for rid, (when, _standing) in last_change.items()
+              if (now_world - when) <= timedelta(days=flip_window_world_days)}
     in_min_tenure = sum(
         1 for (when, new) in last_change.values()
         if new == CITIZEN
