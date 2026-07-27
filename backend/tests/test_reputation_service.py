@@ -15,6 +15,7 @@ from app.services.reputation_service import (
     project,
     recompute,
     score_from_meta,
+    vote_trust_delta,
 )
 
 
@@ -333,3 +334,53 @@ async def test_election_votes_still_weighted_by_reputation(db_session, monkeypat
     # 自己的一票。
     assert poll.options_json[good_idx]["npc_votes"] == len(voters) + 1
     assert poll.options_json[bad_idx]["npc_votes"] == 1
+
+
+# ── F1 第 2 项：声誉只影响得票 ──────────────────────────────────────────
+
+
+def test_vote_trust_delta_is_gated_and_weighted(monkeypatch):
+    monkeypatch.setattr(settings, "rep_enabled", False)
+    assert vote_trust_delta({"reputation": {"score": 0.8}}) == 0.0
+    monkeypatch.setattr(settings, "rep_enabled", True)
+    monkeypatch.setattr(settings, "rep_vote_trust_weight", 2.0)
+    assert vote_trust_delta({"reputation": {"score": 0.4}}) == pytest.approx(0.8)
+    assert vote_trust_delta(None) == pytest.approx(2.0 * settings.rep_neutral)
+
+
+@pytest.mark.anyio
+async def test_reputation_moves_votes_not_candidacy(db_session, monkeypatch):
+    """回归锁:声誉在候选集上失效之后,得票权重是它唯一的政治通道。"""
+    from types import SimpleNamespace
+
+    from app.services import civic_service, relation_service
+
+    voter = _resident("vote_caster")
+    good = _resident("vote_good", reputation=0.9)
+    bad = _resident("vote_bad", reputation=-0.9)
+    db_session.add_all([voter, good, bad])
+    await db_session.commit()
+
+    poll = SimpleNamespace(question="镇长选举:谁来当下一任镇长?", id=1)
+    opts = [
+        {"label": "bad", "effect": {"type": "mayor", "slug": "vote_bad"}},
+        {"label": "good", "effect": {"type": "mayor", "slug": "vote_good"}},
+    ]
+    by_slug = {"vote_caster": voter, "vote_good": good, "vote_bad": bad}
+
+    monkeypatch.setattr(settings, "rep_enabled", True)
+    idx = await civic_service._npc_choice(
+        db_session, voter, poll, opts, relation_service, by_slug
+    )
+    assert opts[idx]["effect"]["slug"] == "vote_good"
+
+    monkeypatch.setattr(settings, "rep_enabled", False)
+    idx_off = await civic_service._npc_choice(
+        db_session, voter, poll, opts, relation_service, by_slug
+    )
+    good.meta_json = {**good.meta_json, "reputation": {"score": -0.9, "samples": 1}}
+    bad.meta_json = {**bad.meta_json, "reputation": {"score": 0.9, "samples": 1}}
+    idx_off_swapped = await civic_service._npc_choice(
+        db_session, voter, poll, opts, relation_service, by_slug
+    )
+    assert idx_off_swapped == idx_off   # 闸门关 → 声誉一个字节都到不了选票
