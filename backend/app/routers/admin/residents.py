@@ -97,12 +97,53 @@ async def _edit_resident(
     status: str | None = None,
     resident_type: str | None = None,
     reply_mode: str | None = None,
+    *,
+    actor: str = "admin",
 ) -> Resident:
-    """Admin-level edit of any resident's fields."""
+    """Admin-level edit of any resident's fields.
+
+    ``resident_type`` **不再裸赋值**：它是政治层的档位编码，一律转调
+    ``civic_membership`` 的两个写入口，从而拿到同一套防呆、同一套有序清理与
+    同一行 ``civic_standing_history``。列上没有 CHECK，代码就是最后一道闸；
+    这里是仓库里唯一的运行时裸赋值点，不封它「唯一写入口」条款就是假的。
+
+    档位转换放在**所有其它字段之前**：两个写入口都是 guard-first（第一条
+    UPDATE 之前抛出），所以被拒绝时整个请求都是 no-op。
+
+    ⚠️ admin 手工把某人改回 ``npc`` 会在 burn-in 探针上显示为「无晋升记录的
+    UGC-origin 公民」——那是一条有用的红旗，不是噪声。
+    """
+    from app.services.civic_membership import (
+        CIVIC_MEMBER_TYPE, CivicStandingRefused, grant_citizenship,
+        revoke_citizenship,
+    )
+
     result = await db.execute(select(Resident).where(Resident.id == resident_id))
     resident = result.scalar_one_or_none()
     if not resident:
         raise ValueError("Resident not found")
+
+    if resident_type is not None and resident_type != resident.resident_type:
+        if (resident_type == CIVIC_MEMBER_TYPE
+                and resident.resident_type == UGC_RESIDENT_TYPE):
+            await grant_citizenship(
+                db, resident, reason=f"admin edit ({actor})", actor=actor,
+                evidence={"source": "admin_edit"}, reason_code="admin_grant",
+            )
+        elif (resident_type == UGC_RESIDENT_TYPE
+                and resident.resident_type == CIVIC_MEMBER_TYPE):
+            await revoke_citizenship(
+                db, resident, reason=f"admin edit ({actor})", actor=actor,
+                tier="demote", reason_code="admin_revoke",
+            )
+        else:
+            raise CivicStandingRefused(
+                f"admin edit refused: {resident.resident_type!r} → "
+                f"{resident_type!r} is not a civic standing transition. 只支持 "
+                f"{UGC_RESIDENT_TYPE!r} ⇄ {CIVIC_MEMBER_TYPE!r}；player / preset "
+                "的出身是冻结的，不由政治层改写。"
+            )
+        await db.refresh(resident)
 
     if ability_md is not None:
         resident.ability_md = ability_md
@@ -114,8 +155,7 @@ async def _edit_resident(
         resident.district = district
     if status is not None:
         resident.status = status
-    if resident_type is not None:
-        resident.resident_type = resident_type
+    # resident_type 已在函数开头经两个写入口处理，这里刻意不再赋值
     if reply_mode is not None:
         resident.reply_mode = reply_mode
 
@@ -252,13 +292,20 @@ async def edit_resident(
     db: AsyncSession = Depends(get_db),
 ):
     """Edit any resident's persona layers, district, status, type, reply mode."""
+    from app.services.civic_membership import CivicStandingRefused
+
     try:
         resident = await _edit_resident(
             db, resident_id,
             ability_md=req.ability_md, persona_md=req.persona_md, soul_md=req.soul_md,
             district=req.district, status=req.status,
             resident_type=req.resident_type, reply_mode=req.reply_mode,
+            actor=f"admin:{admin.id}",
         )
+    except CivicStandingRefused as e:
+        # 防呆拒绝是 409（冲突/被拒），不是 404（找不到）——两者混在一起会让
+        # 运维以为「居民不存在」而重试。
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return _resident_to_dict(resident)
