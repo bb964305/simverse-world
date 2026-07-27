@@ -587,6 +587,150 @@ async def test_record_run_persists_the_bounded_payload_via_the_dedicated_session
     assert len(summary["candidates"]) < 300
 
 
+# ── 二次复审 Minor 1-4 ────────────────────────────────────────────────────
+#
+# 四项都发生在 _record_run / _bounded_summary_payload 附近，测试自然是同一
+# 个套件——按复审说明合并成一组 red/green，不拆四对 commit。
+
+def test_bounded_summary_payload_bounds_a_worst_case_chinese_refused_detail():
+    """复审 Minor 1（F3 那个洞在拒绝路径上重演）：``_REFUSED_DETAIL_MAX_
+    CHARS = 300`` 截的是原串字符数，但 ``ensure_ascii=True`` 把每个非 ASCII
+    字符展开成 6 字符的 ``\\uXXXX`` 转义。300 个中文字符编码后是 1800 字符，
+    candidates 已经空了（这里干脆传 ``[]``）时序列化后仍然超预算——本仓的
+    异常消息习惯用中文（``_assert_revocable`` / ``assert_thresholds_
+    calibrated`` 都是长中文串），F1(b) 的前提是"任何未来的拒绝类都不能让
+    摘要消失"，不能只挡住今天的英文候选名单场景。"""
+    result = {
+        "mode": cp.MODE_ON,
+        "world_at": datetime(2026, 8, 1, tzinfo=UTC).isoformat(),
+        "citizens_before": 11,
+        "candidates": [],
+        "promoted": 0,
+        "refused": "grant_refused",
+        "refused_detail": "拒" * 5000,
+    }
+    payload = cp._bounded_summary_payload(result)
+    serialized = json.dumps(payload)
+    assert len(serialized) <= 2000
+    assert payload["refused_detail"] is None or len(payload["refused_detail"]) < 300
+
+
+@pytest.mark.anyio
+async def test_pool_exhaustion_is_logged_at_error_not_generic_warning(
+        tmp_path, caplog):
+    """复审 Minor 2：``_record_run`` 期间同时占用 2 条连接（调用方 db 一条 +
+    专用 session 一条）。池耗尽时 checkout 会等到 ``pool_timeout`` 才抛超时
+    ——落进通用 fail-open 会和"没什么好记的"共用同一条 warning，运维分不清
+    这次是真的没数据还是连接池忙不过来。用小池（``pool_size=1,
+    max_overflow=0``）复现：先用一个 session 占住唯一的连接（flush 但不
+    commit/close），再跑 ``_record_run``——它自己需要的第二条连接永远拿
+    不到。"""
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession as _AsyncSession, async_sessionmaker as _async_sessionmaker,
+        create_async_engine as _create_async_engine,
+    )
+
+    from app.database import Base as _Base
+
+    engine = _create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'pool_exhaustion.db'}",
+        pool_size=1, max_overflow=0, pool_timeout=1)
+    async with engine.begin() as conn:
+        await conn.run_sync(_Base.metadata.create_all)
+    factory = _async_sessionmaker(engine, class_=_AsyncSession,
+                                  expire_on_commit=False, autoflush=False)
+
+    holder = factory()
+    holder.add(_res("holder_row", cm.UGC_RESIDENT_TYPE))
+    await holder.flush()   # 占住这个池唯一的一条连接，不提交也不关闭
+
+    caplog.set_level("ERROR", logger="app.tasks.civic_promotion")
+    result = {
+        "mode": cp.MODE_SHADOW,
+        "world_at": datetime(2026, 8, 1, tzinfo=UTC).isoformat(),
+        "citizens_before": 1, "candidates": ["u0"], "promoted": 0,
+        "refused": None,
+    }
+    await cp._record_run(holder, result)   # 不该抛异常——fail-open
+
+    await holder.rollback()
+    await holder.close()
+    await engine.dispose()
+
+    error_records = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert error_records, (
+        "连接池耗尽必须单独用 ERROR 记，不能和通用 fail-open 的 warning "
+        "共用同一条日志")
+    assert any("pool" in r.getMessage().lower()
+              or "连接" in r.getMessage() for r in error_records), (
+        "ERROR 日志必须点名是连接池问题，不能只是通用的"
+        "「recording ... failed」")
+
+
+@pytest.mark.anyio
+async def test_record_run_never_disposes_the_shared_connection_pool(
+        db_session, monkeypatch):
+    """复审 Minor 3：``AsyncEngine(db.get_bind())`` 包住的是与 ``db`` 同一个
+    连接池（已用脚本验证过 ``wrapped.pool is engine.pool``）。这个 wrapped
+    engine 绝不能调用 ``.dispose()``——那会把整个应用共用的连接池连根拔起，
+    不是关掉这一次专用 session 自己的什么东西。用 spy 顶替
+    ``AsyncEngine.dispose``，跑几次 ``_record_run``，断言从未被调用；再确认
+    调用方的 session 之后仍然可用（池没被拆）。"""
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
+    calls = []
+    real_dispose = AsyncEngine.dispose
+
+    async def _spy_dispose(self, *args, **kwargs):
+        calls.append(self)
+        return await real_dispose(self, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncEngine, "dispose", _spy_dispose)
+
+    for _ in range(3):
+        await cp._record_run(db_session, {
+            "mode": cp.MODE_SHADOW,
+            "world_at": datetime(2026, 8, 1, tzinfo=UTC).isoformat(),
+            "citizens_before": 1, "candidates": ["u0"], "promoted": 0,
+            "refused": None,
+        })
+
+    assert calls == [], "_record_run 的 scratch engine 绝不能调用 dispose()"
+
+    # 池没被拆——调用方的 session 之后仍然能正常查询
+    summary = await ConfigService(db_session).get(cp.RUN_SUMMARY_KEY)
+    assert summary is not None
+
+
+@pytest.mark.anyio
+async def test_record_run_refuses_a_connection_bound_session_instead_of_silently_losing_data(
+        db_engine, caplog):
+    """复审 Minor 4：``AsyncSession.get_bind()`` 的返回类型是
+    ``Engine | Connection``。实测过（见任务报告）：``AsyncEngine(connection)``
+    **不会**抛异常，而是悄悄包出一个复用同一条连接/同一个事务的坏
+    wrapper——比"抛异常被 fail-open 吞掉"更隐蔽，因为连异常都没有，只是
+    数据对不上（Important 2 那个漏洞的另一种变种）。这里显式判
+    ``isinstance(bind, Engine)``，不满足就直接拒绝、单独告警。"""
+    from sqlalchemy.ext.asyncio import AsyncSession as _AsyncSession
+
+    caplog.set_level("ERROR", logger="app.tasks.civic_promotion")
+    async with db_engine.connect() as conn:
+        conn_bound = _AsyncSession(bind=conn, expire_on_commit=False)
+        result = {
+            "mode": cp.MODE_SHADOW,
+            "world_at": datetime(2026, 8, 1, tzinfo=UTC).isoformat(),
+            "citizens_before": 1, "candidates": ["u0"], "promoted": 0,
+            "refused": None,
+        }
+        await cp._record_run(conn_bound, result)   # 不该抛异常
+        await conn_bound.close()
+
+    error_records = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert any("engine" in r.getMessage().lower() for r in error_records), (
+        "Connection-bound session 必须单独用 ERROR 记，不能悄悄走 "
+        "AsyncEngine(connection) 那条会复用同一事务的坏路")
+
+
 # ── 数值闸门 ───────────────────────────────────────────────────────────
 
 @pytest.mark.anyio
