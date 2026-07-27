@@ -285,6 +285,16 @@ async def test_run_combines_distribution_and_coverage_and_writes_nothing(
 
     report = await _run(0.4, db=db_session)
 
+    # 只读性:逐字段比对(下面的 meta_json/mood_json/行数断言)只能盯住我们想到
+    # 的字段——评审复现过一条"在 _gossip_affinities() 循环里改一个字段、不
+    # commit/flush"的变异,21 条测试原样全绿,且探针确认该对象确实进了
+    # session.dirty。这种"改脏但没提交"的对象,一旦调用方后续在同一 session
+    # 上下文里再 commit 一次(比如请求生命周期的收尾钩子),就会被悄悄带着落
+    # 库——脏对象本身就是风险,不能靠"这次调用方没 commit"侥幸过关。直接问
+    # session 有没有脏对象/待插入对象,把"通过 ORM 间接写库"这整条路径堵死。
+    assert not db_session.dirty, f"_run() 弄脏了 ORM 对象: {db_session.dirty!r}"
+    assert not db_session.new, f"_run() 往 session 里塞了待插入对象: {db_session.new!r}"
+
     assert report["n"] == 3
     assert report["affinity_coverage"] == {
         "n": 2, "covered": 1, "uncovered": 1, "coverage_share": 0.5,
