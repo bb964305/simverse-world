@@ -204,3 +204,81 @@ def test_audit_key_fits_system_config_key_column():
     assert len(key) <= 200
     assert key.startswith("office_audit:mayor:")
     assert key.endswith("20260727T030405")
+
+
+# ── Task 5: 空缺超过一个夜间周期 → 红旗输入 ─────────────────────────
+
+@pytest.mark.anyio
+async def test_overdue_vacancies_flags_only_stale_empty_offices(db_session):
+    now = datetime.now(UTC)
+    db_session.add_all([
+        # 空缺 30 小时 → 超过一个夜间周期
+        Office(office_key="mayor", institution="town_hall",
+               fill_strategy="election", holder_slug=None,
+               updated_at=now - timedelta(hours=30)),
+        # 同样是民选缺位,但只空了 2 小时 → 还在允许窗口内(时间阈值本身的边界)
+        Office(office_key="deputy_mayor", institution="town_hall",
+               fill_strategy="election", holder_slug=None,
+               updated_at=now - timedelta(hours=2)),
+        # 在任 → 无论多久都不算空缺
+        Office(office_key="postman", institution="post_office",
+               fill_strategy="seed", holder_slug="luo-xiaozhou",
+               updated_at=now - timedelta(days=90)),
+    ])
+    await db_session.commit()
+
+    flags = await office_audit.overdue_vacancies(db_session, now=now)
+    assert [f["office_key"] for f in flags] == ["mayor"]
+    assert flags[0]["fill_strategy"] == "election"
+    assert flags[0]["vacant_hours"] == pytest.approx(30.0, abs=0.05)
+    assert flags[0]["vacant_since"] == (now - timedelta(hours=30)).isoformat()
+
+    # 阈值可调:放宽到 48 小时后没有红旗
+    assert await office_audit.overdue_vacancies(
+        db_session, max_vacant_hours=48.0, now=now) == []
+
+
+@pytest.mark.anyio
+async def test_overdue_vacancies_ignores_labour_offices_vacant_forever(db_session):
+    """生产的真实形态:迁移 046 seed 出四行,doctor 连 backfill 都没有,
+    holder 恒 NULL、updated_at 停在迁移那一刻。它们没有任何自动回填路径
+    (trigger_backfill 只认 fill_strategy == "election"),所以不得成为永久红旗
+    ——否则探针每晚恒定 2~3 面红旗,镇长空缺淹没在噪声里。"""
+    now = datetime.now(UTC)
+    db_session.add_all([
+        Office(office_key="doctor", institution="clinic",
+               fill_strategy="appointment", holder_slug=None,
+               updated_at=now - timedelta(days=90)),
+        Office(office_key="postman", institution="post_office",
+               fill_strategy="seed", holder_slug=None,
+               updated_at=now - timedelta(days=90)),
+    ])
+    await db_session.commit()
+
+    assert await office_audit.overdue_vacancies(db_session, now=now) == []
+    # 显式放开策略白名单时才看得到它们(收口若要扩面,这就是入口)
+    widened = await office_audit.overdue_vacancies(
+        db_session, strategies=frozenset({"election", "appointment", "seed"}),
+        now=now)
+    assert [f["office_key"] for f in widened] == ["doctor", "postman"]
+
+
+@pytest.mark.anyio
+async def test_overdue_vacancies_shape_is_probe_consumable(db_session):
+    """形状契约:钉死探针收口时会依赖的字段集(本线不接线,只能靠这条测试
+    保证交接面不漂)。"""
+    now = datetime.now(UTC)
+    db_session.add(Office(office_key="mayor", institution="town_hall",
+                          fill_strategy="election", holder_slug=None,
+                          updated_at=now - timedelta(hours=30)))
+    await db_session.commit()
+
+    flag = (await office_audit.overdue_vacancies(db_session, now=now))[0]
+    assert set(flag) == {"office_key", "fill_strategy",
+                         "vacant_since", "vacant_hours"}
+    json.dumps(flag)          # 探针要 JSON 序列化,不许塞 datetime 进去
+
+
+@pytest.mark.anyio
+async def test_overdue_vacancies_empty_world(db_session):
+    assert await office_audit.overdue_vacancies(db_session) == []

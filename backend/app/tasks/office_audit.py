@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -353,3 +353,56 @@ async def list_term_audits(
         out.append(payload)
     out.sort(key=lambda p: str(p.get("term_ended_at") or ""), reverse=True)
     return out[:limit]
+
+
+async def overdue_vacancies(
+    db: AsyncSession, *,
+    max_vacant_hours: float = 24.0,
+    strategies: frozenset[str] = frozenset({"election"}),
+    now: datetime | None = None,
+) -> list[dict]:
+    """Offices that have been vacant longer than one nightly cycle.
+
+    The §5 与 F2 的接口约定 caps an acceptable vacancy at one nightly cycle;
+    anything past that is a probe red flag. Vacancy age is read off
+    ``offices.updated_at`` — the same signal ``scripts/burnin_report.py``'s
+    ``office_occupancy`` already derives it from, so the two never disagree.
+
+    Only offices with an ACTUAL refill path can go red, and the predicate is
+    the same one ``trigger_backfill`` early-returns on
+    (``_fill_strategy(...) != "election"``). Of the four S2-1 slots only the
+    mayor is elected: ``town_clerk``/``postman`` are ``seed`` and ``doctor``
+    is ``appointment`` (``OFFICE_DEFS``), nothing in the world ever refills
+    them automatically, and migration 046 backfills neither ``doctor``'s
+    holder nor its ``updated_at``. Without this filter the probe would raise
+    2–3 red flags every single night forever and drown the one vacancy that
+    actually means something.
+
+    The threshold is a keyword default rather than a settings knob on purpose:
+    F3 ships no ``config.py`` change (共享文件延到收口). Read-only, fail-open.
+    """
+    ref = _as_utc(now) or datetime.now(UTC)
+    cutoff = ref - timedelta(hours=float(max_vacant_hours))
+    try:
+        rows = (await db.execute(
+            select(Office).where(
+                Office.holder_slug.is_(None),
+                Office.fill_strategy.in_(sorted(strategies)),
+            )
+        )).scalars().all()
+    except Exception:
+        logger.warning("office vacancy scan failed", exc_info=True)
+        return []
+    out: list[dict] = []
+    for o in rows:
+        ts = _as_utc(o.updated_at)
+        if ts is None or ts > cutoff:
+            continue
+        out.append({
+            "office_key": o.office_key,
+            "fill_strategy": o.fill_strategy,
+            "vacant_since": ts.isoformat(),
+            "vacant_hours": round((ref - ts).total_seconds() / 3600.0, 2),
+        })
+    out.sort(key=lambda e: e["office_key"])
+    return out
