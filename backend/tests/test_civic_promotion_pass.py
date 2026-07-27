@@ -494,6 +494,99 @@ async def test_on_mode_writes_history_shaped_for_the_probes_leak_check(
     assert snapshot["cross"]["ugc_citizen_unrecorded"] == 0
 
 
+# ── 运行摘要的列宽预算（复审 Minor 1，因生产是 Postgres 而升级）───────────
+#
+# 旧实现按 slug **个数**截断到 50——``Resident.slug`` 是 ``String(100)``，
+# 50 × 100 + JSON 开销 ≈ 5 KB，稳超 ``SystemConfig.value`` 的 ``String(2000)``。
+# Postgres 上会 ``StringDataRightTruncation``；``_record_run`` 是 fail-open，
+# 会把那次异常整个吞掉只留一条 warning——shadow 三夜观察期的名单就无声无息
+# 地从没写进去过。SQLite 本地测试不校验 VARCHAR 列宽，测不出来，所以下面的
+# 断言直接量序列化后的字符数，不指望数据库报错。
+
+def _worst_case_slugs(n: int) -> list[str]:
+    """``Resident.slug`` 的列宽上限是 ``String(100)``——每个 slug 精确
+    100 字符，模拟最坏情形。"""
+    return [str(i).zfill(4).ljust(100, "x") for i in range(n)]
+
+
+def test_bounded_summary_payload_fits_within_the_system_config_column():
+    result = {
+        "mode": cp.MODE_SHADOW,
+        "world_at": datetime(2026, 8, 1, tzinfo=UTC).isoformat(),
+        "citizens_before": 11,
+        "candidates": _worst_case_slugs(300),
+        "promoted": 0,
+        "refused": None,
+    }
+    payload = cp._bounded_summary_payload(result)
+    serialized = json.dumps(payload)
+
+    assert len(serialized) <= 2000
+    # candidate_count 是真实候选总数，不受截断影响——读者要能分清「刚好 50
+    # 个候选」和「300 个候选只看到一部分」。
+    assert payload["candidate_count"] == 300
+    assert payload["candidates_truncated"] is True
+    assert len(payload["candidates"]) < 300
+    assert payload["candidates"] == _worst_case_slugs(300)[:len(payload["candidates"])]
+
+
+def test_bounded_summary_payload_does_not_mark_a_small_list_truncated():
+    """没撞预算时不能误报"被砍过"。"""
+    result = {
+        "mode": cp.MODE_SHADOW,
+        "world_at": datetime(2026, 8, 1, tzinfo=UTC).isoformat(),
+        "citizens_before": 11,
+        "candidates": ["u0", "u1"],
+        "promoted": 0,
+        "refused": None,
+    }
+    payload = cp._bounded_summary_payload(result)
+    assert payload["candidates"] == ["u0", "u1"]
+    assert payload["candidates_truncated"] is False
+    assert payload["candidate_count"] == 2
+
+
+def test_bounded_summary_payload_also_bounds_the_refused_detail_text():
+    """CivicStandingRefused 的异常消息是自由文本，理论上可以任意长——不能
+    让它反过来把 candidates 的预算全部挤掉。"""
+    result = {
+        "mode": cp.MODE_ON,
+        "world_at": datetime(2026, 8, 1, tzinfo=UTC).isoformat(),
+        "citizens_before": 11,
+        "candidates": _worst_case_slugs(20),
+        "promoted": 0,
+        "refused": "grant_refused",
+        "refused_detail": "x" * 5000,
+    }
+    payload = cp._bounded_summary_payload(result)
+    serialized = json.dumps(payload)
+    assert len(serialized) <= 2000
+    assert len(payload["refused_detail"]) < 5000
+
+
+@pytest.mark.anyio
+async def test_record_run_persists_the_bounded_payload_via_the_dedicated_session(
+        db_session):
+    """把 Important 2（独立 session）与 Minor 1（预算截断）接在一起验证：
+    即使 result 里塞进了会撑爆列宽的候选名单，_record_run 落库的还是能被
+    ConfigService 读回来的合法 JSON，而不是被 fail-open 悄悄吞掉。"""
+    result = {
+        "mode": cp.MODE_SHADOW,
+        "world_at": datetime(2026, 8, 1, tzinfo=UTC).isoformat(),
+        "citizens_before": 11,
+        "candidates": _worst_case_slugs(300),
+        "promoted": 0,
+        "refused": None,
+    }
+    await cp._record_run(db_session, result)
+
+    summary = await ConfigService(db_session).get(cp.RUN_SUMMARY_KEY)
+    assert summary is not None, "预算截断不该让 fail-open 把整次写都吞掉"
+    assert summary["candidate_count"] == 300
+    assert summary["candidates_truncated"] is True
+    assert len(summary["candidates"]) < 300
+
+
 # ── 数值闸门 ───────────────────────────────────────────────────────────
 
 @pytest.mark.anyio
