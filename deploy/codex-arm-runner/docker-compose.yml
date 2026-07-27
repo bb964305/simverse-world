@@ -1,0 +1,88 @@
+services:
+  model-gateway:
+    image: simverse-lab-model-gateway:0.1.0
+    build:
+      context: ../..
+      dockerfile: deploy/codex-arm-runner/Dockerfile.gateway
+    restart: unless-stopped
+    env_file:
+      - path: model-gateway.env
+        required: true
+    ports:
+      - "8096:8096"
+    volumes:
+      - model_gateway_data:/var/lib/simverse
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8096/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    networks:
+      - gateway-egress
+      - runtime-internal
+
+  codex-runtime:
+    image: simverse-codex-runtime:0.1.0
+    build:
+      context: ../..
+      dockerfile: deploy/codex-arm-runner/Dockerfile.runtime
+    restart: unless-stopped
+    depends_on:
+      model-gateway:
+        condition: service_healthy
+    env_file:
+      - path: codex-runtime.env
+        required: true
+    volumes:
+      - codex_runtime_data:/var/lib/simverse/codex-runs
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 8g
+    cpus: 4
+    networks:
+      - runtime-internal
+
+  runtime-proxy:
+    image: nginx:1.30.4-alpine
+    user: "101:101"
+    restart: unless-stopped
+    depends_on:
+      codex-runtime:
+        condition: service_started
+    ports:
+      - "8097:8097"
+    volumes:
+      - ./runtime-proxy.conf:/etc/nginx/nginx.conf:ro
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:rw,noexec,nosuid,size=16m,uid=101,gid=101,mode=0700
+      - /var/run:rw,noexec,nosuid,size=1m,uid=101,gid=101,mode=0700
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 32
+    mem_limit: 64m
+    cpus: 0.25
+    networks:
+      - gateway-egress
+      - runtime-internal
+
+volumes:
+  model_gateway_data:
+  codex_runtime_data:
+
+networks:
+  gateway-egress:
+  runtime-internal:
+    internal: true

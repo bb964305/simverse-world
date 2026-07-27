@@ -1,0 +1,15 @@
+model = "lab-auto"
+model_provider = "lab_gateway"
+web_search = "disabled"
+
+[model_providers.lab_gateway]
+name = "Simverse Lab model gateway"
+base_url = "http://127.0.0.1:8096/v1"
+env_key = "LAB_RUN_TOKEN"
+wire_api = "responses"
+
+[shell_environment_policy]
+inherit = "none"
+ignore_default_excludes = false
+include_only = ["PATH", "HOME", "LANG"]
+exclude = ["LAB_RUN_TOKEN", "*KEY*", "*SECRET*", "*TOKEN*"]

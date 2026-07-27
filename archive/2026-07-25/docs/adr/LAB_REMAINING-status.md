@@ -353,7 +353,7 @@ remaining; **[BLOCKED]** = external infrastructure.
 ## Phase 8 — OCI isolation V11: PROVEN on a dedicated Linux runner (2026-07-19)
 
 The V11 adversarial OCI-isolation suite now passes on a **real dedicated Linux
-runner** (`100.93.72.102`: Oracle Cloud aarch64, Ubuntu 22.04, kernel
+runner** (`<runner-host>`: Oracle Cloud aarch64, Ubuntu 22.04, kernel
 6.8.0-oracle, **rootless Docker 29.2.1, cgroup v2, AppArmor, in-container
 Seccomp=2**), no longer only colima/dev-grade:
 
@@ -475,7 +475,7 @@ Genuinely remaining — none of it a code task I can complete unilaterally:
 ## External blockers
 
 - **Real Hermes/OpenClaw/computer-use endpoints and credentials for V04-V06 (P7).**
-  STILL BLOCKED: the `100.93.72.102` runner is an OCI execution host, not an
+  STILL BLOCKED: the `<runner-host>` runner is an OCI execution host, not an
   agent-runtime provider; no real runtime endpoint is configured anywhere. The
   ADR stays 未选型; no scores were fabricated.
 - ~~A dedicated Linux runner with rootless OCI... for V11.~~ **RESOLVED** — see the
