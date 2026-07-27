@@ -213,6 +213,21 @@ async def _score_all(db: AsyncSession, residents: list[Resident]) -> list[ScoreR
     return rows
 
 
+async def project(db: AsyncSession, *, force: bool = False) -> list[ScoreRow]:
+    """只读投影:算出「今晚会写成什么」但一个字节都不落库。
+
+    ``force=True`` 绕过 ``rep_enabled``,让开闸前的标定(``scripts/rep_calibrate.py``)
+    能读到真实分布。与 ``recompute`` 共用 ``_score_all``,因此标定口径和夜间任务
+    永远不会漂移。
+    """
+    if not (force or settings.rep_enabled):
+        return []
+    residents = await _scored_residents(db)
+    if not residents:
+        return []
+    return await _score_all(db, residents)
+
+
 async def recompute(db: AsyncSession) -> int:
     """Recompute every simulated resident's slow reputation projection."""
     if not settings.rep_enabled:

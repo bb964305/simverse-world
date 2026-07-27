@@ -11,6 +11,7 @@ from app.services.reputation_service import (
     evidence_weight,
     get_many,
     gossip_tone,
+    project,
     recompute,
     score_from_meta,
 )
@@ -242,3 +243,33 @@ async def test_recompute_covers_ugc_residents_but_never_the_player_avatar(
     await db_session.refresh(avatar)
     assert "reputation" in (ugc.meta_json or {})
     assert "reputation" not in (avatar.meta_json or {})
+
+
+# ── F1 第 4 项:project() 只读投影 ───────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_project_is_read_only_and_matches_recompute(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "rep_enabled", False)
+    subject = _resident("proj_subject")
+    teller = _resident("proj_teller")
+    db_session.add_all([subject, teller])
+    await db_session.flush()
+    db_session.add(Memory(
+        resident_id=teller.id, type="event", content="x",
+        importance=0.7, source="gossip", related_resident_id=subject.id,
+        metadata_json={"hops": 1, "distorted": False},
+    ))
+    await db_session.commit()
+
+    assert await project(db_session) == []            # 闸门关且未 force → 空
+    rows = await project(db_session, force=True)      # 标定路径:开闸前也能读
+    assert {row.slug for row in rows} == {"proj_subject", "proj_teller"}
+    await db_session.refresh(subject)
+    assert "reputation" not in (subject.meta_json or {})   # 只读,零写入
+
+    monkeypatch.setattr(settings, "rep_enabled", True)
+    projected = {row.resident_id: row.score for row in await project(db_session)}
+    assert await recompute(db_session) == 2
+    await db_session.refresh(subject)
+    assert score_from_meta(subject.meta_json) == pytest.approx(projected[subject.id])
