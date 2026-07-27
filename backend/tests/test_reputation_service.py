@@ -4,6 +4,7 @@ import pytest
 from app.config import settings
 from app.models.memory import Memory
 from app.models.resident import Resident
+from app.services import civic_service
 from app.services import election_service
 from app.services import relation_service
 from app.services.reputation_service import (
@@ -100,21 +101,6 @@ async def test_get_many_and_credit_threshold(db_session, monkeypatch):
     assert scores["missing"] == settings.rep_neutral
     assert credit_allowed(-0.8) is False
     assert credit_allowed(0.8) is True
-
-
-@pytest.mark.anyio
-async def test_open_election_ranks_reputation_when_enabled(db_session, monkeypatch):
-    monkeypatch.setattr(settings, "rep_enabled", True)
-    low = _resident("low", reputation=-0.5)
-    high = _resident("high", reputation=0.9)
-    db_session.add_all([low, high])
-    await db_session.commit()
-
-    poll = await election_service.open_election(
-        db_session,
-        candidate_slugs=["low", "high"],
-    )
-    assert poll.options_json[0]["effect"]["slug"] == "high"
 
 
 # ── F1 第 1 项：tone 由关系 affinity 决定 ──────────────────────────────
@@ -273,3 +259,77 @@ async def test_project_is_read_only_and_matches_recompute(db_session, monkeypatc
     assert await recompute(db_session) == 2
     await db_session.refresh(subject)
     assert score_from_meta(subject.meta_json) == pytest.approx(projected[subject.id])
+
+
+# ── F1 第 2 项：候选集由截断改为加权 ────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_open_election_keeps_low_reputation_candidates_on_the_ballot(
+    db_session, monkeypatch
+):
+    """硬门:候选集不得因「被议论多」而缩小。被动选举权不因名声受损而剥夺。"""
+    monkeypatch.setattr(settings, "rep_enabled", True)
+    worst = _resident("worst", reputation=-0.9)
+    others = [_resident(f"cand{i}", reputation=0.5) for i in range(4)]
+    db_session.add_all([worst, *others])
+    await db_session.commit()
+
+    # 显式候选名单:顺序由调用方决定,不依赖 DB 行序
+    poll = await election_service.open_election(
+        db_session,
+        candidate_slugs=["worst", "cand0", "cand1", "cand2", "cand3"],
+    )
+    slugs = [option["effect"]["slug"] for option in poll.options_json]
+    assert slugs == ["worst", "cand0", "cand1", "cand2"]   # [:4] 保留,顺序即入参顺序
+
+
+@pytest.mark.anyio
+async def test_open_election_candidate_set_is_reputation_blind(db_session, monkeypatch):
+    """开闸前后同一个世界,候选集必须逐项相同。"""
+    db_session.add_all([
+        _resident("blind_low", reputation=-0.9),
+        _resident("blind_mid", reputation=0.0),
+        _resident("blind_high", reputation=0.9),
+    ])
+    await db_session.commit()
+
+    monkeypatch.setattr(settings, "rep_enabled", True)
+    on = [o["effect"]["slug"] for o in (await election_service.open_election(db_session)).options_json]
+    monkeypatch.setattr(settings, "rep_enabled", False)
+    off = [o["effect"]["slug"] for o in (await election_service.open_election(db_session)).options_json]
+    assert on == off
+    assert set(on) == {"blind_low", "blind_mid", "blind_high"}
+
+
+@pytest.mark.anyio
+async def test_election_votes_still_weighted_by_reputation(db_session, monkeypatch):
+    """候选集与声誉解耦,但声誉仍是 `_npc_choice` 里的一项打分权重——不能矫枉
+    过正把这条影响力也一起删掉。用中性选民(无 SBTI 差异、无关系羁绊)隔离出
+    声誉这一项:+0.9 对 -0.9 的声誉差(× rep_vote_trust_weight=1.0 → 1.8)远超
+    taste 项的最大摆动(< _TASTE_MAG=0.25),对每个中性选民都应压倒性获胜。
+    """
+    monkeypatch.setattr(settings, "rep_enabled", True)
+    good = _resident("cand_good", reputation=0.9)
+    bad = _resident("cand_bad", reputation=-0.9)
+    voters = [_resident(f"voter{i}") for i in range(5)]
+    db_session.add_all([good, bad, *voters])
+    await db_session.commit()
+
+    poll = await election_service.open_election(
+        db_session, candidate_slugs=["cand_good", "cand_bad"],
+    )
+    n = await civic_service.run_npc_voting(db_session)
+    assert n == len(voters) + 2   # 5 中性选民 + 两个候选人各自的自投
+
+    await db_session.refresh(poll)
+    good_idx = next(
+        i for i, o in enumerate(poll.options_json) if o["effect"]["slug"] == "cand_good"
+    )
+    bad_idx = next(
+        i for i, o in enumerate(poll.options_json) if o["effect"]["slug"] == "cand_bad"
+    )
+    # 5 个中性选民全部倒向高声誉候选人,加上他自己的一票;声誉低的候选人只拿到
+    # 自己的一票。
+    assert poll.options_json[good_idx]["npc_votes"] == len(voters) + 1
+    assert poll.options_json[bad_idx]["npc_votes"] == 1
