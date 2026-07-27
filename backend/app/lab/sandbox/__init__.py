@@ -24,7 +24,7 @@ from app.lab.sandbox.base import (  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
-_REAL_ADAPTERS = ("simverse_ref", "openclaw", "hermes", "computer_use")
+_REAL_ADAPTERS = ("simverse_ref", "codex", "openclaw", "hermes", "computer_use")
 
 
 def get_adapter(name: str) -> SandboxAdapter:
@@ -37,6 +37,9 @@ def get_adapter(name: str) -> SandboxAdapter:
             if key == "simverse_ref":
                 from app.lab.sandbox.simverse_ref import SimverseRefAdapter
                 return SimverseRefAdapter()
+            if key == "codex":
+                from app.lab.sandbox.codex import CodexAdapter
+                return CodexAdapter()
             if key == "openclaw":
                 from app.lab.sandbox.openclaw import OpenClawAdapter
                 return OpenClawAdapter()

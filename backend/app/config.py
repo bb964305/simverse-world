@@ -217,7 +217,7 @@ class Settings(BaseSettings):
     # is the Redis flag ``sv:lab:enabled`` (admin toggles it live, no restart);
     # this only gates whether the feature is wired at deploy time.
     lab_enabled: bool = False
-    lab_adapter: str = "mock"               # default sandbox adapter (mock|openclaw|hermes|computer_use)
+    lab_adapter: str = "mock"               # default sandbox adapter (mock|codex|openclaw|hermes|computer_use)
     lab_creator_share: float = 0.2          # researcher's creator gets this share of reward_sc; rest → treasury
     lab_platform_fee_rate: float = 0.1      # platform fee added on top of reward (fee = ceil(reward*rate)) → sink
     lab_max_concurrent_runs: int = 3        # global cap on concurrently-running runs
@@ -225,6 +225,17 @@ class Settings(BaseSettings):
     lab_daily_tasks_per_user: int = 20      # per-player daily task-publish cap
     lab_default_budget_usd: float = 0.5     # per-run LLM/compute budget ceiling
     lab_sc_per_usd: int = 100               # SC↔USD conversion (price scopes / validate reward vs budget)
+    # Codex model routing. Model ids are deliberately fixed in model_policy.py;
+    # reward selects a tier and neither the player nor Codex may override it.
+    lab_model_policy_version: str = "lab-deepseek-v1"
+    lab_pro_min_reward_sc: int = 100
+    lab_flash_budget_usd: float = 0.25
+    lab_pro_budget_usd: float = 0.5
+    lab_model_gateway_base_url: str = ""
+    lab_model_gateway_auth_secret: str = ""
+    lab_model_gateway_token_ttl_s: int = 3600
+    lab_codex_base_url: str = ""
+    lab_codex_api_key: str = ""
     lab_approval_timeout_s: int = 1800      # sensitive-action human-review timeout (default: deny)
     lab_run_heartbeat_ttl_s: int = 300      # orphan-run watchdog threshold (no heartbeat past this → reap+refund)
     lab_auto_release_hours: int = 72        # review→auto-release window (anti-runaway)

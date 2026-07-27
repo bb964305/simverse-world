@@ -232,12 +232,37 @@ async def run_one(run_id: str) -> None:
         await _ws_task_update(task)
 
         adapter = get_adapter(run.adapter)
+        model_gateway_token = ""
+        if run.adapter == "codex":
+            from app.lab.model_policy import ModelAssignment, issue_gateway_token
+
+            model_gateway_token = issue_gateway_token(
+                tenant_id=task.issuer_user_id,
+                task_id=task.id,
+                run_id=run.id,
+                assignment=ModelAssignment(
+                    tier=run.model_tier,
+                    model=run.model_name,
+                    policy_version=run.model_policy_version,
+                    budget_usd_cents=run.budget_usd_cents,
+                    cpu_cores=run.resource_cpu_cores,
+                    memory_mb=run.resource_memory_mb,
+                ),
+                max_model_tokens=settings.lab_budget_model_tokens,
+            )
         spec = RunSpec(
             run_id=run.id, task_id=task.id, researcher_slug=run.researcher_slug,
             brief=(task.brief_md or task.title or ""), scopes=list(run.scopes_json or []),
             budget_usd=(run.budget_usd_cents or 0) / 100.0, deadline=task.deadline_at,
             egress_allowlist=list(getattr(settings, "lab_egress_allowlist", []) or []),
             secrets={}, deliverable_kind=task.deliverable_kind,
+            tenant_id=task.issuer_user_id, model_tier=run.model_tier,
+            model_name=run.model_name,
+            model_policy_version=run.model_policy_version,
+            resource_cpu_cores=run.resource_cpu_cores,
+            resource_memory_mb=run.resource_memory_mb,
+            model_gateway_base_url=settings.lab_model_gateway_base_url,
+            model_gateway_token=model_gateway_token,
         )
 
         seq = 0
