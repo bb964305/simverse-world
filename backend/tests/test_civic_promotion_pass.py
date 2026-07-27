@@ -159,7 +159,7 @@ async def test_shadow_records_the_run_summary_for_the_probe(db_session,
 
 @pytest.mark.anyio
 async def test_shadow_summary_write_does_not_commit_unrelated_pending_state(
-        db_session, monkeypatch):
+        monkeypatch, tmp_path):
     """复审 Important 2：shadow 唯一的写（运行摘要）不能借道调用方 session
     自己的事务边界。``_record_run`` → ``ConfigService.set`` 末尾是
     ``await self._db.commit()``；``run_promotion_pass`` 对调用方传入什么样
@@ -167,33 +167,66 @@ async def test_shadow_summary_write_does_not_commit_unrelated_pending_state(
     接进 nightly_cron 后与其它任务共用同一个 session，或是被某个手工脚本
     复用的长命 session），直接在 ``db`` 上 commit 会把那些改动一并带下去。
 
+    ⚠️ 这里**不用** ``db_session`` 夹具——那个夹具背后的引擎是 SQLite
+    ``:memory:`` + ``StaticPool``：全程只有一个物理连接，任何"专用 session"
+    最终都会拿到同一个连接、同一个事务，天然验证不出连接级隔离（实测过：
+    在 ``:memory:``/``StaticPool`` 上，即使 ``_record_run`` 已经改成开专用
+    session，``scratch.commit()`` 命中的还是 ``db_session`` 那个唯一的物理
+    连接，intruder 一样会被带下去——不是修复没生效，是这个夹具结构性验证不
+    出"两个 session 各自独立提交"这件事）。生产是 Postgres 的真实连接池
+    （``pool_size=20``），这里改用临时文件 SQLite（``AsyncAdaptedQueuePool``，
+    真正的多连接、彼此独立的事务）来如实模拟"专用 session 拿到独立物理连接"。
+
     用 rollback 之后还在不在来判定"是不是已经被提交"：同一个 session 内，
-    真正提交过的行 rollback 不掉，这比查第二个连接更直接（不依赖具体的
-    连接池/隔离级别实现细节）。
+    真正提交过的行 rollback 不掉。
     """
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession as _AsyncSession, async_sessionmaker as _async_sessionmaker,
+        create_async_engine as _create_async_engine,
+    )
+
+    from app.database import Base as _Base
+
+    engine = _create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'record_run_isolation.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(_Base.metadata.create_all)
+    # autoflush=False：SQLite 文件库是单写者锁——build_snapshot() 的只读
+    # SELECT 若 autoflush 出 intruder 的 INSERT，会在这个连接上一直握着写锁
+    # 直到 db_session 提交/回滚，而 _record_run 的专用 session 这时去写
+    # system_config 会撞上同一个文件锁，报 "database is locked"（这是 SQLite
+    # 单写者模型的产物，Postgres 的行级 MVCC 不会有这个问题——同一张不相关
+    # 的表，两个事务互不阻塞）。关掉 autoflush 只是不让"待提交但从未真正发
+    # 送给数据库"的对象提前触发写锁，不影响本测试要证明的东西：intruder
+    # 在 db_session 自己 commit 之前，任何时候都不该真的落库。
+    factory = _async_sessionmaker(engine, class_=_AsyncSession,
+                                  expire_on_commit=False, autoflush=False)
+
     monkeypatch.setenv("CIVIC_PROMOTION_MODE", "shadow")
-    await _world(db_session, denizens=1)
+    async with factory() as db_session:
+        await _world(db_session, denizens=1)
 
-    intruder = _res("intruder_pending_row", cm.UGC_RESIDENT_TYPE)
-    db_session.add(intruder)   # 故意不 commit——模拟共享 session 里别的任务
-                               # 留下的未提交改动
+        intruder = _res("intruder_pending_row", cm.UGC_RESIDENT_TYPE)
+        db_session.add(intruder)   # 故意不 commit——模拟共享 session 里别的
+                                   # 任务留下的未提交改动
 
-    result = await cp.run_promotion_pass(db_session)
-    assert result["mode"] == cp.MODE_SHADOW
+        result = await cp.run_promotion_pass(db_session)
+        assert result["mode"] == cp.MODE_SHADOW
 
-    await db_session.rollback()
-    intruder_survived = (await db_session.execute(
-        select(Resident.slug).where(Resident.slug == "intruder_pending_row")
-    )).scalar_one_or_none()
-    assert intruder_survived is None, (
-        "shadow 的运行摘要写把 session 里不相关的待提交改动一并 commit 了")
+        await db_session.rollback()
+        intruder_survived = (await db_session.execute(
+            select(Resident.slug).where(Resident.slug == "intruder_pending_row")
+        )).scalar_one_or_none()
+        assert intruder_survived is None, (
+            "shadow 的运行摘要写把 session 里不相关的待提交改动一并 commit 了")
 
-    # shadow 自己那一次写（运行摘要）必须真的落库——不能为了不牵连 intruder
-    # 就干脆什么都不写了
-    summary = await ConfigService(db_session).get(cp.RUN_SUMMARY_KEY)
-    assert summary is not None
-    assert summary["mode"] == cp.MODE_SHADOW
-    assert summary["candidates"] == ["u0"]
+        # shadow 自己那一次写（运行摘要）必须真的落库——不能为了不牵连
+        # intruder 就干脆什么都不写了
+        summary = await ConfigService(db_session).get(cp.RUN_SUMMARY_KEY)
+        assert summary is not None
+        assert summary["mode"] == cp.MODE_SHADOW
+        assert summary["candidates"] == ["u0"]
+    await engine.dispose()
 
 
 # ── on ─────────────────────────────────────────────────────────────────

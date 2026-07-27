@@ -462,24 +462,49 @@ async def _record_run(db, result: dict) -> None:
 
     这是 shadow 态**唯一**的一次写——政治层（``residents`` /
     ``civic_standing_history``）零写入。
+
+    用**独立于调用方 ``db`` 的一次性会话**写、提交、关闭（复审 Important 2）
+    ——不能借用 ``db`` 自己的事务边界。``ConfigService.set`` 末尾是
+    ``await self._db.commit()``，而 ``Session.commit()`` 不受 ``begin_nested()``
+    savepoint 约束：它总是提交到最外层，savepoint 只能 release/rollback 自己
+    那一段，管不住 ``commit()``（用两段实验脚本验证过，见任务报告）。
+    ``run_promotion_pass`` 对调用方传入什么样的 ``db`` 没有任何契约保证——如
+    果 ``db`` 上还有别的未提交改动（比如接进 nightly_cron 后与其它任务共用
+    同一个 session），直接在 ``db`` 上 commit 会把那些改动一并带下去，与
+    「shadow 对 residents / civic_standing_history 零写入」的承诺打架。
+
+    ``AsyncEngine(db.get_bind())`` 包住的是与 ``db`` 同一个底层 sync engine
+    （同一个连接池、同一个物理数据库）——不是重新 ``create_async_engine``，
+    那样在 SQLite ``:memory:`` 下会开出一个全新的空库，测试会读不到自己刚
+    写的东西；``AsyncSession.get_bind()`` 返回的本来就是这个 sync engine
+    （不是 ``AsyncEngine``），``AsyncEngine(...)`` 只是把它重新包一层给
+    ``async_sessionmaker`` 用，不建新连接池。
     """
     try:
+        from sqlalchemy.ext.asyncio import (
+            AsyncEngine, AsyncSession, async_sessionmaker,
+        )
+
         from app.services.config_service import ConfigService
 
-        await ConfigService(db).set(
-            RUN_SUMMARY_KEY,
-            {
-                "mode": result.get("mode"),
-                "world_at": result.get("world_at"),
-                "citizens_before": result.get("citizens_before"),
-                "candidates": list(result.get("candidates") or [])[:_SUMMARY_MAX_SLUGS],
-                "candidate_count": len(result.get("candidates") or []),
-                "promoted": result.get("promoted", 0),
-                "refused": result.get("refused"),
-                "refused_detail": result.get("refused_detail"),
-            },
-            group="civic", updated_by=PROMOTION_ACTOR,
-        )
+        payload = {
+            "mode": result.get("mode"),
+            "world_at": result.get("world_at"),
+            "citizens_before": result.get("citizens_before"),
+            "candidates": list(result.get("candidates") or [])[:_SUMMARY_MAX_SLUGS],
+            "candidate_count": len(result.get("candidates") or []),
+            "promoted": result.get("promoted", 0),
+            "refused": result.get("refused"),
+            "refused_detail": result.get("refused_detail"),
+        }
+        scratch_factory = async_sessionmaker(
+            AsyncEngine(db.get_bind()), class_=AsyncSession,
+            expire_on_commit=False)
+        async with scratch_factory() as scratch:
+            await ConfigService(scratch).set(
+                RUN_SUMMARY_KEY, payload, group="civic",
+                updated_by=PROMOTION_ACTOR,
+            )
     except Exception:
         logger.warning("recording civic_promotion run summary failed",
                        exc_info=True)
