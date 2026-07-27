@@ -12,7 +12,9 @@ narrow Responses-to-Chat gateway. Codex only sees the virtual model
 The gateway holds the DashScope API key and a durable SQLite usage ledger. The
 Codex Runtime receives only a short-lived, run-scoped token. Codex-launched
 shell commands inherit a clean environment that excludes keys, secrets, and
-tokens.
+tokens. Redaction of persisted text remains best-effort defense in depth; it is
+not the credential boundary. Short-lived per-run credentials, the loopback
+proxy, UID separation, and restricted egress provide that boundary.
 
 The outer container is not treated as a multi-tenant execution boundary. Codex
 keeps its `workspace-write` bubblewrap/seccomp sandbox, and every run is assigned
@@ -30,6 +32,11 @@ so container teardown also owns their lifecycle. The entrypoint retains a
 writable bind only to that run subtree, remounts the complete host cgroup view
 read-only, and then drops `SYS_ADMIN`. Startup fails closed if any isolation
 prerequisite is absent.
+
+Each run also receives a mode-0700 `TMPDIR` inside its own workspace. The
+container-level `/tmp` is root-only, so run UIDs cannot exchange files or consume
+one shared writable temporary namespace. Run cgroup names are independent random
+identifiers and the delegated cgroup parent is mode 0700.
 
 The Runtime has a 4 CPU / 8 GiB outer pool and admits either two low-tier runs
 or one high-tier run at a time. Completed, failed, timed-out, and cancelled runs
@@ -71,12 +78,12 @@ network policy so port 8097 accepts only the Lab backend. The gateway alone
 needs outbound access to `dashscope.aliyuncs.com`; the Runtime never receives
 the DashScope key.
 
-Codex admission currently requires `LAB_TERMINALIZER_V2_ENABLED=false`. The v1
-escrow terminalizer atomically refunds the task deposit minus metered model cost
-using `ceil(cost_usd_cents * LAB_SC_PER_USD / 100)`. The PostgreSQL v2 financial
-kernel still encodes full-refund-only commands, so the backend rejects that
-combination before creating or funding a task; it must not be enabled until a
-forward migration makes the database kernel cost-aware.
+The v1 escrow terminalizer refunds the task deposit minus metered model cost
+using the SC/USD conversion rate frozen on the run. Migration 053 freezes that
+rate for the PostgreSQL v2 kernel, whose command builder and finalizer both
+recompute the same issuer/sink split. Keep `LAB_TERMINALIZER_V2_ENABLED=false`
+until the PostgreSQL release gate for the deployed revision has passed; code
+availability does not by itself open the production terminalizer.
 
 Start the services from this directory with:
 
@@ -85,6 +92,14 @@ docker compose up -d --build
 ```
 
 ## Functional verification
+
+The local Python suite provides contract regressions for cleanup under external
+symlinks, failed ownership restoration, mode-0000 directories, process-group
+termination, launcher argument validation, randomized cgroup naming, and per-run
+temporary directories. Those tests intentionally use temporary directories and
+mocked kernel calls; they do not prove real setuid, cgroup v2, or `hidepid=2`
+behavior. The ARM `functional-test.sh` remains the release evidence for those
+Linux kernel boundaries.
 
 On the ARM host, with the repository and an environment file containing
 `LLM_API_KEY`, run:
