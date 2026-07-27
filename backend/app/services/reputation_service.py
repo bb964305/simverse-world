@@ -10,6 +10,8 @@ evidence. ``rep_gossip_base_tone`` is only the bias for an unknown pair.
 """
 from __future__ import annotations
 
+import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -264,3 +266,103 @@ async def recompute(db: AsyncSession) -> int:
 
     await db.commit()
     return len(residents)
+
+
+# ── F1 第 3 项:用真实分布标定信用阈值 ──────────────────────────────────
+
+
+class CalibrationError(RuntimeError):
+    """样本无法给出一个可用的信用阈值(太少 / 退化)。"""
+
+
+def _percentile(values_sorted: list[float], q: float) -> float:
+    """最近秩分位数(无 numpy 依赖)。``q`` 取 [0, 1]。"""
+    if not values_sorted:
+        return 0.0
+    n = len(values_sorted)
+    index = math.ceil(max(0.0, min(1.0, q)) * n) - 1
+    return values_sorted[max(0, min(n - 1, index))]
+
+
+def describe(scores: Sequence[float]) -> dict[str, float]:
+    """声誉分分布的形状——标定与探针共用的读数。"""
+    values = sorted(float(score) for score in scores)
+    if not values:
+        return {
+            "n": 0, "min": 0.0, "p10": 0.0, "p25": 0.0, "median": 0.0,
+            "p75": 0.0, "p90": 0.0, "max": 0.0, "mean": 0.0,
+            "negative_share": 0.0,
+        }
+    return {
+        "n": len(values),
+        "min": values[0],
+        "p10": _percentile(values, 0.10),
+        "p25": _percentile(values, 0.25),
+        "median": _percentile(values, 0.50),
+        "p75": _percentile(values, 0.75),
+        "p90": _percentile(values, 0.90),
+        "max": values[-1],
+        "mean": sum(values) / len(values),
+        "negative_share": sum(1 for v in values if v < 0) / len(values),
+    }
+
+
+def describe_affinity_coverage(affinities: Sequence[float]) -> dict[str, float]:
+    """gossip 样本的『覆盖率』读数,和 ``describe()`` 关心的是两件不同的事。
+
+    ``describe()`` 只看最终分数落在哪——负偏、正偏、居中。但
+    ``gossip_tone(affinity)`` 在 ``affinity == 0``(两人无关系行,或
+    canonical pair 查不到)时退化为 ``rep_gossip_base_tone``,也就是
+    修复前那个恒定负值。如果生产里绝大多数 gossip 记忆的
+    (holder, subject) pair 都查不到非零 affinity,population 的最终分数
+    分布依然会是一条看起来正常的负偏曲线——和「机制生效但大家确实互相
+    说坏话」长得一模一样。``describe()`` 分不清这两种情况,这个函数才能。
+
+    调用方喂入的是 ``_score_all`` 内部循环里,查表得到的逐条 pair
+    affinity(该值目前算完 tone 后即被丢弃);``covered`` 统计其中非零的
+    条数——非零意味着这条 gossip 记忆真的读到了一条 ``resident_relations``
+    行,而不是落在无关系的 fallback 上。
+    """
+    values = [float(affinity) for affinity in affinities]
+    n = len(values)
+    if n == 0:
+        return {"n": 0, "covered": 0, "uncovered": 0, "coverage_share": 0.0}
+    covered = sum(1 for value in values if value != 0.0)
+    return {
+        "n": n,
+        "covered": covered,
+        "uncovered": n - covered,
+        "coverage_share": covered / n,
+    }
+
+
+def recommend_credit_min_score(
+    scores: Sequence[float], reject_fraction: float = 0.15
+) -> float:
+    """给出使拒绝面**非空且非全量**的阈值,尽量贴近 ``reject_fraction``。
+
+    只在相邻的两个**实际出现过的**分值之间取中点,因此返回值必然满足
+    ``0 < |{s < T}| < n``——「拒绝面非空」是构造保证,不靠事后断言。
+    """
+    values = sorted(float(score) for score in scores)
+    if len(values) < 2:
+        raise CalibrationError(f"need at least 2 scores to calibrate, got {len(values)}")
+    if not 0.0 < float(reject_fraction) < 1.0:
+        raise CalibrationError(
+            f"reject_fraction must be in (0, 1), got {reject_fraction!r}"
+        )
+    distinct = sorted(set(values))
+    if len(distinct) < 2:
+        raise CalibrationError(
+            f"degenerate distribution: every score == {distinct[0]!r}"
+        )
+    target = float(reject_fraction) * len(values)
+    best_gap: float | None = None
+    best_threshold = 0.0
+    for low, high in zip(distinct, distinct[1:]):
+        threshold = (low + high) / 2.0
+        rejected = sum(1 for value in values if value < threshold)
+        gap = abs(rejected - target)
+        if best_gap is None or gap < best_gap:
+            best_gap, best_threshold = gap, threshold
+    return best_threshold
