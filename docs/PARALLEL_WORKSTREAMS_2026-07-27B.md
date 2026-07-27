@@ -11,13 +11,20 @@
 
 ## 1. 已定决策
 
-| # | 决策 | 落到哪条线 |
-|---|---|---|
-| 1 | 审计整改自成一批（07-27B），**不打断**在飞的 F1/F2/F3/T | 全部 |
-| 2 | 三张脏 poll **延期而非作废**，`_close_one` 单独修 | A |
-| 3 | 本文只做批次设计；step 级计划一线一份另出 | — |
+| # | 决策 | 落到哪条线 | 连锁后果 |
+|---|---|---|---|
+| 1 | 审计整改自成一批（07-27B），**不打断**在飞的 F1/F2/F3/T | 全部 | — |
+| 2 | 三张脏 poll **延期而非作废**，`_close_one` 单独修 | A | — |
+| 3 | 本文只做批次设计；step 级计划一线一份另出 | — | — |
+| 4 | 失格候选走 **次名递补**，不走整案流会 | A1 | **F2 计划 Task 7 Step 5 的流会实现整段删除**，含 `_VERDICT_NOTE['winner_ineligible']` 与 `test_close_one_announces_a_failed_vote_when_the_winner_lost_rights` |
+| 5 | `install_mayor` 结票复核 **整条并进 F2 Task 7**，A2 不单独立线 | F2 | A2 的「调用方日志」作为 F2 Task 7 的追加 Step；**F2 spec 的 §4.3 独占清单保留 `election_service.py:135-193`** |
+| 6 | 用户 custom LLM 功能 **整体删除** | C2 | **C3、C4 全部作废**；C 线缩为 C1（部署验证）+ C2（两步删除）+ C1b（密钥吊销） |
+| 7 | `feat/lab-codex-runtime` **先合 master** | 全部 | T1 迁移变成 **049→053**；F2 建表迁移改号；**所有线在 lab 合入后重抓测试基线** |
+| 8 | poll 延期用 **heredoc 注入**（`docker compose exec -T api python - ... < script`） | A3 | 不依赖 T1；停 agent-worker 保留为 fallback |
 
-**尚未拍板、且阻塞开工的五项在 §8，必须先答。**
+**决策 4 与 5 的交互（必须写明，否则会误排）**：A2 并进 F2 后，它要等 F2 的 `①建表迁移 → ②T2 → ③代码合入` 走完，**赶不上延期到期日**。这是可接受的，因为 **A1 单独就能护住这三张 poll** —— 四个候选全部失格 → 走 `not live` 流会分支 → 根本不会调用 `install_mayor`。A2 是纵深防御的第二层，不是这次的止血层。
+
+> **硬约束**：A1 必须在延期到期日之前部署到 vm212。A2 可随 F2 走。
 
 ---
 
@@ -79,7 +86,7 @@ if due is not None and due > now:
 | 线 | ID | 问题 | 级 |
 |---|---|---|---|
 | **A** | A1 | `_close_one` 结票不复核候选人在籍 | P0 |
-| | A2 | `install_mayor` 找不到 winner 时**先扫描清空再返回 False** → 静默罢免在任镇长，全链零日志 | P0 |
+| | ~~A2~~ | `install_mayor` 静默罢免在任镇长 —— **已并进 F2 Task 7**（决策 5），不在 A 线交付 | → F2 |
 | | A3 | 三张脏 poll 的延期动作（生产数据变更） | P0 |
 | | ~~A4~~ | UGC 进候选池 —— **master 已修**，只剩文档口径纠偏 | — |
 | **B** | B1 | `delete_account` 只覆盖 7 张表 / 30+ 个 user 关联列 | P1 |
@@ -89,9 +96,9 @@ if due is not None and due > now:
 | | B5 | 托管币永久冻结：用户消失 → refund 抛错 → hold 永远 held、LabTask 永远非终态 | P1 |
 | | B6 | 排行榜把已注销用户以「空名字 + 裸 UUID」继续挂榜，季末奖金静默烧掉 | P2 |
 | **C** | C1 | 管理端明文回传平台 Key —— **代码已修、生产仍在漏**（§2.2），只剩部署与生产验证 | P1 |
-| | C2 | 用户 `custom_llm_api_key` 明文入库，**且全链路零消费** | P2 |
-| | C3 | `allow_user_custom_llm` 策略开关零读点，写入完全不校验 | P1 |
-| | C4 | 前后端 LLM 字段名断层：测试连接恒 422、保存静默丢字段 | P2 |
+| | C2 | 用户 custom LLM **整体删除**（决策 6）：步 1 删代码路径、步 2 单独 DDL 删列 | P2 |
+| | ~~C3~~ | `allow_user_custom_llm` 策略开关零读点 —— **随功能删除作废** | — |
+| | ~~C4~~ | 前后端 LLM 字段名断层 —— **随功能删除作废** | — |
 | | C1b | 两把真实 API Key 留在**公开仓库**的 git 历史里 | P2 |
 | **D** | D1 | 8100 公网绑定 —— **代码已修、生产仍公网可达**（§2.2），需补投递路径 | P1 |
 | | D2 | `--forwarded-allow-ips=*` 的安全论证前提曾经是假的，需补不变量测试锁死 | P2 |
@@ -165,9 +172,14 @@ python -m pytest tests/test_m3_civic.py tests/test_m6_election.py \
 
 **独占文件**：`app/services/civic_service.py`、`tests/test_election_close_eligibility.py`（新建）、`tests/test_m3_civic.py`
 
-> ⚠️ **A1 与 F2 的 `_close_one` 语义互斥，不是互补**（原研究稿判错，评审推翻）。F2 计划 Task 7 Step 5 写的是「winner 照旧选出 → `install_mayor` 返回 False → 追加 `_VERDICT_NOTE['winner_ineligible']` → **整案流会**」；A1 写的是「剔除失格者 → **次名递补当选**」。两者改同一段 `effect / result_note` 代码块，F2 的 `test_close_one_announces_a_failed_vote_when_the_winner_lost_rights` 在 A1 语义下必然失败。**这是世界内规则的产品决策，见 §8 决策 1。**
+> ✅ **已按 §1 决策 4 定案：次名递补。** F2 计划 Task 7 Step 5 的竞争实现（「winner 照旧选出 → `install_mayor` 返回 False → 追加 `_VERDICT_NOTE['winner_ineligible']` → 整案流会」）**整段删除**，连同它的 `test_close_one_announces_a_failed_vote_when_the_winner_lost_rights`。
+>
+> 落地时必须同步改 `docs/plans/2026-07-27-F2-civic-standing.md`，否则 F2 执行者会照着已作废的 Step 5 写代码，然后与 A1 撞在同一段 `effect / result_note` 上。**这条 spec 修订先于 F2 Task 7 开工。**
 
-### A2 · `install_mayor` 静默罢免在任镇长
+### A2 · `install_mayor` 静默罢免在任镇长 —— **已按 §1 决策 5 并进 F2 Task 7，不在 A 线交付**
+
+> 本节保留问题描述与修法，作为 F2 Task 7 的**输入规格**；A 线不再单独排这条。
+> **不赶延期窗口**：A1 的 `not live` 分支已使这三张 poll 根本走不到 `install_mayor`。
 
 **根因**：写操作（清空全镇 mayor 标 + commit）排在读校验（winner 是否解析得到）**之前**。函数把「扫描顺带发现 winner」和「安装 winner」耦合在同一个循环里，于是「找不到人」这条失败路径不是 no-op，而是**一次已提交的罢免**。叠加返回值 False 在 `_execute_outcome` 里被静默吞掉、公告文案在执行前就已拼好 —— 失败在世界内和运维侧都不可见。
 
@@ -175,9 +187,9 @@ python -m pytest tests/test_m3_civic.py tests/test_m6_election.py \
 
 **硬门**：种入持 `meta_json={"mayor": True}` 的在任者 + 一个路人 → `assert await install_mayor(db, "ghost") is False` **且在任者的 mayor 标仍在**。必须点名 `tests/test_office_integration.py:162`（选举结果 → `_execute_outcome` → `install_mayor` 全链用例）为硬门 —— 它才是唯一能抓到「公告说当选、库里没人」的回归。
 
-**独占文件**：`app/services/election_service.py:135-193`、`app/services/civic_service.py:612-614`、`tests/test_m6_election.py`
+**独占文件**：`app/services/election_service.py:135-193`、`app/services/civic_service.py:612-614`、`tests/test_m6_election.py` —— **全部归 F2 Task 7**，07-27 批次 `:109` 的独占声明保持不变，不需要改 F2 的 spec 边界。
 
-> ⚠️ **与 F2 硬冲突**：07-27 批次 `:109` 把 `election_service.py:135-193`（`install_mayor` 的结票复核与事务化）明写为 F2 独占区。**见 §8 决策 2。**
+> **为什么不选「A2 先合、F2 rebase」**：A2 的修法明写「`:141` 的 `is_autonomous` 扫描谓词保持不动」，而 F2 Task 7 的 `test_stale_mayor_flag_on_a_demoted_resident_is_still_swept` 依赖 `:141` 改成全表扫描。A2 先合之后 F2 仍要回到同一个函数再改一次 —— 同一函数两次 TDD 循环、两条 commit、一次强制 rebase。
 
 ### A3 · 三张脏 poll 的处置
 
@@ -185,16 +197,16 @@ python -m pytest tests/test_m3_civic.py tests/test_m6_election.py \
 
 **原研究稿给的生产命令不可执行**（评审发现）：`docker compose exec -T api python scripts/postpone_open_polls.py` —— api 镜像由 `Dockerfile:10` 的 `COPY . .` 构建，compose 里 api 的 volumes 只有 media/artifacts/receipt-trust，**没有 backend 源码 bind mount**，新脚本不在运行中的镜像里，必然 `No such file or directory`。「不依赖 T1 部署，用现镜像就能跑」这句话是错的。
 
-**四条可行姿势，须钦定一条**：
+**四条可行姿势，已按 §1 决策 8 钦定 ①**：
 
-| # | 姿势 | 代价 |
+| # | 姿势 | 判定 |
 |---|---|---|
-| ① | `docker compose exec -T api python - --until ... --apply < backend/scripts/postpone_open_polls.py` | T 计划 Task 10 Step 1 已有同款 heredoc 先例 |
-| ② | `docker cp` 脚本进容器再 exec | 多一步，但最直白 |
-| ③ | 等 T1 重建镜像 | 是另一次变更，且要先做完 T1 |
-| ④ | **停 agent-worker**（nightly cron 跑在 `app/agent/main.py:59`，api 侧 `RUN_BACKGROUND_TASKS=false`） | **零代码、零数据变更、零迁移**，但世界停摆 |
+| **①** | `docker compose exec -T api python - --until ... --apply < backend/scripts/postpone_open_polls.py` | ✅ **采用**。T 计划 Task 10 Step 1 已有同款 heredoc 先例；`python -` 会把后续参数原样给 `sys.argv` |
+| ② | `docker cp` 脚本进容器再 exec | 备选，多一步 |
+| ③ | 等 T1 重建镜像 | 否决 —— 是另一次变更，且要先做完 T1 |
+| ④ | **停 agent-worker**（nightly cron 跑在 `app/agent/main.py:59`，api 侧 `RUN_BACKGROUND_TASKS=false`） | ✅ **保留为正式 fallback**：零代码、零数据变更、零迁移，代价是世界停摆。2026-07-28 22:5x 执行可无损买到一天 |
 
-**推荐 ①**（脚本进仓库、`--dry-run` 默认、不可重放，满足 T2 三条硬约束），**④ 作为正式 fallback** 写进文档 —— 如果 A1/A2 来不及，2026-07-28 22:5x 停 worker 就能无损买到一天。
+脚本仍须满足 T2 三条硬约束：进仓库、被评审、`--dry-run` 为默认值、不可重放（`system_config` 写完成标记，无 `--force-rerun` 则拒绝）。
 
 **`--until` 取值不能拍脑袋**：评审发现原稿的 14 天（08-10）会与 T2 死锁 —— T2 的回填脚本在存在 open poll 时 `raise CivicBackfillRefused`（T 计划 `:1371-1377`），而 `closes_at=2026-08-10 23:29` 的实际关票日是 **08-11**，于是 T2 在 08-11 前没有任何合法窗口，`§7 ②→③→④` 全线顶到 08-11 之后，而 08-21 是下次自动选举的硬边界，余量从 11 天塌缩到不足一周。
 
@@ -247,15 +259,36 @@ python -m pytest tests/test_m3_civic.py tests/test_m6_election.py \
 
 ## 6. 线 C · 密钥与用户配置
 
-**组内串行**（C2/C3/C4 共抢 `routers/settings.py`、`settings_service.py`、`schemas/settings.py`、`LLMSection.tsx`）。
+**按 §1 决策 6，C3 与 C4 全部作废** —— 用户 custom LLM 功能整体删除，没有「校验策略开关」和「修字段名断层」可言。C 线缩为三项。
 
-**建议顺序 C4 → C3 → C2**（C1 已修）：C4 先修字段名断层让「测试连接」真能打通，C3 的 403 才可与「本来就 422」区分开；C2 的取舍放最后。
+### C1 · 部署并生产验证密钥掩码
 
-| ID | 根因 | 硬门要点 |
+代码已在 `c2fff2f`，**生产仍在明文回传**（§2.2）。本项无代码交付，产出是 T1 之后的一次生产验证：
+
+```bash
+# 带 admin token 的线上只读调用；判定只贴「不含 sk- 前缀 / 长度为掩码长度」
+# 响应体本身绝不进任何文档、日志或 commit message
+```
+
+### C2 · 删除用户 custom LLM 功能（两步，不得合批）
+
+**根因**：custom LLM 是只落地了「存」这一半的功能 —— 写入路径完整（`settings_service.py:294`），消费路径预留了签名却从未接线（`ws/handlers/chat.py:255` 不传）。`grep custom_llm backend/app/llm/ backend/app/agent/` → **0 命中**。用户交出明文密钥，承担 100% 泄漏风险，换零功能收益。
+
+> ⚠️ **必须拆两步**（评审指出原稿把 `drop_column`×5 与删路由/删 UI/删 Settings 字段放同一次变更，违反「迁移与行为变更不同批」红线）：
+>
+> **步 1 · 删代码路径，列留着不用** —— 删 `routers/settings.py` 的 LLM 路由、`schemas/settings.py` 的 `LLMUpdateRequest`/`LLMTestRequest`、`schemas/admin.py` 的四个 custom_llm 字段、前端 `LLMSection.tsx` 与 `services/api/settings.ts` 的对应面、`config.py` 的 `allow_user_custom_llm`（延到收口，§1 决策 6 锁了 config.py）。零迁移。
+> **步 2 · 单独一次 DDL 删列** —— `users.custom_llm_*` 五列。迁移号见 §14 链序。
+
+**硬门**：
+```bash
+grep -rn "custom_llm" backend/app/ frontend/src/ | grep -v node_modules | wc -l   # 期望 0
+cd backend && .venv/bin/python -m alembic heads | wc -l                            # 期望 1
+```
+
+### C1b · 公开仓库 git 历史里的两把真实密钥
+
+| ID | 根因 | 动作 |
 |---|---|---|
-| **C3** | 三个不同名字（env `allow_user_custom_llm` / DB `user_llm.allow_custom_llm` / 前端 `system_allows_custom`）各自孤立，中间的授权判定从来没写 | `ALLOW_USER_CUSTOM_LLM=false` 时 `PATCH /settings/llm` → **403**（现在 200）<br>⚠️ 落地后生产行为从「实际全开」变「实际全关」，是**纯行为变更，不得与任何迁移同批部署** |
-| **C4** | 前端 TS 接口与后端 pydantic schema 是两份手写、互不校验的字段名清单，pydantic 默认 `extra="ignore"` 让 PATCH 从「报错」退化成「静默丢弃 + 200」 | 红证据现可复现：`LLMTestRequest(base_url=..., model=...)` → `422 missing: [('api_base_url',), ('model_name',)]`。修完须加**跨文件契约测试**防复发——后端单测用的是正确字段名，所以全绿也掩盖了断层 |
-| **C2** | custom LLM 是只落地了「存」这一半的功能：写入路径完整（`settings_service.py:294`），消费路径预留了签名却从未接线（`ws/handlers/chat.py:255` 不传）。用户交出明文密钥，零功能收益 | **见 §8 决策 3** —— 分支 A（删功能）会直接作废 C3 与 C4 |
 | **C1b** | 开源前 sanitize 只做工作区替换，没做历史重写，也没有任何前置检查 | 历史 blob 现在仍可取：`git log --all -S 'sk-sp-2f85' --oneline` 有输出。**已核实两把历史密钥的 SHA-256 与生产在用的均不匹配**（比对只用哈希前 16 位，未打印明文）→ 泄漏的不是当前在产密钥，P2 而非 P0。<br>**动作**：① 供应商侧吊销（公开历史里的密钥一律按已泄漏处理）；② 重写历史收益有限（GitHub 缓存 + 已有 clone），**吊销优先于重写**；③ 防复发测试 `test_no_hardcoded_secrets.py`，正则复用 `app/lab/guard.py:38-41` 的 `_SECRET_RE` 避免两份规则漂移 |
 
 ---
@@ -337,12 +370,12 @@ python -m pytest tests/test_m3_civic.py tests/test_m6_election.py \
 
 | 文件 | 争用方 | 裁决 |
 |---|---|---|
-| `app/services/civic_service.py` | A1（`_close_one`）、A2（`_execute_outcome:612-614`）、F1 线（`:366-371` vote-trust）、F2 线 | **A 线独占，组内串行**；F1/F2 行区不重叠但需 rebase |
-| `app/services/election_service.py:135-193` | A2、**F2 线 Task 7** | **见 §13 决策 2**，二选一 |
+| `app/services/civic_service.py` | A1（`_close_one`）、F2 线（`_execute_outcome:612-614` 随 Task 7）、F1 线（`:366-371` vote-trust） | **A1 先合**（赶延期窗口）；F1/F2 行区不重叠但需 rebase |
+| `app/services/election_service.py:135-193` | **F2 线 Task 7 独占**（决策 5） | A 线不碰 |
 | `app/services/account_deletion.py` | B1 B3 B4 B5 B6 | **B 线独占，不可 fan-out** |
-| `app/routers/settings.py` | B1 B5 C2 C3 C4 | **全批最热**。B 线先，C 线后；跨组串行 |
-| `app/services/settings_service.py` | B1 B4 C2 C3 | 同上 |
-| `app/ws/handlers/chat.py` | B4（`extract_events` 透传）、C2 分支B（`user_config` 接线） | **两组原稿都没发现这条冲突**。B4 先 |
+| `app/routers/settings.py` | B1 B5 C2 | B 线先，C2 后；跨组串行 |
+| `app/services/settings_service.py` | B1 B4 C2 | 同上 |
+| `app/ws/handlers/chat.py` | B4（`extract_events` 透传）| 冲突消失 —— C2 走删除分支，不再需要 `user_config` 接线 |
 | `backend/scripts/burnin_report.py` | B1（账户残留探针）、**F2 线 Task 11** | B 的探针追加在文件尾部并**延到收口接线** |
 | `deploy/backend/docker-compose.yml` | D2 D3 G3 | D 线一次重建同时上；G3 单独一次发布 |
 | `backend/tests/test_deploy_compose.py` | D2 D3 G3 | 同上 |
@@ -350,25 +383,25 @@ python -m pytest tests/test_m3_civic.py tests/test_m6_election.py \
 | `backend/pyproject.toml` | F1（addopts）、F5（dev deps + relock） | F1 先，F5 后（relock 时带上 F1 的状态） |
 | `deploy/backend/.env.example` | G3、G4' | G4' 先立闸门，G3 后加键 |
 | `deploy/backend/deploy.sh` | G1、**T 线 Task 2** | **让给 T 线**，G1 只做 amendment |
-| `backend/alembic/versions/` | B2、C2 分支B、**F2 线**、**lab-codex 051/052/053** | **见 §13 决策 4**；钦定顺序 B2 → lab → F2 → C2，每项 gate 都加 `alembic heads \| wc -l == 1` |
-| `backend/app/config.py` | C2 分支B、D3 备选、D4 收口项 | **§1 决策 6 锁给收口**，线内不改 |
+| `backend/alembic/versions/` | B2、**lab-codex 051/052/053**、**F2 建表**、C2 步 2 | 决策 7 定序：**B2（改 050）→ lab 051/052/053 → F2 054 → C2 055**；每项 gate 都加 `alembic heads \| wc -l == 1`，且**必须在集成分支上跑** |
+| `backend/app/config.py` | C2 步 1 的 `allow_user_custom_llm`、D3 备选、D4 收口项 | **§1 决策 3 锁给收口**，线内不改 |
 | `docs/ROADMAP.md` | H3、H4、lab-codex | H3+H4 合一个 commit；收口时一人落笔 |
 
 **真正能并行的粗线**：`A ∥ B ∥ C ∥ D ∥ E ∥ F ∥ G ∥ H` 八条，**不是 40 条细项**。
 
 ---
 
-## 13. 必须先拍板的阻塞决策
+## 13. 阻塞决策 —— 已全部拍板（2026-07-27）
 
-| # | 决策 | 选项 | 影响面 |
+| # | 决策 | 定案 | 落地动作 |
 |---|---|---|---|
-| **1** | `_close_one` 失格候选的世界内语义 | **(a) 次名递补当选**（A1 稿）<br>**(b) 整案流会、择日重开**（F2 Task 7 稿） | 两者改同一段代码、测试互斥。**必须只保留一份实现**，另一份从对应 spec 删掉 |
-| **2** | `install_mayor` 结票复核归谁 | **(a) 整条并进 F2 Task 7**（推荐，A2 的调用方日志作为追加 Step）<br>**(b) F2 Task 7 删掉改成引用 A2** | 「A2 先合、F2 rebase」是**最差解**：A2 明写「`:141` 的 `is_autonomous` 扫描谓词保持不动」，而 F2 Task 7 的 `test_stale_mayor_flag_on_a_demoted_resident_is_still_swept` 依赖 `:141` 改成全表 → 同一函数被两次 TDD 循环 + 一次强制 rebase |
-| **3** | 用户 custom LLM 功能的去留 | **(a) 删掉**（零消费、100% 泄漏风险换零收益）<br>**(b) 保留 + 服务端加密 + 接上消费路径** | **选 (a) 则 C3 与 C4 全部作废**。C 组建议顺序把 C2 排最后 → 最坏情况是先做完 C4+C3 再把它们删掉。**这条必须在 C 线开工前答** |
-| **4** | `feat/lab-codex-runtime` 何时合 | **(a) 先合 master**（四条线重抓基线，T1 部署的 master 带 051/052/053）<br>**(b) 推到本批收口之后** | 选 (a)：T1 迁移从「049→050 一步」变成「049→053」。已实测生产 `.env` 无任何 `LAB_*` key、默认 `lab_adapter="mock"`/`lab_enabled=False` → **行为零变化**，三个迁移都是 additive，不违红线。<br>选 (b)：F6 簇 3 与 F2 的文件冲突推迟，但 lab 线继续漂移 |
-| **5** | 三张脏 poll 的执行姿势 | **①** heredoc 注入脚本（推荐）<br>**②** `docker cp`<br>**④** 停 agent-worker（零变更 fallback） | 真实截止 **2026-07-28 23:00 UTC**（§2.1），窗口约 31 小时，不必抢今晚 |
+| **1** | `_close_one` 失格候选的世界内语义 | **次名递补当选** | 删 F2 plan Task 7 Step 5 的流会实现与 `test_close_one_announces_a_failed_vote_when_the_winner_lost_rights` |
+| **2** | `install_mayor` 结票复核归谁 | **整条并进 F2 Task 7** | A2 不单独立线；A1 独自护住待决 poll（`not live` 分支根本不调 `install_mayor`） |
+| **3** | 用户 custom LLM 功能的去留 | **整体删除** | C3/C4 作废；C2 拆两步（步 1 删代码路径 → 步 2 单独 DDL 删列） |
+| **4** | `feat/lab-codex-runtime` 何时合 | **先合 master** | T1 迁移变 049→053；F2 建表迁移改 054；**全部线在 lab 合入后重抓基线** |
+| **5** | 三张脏 poll 的执行姿势 | **heredoc 注入** | `docker compose exec -T api python - --until ... --apply < backend/scripts/postpone_open_polls.py`；停 agent-worker 保留为 fallback |
 
-**另需确认（非阻塞但有生产影响）**：下次部署 bootstrap 会往生产 `users` 插一行 `id='system'` 哨兵（幂等 additive）。T1 本身要跑迁移 049→050 —— 合起来一次部署带**迁移 + 数据插入**，蹭到「迁移不与开闸/数据变更同批」红线边上。要么拆两次，要么显式接受并记录。部署前后各查一次 `SELECT id,email FROM users WHERE id='system';`（前应为空，后应恰好一行）。
+**仍需确认（非阻塞但有生产影响）**：下次部署 bootstrap 会往生产 `users` 插一行 `id='system'` 哨兵（幂等 additive）。T1 本身要跑迁移 049→053 —— 合起来一次部署带**迁移 + 数据插入**，蹭到「迁移不与开闸/数据变更同批」红线边上。要么拆两次，要么显式接受并记录。部署前后各查一次 `SELECT id,email FROM users WHERE id='system';`（前应为空，后应恰好一行）。
 
 ---
 
@@ -377,24 +410,26 @@ python -m pytest tests/test_m3_civic.py tests/test_m6_election.py \
 ```
 ── 前置（谁都不依赖，可立刻做）────────────────────────────
   H4  改 ROADMAP :14/:16/:17（必须先于 T1，否则 T 执行者会找不存在的存量泄漏）
-  H5  定案迁移号 + 两个 plan 的文本修正（必须先于 F2 Task 1）
+  H5  定案迁移号 + 改 F2 plan：删 Task 7 Step 5 流会实现、迁移号 051→054
+      （必须先于 F2 Task 1 与 Task 7）
   G4' 修 env 一致性不变式（必须先于 F1/F2/F3 功能线合入）
   C1b 供应商侧吊销两把历史密钥（外部动作，不占文件锁）
   E2  敏感词过滤补全（5 分钟，必须先于 F2 ④开闸）
 
-── A 线（有墙钟）─────────────────────────────────────
-  A3 延期 ──> A1 + A2 ──> 部署到 vm212 ──> 延期到期前必须完成
-     └ fallback: 2026-07-28 22:5x 停 agent-worker（零变更）
+── A 线（有墙钟，2026-07-28 23:00 UTC）──────────────────
+  A3 延期(heredoc) ──> A1 次名递补 ──> 部署 vm212 ──> 延期到期前必须完成
+     └ fallback: 2026-07-28 22:5x 停 agent-worker（零变更，买一天）
+     └ A2 已并进 F2，不赶这个窗口
 
-── 迁移链（严格串行，每步 gate 加 alembic heads == 1）──────
-  B2 (改 050 或新增) ──> lab-codex 051/052/053 ──> F2 建表 ──> C2 分支B
+── 迁移链（严格串行，每步 gate 在集成分支上跑 heads == 1）───
+  B2(改 050) ──> lab-codex 051/052/053 ──> F2 建表 054 ──> C2 步2 删列 055
 
 ── 生产变更（每项独占一次，不得合批）───────────────────────
-  T1 部署 master(049→050 或 →053) + system 哨兵行
+  T1 部署 master(049→053，含 lab 三个 additive 迁移) + system 哨兵行
      └ 同时把 C1 掩码、哨兵铸币 guard、lab 时间炸弹修复带上生产（§2.2）
      └ D1 需额外一步：compose 是宿主文件，git archive 送不上去
-  T2 回填（vm212 上是空跑）
-  C3 策略开关生效（纯行为变更）
+  T2 回填（vm212 上是空跑，0 行是正确结果）
+  C2 步2 删列（纯 DDL，独立一次）
   D2/D3 容器重建（避开 T 线 Task 3/9/10/11 窗口）
   G3 UVICORN_WORKERS 2→1 + prometheus 容器
 
@@ -414,7 +449,7 @@ python -m pytest tests/test_m3_civic.py tests/test_m6_election.py \
 
 线全部完成后按序统一处理（继承 07-27 批次 §8，本批追加第 6、7 条）：
 
-1. `config.py` / `.env.example`：三条 F 线的新开关 + D3 若走 Settings 形态的字段 + C2 分支B 的 `secrets_encryption_key`
+1. `config.py` / `.env.example`：三条 F 线的新开关 + D3 若走 Settings 形态的字段 + **删掉** `allow_user_custom_llm`（C2 步 1 延到这里，§1 决策 3 锁了 config.py）
 2. `nightly_cron.py`：接 F2 `civic_promotion` 与 F3 `office_audit`
 3. 声誉影响接线（F3 卸任审计 × F1 声誉数据）
 4. `alembic heads` 单头校验（**在集成分支上跑**，见红线 4）
@@ -426,7 +461,9 @@ python -m pytest tests/test_m3_civic.py tests/test_m6_election.py \
 
 ## 16. 各线共同约定
 
-**工作区**：每条线在 `/Volumes/data/dev/simverse-world/.worktrees/<name>` 独立 worktree，**base 为 `c2fff2f`**（不是 `fc60ac2`，也不是 `918c5fd`）。worktree 必须在 Mac 本机创建。不要在 worktree 内创建 `backend/.env`（会破坏 conftest 的测试隔离）。
+**工作区**：每条线在 `/Volumes/data/dev/simverse-world/.worktrees/<name>` 独立 worktree。**base 为 `feat/lab-codex-runtime` 合入后的 master**（决策 7）—— 不是 `fc60ac2`、不是 `918c5fd`、也不是 `c2fff2f`。worktree 必须在 Mac 本机创建。不要在 worktree 内创建 `backend/.env`（会破坏 conftest 的测试隔离）。
+
+> **例外**：A3（延期脚本）与 A1 有墙钟压力，**允许以 `c2fff2f` 为 base 先行**，因为它们碰的文件（`scripts/postpone_open_polls.py`、`civic_service.py` 的 `_close_one`）与 lab 线零交集。合并时正常 rebase。
 
 开工前路径守卫，逐字照抄：
 
@@ -436,7 +473,7 @@ source /Volumes/data/dev/simverse-world/backend/.venv/bin/activate
 python -c "import app; p=app.__file__; assert '.worktrees/' in p, f'WRONG: {p}'; print('OK',p)"
 ```
 
-**基线捕获**：第 0 步先跑全量并存档，收工同命令做差集。**必须在 `c2fff2f` 上重抓** —— 管理系统批次已把基线从 918c5fd 的 `51 failed` 移动到 `50 failed / 2247 passed / 17 errors`。
+**基线捕获**：第 0 步先跑全量并存档，收工同命令做差集。**必须在 lab 合入后的 master 上重抓** —— 基线已经从 918c5fd 的 `51 failed` 移到 c2fff2f 的 `50 failed / 2247 passed / 17 errors`，lab 合入会再动一次。用旧基线做双向差集，比较对象是错的。
 
 ```bash
 python -m pytest tests/ -q -p no:randomly > /tmp/<line>-base.txt 2>&1; tail -3 /tmp/<line>-base.txt
