@@ -514,7 +514,15 @@ async def _close_one(db, poll: Poll) -> None:
     result_note = f"「{poll.question}」投票结束,「{opts[win]['label']}」以 {tally[win]} 票胜出。"
     if effect:
         applied = await _execute_outcome(db, effect, poll_id=poll.id)
-        result_note += "议案已生效。" if applied else "议案生效时遇到问题,已记录。"
+        if applied:
+            result_note += "议案已生效。"
+        elif effect.get("type") == "mayor":
+            # F2: install_mayor 的结票复核不通过 —— 当选人在投票窗口内被撤销了
+            # 公民权（或已不在名册上）。它是零写入的 return False，所以本案只是
+            # 流会，不是「生效时出了问题」。
+            result_note += f"{_VERDICT_NOTE['winner_ineligible']},本案流会。"
+        else:
+            result_note += "议案生效时遇到问题,已记录。"
     await _clerk_announce(db, f"镇务结果:{poll.question}", result_note)
 
 
@@ -523,6 +531,8 @@ _VERDICT_NOTE = {
     "threshold_not_met": "未达本级审批所需的票数门槛",
     "quorum_not_met": "投票人数未达法定出席门槛",
     "no_votes": "无人投票",
+    # F2：install_mayor 结票复核不通过（当选人在投票窗口内失去了公民资格）。
+    "winner_ineligible": "当选人已失去公民资格",
 }
 
 

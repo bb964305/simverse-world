@@ -15,6 +15,7 @@ Gated by ``settings.election_enabled``. Fail-open.
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, UTC
 
@@ -23,6 +24,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import settings
 from app.models.resident import Resident
+from app.models.system_config import SystemConfig
 
 logger = logging.getLogger(__name__)
 
@@ -132,40 +134,76 @@ async def maybe_open_seasonal_election(db):
     return poll
 
 
+async def _record_current_mayor(db, slug: str) -> None:
+    """Stage ``system_config['current_mayor'] = slug`` in the *caller's*
+    transaction — deliberately not ``ConfigService.set()``, which commits
+    (``config_service.py:48``) and would split the install back into two
+    transactions. Value encoding is byte-identical to ConfigService's
+    (``json.dumps``), so ``ConfigService.get`` keeps reading it.
+    """
+    cfg = (await db.execute(
+        select(SystemConfig).where(SystemConfig.key == "current_mayor")
+    )).scalar_one_or_none()
+    if cfg is None:
+        db.add(SystemConfig(key="current_mayor", value=json.dumps(slug),
+                            group="civic", updated_by="election"))
+    else:
+        cfg.value = json.dumps(slug)
+        cfg.updated_by = "election"
+        cfg.updated_at = datetime.now(UTC)
+
+
 async def install_mayor(db, slug: str | None) -> bool:
     """Set ``slug`` as the sitting mayor (clearing any previous one) and record
-    it in system_config. Returns True on success."""
+    it in system_config. Returns True on success.
+
+    F2 收口的两条语义（原实现的两个坑）：
+
+    1. **结票时复核资格**。winner 用 ``Resident.is_civic_voter``（政治权利）
+       解析，不是 ``is_autonomous``（世界人口）——候选名单是开票那一刻的快照，
+       中途可能有人被降级，**快照不构成信任**。不合格立即 ``return False`` 且
+       零写入（三个表示 meta_json / system_config / offices 一个都不碰），由
+       ``civic_service._close_one`` 走流会公告分支。
+    2. **事务化**。原实现先 ``commit()`` 再判 ``winner is None``：winner 解析
+       失败时旧镇长的 ``meta_json`` 已被清掉、``system_config`` 与 offices 却
+       仍指向他，留下三向分歧（触发条件今天就可达：目标 slug 查不到即可）。
+       现在旧镇长清理、新镇长安装、``current_mayor`` 记录在同一次 commit 里。
+
+    清扫面是「全表带 ``meta_json`` 的居民」而不是 ``is_autonomous``——通用约束：
+    凡是清理「已离开集合 S 的居民」的扫描，都不能用 S 本身做 WHERE（逐出档
+    落地时无需回来改这里）。
+    """
     if not slug:
         return False
-    residents = (await db.execute(
-        select(Resident).where(Resident.is_autonomous)
+
+    winner = (await db.execute(
+        select(Resident).where(Resident.slug == slug, Resident.is_civic_voter)
+    )).scalar_one_or_none()
+    if winner is None:
+        logger.warning(
+            "install_mayor refused: %r is not (or is no longer) a civic voter "
+            "— zero writes, the poll fails over to the 流会 branch", slug)
+        return False
+
+    others = (await db.execute(
+        select(Resident).where(Resident.meta_json.isnot(None))
     )).scalars().all()
-    winner = None
-    for r in residents:
+    for r in others:
+        if r.slug == slug:
+            continue
         meta = dict(r.meta_json or {})
-        was = bool(meta.get("mayor"))
-        should = (r.slug == slug)
-        if was != should:
-            if should:
-                meta["mayor"] = True
-                winner = r
-            else:
-                meta.pop("mayor", None)
+        if meta.pop("mayor", None) is not None:
             r.meta_json = meta
             flag_modified(r, "meta_json")
-        elif should:
-            winner = r
+    winner_meta = dict(winner.meta_json or {})
+    if not winner_meta.get("mayor"):
+        winner_meta["mayor"] = True
+        winner.meta_json = winner_meta
+        flag_modified(winner, "meta_json")
+
+    await _record_current_mayor(db, slug)
     await db.commit()
 
-    if winner is None:
-        return False
-    try:
-        from app.services.config_service import ConfigService
-        await ConfigService(db).set(
-            "current_mayor", slug, group="civic", updated_by="election",
-        )
-    except Exception:
-        logger.warning("recording current_mayor failed", exc_info=True)
     # S2-1: dual-write the offices row when the gate is on. Both legacy
     # stores above stay alive — meta_json['mayor'] is the wage multiplier
     # (gotcha #1), system_config the read fallback. Fail-open: an offices
