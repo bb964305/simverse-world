@@ -42,6 +42,18 @@ def credit_allowed(score: float) -> bool:
     return float(score) >= settings.rep_credit_min_score
 
 
+def vote_trust_delta(meta_json: dict | None) -> float:
+    """声誉进入一张选票的**唯一**通道(F1 第 2 项)。
+
+    候选集选取已与声誉解耦(``election_service.open_election``),名声只在
+    ``civic_service._npc_choice`` 的打分里当一项权重。闸门关时返回 0.0,加到
+    分数上是逐字节无影响。
+    """
+    if not settings.rep_enabled:
+        return 0.0
+    return settings.rep_vote_trust_weight * score_from_meta(meta_json)
+
+
 #: 八卦语气对关系 affinity 的权重。本线不改 config.py（批次规则 §1-6），先落成
 #: 模块常量，``getattr`` 间接读使收口时「加一行 rep_gossip_affinity_weight」成为
 #: 纯配置改动、代码零 diff。取 3.0 的依据：在冻结的 base_tone=-0.3 下，符号翻转
