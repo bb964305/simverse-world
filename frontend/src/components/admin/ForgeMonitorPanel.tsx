@@ -48,7 +48,7 @@ function StageBadge({ stage }: { stage: string }) {
   )
 }
 
-function ModeBadge({ mode }: { mode: 'quick' | 'deep' }) {
+function ModeBadge({ mode }: { mode: string }) {
   return (
     <span style={{
       fontSize: 11,
@@ -68,6 +68,13 @@ function formatElapsed(seconds: number): string {
   const m = Math.floor(seconds / 60)
   const s = seconds % 60
   return `${m}m ${s}s`
+}
+
+function elapsedSince(iso: string): string {
+  // 后端不返回 elapsed_seconds,用 created_at 现算。naive-UTC 要走 parseUTC。
+  const started = parseUTC(iso).getTime()
+  if (Number.isNaN(started)) return '—'
+  return formatElapsed(Math.max(0, Math.floor((Date.now() - started) / 1000)))
 }
 
 function formatDateTime(iso: string): string {
@@ -150,7 +157,7 @@ function ActiveSessions({ token }: ActiveSessionsProps) {
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
       {sessions.map((s) => (
         <div
-          key={s.forge_id}
+          key={s.id}
           style={{
             background: 'var(--bg-card)',
             border: '1px solid var(--border)',
@@ -169,8 +176,8 @@ function ActiveSessions({ token }: ActiveSessionsProps) {
             <StageBadge stage={s.current_stage} />
           </div>
           <div style={{ display: 'flex', gap: 12, fontSize: 12, color: 'var(--text-muted)' }}>
-            <span>耗时 {formatElapsed(s.elapsed_seconds)}</span>
-            <span style={{ marginLeft: 'auto', fontSize: 10, opacity: 0.7 }}>{s.forge_id.slice(0, 8)}</span>
+            <span>耗时 {elapsedSince(s.created_at)}</span>
+            <span style={{ marginLeft: 'auto', fontSize: 10, opacity: 0.7 }}>{s.id.slice(0, 8)}</span>
           </div>
         </div>
       ))}
@@ -206,8 +213,8 @@ function HistoryTable({ token }: HistoryTableProps) {
     setError(null)
     try {
       const resp = await getAdminForgeHistory(token, {
-        page,
-        per_page: perPage,
+        offset: (page - 1) * perPage,
+        limit: perPage,
         status: statusFilter || undefined,
       })
       setItems(resp.items)
@@ -272,7 +279,7 @@ function HistoryTable({ token }: HistoryTableProps) {
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
           <thead>
             <tr style={{ borderBottom: '1px solid var(--border)' }}>
-              {['角色名', '模式', '状态', '最终阶段', '开始时间', '结束时间', '居民 ID'].map((h) => (
+              {['角色名', '模式', '状态', '最终阶段', '开始时间', '更新时间'].map((h) => (
                 <th
                   key={h}
                   style={{
@@ -292,33 +299,30 @@ function HistoryTable({ token }: HistoryTableProps) {
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={7} style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)' }}>
+                <td colSpan={6} style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)' }}>
                   加载中...
                 </td>
               </tr>
             ) : items.length === 0 ? (
               <tr>
-                <td colSpan={7} style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)' }}>
+                <td colSpan={6} style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)' }}>
                   暂无记录
                 </td>
               </tr>
             ) : items.map((item) => (
               <tr
-                key={item.forge_id}
+                key={item.id}
                 style={{ borderBottom: '1px solid var(--border)' }}
               >
                 <td style={{ padding: '10px 12px', fontWeight: 600 }}>{item.character_name}</td>
                 <td style={{ padding: '10px 12px' }}><ModeBadge mode={item.mode} /></td>
                 <td style={{ padding: '10px 12px' }}><StageBadge stage={item.status} /></td>
-                <td style={{ padding: '10px 12px' }}><StageBadge stage={item.stage} /></td>
+                <td style={{ padding: '10px 12px' }}><StageBadge stage={item.current_stage} /></td>
                 <td style={{ padding: '10px 12px', color: 'var(--text-muted)', fontSize: 12, whiteSpace: 'nowrap' }}>
-                  {formatDateTime(item.started_at)}
+                  {formatDateTime(item.created_at)}
                 </td>
                 <td style={{ padding: '10px 12px', color: 'var(--text-muted)', fontSize: 12, whiteSpace: 'nowrap' }}>
-                  {item.finished_at ? formatDateTime(item.finished_at) : '—'}
-                </td>
-                <td style={{ padding: '10px 12px', color: 'var(--text-muted)', fontSize: 11, fontFamily: 'monospace' }}>
-                  {item.resident_id ? item.resident_id.slice(0, 8) + '...' : '—'}
+                  {formatDateTime(item.updated_at)}
                 </td>
               </tr>
             ))}
