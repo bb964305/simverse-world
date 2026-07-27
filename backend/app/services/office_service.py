@@ -12,6 +12,8 @@ coin_service atomicity pattern — never SELECT-then-write):
 - ``term_check``: per-row guard UPDATE ``WHERE id = :id AND term_ends_at <=
   :now`` so a concurrent re-appoint between SELECT and UPDATE is never
   clobbered.
+  A vacate that actually landed then calls ``trigger_backfill`` — without it
+  the office stays empty forever (F3 断链).
 
 Term semantics: ``term_days`` are WORLD days. All conversion goes through
 ``app/world_clock.py`` (the single time-scale entry point) — never a bare
@@ -21,6 +23,8 @@ Mayor special-case: vacating the mayor office also clears the two legacy
 stores — ``meta_json['mayor']`` (the wage-bonus multiplier, gotcha #1) and
 ``system_config['current_mayor']`` (the read-path fallback) — so the three
 representations never diverge after a term expiry. Fail-open throughout.
+Neither legacy-store query filters by resident_type / is_autonomous: the row
+that must be cleaned is precisely the one that may have just left that set.
 """
 from __future__ import annotations
 
@@ -122,9 +126,28 @@ class OfficeService:
         )
         return True
 
-    async def vacate(self, office_key: str) -> bool:
+    async def vacate(self, office_key: str, *, audit: bool = False) -> bool:
         """Clear the office holder + term end. Guard UPDATE — returns True
-        only when an actual holder was cleared (idempotent no-op otherwise)."""
+        only when an actual holder was cleared (idempotent no-op otherwise).
+
+        ``audit=True`` additionally files a read-only term audit for the
+        departing holder (F2's revocation path uses it; default False keeps
+        every existing caller byte-identical). F2's ``revoke_citizenship``
+        does NOT call this method at all — it hand-rolls its own
+        ``update(Office)`` because ``vacate`` commits internally, which does
+        not compose with F2's own transaction. ``audit=True`` is for OTHER
+        callers only (term_check uses its own inline copy of this same
+        sequence, not this method).
+
+        The pre-read is NOT a guard (the UPDATE's rowcount still decides): it
+        captures who is leaving and when the term began, because both the
+        legacy-store cleanup and the audit are keyed on that identity.
+        """
+        prior_row = (await self.db.execute(
+            select(Office).where(Office.office_key == office_key)
+        )).scalar_one_or_none()
+        prior_holder = prior_row.holder_slug if prior_row is not None else None
+        prior_started = prior_row.term_started_at if prior_row is not None else None
         res = await self.db.execute(
             update(Office)
             .where(Office.office_key == office_key, Office.holder_slug.isnot(None))
@@ -134,19 +157,32 @@ class OfficeService:
         )
         vacated = (res.rowcount or 0) > 0
         if vacated and office_key == "mayor":
-            await self._clear_mayor_legacy_stores()
+            await self._clear_mayor_legacy_stores(holder_slug=prior_holder)
         await self.db.commit()
         if vacated:
             await self._emit_office_changed(
                 "office_vacated", office_key, holder_slug=None,
             )
+            if audit:
+                from app.tasks import office_audit
+                await office_audit.record_term_audit(
+                    self.db, office_key=office_key, holder_slug=prior_holder,
+                    term_started_at=prior_started,
+                )
         return vacated
 
     async def term_check(self, *, now: datetime | None = None) -> int:
-        """Nightly: vacate every office whose term_ends_at has passed.
-        Returns the number of offices vacated. ``now`` is injectable for
-        frozen-clock tests; the default reads the world clock's real 'now'
-        (term_ends_at is stored in real UTC, converted at appoint time)."""
+        """Nightly: vacate every office whose term_ends_at has passed, then
+        hand each freed seat to :func:`trigger_backfill`.
+
+        Returns the number of offices actually vacated. ``now`` is injectable
+        for frozen-clock tests; the default reads the world clock's real 'now'
+        (term_ends_at is stored in real UTC, converted at appoint time).
+
+        The backfill call is the F3 断链 fix: before it, an expired term left
+        the office empty AND cleared both current_mayor fallbacks, so nothing
+        in the world could ever seat a successor.
+        """
         if now is None:
             from app import world_clock
             now = world_clock.now_real().astimezone(UTC)
@@ -157,12 +193,24 @@ class OfficeService:
                 Office.term_ends_at <= now,
             )
         )).scalars().all()
+        # Extracted into plain tuples immediately — the loop below must never
+        # touch these ORM objects again. trigger_backfill's fail-open path
+        # (_rollback_quietly) calls db.rollback(), which — unlike commit()
+        # under expire_on_commit=False — unconditionally expires the WHOLE
+        # identity map, including whichever `due` rows this loop hasn't
+        # reached yet. A later `office.office_key` read on an expired
+        # AsyncSession-loaded instance triggers an implicit lazy-refresh
+        # outside of any greenlet_spawn context and raises MissingGreenlet
+        # (fix round 1: reproduced with 2 due offices where the first's
+        # backfill fails — the second's attribute read crashed term_check
+        # outright, taking down the whole nightly cron office segment).
+        due_rows = [(o.id, o.office_key, o.holder_slug, o.term_started_at) for o in due]
         n = 0
-        for office in due:
+        for office_id, office_key, prior_holder, prior_started in due_rows:
             res = await self.db.execute(
                 update(Office)
                 .where(
-                    Office.id == office.id,
+                    Office.id == office_id,
                     Office.holder_slug.isnot(None),
                     Office.term_ends_at <= now,
                 )
@@ -172,12 +220,36 @@ class OfficeService:
             )
             if (res.rowcount or 0) == 0:
                 continue  # re-appointed concurrently — not expired anymore
-            if office.office_key == "mayor":
-                await self._clear_mayor_legacy_stores()
+            if office_key == "mayor":
+                await self._clear_mayor_legacy_stores(holder_slug=prior_holder)
             await self.db.commit()
             n += 1
             await self._emit_office_changed(
-                "office_vacated", office.office_key, holder_slug=None,
+                "office_vacated", office_key, holder_slug=None,
+            )
+            # F3: 卸任财政审计 — read-only, fail-open, and chronologically
+            # before the backfill (it summarises the term that just ended).
+            # It runs AFTER the vacate's own commit() above, so a failure
+            # here (record_term_audit's own _rollback_quietly) only ever
+            # rolls back its OWN not-yet-committed work — the vacate and the
+            # legacy-store cleanup are already durable and cannot be undone
+            # by it. due_rows was extracted into plain tuples before this
+            # loop started specifically so that a rollback-triggered identity
+            # map expiry here can never strand a later iteration's ORM read
+            # (see the due_rows comment above) — office_key/prior_holder/
+            # prior_started are plain values, and trigger_backfill below only
+            # issues fresh SELECTs, never touching a previously-loaded row.
+            from app.tasks import office_audit
+            await office_audit.record_term_audit(
+                self.db, office_key=office_key, holder_slug=prior_holder,
+                term_started_at=prior_started, term_ended_at=now,
+            )
+            # F3: the second half. trigger_backfill is fail-open internally,
+            # so a broken election can never turn a completed vacate into an
+            # exception. It runs AFTER the legacy stores were cleared above —
+            # that ordering is what makes the vacancy visible to it.
+            await trigger_backfill(
+                self.db, office_key, reason=REASON_TERM_EXPIRED,
             )
         return n
 
@@ -208,22 +280,41 @@ class OfficeService:
 
     # ── internals ──────────────────────────────────────────────────────
 
-    async def _clear_mayor_legacy_stores(self) -> None:
+    async def _clear_mayor_legacy_stores(
+        self, *, holder_slug: str | None = None,
+    ) -> None:
         """Keep the two legacy mayor stores in step with an offices-side
-        vacate: pop meta_json['mayor'] everywhere (the wage multiplier —
-        gotcha #1) and null system_config['current_mayor'] (the read
-        fallback). Flushed into the caller's transaction; fail-open."""
+        vacate: pop meta_json['mayor'] (the wage multiplier — gotcha #1) and
+        null system_config['current_mayor'] (the read fallback). Flushed into
+        the caller's transaction; fail-open.
+
+        NEITHER query may carry a membership predicate. The pre-F3 version
+        scanned ``WHERE Resident.is_autonomous``, i.e. it selected the set the
+        departing holder may have just left (demoted / exiled / a player
+        avatar) — exactly the row that must be cleaned. Two disjoint reads
+        replace it:
+
+        1. targeted — ``WHERE slug = :holder_slug``, identity not membership;
+        2. residual — ``WHERE meta_json IS NOT NULL AND slug <> :holder_slug``,
+           catching stale flags any other path left behind.
+        """
         try:
             from sqlalchemy.orm.attributes import flag_modified
             from app.models.resident import Resident
 
-            residents = (await self.db.execute(
-                select(Resident).where(
-                    Resident.is_autonomous,
-                    Resident.meta_json.isnot(None),
-                )
-            )).scalars().all()
-            for r in residents:
+            targets: list = []
+            if holder_slug:
+                leaving = (await self.db.execute(
+                    select(Resident).where(Resident.slug == holder_slug)
+                )).scalar_one_or_none()
+                if leaving is not None:
+                    targets.append(leaving)
+            residual_stmt = select(Resident).where(Resident.meta_json.isnot(None))
+            if holder_slug:
+                residual_stmt = residual_stmt.where(Resident.slug != holder_slug)
+            targets.extend((await self.db.execute(residual_stmt)).scalars().all())
+
+            for r in targets:
                 meta = dict(r.meta_json or {})
                 if meta.get("mayor"):
                     meta.pop("mayor", None)
@@ -269,3 +360,136 @@ class OfficeService:
             await broadcast_world_changed(payload)
         except Exception:
             logger.warning("office_changed broadcast failed", exc_info=True)
+
+
+# ── F3: the missing second half of a vacancy ───────────────────────────
+#
+# term_check() only ever vacated. current_mayor()'s two fallbacks were cleared
+# by the same pass, so the world settled into "no mayor and nobody arriving".
+# trigger_backfill is that missing link, and it is also the single entry point
+# F2's revocation calls (KICKOFF 2026-07-27 §5 与 F2 的接口约定).
+
+REASON_TERM_EXPIRED = "term_expired"
+REASON_CIVIC_REVOCATION = "civic_revocation"
+REASON_MANUAL = "manual"
+
+
+async def _rollback_quietly(db: AsyncSession) -> None:
+    """Roll back after a swallowed failure so the caller's session stays
+    usable. Never raises — a fail-open path may not explode on its way out."""
+    try:
+        await db.rollback()
+    except Exception:
+        logger.warning("rollback after a swallowed office failure also failed",
+                       exc_info=True)
+
+
+async def _fill_strategy(db: AsyncSession, office_key: str) -> str:
+    """The office's refill procedure.
+
+    Falls back to OFFICE_DEFS when the row is missing: with
+    ``polis_office_enabled`` off the migration-046 seed may never have run in
+    this world, and "no row" must not be read as "not an elected office".
+    """
+    try:
+        row = (await db.execute(
+            select(Office.fill_strategy).where(Office.office_key == office_key)
+        )).scalar_one_or_none()
+    except Exception:
+        logger.warning("offices fill_strategy lookup failed: %s", office_key,
+                       exc_info=True)
+        row = None
+    if row:
+        return str(row)
+    return str(OFFICE_DEFS.get(office_key, {}).get("fill_strategy") or "")
+
+
+async def _effective_holder(db: AsyncSession, office_key: str) -> str | None:
+    """Who effectively holds ``office_key`` right now, under EITHER gate state.
+
+    For the mayor this must NOT be a raw ``offices`` read: correctness may not
+    depend on ``polis_office_enabled``. With the gate off the offices row can
+    be absent entirely, or carry a stale migration-046 holder_slug that no
+    business path honours. ``election_service.current_mayor`` is the one read
+    that already encodes both worlds (offices when the gate is on, then the
+    ``system_config['current_mayor']`` fallback).
+    """
+    if office_key == "mayor":
+        from app.services import election_service
+        return await election_service.current_mayor(db)
+    return await OfficeService(db).get_holder(office_key)
+
+
+async def trigger_backfill(
+    db: AsyncSession, office_key: str, *, reason: str,
+) -> str | None:
+    """Refill a now-vacant office. Returns the opened Poll.id, else None.
+
+    None means: not an elected office / still occupied / an election poll is
+    already open / election|civic gates off / not enough candidates / an
+    internal failure (fail-open — a broken election must never break the
+    vacate that called us).
+
+    CALL ORDER (F2 contract): call this only after both legacy mayor stores
+    (``meta_json['mayor']`` and ``system_config['current_mayor']``) have been
+    cleared. ``_effective_holder`` reads the fallback on purpose, so calling
+    too early reports "still occupied" and silently skips the backfill.
+    """
+    try:
+        if not office_key:
+            return None
+        if await _fill_strategy(db, office_key) != "election":
+            return None
+        from app.config import settings
+        if not (settings.election_enabled and settings.civic_polls_enabled):
+            return None
+        if await _effective_holder(db, office_key):
+            return None
+
+        from app.models.season import Poll
+        from app.services import election_service
+        existing = (await db.execute(
+            select(Poll).where(
+                Poll.status == "open",
+                Poll.question.like(f"{election_service.ELECTION_TAG}%"),
+            )
+        )).scalars().first()
+        if existing is not None:
+            logger.info("office backfill skipped (%s/%s): election already open",
+                        office_key, reason)
+            return None
+
+        poll = await election_service.open_election(db)
+        if poll is None:
+            logger.info("office backfill produced no poll (%s/%s)",
+                        office_key, reason)
+            return None
+        try:
+            from app.services.config_service import ConfigService
+            await ConfigService(db).set(
+                "election_last_opened",
+                datetime.now(UTC).date().isoformat(),
+                group="civic", updated_by=f"office_backfill:{reason}",
+            )
+        except Exception:
+            logger.warning("stamping election_last_opened failed", exc_info=True)
+            # Same reason as the outer handler: ConfigService.set writes and
+            # commits, so a failure here can leave the session needing a
+            # rollback. The poll itself is already committed by propose().
+            await _rollback_quietly(db)
+        logger.info("office backfill opened election %s for %s (%s)",
+                    poll.id, office_key, reason)
+        return poll.id
+    except Exception:
+        logger.warning("office backfill failed (%s/%s)", office_key, reason,
+                       exc_info=True)
+        # Fail-open has to cover the SESSION, not just the return value.
+        # open_election → civic_service.propose does db.add + db.commit, so the
+        # exception may well come out of a flush/commit (IntegrityError, a
+        # dropped connection, a column-width overflow). A session left in the
+        # needs-rollback state makes every LATER statement raise
+        # PendingRollbackError — i.e. returning None would merely move the
+        # explosion one statement down (term_check's next due office, or F2's
+        # 改档位 → 写历史行 → 广播 after vacate returned True).
+        await _rollback_quietly(db)
+        return None
