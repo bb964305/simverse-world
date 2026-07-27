@@ -291,32 +291,27 @@ export async function getAdminResidentSpriteCandidate(
   return response.blob()
 }
 
+// 与后端 ForgeSessionListItem 逐字对应(backend/app/schemas/admin.py:145)。
+// 这里曾经自造 forge_id / started_at / elapsed_seconds 三个后端不存在的字段,
+// 而 apiFetch 只做裸 resp.json() 不做映射,于是活跃会话一出现就崩渲染。
 export interface AdminForgeSession {
-  forge_id: string
+  id: string
+  user_id: string
   character_name: string
-  mode: 'quick' | 'deep'
-  current_stage: string
+  mode: string
   status: string
-  started_at: string
-  elapsed_seconds: number
+  current_stage: string
+  created_at: string
+  updated_at: string
 }
 
-export interface AdminForgeHistoryItem {
-  forge_id: string
-  character_name: string
-  mode: 'quick' | 'deep'
-  status: string
-  stage: string
-  started_at: string
-  finished_at: string | null
-  resident_id: string | null
-}
+export type AdminForgeHistoryItem = AdminForgeSession
 
 export interface AdminForgeHistoryResponse {
   items: AdminForgeHistoryItem[]
   total: number
-  page: number
-  per_page: number
+  offset: number
+  limit: number
 }
 
 export function getAdminForgeActive(token: string): Promise<AdminForgeSession[]> {
@@ -327,11 +322,11 @@ export function getAdminForgeActive(token: string): Promise<AdminForgeSession[]>
 
 export function getAdminForgeHistory(
   token: string,
-  params: { page?: number; per_page?: number; status?: string },
+  params: { offset?: number; limit?: number; status?: string },
 ): Promise<AdminForgeHistoryResponse> {
   const qs = new URLSearchParams()
-  if (params.page != null) qs.set('page', String(params.page))
-  if (params.per_page != null) qs.set('per_page', String(params.per_page))
+  if (params.offset != null) qs.set('offset', String(params.offset))
+  if (params.limit != null) qs.set('limit', String(params.limit))
   if (params.status) qs.set('status', params.status)
   const query = qs.toString() ? `?${qs.toString()}` : ''
   return apiFetch(`/admin/forge${query}`, {

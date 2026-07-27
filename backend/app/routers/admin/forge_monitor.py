@@ -9,6 +9,7 @@ from app.http import get_client
 from app.database import get_db
 from app.models.user import User
 from app.models.forge_session import ForgeSession
+from app.forge.pipeline import TERMINAL_STATUSES
 from app.routers.admin.middleware import require_admin
 from app.schemas.admin import ForgeSessionListItem, ForgeSessionDetail, ServiceHealthItem
 
@@ -88,11 +89,12 @@ async def list_active_forge_sessions(
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """List currently active (non-completed, non-error) forge sessions."""
+    """List currently in-flight forge sessions (not yet done/error)."""
     result = await db.execute(
         select(ForgeSession)
-        .where(ForgeSession.status.notin_(["completed", "error"]))
+        .where(ForgeSession.status.notin_(TERMINAL_STATUSES))
         .order_by(ForgeSession.updated_at.desc())
+        .limit(200)
     )
     sessions = result.scalars().all()
     return [ForgeSessionListItem.model_validate(s, from_attributes=True) for s in sessions]

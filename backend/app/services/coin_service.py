@@ -10,6 +10,7 @@ from app.models.user import User
 from app.models.transaction import Transaction
 from app.models.coin_hold import CoinHold
 from app.models.resident_treasury import ResidentTreasury
+from app.services.system_users import NON_USER_CREATOR_IDS
 
 MAX_TRANSFER_ATTEMPTS = 3
 
@@ -511,12 +512,19 @@ async def reward(db: AsyncSession, user_id: str, amount: int, reason: str) -> in
     return row.scalar_one_or_none() or 0
 
 
-async def reward_creator_passive(db: AsyncSession, creator_id: str, resident_slug: str) -> dict | None:
+async def reward_creator_passive(db: AsyncSession, creator_id: str | None, resident_slug: str) -> dict | None:
     """
     Award 1 SC to creator when their resident gets a conversation.
-    Returns notification payload if reward given, None if creator is 'system' or not found.
+    Returns notification payload if reward given, None if the creator is one of
+    the non-human sentinels (or missing).
+
+    NON_USER_CREATOR_IDS covers both spellings: the admin console's "system"
+    and the seed cast's SYSTEM_CREATOR_ID UUID. Only the former used to be
+    checked, so every built-in NPC conversation minted 1 SC into the seed
+    System account and inflated the admin economy panel's total_issued.
+    creator_id is nullable (account deletion orphans residents).
     """
-    if creator_id == "system":
+    if creator_id is None or creator_id in NON_USER_CREATOR_IDS:
         return None
 
     # Realism P0-5d: reuse the atomic UPDATE reward() instead of the old

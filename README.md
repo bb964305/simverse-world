@@ -255,6 +255,7 @@ npm run dev
 - 打开 http://localhost:5173 应看到游戏界面
 - 访问 http://localhost:8000/health 应返回 `{"status": "ok"}`
 - 访问 http://localhost:8000/docs 查看 API 文档
+- 管理后台 `/admin` 需要 `is_admin` 账号——第一个管理员怎么来见 [docs/ADMIN_BOOTSTRAP.md](docs/ADMIN_BOOTSTRAP.md)
 
 ---
 
@@ -317,7 +318,7 @@ docker compose up -d --build
 
 这会启动：
 - **PostgreSQL 16** — 数据库（仅监听 127.0.0.1:5432）
-- **API 服务** — FastAPI 应用（监听 0.0.0.0:8100）
+- **API 服务** — FastAPI 应用（仅监听 127.0.0.1:8100）
 
 验证：
 
@@ -325,6 +326,10 @@ docker compose up -d --build
 curl http://localhost:8100/health
 # 应返回 {"status": "ok"}
 ```
+
+API 现在只监听回环地址，外部无法直接访问 8100 端口；要让 Step 3 里的
+`https://api.your-domain.com` 生效，需要额外在宿主机上配置 Cloudflare Tunnel
+或反向代理（Nginx/Caddy），把公网请求转发到 127.0.0.1:8100。
 
 ### Step 3：构建并部署前端
 

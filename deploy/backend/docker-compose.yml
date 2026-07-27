@@ -57,7 +57,11 @@ services:
       dockerfile: ../deploy/Dockerfile
     restart: unless-stopped
     ports:
-      - "0.0.0.0:8100:8000"
+      # loopback only — cloudflared runs on the host and reaches the API here.
+      # Publishing on 0.0.0.0 exposed all 68 /admin endpoints and /metrics
+      # directly, and made rate_limit.py's trusted CF-Connecting-IP header
+      # attacker-controlled for anyone hitting the port directly.
+      - "127.0.0.1:8100:8000"
     depends_on:
       db:
         condition: service_healthy
