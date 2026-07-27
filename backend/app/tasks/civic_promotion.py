@@ -233,6 +233,39 @@ def select_promotions(
     return tuple(sorted(picked))
 
 
+def select_promotions_for_write(
+    snap: PromotionSnapshot, *, min_world_days: float, min_peers: int,
+    min_familiarity: float, seasoning_days: float,
+) -> tuple[str, ...]:
+    """夜间任务写路径的**唯一**入口——真正调用
+    :func:`app.services.civic_membership.grant_citizenship_batch` 之前，候选
+    集必须经过这里取得。
+
+    结构性收口（Task 6 评审硬要求，逐字引用）：
+
+        ``select_promotions`` is only a DECISION function; the actual DB
+        write happens when Task 12 calls
+        ``civic_membership.grant_citizenship_batch``. The gate therefore
+        blocks "calling ``select_promotions(mode=on)``", NOT "any write".
+        Nothing structurally forces Task 12 through the gate at all. FIX
+        SHAPE: give Task 12 a dedicated entry point with ``mode='on'``
+        hardcoded (e.g. ``select_promotions_for_write(...)``) rather than
+        letting it reuse the shadow-defaulting signature.
+
+    ``select_promotions`` 默认 ``mode=MODE_SHADOW``（观测态，任何门槛值都放
+    行）——那个默认本身就是漏洞：写路径与观测路径共用同一个签名时，调用方
+    只要忘记显式传 ``mode="on"``，占位门槛就会在 off/shadow 的默认放行下
+    悄悄流进 :func:`app.services.civic_membership.grant_citizenship_batch`。
+    本函数不给调用方这个选择——``mode`` 在这里硬编码成 ``MODE_ON`` 且**不作
+    为参数暴露**，调用方无法「忘记传」。
+    """
+    return select_promotions(
+        snap, min_world_days=min_world_days, min_peers=min_peers,
+        min_familiarity=min_familiarity, seasoning_days=seasoning_days,
+        mode=MODE_ON,
+    )
+
+
 def promotion_evidence(
     snap: PromotionSnapshot, resident_id: str, *, min_familiarity: float,
     seasoning_days: float,
@@ -363,3 +396,199 @@ async def build_snapshot(db) -> PromotionSnapshot:
         facts=tuple(facts),
         familiarity=tuple((a, b, float(f or 0.0)) for a, b, f in edges),
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 三态 pass
+# ═══════════════════════════════════════════════════════════════════════
+#
+# **收口接线位置（本批不改 nightly_cron.py，位置在这里写死）**：
+#
+#     close_due_polls (nightly_cron.py:215)
+#         → seed_civic_agenda (:226)
+#         → maybe_open_seasonal_election (:237)
+#         → 【civic_promotion 接在这里，≈:245】
+#         → run_npc_voting (:247)
+#         → office term_check (:263)
+#
+# 理由是语义决策：当晚晋升、当晚补投，新公民参与的第一次关票分子分母同源。
+# 接在末尾并不能消除危害，只把它推迟一晚——每晚 close(215) 先于 vote(247)，
+# 夜 N 末尾晋升的人在夜 N+1 关票时仍然是「进了分母、一票未投」。收口接线时
+# 用与 nightly_cron.py:142-145（opinion drift 顺序硬约束）同样的注释形式锚住
+# 位置，对应回归测试按 **N+1 晚** 断言。
+
+PROMOTION_ACTOR = "civic_promotion"
+PROMOTION_REASON_CODE = "threshold_met"
+PROMOTION_REASON = "满足公民权晋升门槛（在镇世界日 + 与锚定公民的熟识度）"
+
+#: 每次运行的摘要落点。shadow 态不产生历史行，探针只能从这里读候选名单。
+#: ``SystemConfig.value`` 是 ``String(2000)``，所以名单截断到 50 个 slug。
+RUN_SUMMARY_KEY = "civic_promotion_last_run"
+_SUMMARY_MAX_SLUGS = 50
+
+
+async def _record_run(db, result: dict) -> None:
+    """把本次运行摘要写进 ``system_config``（fail-open）。
+
+    这是 shadow 态**唯一**的一次写——政治层（``residents`` /
+    ``civic_standing_history``）零写入。
+    """
+    try:
+        from app.services.config_service import ConfigService
+
+        await ConfigService(db).set(
+            RUN_SUMMARY_KEY,
+            {
+                "mode": result.get("mode"),
+                "world_at": result.get("world_at"),
+                "citizens_before": result.get("citizens_before"),
+                "candidates": list(result.get("candidates") or [])[:_SUMMARY_MAX_SLUGS],
+                "candidate_count": len(result.get("candidates") or []),
+                "promoted": result.get("promoted", 0),
+                "refused": result.get("refused"),
+            },
+            group="civic", updated_by=PROMOTION_ACTOR,
+        )
+    except Exception:
+        logger.warning("recording civic_promotion run summary failed",
+                       exc_info=True)
+
+
+async def run_promotion_pass(db) -> dict:
+    """一夜一次的晋升 pass。返回运行摘要（也是探针与测试的读数来源）。
+
+    三态（``CIVIC_PROMOTION_MODE``）：
+
+    - ``off``（默认）：零读零写立即返回，行为与本批开工前逐字节一致；
+    - ``shadow``：完整候选计算 + **全部防呆检查**，名单与证据进日志与运行
+      摘要，**对 residents / civic_standing_history 零写入**。生产至少观察 3 个
+      夜间周期，名单规模与标定预期一致才进开闸。首夜爆炸半径不可预演，
+      shadow 是带全部防呆的实跑演练 + 名单落盘；
+    - ``on``：真正执行 :func:`app.services.civic_membership.grant_citizenship_batch`。
+
+    数值闸门的顺序：**先用完整候选集判熔断，再按单夜上限确定性截断**。反过来
+    熔断永远打不响（截断后的集合恒 ≤ 上限）。
+
+    熔断阈值是 ``max(绝对下限, 公民数 × 比例)``，两项缺一不可：只有比例项时，
+    小镇规模下熔断恒响（11 位公民 × 0.20 ≈ 2.2），单夜上限默认 5 永远够不着，
+    闸门 1 变成死代码；只有下限时，世界长大后熔断就不再随规模缩放。
+
+    写路径的结构性收口（Task 6 评审硬要求）：``mode == MODE_ON`` 时，候选集
+    **只能**经 :func:`select_promotions_for_write` 取得——该函数把 mode="on"
+    硬编码、不对外暴露 mode 形参，调用方没有「忘记传 mode='on'」这个选项，
+    也就没有绕过 :func:`assert_thresholds_calibrated` 直接把占位门槛写进库
+    的路。``off``/``shadow`` 两态永远不会触达这个函数：``off`` 在此之前已经
+    return，``shadow`` 分支用的是 :func:`select_promotions` 的默认（观测态）
+    签名。
+    """
+    from app.services.civic_membership import (
+        auto_demotion_enabled, grant_citizenship_batch, min_familiarity,
+        min_peers, min_world_days, peer_seasoning_world_days,
+        promotion_breaker_fraction, promotion_breaker_min_abs,
+        promotion_max_per_run, promotion_mode,
+    )
+
+    mode = promotion_mode()
+    if mode not in (MODE_OFF, MODE_SHADOW, MODE_ON):
+        logger.error("unknown CIVIC_PROMOTION_MODE=%r — 按 off 处理", mode)
+        mode = MODE_OFF
+    if mode == MODE_OFF:
+        return {"mode": MODE_OFF, "world_at": None, "citizens_before": None,
+                "candidates": [], "evidence": {}, "promoted": 0,
+                "demoted": 0, "refused": None}
+
+    if auto_demotion_enabled():
+        raise NotImplementedError(
+            "CIVIC_AUTO_DEMOTION_ENABLED=true，但自动下滑降级 v1 未实现。开启"
+            "前必须先落地滞后三件套：滞后区间 Δ ≥ 0.10（严格大于单次最大相关"
+            "增量 0.05）、最短任期 ≥ 12 世界日（= 一张 poll 的生命周期）、冷却"
+            "期 ≥ 12 世界日。缺一不可——门槛②读的 familiarity 有周衰减，没有"
+            "滞后就是让公民权跟着社交波动飘。"
+        )
+
+    seasoning = peer_seasoning_world_days()
+    threshold = min_familiarity()
+    snap = await build_snapshot(db)
+
+    # 写路径的结构性收口：mode == MODE_ON 的候选集只能经
+    # select_promotions_for_write 取得（见本函数 docstring）；shadow 用
+    # select_promotions() 的默认（观测态）签名——观测态必须能在占位门槛上跑，
+    # 这里不能触发标定闸门。判定本身与 mode 无关，同一组入参在两态下选出
+    # 同一批人，唯一的区别是「是否会在占位门槛上 raise」。
+    if mode == MODE_ON:
+        candidate_ids = select_promotions_for_write(
+            snap, min_world_days=min_world_days(), min_peers=min_peers(),
+            min_familiarity=threshold, seasoning_days=seasoning,
+        )
+    else:
+        candidate_ids = select_promotions(
+            snap, min_world_days=min_world_days(), min_peers=min_peers(),
+            min_familiarity=threshold, seasoning_days=seasoning,
+        )
+
+    slug_by_id = {f.resident_id: f.slug for f in snap.facts}
+    citizens_before = sum(1 for f in snap.facts
+                          if f.resident_type in CIVIC_VOTER_TYPES)
+    evidence_by_id = {
+        i: promotion_evidence(snap, i, min_familiarity=threshold,
+                              seasoning_days=seasoning)
+        for i in candidate_ids
+    }
+    result = {
+        "mode": mode,
+        "world_at": snap.now_world.isoformat(),
+        "citizens_before": citizens_before,
+        "candidates": [slug_by_id.get(i, i) for i in candidate_ids],
+        "evidence": {slug_by_id.get(i, i): evidence_by_id[i]
+                    for i in candidate_ids},
+        "promoted": 0,
+        "demoted": 0,          # 夜间任务只升，永不自动降
+        "refused": None,
+    }
+
+    # 闸门 2（熔断）：用**完整**候选集判，整批拒绝、不截断。
+    # 阈值 = max(绝对下限, 公民数 × 比例)——绝对下限保证小批量能放行（否则
+    # 4 位内置公民 × 0.20 = 0.8，一个候选都过不去），比例保证世界长大后熔断
+    # 仍随规模缩放。
+    breaker = promotion_breaker_fraction()
+    breaker_min_abs = promotion_breaker_min_abs()
+    breaker_limit = max(float(breaker_min_abs), citizens_before * breaker)
+    if candidate_ids and len(candidate_ids) > breaker_limit:
+        logger.error(
+            "civic_promotion circuit breaker: %d candidate(s) > limit %.2f = "
+            "max(min_abs=%d, %d citizens × %.2f) — 整批拒绝（截断会掩盖"
+            "「阈值写反」这类全量误判）。名单：%s",
+            len(candidate_ids), breaker_limit, breaker_min_abs,
+            citizens_before, breaker, result["candidates"])
+        result["refused"] = "circuit_breaker"
+        await _record_run(db, result)
+        return result
+
+    # 闸门 1（单夜上限）：确定性截断（candidate_ids 已按 id 排序），余量下夜再来
+    cap = promotion_max_per_run()
+    picked = candidate_ids[:cap]
+    if len(picked) < len(candidate_ids):
+        logger.warning(
+            "civic_promotion per-run cap: promoting %d of %d candidate(s) "
+            "tonight (CIVIC_PROMOTION_MAX_PER_RUN=%d); 余量下夜再来",
+            len(picked), len(candidate_ids), cap)
+
+    if mode == MODE_SHADOW:
+        logger.info(
+            "civic_promotion SHADOW: %d candidate(s) would be promoted "
+            "tonight — %s | evidence=%s",
+            len(picked), [slug_by_id.get(i, i) for i in picked],
+            result["evidence"])
+        await _record_run(db, result)
+        return result
+
+    if picked:
+        result["promoted"] = await grant_citizenship_batch(
+            db, list(picked), reason=PROMOTION_REASON,
+            reason_code=PROMOTION_REASON_CODE, actor=PROMOTION_ACTOR,
+            evidence_by_id=evidence_by_id,
+        )
+    await _record_run(db, result)
+    logger.info("civic_promotion pass done: mode=%s candidates=%d promoted=%d",
+                mode, len(candidate_ids), result["promoted"])
+    return result
