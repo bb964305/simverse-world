@@ -427,6 +427,36 @@ RUN_SUMMARY_KEY = "civic_promotion_last_run"
 _SUMMARY_MAX_SLUGS = 50
 
 
+async def _player_avatar_ids(db, resident_ids) -> frozenset[str]:
+    """候选集里有哪些其实是玩家化身——``users.player_resident_id`` 命中。
+
+    候选面纪律：玩家化身永远不是候选人。写入口
+    （:func:`app.services.civic_membership.grant_citizenship_batch`）查同一张
+    表整批拒绝是防线在生效，但让它端着一个必被拒绝的候选人走到写入口，会让
+    同一批里其它合法候选跟着永久卡死——``CivicStandingRefused`` 是整批拒绝，
+    不分谁的锅。候选面必须在自己的防线上先把它筛掉，不能指望写入口的射程
+    检查兜底。
+
+    复现路径：admin 手滑把化身的 ``resident_type`` 改成 denizen 档，若
+    ``meta_json`` 没有 ``origin`` 键，``is_ugc_resident`` 第 5 条兜底
+    （``creator_id is not None``）会把它判成 UGC，候选面因此收它。这条兜底
+    本身是否该收窄，是收口时才拍板的产品决策（见
+    ``civic_membership.is_ugc_resident`` 的 docstring），本函数不碰它，只是
+    在候选面这一层加一道独立防线。
+    """
+    if not resident_ids:
+        return frozenset()
+    from sqlalchemy import select
+
+    from app.models.user import User
+
+    hits = (await db.execute(
+        select(User.player_resident_id)
+        .where(User.player_resident_id.in_(resident_ids))
+    )).scalars().all()
+    return frozenset(hits)
+
+
 async def _record_run(db, result: dict) -> None:
     """把本次运行摘要写进 ``system_config``（fail-open）。
 
@@ -446,6 +476,7 @@ async def _record_run(db, result: dict) -> None:
                 "candidate_count": len(result.get("candidates") or []),
                 "promoted": result.get("promoted", 0),
                 "refused": result.get("refused"),
+                "refused_detail": result.get("refused_detail"),
             },
             group="civic", updated_by=PROMOTION_ACTOR,
         )
@@ -480,10 +511,20 @@ async def run_promotion_pass(db) -> dict:
     的路。``off``/``shadow`` 两态永远不会触达这个函数：``off`` 在此之前已经
     return，``shadow`` 分支用的是 :func:`select_promotions` 的默认（观测态）
     签名。
+
+    候选面纪律（复审 Important 1）：候选集算出来之后、任何写之前，会先剔除
+    玩家化身（:func:`_player_avatar_ids`）——写入口的射程检查拒绝它是防线在
+    生效，但候选面把它端上来会连累同一批里的合法候选一起被整批拒绝。
+
+    拒绝容错（复审 Important 1）：``grant_citizenship_batch`` 抛出的
+    ``CivicStandingRefused``（射程防呆之外的任何拒绝类，比如并发窗口内被
+    改过 ``resident_type``）在这里被捕获，不会传给调用方——``nightly_cron``
+    里一炸会中断整条夜间链。拒绝路径也会调用 :func:`_record_run`，运行摘要
+    带上拒绝原因，不会因为异常发生在 ``_record_run`` 之前而静默消失。
     """
     from app.services.civic_membership import (
-        auto_demotion_enabled, grant_citizenship_batch, min_familiarity,
-        min_peers, min_world_days, peer_seasoning_world_days,
+        CivicStandingRefused, auto_demotion_enabled, grant_citizenship_batch,
+        min_familiarity, min_peers, min_world_days, peer_seasoning_world_days,
         promotion_breaker_fraction, promotion_breaker_min_abs,
         promotion_max_per_run, promotion_mode,
     )
@@ -527,20 +568,28 @@ async def run_promotion_pass(db) -> dict:
         )
 
     slug_by_id = {f.resident_id: f.slug for f in snap.facts}
+
+    # 候选面纪律：玩家化身永远不是候选人（见本函数 docstring）。剔除放在
+    # 这里——breaker/cap 两道数值闸门看到的都是筛过的集合，一个必被写入口
+    # 拒绝的候选人不该占熔断/上限的名额。
+    avatar_ids = await _player_avatar_ids(db, candidate_ids)
+    if avatar_ids:
+        logger.warning(
+            "civic_promotion: %d candidate(s) are player avatars — excluded "
+            "from the pass (the write entry point would refuse the whole "
+            "batch otherwise): %s",
+            len(avatar_ids),
+            sorted(slug_by_id.get(a, a) for a in avatar_ids))
+        candidate_ids = tuple(c for c in candidate_ids if c not in avatar_ids)
+
     citizens_before = sum(1 for f in snap.facts
                           if f.resident_type in CIVIC_VOTER_TYPES)
-    evidence_by_id = {
-        i: promotion_evidence(snap, i, min_familiarity=threshold,
-                              seasoning_days=seasoning)
-        for i in candidate_ids
-    }
     result = {
         "mode": mode,
         "world_at": snap.now_world.isoformat(),
         "citizens_before": citizens_before,
         "candidates": [slug_by_id.get(i, i) for i in candidate_ids],
-        "evidence": {slug_by_id.get(i, i): evidence_by_id[i]
-                    for i in candidate_ids},
+        "evidence": {},
         "promoted": 0,
         "demoted": 0,          # 夜间任务只升，永不自动降
         "refused": None,
@@ -573,6 +622,16 @@ async def run_promotion_pass(db) -> dict:
             "tonight (CIVIC_PROMOTION_MAX_PER_RUN=%d); 余量下夜再来",
             len(picked), len(candidate_ids), cap)
 
+    # 只为真正会被处理（写库或 shadow 展示）的这一批算证据——不为被单夜上限
+    # 截掉的溢出候选白算一遍 promotion_evidence（复审「折进来」的清理项）。
+    evidence_by_id = {
+        i: promotion_evidence(snap, i, min_familiarity=threshold,
+                              seasoning_days=seasoning)
+        for i in picked
+    }
+    result["evidence"] = {slug_by_id.get(i, i): evidence_by_id[i]
+                          for i in picked}
+
     if mode == MODE_SHADOW:
         logger.info(
             "civic_promotion SHADOW: %d candidate(s) would be promoted "
@@ -583,11 +642,23 @@ async def run_promotion_pass(db) -> dict:
         return result
 
     if picked:
-        result["promoted"] = await grant_citizenship_batch(
-            db, list(picked), reason=PROMOTION_REASON,
-            reason_code=PROMOTION_REASON_CODE, actor=PROMOTION_ACTOR,
-            evidence_by_id=evidence_by_id,
-        )
+        try:
+            result["promoted"] = await grant_citizenship_batch(
+                db, list(picked), reason=PROMOTION_REASON,
+                reason_code=PROMOTION_REASON_CODE, actor=PROMOTION_ACTOR,
+                evidence_by_id=evidence_by_id,
+            )
+        except CivicStandingRefused as exc:
+            # 拒绝容错：不把异常传给调用方——nightly_cron 里一炸会中断整条
+            # 夜间链。run summary 也要走这条路径写，不能因为异常发生在
+            # _record_run 之前而让本次运行静默消失、探针上看不到任何线索。
+            logger.error(
+                "civic_promotion grant refused: %s — 整批拒绝，未晋升；"
+                "本轮尝试：%s", exc, result["candidates"])
+            result["refused"] = "grant_refused"
+            result["refused_detail"] = str(exc)
+            await _record_run(db, result)
+            return result
     await _record_run(db, result)
     logger.info("civic_promotion pass done: mode=%s candidates=%d promoted=%d",
                 mode, len(candidate_ids), result["promoted"])
