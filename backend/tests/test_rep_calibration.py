@@ -108,3 +108,217 @@ def test_describe_affinity_coverage_all_real_relations_is_full_coverage():
     stats = describe_affinity_coverage([0.3, -0.5, 0.1])
     assert stats["covered"] == 3
     assert stats["coverage_share"] == pytest.approx(1.0)
+
+
+# ── Task 8: scripts/rep_calibrate.py 只读标定脚本(照抄 brief) ──────────
+
+from sqlalchemy import select  # noqa: E402
+
+from app.models.memory import Memory  # noqa: E402
+from app.models.resident import Resident  # noqa: E402
+from app.services import relation_service  # noqa: E402
+from app.services.reputation_service import ScoreRow, project  # noqa: E402
+from scripts.rep_calibrate import _gossip_affinities, _run, build_report, render  # noqa: E402
+
+
+def _rows(scores):
+    return [
+        ScoreRow(resident_id=f"r{i}", slug=f"s{i}", previous=0.0, score=score, samples=i)
+        for i, score in enumerate(scores)
+    ]
+
+
+def test_build_report_flags_the_decorative_gate():
+    report = build_report(_rows([-0.20, -0.12, -0.05, 0.0, 0.0, 0.03, 0.08, 0.15]),
+                          0.25, -0.3)
+    assert report["n"] == 8
+    assert report["current_rejected"] == 0            # -0.3 谁也拒绝不了
+    assert report["recommended"] == pytest.approx(-0.085)
+    assert report["recommended_rejected"] == 2
+    assert [entry["slug"] for entry in report["lowest"]][0] == "s0"
+    text = render(report)
+    assert "装饰性闸门" in text
+    assert "建议 REP_CREDIT_MIN_SCORE" in text
+
+
+def test_build_report_handles_a_degenerate_world():
+    report = build_report(_rows([0.0, 0.0]), 0.15, -0.3)
+    assert report["recommended"] is None
+    assert "degenerate" in report["error"]
+    assert "无法标定" in render(report)
+
+
+def test_build_report_handles_an_empty_world():
+    report = build_report([], 0.15, -0.3)
+    assert report["n"] == 0
+    assert report["recommended"] is None
+    assert render(report)   # 不炸
+
+
+# ── 硬性要求:输出必须同时包含分数分布与 affinity 覆盖率,缺一不可 ──────
+#
+# task-8-brief.md 的 Step 3 代码原样只把 describe()/recommend_credit_min_score()
+# 接进 build_report——两者都只吃最终分数,回答不了"多大比例的 gossip 落在
+# gossip_tone(0) fallback 上"这个问题(Task 7 的报告已论证过,见
+# describe_affinity_coverage 的 docstring)。这正是本脚本存在的理由,orchestrator
+# 的任务说明把它列为硬性要求。下面钉死 build_report/render 必须能端出这份读数,
+# 且不破坏 brief 原样的 3 参调用。
+
+
+def test_build_report_includes_affinity_coverage_when_provided():
+    rows = _rows([-0.2, 0.1, 0.0])
+    report = build_report(rows, 0.25, -0.3, affinities=[0.4, 0.0, 0.0, -0.2])
+    assert report["affinity_coverage"] == {
+        "n": 4, "covered": 2, "uncovered": 2, "coverage_share": 0.5,
+    }
+    text = render(report)
+    assert "2/4" in text
+    assert "50.0%" in text
+    assert "fallback" in text.lower()
+
+
+def test_build_report_without_affinities_omits_the_coverage_section():
+    """brief 原样的 3 参调用(上面那组测试)必须保持不变——affinities 是
+    可选的向后兼容追加参数,不是破坏性改动。"""
+    report = build_report(_rows([-0.1, 0.1]), 0.25, -0.3)
+    assert "affinity_coverage" not in report
+    render(report)   # 不炸,且不含覆盖率行
+
+
+def test_render_names_the_fallback_when_affinity_coverage_is_all_zero():
+    """覆盖率为 0 时,措辞要点名 fallback——呼应"光看分数分布分不清机制生效
+    但偏负、还是全落在 fallback 上"这条口径。"""
+    rows = _rows([-0.2, -0.1, 0.0])
+    report = build_report(rows, 0.25, -0.3, affinities=[0.0, 0.0, 0.0])
+    text = render(report)
+    assert "0/3" in text
+    assert "fallback" in text.lower()
+
+
+def test_build_report_affinity_coverage_of_empty_gossip_sample_does_not_explode():
+    report = build_report(_rows([-0.1, 0.1]), 0.25, -0.3, affinities=[])
+    assert report["affinity_coverage"]["n"] == 0
+    assert render(report)
+
+
+# ── DB 集成:重建 _score_all 丢弃的逐 pair affinity,并锁死只读 ──────────
+
+
+def _npc(slug: str):
+    return Resident(
+        slug=slug, name=slug, district="central_plaza", status="idle",
+        resident_type="npc", creator_id=None, tile_x=70, tile_y=56,
+        mood_json={"valence": 0.0, "arousal": 0.2, "label": "calm"},
+        meta_json={"sbti": {"dimensions": {"Ac1": "H"}}},
+    )
+
+
+@pytest.mark.anyio
+async def test_gossip_affinities_reconstructs_the_list_score_all_discards(
+    db_session, monkeypatch
+):
+    """_score_all 算完 tone 就把逐 pair affinity 丢了(Task 7 交接的缺口)——
+    标定脚本必须自己从 _affinity_lookup 重新拼,不能假设 project() 的返回值
+    里有它。"""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "rep_enabled", False)
+    teller = _npc("aff_teller")
+    liked = _npc("aff_liked")
+    stranger = _npc("aff_stranger")
+    db_session.add_all([teller, liked, stranger])
+    await db_session.flush()
+    db_session.add_all([
+        Memory(
+            resident_id=teller.id, type="event", content="about liked",
+            importance=0.7, source="gossip", related_resident_id=liked.id,
+            metadata_json={"hops": 0, "distorted": False},
+        ),
+        Memory(
+            resident_id=teller.id, type="event", content="about stranger",
+            importance=0.7, source="gossip", related_resident_id=stranger.id,
+            metadata_json={"hops": 0, "distorted": False},
+        ),
+    ])
+    await db_session.commit()
+    await relation_service.bump(db_session, teller.id, liked.id, d_affinity=0.4)
+    # teller <-> stranger: 无 relation 行 → fallback(affinity 0.0)
+
+    rows = await project(db_session, force=True)
+    affinities = await _gossip_affinities(db_session, [row.resident_id for row in rows])
+
+    assert sorted(affinities) == pytest.approx([0.0, 0.4])
+
+
+@pytest.mark.anyio
+async def test_run_combines_distribution_and_coverage_and_writes_nothing(
+    db_session, monkeypatch
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "rep_enabled", False)  # force=True 绕过它读真实分布
+    teller = _npc("run_teller")
+    liked = _npc("run_liked")
+    stranger = _npc("run_stranger")
+    db_session.add_all([teller, liked, stranger])
+    await db_session.flush()
+    db_session.add_all([
+        Memory(
+            resident_id=teller.id, type="event", content="about liked",
+            importance=0.7, source="gossip", related_resident_id=liked.id,
+            metadata_json={"hops": 0, "distorted": False},
+        ),
+        Memory(
+            resident_id=teller.id, type="event", content="about stranger",
+            importance=0.7, source="gossip", related_resident_id=stranger.id,
+            metadata_json={"hops": 0, "distorted": False},
+        ),
+    ])
+    await db_session.commit()
+    await relation_service.bump(db_session, teller.id, liked.id, d_affinity=0.4)
+
+    before = {
+        row.id: (row.meta_json, row.mood_json)
+        for row in (await db_session.execute(select(Resident))).scalars().all()
+    }
+    before_memory_count = len((await db_session.execute(select(Memory))).scalars().all())
+
+    report = await _run(0.4, db=db_session)
+
+    assert report["n"] == 3
+    assert report["affinity_coverage"] == {
+        "n": 2, "covered": 1, "uncovered": 1, "coverage_share": 0.5,
+    }
+
+    after = (await db_session.execute(select(Resident))).scalars().all()
+    assert len(after) == len(before)
+    for resident in after:
+        assert (resident.meta_json, resident.mood_json) == before[resident.id]
+        assert "reputation" not in (resident.meta_json or {})
+    after_memory_count = len((await db_session.execute(select(Memory))).scalars().all())
+    assert after_memory_count == before_memory_count
+
+
+# ── main() 退出码契约(mock _run,不碰真实 DB)──────────────────────────
+
+
+def test_main_returns_0_when_a_reject_face_is_found(monkeypatch, capsys):
+    from scripts import rep_calibrate
+
+    async def _fake_run(reject_fraction, db=None):
+        return build_report(_rows([-0.2, -0.1, 0.0, 0.1, 0.2]), reject_fraction, -0.3)
+
+    monkeypatch.setattr(rep_calibrate, "_run", _fake_run)
+    assert rep_calibrate.main(["--reject-fraction", "0.4"]) == 0
+    assert "建议 REP_CREDIT_MIN_SCORE" in capsys.readouterr().out
+
+
+def test_main_returns_2_when_the_distribution_is_degenerate(monkeypatch, capsys):
+    from scripts import rep_calibrate
+
+    async def _fake_run(reject_fraction, db=None):
+        return build_report(_rows([0.0, 0.0]), reject_fraction, -0.3)
+
+    monkeypatch.setattr(rep_calibrate, "_run", _fake_run)
+    assert rep_calibrate.main([]) == 2
+    assert "无法标定" in capsys.readouterr().out
