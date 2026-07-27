@@ -282,3 +282,21 @@ async def test_overdue_vacancies_shape_is_probe_consumable(db_session):
 @pytest.mark.anyio
 async def test_overdue_vacancies_empty_world(db_session):
     assert await office_audit.overdue_vacancies(db_session) == []
+
+
+@pytest.mark.anyio
+async def test_overdue_vacancies_never_flags_an_occupied_election_office(db_session):
+    """假阳性回归锁(评审 fix round 1 追加):去掉 holder_slug IS NULL 谓词后,
+    在任镇长会被误判成空缺红旗——比漏报一个空缺更危险,brief 的立意是
+    「别让噪声淹没真正该看的镇长空缺」,而假阳性正是更糟的一种噪声,一旦
+    出现会让人开始无视红旗。这条只锁 holder_slug 这一半谓词:fill_strategy
+    谓词已经被 test_overdue_vacancies_ignores_labour_offices_vacant_forever
+    锁住了(该用例里的 doctor/postman 都是 holder_slug=None,不会触达
+    holder_slug 谓词)。"""
+    now = datetime.now(UTC)
+    db_session.add(Office(office_key="mayor", institution="town_hall",
+                          fill_strategy="election", holder_slug="he-qiaoyun",
+                          updated_at=now - timedelta(hours=90)))
+    await db_session.commit()
+
+    assert await office_audit.overdue_vacancies(db_session, now=now) == []
