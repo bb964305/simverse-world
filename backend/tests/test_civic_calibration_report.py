@@ -13,7 +13,9 @@ from app import world_clock
 from app.models.civic_standing_history import CivicStandingHistory
 from app.models.resident import Resident
 from app.models.resident_relation import ResidentRelation
+from app.models.system_config import SystemConfig
 from app.services import civic_membership as cm
+from app.tasks import civic_promotion as cp
 from scripts.civic_calibration_report import (
     collect_calibration,
     percentiles,
@@ -228,6 +230,45 @@ async def test_a_gate_that_rejects_nobody_is_named_decorative(db_session,
     assert "🔴" not in out
 
 
+@pytest.mark.anyio
+async def test_min_peers_is_not_decorative_when_lowering_k_would_save_someone(
+        db_session, monkeypatch):
+    """k>1 回归：门槛②的拒绝条件是「**达标**边 < k」，不是「锚定边总数 < k」。
+
+    u2 有 3 条锚定边但只有 2 条达标——把 k 从 3 降到 2 他立刻能过，MIN_PEERS
+    就是那道在拒他的闸。只看「锚定边总数不足 k 条」会把这类拒绝整个记在 θ 头
+    上，于是报告一边说 MIN_PEERS「没有参与任何一次拒绝」，一边 k 一降晋升面就
+    变——自相矛盾，运维照着挑不出该抄哪一行。
+    """
+    monkeypatch.setenv("CIVIC_PROMOTION_MIN_WORLD_DAYS", "1")
+    monkeypatch.setenv("CIVIC_PROMOTION_MIN_PEERS", "3")
+    monkeypatch.setenv("CIVIC_PROMOTION_MIN_FAMILIARITY", "0.4")
+    b1, b2, b3 = _builtin("b1"), _builtin("b2"), _builtin("b3")
+    u1, u2 = _ugc("u1"), _ugc("u2")
+    db_session.add_all([b1, b2, b3, u1, u2])
+    await db_session.commit()
+    for peer in (b1, b2, b3):
+        await _edge(db_session, u1, peer, 0.9)
+    for peer, fam in ((b1, 0.9), (b2, 0.5), (b3, 0.1)):
+        await _edge(db_session, u2, peer, fam)
+
+    data = await collect_calibration(db_session)
+    assert data["candidate_face"]["verdict"] == "partial"
+    ga = data["gate_attribution"]
+    assert ga["rejected_by"] == {"world_days": 0, "peers": 1, "banned": 0}
+    assert ga["peers_breakdown"] == {"too_few_anchored_edges": 0,
+                                     "kth_best_below_theta": 1}
+    # 只有世界日是真装饰（两人都 ≈400 世界日，min=1，它确实没拒过谁）
+    assert ga["decorative_gates"] == ["min_world_days"]
+
+    # 反证：k 一降晋升面就变 —— MIN_PEERS 明明在拒人
+    snap = await cp.build_snapshot(db_session)
+    kw = dict(min_world_days=1.0, min_familiarity=0.4,
+              seasoning_days=cm.peer_seasoning_world_days())
+    assert len(cp.select_promotions(snap, min_peers=3, **kw)) == 1
+    assert len(cp.select_promotions(snap, min_peers=2, **kw)) == 2
+
+
 # ── 实测扫描：门槛值由分布推出，不得预填 ───────────────────────────────
 
 @pytest.mark.anyio
@@ -271,19 +312,70 @@ async def test_sweep_names_the_measured_triples_that_make_the_face_partial(
     assert "可用取值" in render_calibration(data)
 
 
+@pytest.mark.anyio
+async def test_sweep_rows_flag_the_numeric_gates_that_size_alone_hides(
+        db_session, monkeypatch):
+    """``size`` 是**候选面大小**，不是当晚真会放行的人数。
+
+    候选面之后还有两道数值闸（``civic_membership:398-421``）：单夜上限**截断**、
+    熔断**整批拒绝且不截断**。一行 size=4 的取值在熔断线 3 之下真上线是晋升 0
+    人——报告若把 size 说成「当晚真会晋升的人数」，开闸那天照着抄的人会踩空。
+    """
+    monkeypatch.setenv("CIVIC_PROMOTION_MIN_WORLD_DAYS", "1")
+    monkeypatch.setenv("CIVIC_PROMOTION_MIN_PEERS", "1")
+    monkeypatch.setenv("CIVIC_PROMOTION_MIN_FAMILIARITY", "0.05")
+    monkeypatch.setenv("CIVIC_PROMOTION_MAX_PER_RUN", "2")
+    monkeypatch.setenv("CIVIC_PROMOTION_BREAKER_MIN_ABS", "3")
+    monkeypatch.setenv("CIVIC_PROMOTION_BREAKER_FRACTION", "0.2")
+    b1 = _builtin("b1")
+    ugc = [_ugc(f"u{i}") for i in range(5)]
+    db_session.add_all([b1, *ugc])
+    await db_session.commit()
+    for who, fam in zip(ugc, (0.9, 0.7, 0.5, 0.3, 0.1)):
+        await _edge(db_session, who, b1, fam)
+
+    data = await collect_calibration(db_session)
+    assert data["numeric_gates"] == {
+        "max_per_run": 2, "breaker_threshold": 3.0,
+        "breaker_fraction": 0.2, "breaker_min_abs": 3}
+    by_size = {r["size"]: r for r in data["sweep"]["partial"]}
+    assert by_size[4]["trips_breaker"] is True          # 4 > 3 → 整批拒绝
+    assert by_size[3]["trips_breaker"] is False
+    assert by_size[3]["exceeds_max_per_run"] is True    # 3 > 2 → 截断
+    assert by_size[2]["exceeds_max_per_run"] is False
+    out = render_calibration(data)
+    assert "size 是候选面大小" in out
+    assert "整批拒绝" in out
+
+
 # ── 只读 ───────────────────────────────────────────────────────────────
 
+#: 脚本会碰到的**全部**表。``system_config`` 容易漏：它不在三张业务表里，是经
+#: ``build_snapshot`` → ``_backfill_mark_world`` → ``ConfigService.get`` 摸到的
+#: （``civic_promotion.py:287``）。漏掉它，一次 ``ConfigService.set`` 的写入变异
+#: 能完整地静默通过——这正是「断言写窄了」的同一类洞。
+_TOUCHED_TABLES = (Resident, ResidentRelation, CivicStandingHistory)
+
+
 async def _fingerprint(db):
-    """脚本碰过的三张表的**全部列**指纹。
+    """脚本碰过的每一张表的**全部列**指纹。
 
     只比 slug/type/meta 三列会漏掉「改了 familiarity」「插了一行历史」这类间接
     写入——F1 的复审用 delete 变异实测过：断言写窄了，变异能静默通过。
     """
     out = {}
-    for model in (Resident, ResidentRelation, CivicStandingHistory):
+    for model in _TOUCHED_TABLES:
         rows = (await db.execute(select(model.__table__))).all()
         out[model.__tablename__] = sorted(repr(r) for r in rows)
     return out
+
+
+@pytest.mark.anyio
+async def test_the_fingerprint_covers_every_table_the_script_touches(db_session):
+    """指纹的覆盖面本身要被断言，否则「只读」证明的是一个更小的命题。"""
+    assert set(await _fingerprint(db_session)) == {
+        "residents", "resident_relations", "civic_standing_history",
+        "system_config"}
 
 
 @pytest.mark.anyio
