@@ -4,8 +4,10 @@ import asyncio
 import hmac
 import json
 import os
+import secrets
 import shutil
 import sys
+import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -17,6 +19,8 @@ from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.lab.codex_runtime.config import CodexRuntimeConfig
+from app.lab.codex_runtime.credential_proxy import RunCredentialProxy
+from app.lab import guard
 from app.lab.model_catalog import FLASH_MODEL, PRO_MODEL, RESOURCE_PROFILES
 
 
@@ -56,6 +60,8 @@ class RuntimeSession:
     process: asyncio.subprocess.Process | None = None
     task: asyncio.Task | None = None
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
+    executor_uid: int = 0
+    finished_at: float | None = None
 
     async def append(self, **step: Any) -> None:
         async with self.condition:
@@ -68,6 +74,7 @@ class RuntimeSession:
             self.done = True
             self.failed = failed
             self.error = error
+            self.finished_at = time.monotonic()
             self.condition.notify_all()
 
 
@@ -135,17 +142,112 @@ def _codex_config(base_url: str) -> str:
 
 
 async def _gateway_usage(session: RuntimeSession, base_url: str) -> dict:
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+        response = await client.get(
+            base_url.rstrip("/") + "/lab/usage",
+            headers={"Authorization": f"Bearer {session.request.model_gateway_token}"},
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict) or data.get("cost_unknown") is True:
+            raise RuntimeError("model gateway usage is not trustworthy")
+        return data
+
+
+async def _gateway_revoke(session: RuntimeSession, base_url: str) -> None:
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+        response = await client.post(
+            base_url.rstrip("/") + "/lab/revoke",
+            headers={"Authorization": f"Bearer {session.request.model_gateway_token}"},
+        )
+        response.raise_for_status()
+
+
+def _has_hidepid_2() -> bool:
     try:
-        async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
-            response = await client.get(
-                base_url.rstrip("/") + "/lab/usage",
-                headers={"Authorization": f"Bearer {session.request.model_gateway_token}"},
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data if isinstance(data, dict) else {}
+        mounts = Path("/proc/mounts").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return any(
+        fields[1] == "/proc"
+        and {"hidepid=2", "hidepid=invisible"}.intersection(fields[3].split(","))
+        for line in mounts.splitlines()
+        if len(fields := line.split()) >= 4
+    )
+
+
+def _validate_process_isolation(config: CodexRuntimeConfig) -> None:
+    if not config.enforce_process_isolation:
+        return
+    if sys.platform != "linux" or os.geteuid() != 0:
+        raise RuntimeError("isolated Codex Runtime requires a root Linux controller")
+    if not _has_hidepid_2():
+        raise RuntimeError("isolated Codex Runtime requires /proc hidepid=2")
+    root = Path(config.cgroup_root)
+    controllers = root / "cgroup.controllers"
+    if not root.is_dir() or not os.access(root, os.W_OK) or not controllers.is_file():
+        raise RuntimeError("isolated Codex Runtime requires a delegated cgroup v2 root")
+    available = set(controllers.read_text(encoding="ascii").split())
+    if not {"cpu", "memory", "pids"}.issubset(available):
+        raise RuntimeError("Codex cgroup delegation lacks cpu, memory, or pids")
+
+
+def _create_run_cgroup(session: RuntimeSession, config: CodexRuntimeConfig) -> Path | None:
+    if not config.enforce_process_isolation:
+        return None
+    path = Path(config.cgroup_root) / session.workspace.name
+    path.mkdir(mode=0o700)
+    (path / "cpu.max").write_text(
+        f"{session.request.resource_cpu_cores * 100_000} 100000", encoding="ascii"
+    )
+    (path / "memory.max").write_text(
+        str(session.request.resource_memory_mb * 1024 * 1024), encoding="ascii"
+    )
+    (path / "pids.max").write_text("256", encoding="ascii")
+    return path
+
+
+def _remove_workspace(
+    workspace: Path, workspace_root: str, *, restore_controller_owner: bool
+) -> None:
+    resolved_root = Path(workspace_root).resolve()
+    resolved_workspace = workspace.resolve()
+    if resolved_workspace.parent != resolved_root or not resolved_workspace.exists():
+        return
+    if restore_controller_owner:
+        os.chown(resolved_workspace, 0, 0)
+        for current, directories, _files in os.walk(resolved_workspace):
+            os.chown(current, 0, 0)
+            for name in directories:
+                os.chown(Path(current) / name, 0, 0)
+    shutil.rmtree(resolved_workspace)
+
+
+async def _monitor_budget(
+    session: RuntimeSession,
+    config: CodexRuntimeConfig,
+    credential_proxy: RunCredentialProxy,
+) -> str:
+    try:
+        while True:
+            await asyncio.sleep(config.usage_poll_s)
+            credential_proxy.check_healthy()
+            session.request.model_gateway_token = credential_proxy.gateway_token
+            usage = await _gateway_usage(session, config.model_gateway_base_url)
+            cost_cents = int(usage.get("cost_usd_cents") or 0)
+            if guard.check_budget(
+                cost_cents, int(session.request.budget_usd * 100)
+            ):
+                continue
+            if session.process and session.process.returncode is None:
+                session.process.kill()
+            return "model budget exceeded"
+    except asyncio.CancelledError:
+        raise
     except Exception:
-        return {}
+        if session.process and session.process.returncode is None:
+            session.process.kill()
+        return "model usage unavailable"
 
 
 async def _consume_codex(
@@ -160,9 +262,27 @@ async def _consume_codex(
     ):
         codex_home = session.workspace / ".codex"
         codex_home.mkdir(mode=0o700)
-        (codex_home / "config.toml").write_text(
-            _codex_config(config.model_gateway_base_url), encoding="utf-8"
+        client_token = secrets.token_urlsafe(32)
+        credential_proxy = RunCredentialProxy(
+            gateway_base_url=config.model_gateway_base_url,
+            gateway_token=session.request.model_gateway_token,
+            client_token=client_token,
         )
+        cgroup_path = None
+        try:
+            proxy_base_url = await credential_proxy.start()
+            config_path = codex_home / "config.toml"
+            config_path.write_text(_codex_config(proxy_base_url), encoding="utf-8")
+            cgroup_path = _create_run_cgroup(session, config)
+            if config.enforce_process_isolation:
+                os.chown(config_path, session.executor_uid, session.executor_uid)
+                os.chown(codex_home, session.executor_uid, session.executor_uid)
+                os.chown(session.workspace, session.executor_uid, session.executor_uid)
+        except BaseException:
+            await credential_proxy.close()
+            if cgroup_path is not None:
+                cgroup_path.rmdir()
+            raise
         prompt = (
             "You are the assigned Simverse Lab researcher. Complete the task inside "
             "the provided workspace. Use shell/file tools only when needed. Do not "
@@ -173,18 +293,15 @@ async def _consume_codex(
             "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
             "HOME": str(session.workspace),
             "CODEX_HOME": str(codex_home),
-            "LAB_RUN_TOKEN": session.request.model_gateway_token,
+            # This authenticates only to the per-run loopback proxy. It is not a
+            # gateway credential and cannot be used outside this run.
+            "LAB_RUN_TOKEN": client_token,
             "LANG": os.environ.get("LANG", "C.UTF-8"),
         }
         for name in ("SSL_CERT_FILE", "SSL_CERT_DIR"):
             if os.environ.get(name):
                 env[name] = os.environ[name]
-        command = [
-            sys.executable,
-            "-m", "app.lab.codex_runtime.launcher",
-            "--cpu-cores", str(session.request.resource_cpu_cores),
-            "--memory-mb", str(session.request.resource_memory_mb),
-            "--",
+        codex_command = [
             config.codex_binary,
             "--ask-for-approval", "never",
             "exec",
@@ -195,11 +312,29 @@ async def _consume_codex(
             "--model", "lab-auto",
             prompt,
         ]
+        command = codex_command
+        process_cwd: Path | None = session.workspace
+        if config.enforce_process_isolation:
+            assert cgroup_path is not None
+            command = [
+                sys.executable,
+                "-m", "app.lab.codex_runtime.launcher",
+                "--uid", str(session.executor_uid),
+                "--gid", str(session.executor_uid),
+                "--cgroup-path", str(cgroup_path),
+                "--cwd", str(session.workspace),
+                "--",
+                *codex_command,
+            ]
+            process_cwd = None
         terminal_error = ""
+        failed = False
+        cancelled = False
+        budget_monitor: asyncio.Task[str] | None = None
         try:
             session.process = await asyncio.create_subprocess_exec(
                 *command,
-                cwd=session.workspace,
+                cwd=process_cwd,
                 env=env,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
@@ -207,6 +342,9 @@ async def _consume_codex(
                 limit=1024 * 1024,
             )
             assert session.process.stdout is not None
+            budget_monitor = asyncio.create_task(
+                _monitor_budget(session, config, credential_proxy)
+            )
             async with asyncio.timeout(config.run_timeout_s):
                 while line := await session.process.stdout.readline():
                     try:
@@ -251,6 +389,10 @@ async def _consume_codex(
                             session.final_text = text
                             await session.append(phase="message", tool=None, summary=text, payload={})
                 return_code = await session.process.wait()
+            if budget_monitor.done():
+                monitor_error = budget_monitor.result()
+                if monitor_error:
+                    raise RuntimeError(monitor_error)
             if return_code != 0:
                 stderr = ""
                 if session.process.stderr is not None:
@@ -259,39 +401,77 @@ async def _consume_codex(
                 raise RuntimeError(f"Codex exited with status {return_code}: {detail}")
             if not session.final_text:
                 raise RuntimeError("Codex completed without a final report")
-            usage = await _gateway_usage(session, config.model_gateway_base_url)
-            await session.append(
-                phase="message",
-                tool=None,
-                summary="Codex model usage recorded",
-                payload={
-                    "model": session.request.model_name,
-                    "model_tier": session.request.model_tier,
-                    "input_tokens": int(usage.get("input_tokens") or 0),
-                    "output_tokens": int(usage.get("output_tokens") or 0),
-                    "resource_cpu_cores": session.request.resource_cpu_cores,
-                    "resource_memory_mb": session.request.resource_memory_mb,
-                },
-                model_tokens=int(usage.get("total_tokens") or 0),
-                cost_usd_cents=int(usage.get("cost_usd_cents") or 0),
-            )
-            await session.finish()
         except asyncio.CancelledError:
+            cancelled = True
+            failed = True
+            terminal_error = "Codex run cancelled"
             if session.process and session.process.returncode is None:
                 session.process.kill()
                 await session.process.wait()
-            await session.finish(failed=True, error="Codex run cancelled")
-            raise
         except TimeoutError:
+            failed = True
+            terminal_error = "Codex run timed out"
             if session.process and session.process.returncode is None:
                 session.process.kill()
                 await session.process.wait()
-            await session.finish(failed=True, error="Codex run timed out")
         except Exception as exc:
-            await session.finish(failed=True, error=str(exc)[:1000])
+            failed = True
+            terminal_error = str(exc)[:1000]
+        finally:
+            if budget_monitor is not None and not budget_monitor.done():
+                budget_monitor.cancel()
+                await asyncio.gather(budget_monitor, return_exceptions=True)
+            try:
+                credential_proxy.check_healthy()
+                session.request.model_gateway_token = credential_proxy.gateway_token
+                usage = await _gateway_usage(session, config.model_gateway_base_url)
+                await session.append(
+                    phase="message",
+                    tool=None,
+                    summary="Codex model usage recorded",
+                    payload={
+                        "model": session.request.model_name,
+                        "model_tier": session.request.model_tier,
+                        "input_tokens": int(usage.get("input_tokens") or 0),
+                        "output_tokens": int(usage.get("output_tokens") or 0),
+                        "resource_cpu_cores": session.request.resource_cpu_cores,
+                        "resource_memory_mb": session.request.resource_memory_mb,
+                    },
+                    model_tokens=int(usage.get("total_tokens") or 0),
+                    cost_usd_cents=int(usage.get("cost_usd_cents") or 0),
+                )
+            except Exception as exc:
+                failed = True
+                terminal_error = f"model usage unavailable: {exc}"[:1000]
+            try:
+                await _gateway_revoke(session, config.model_gateway_base_url)
+            except Exception as exc:
+                failed = True
+                terminal_error = f"model token revoke failed: {exc}"[:1000]
+            session.request.model_gateway_token = ""
+            await credential_proxy.close()
+            try:
+                _remove_workspace(
+                    session.workspace,
+                    config.workspace_root,
+                    restore_controller_owner=config.enforce_process_isolation,
+                )
+            except OSError:
+                failed = True
+                terminal_error = "run workspace cleanup failed"
+            if cgroup_path is not None:
+                try:
+                    cgroup_path.rmdir()
+                except OSError:
+                    failed = True
+                    terminal_error = "run cgroup cleanup failed"
+            await session.finish(failed=failed, error=terminal_error)
+            if cancelled:
+                return
 
 
 def create_app(config: CodexRuntimeConfig) -> FastAPI:
+    _validate_process_isolation(config)
     app = FastAPI(title="Simverse Codex Runtime", docs_url=None, redoc_url=None)
     sessions: dict[str, RuntimeSession] = {}
     resource_pool = RuntimeResourcePool(
@@ -301,22 +481,71 @@ def create_app(config: CodexRuntimeConfig) -> FastAPI:
     )
     root = Path(config.workspace_root)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if config.enforce_process_isolation:
+        # Dedicated run UIDs need to traverse the root, but cannot list it or
+        # enter another UID's mode-0700 workspace.
+        root.chmod(0o711)
+    next_executor_uid = 20_000
+
+    def prune_sessions() -> None:
+        now = time.monotonic()
+        stale = [
+            key for key, value in sessions.items()
+            if value.done and value.finished_at is not None
+            and now - value.finished_at >= config.session_ttl_s
+        ]
+        for key in stale:
+            sessions.pop(key, None)
+
+    async def consume_safely(session: RuntimeSession, goal: Goal) -> None:
+        try:
+            await _consume_codex(session, goal, config, resource_pool)
+        except BaseException as exc:
+            try:
+                _remove_workspace(
+                    session.workspace,
+                    config.workspace_root,
+                    restore_controller_owner=config.enforce_process_isolation,
+                )
+            except OSError:
+                pass
+            if not session.done:
+                await session.finish(
+                    failed=True,
+                    error=f"runtime isolation setup failed: {exc}"[:1000],
+                )
 
     @app.get("/healthz")
     async def healthz() -> dict:
+        prune_sessions()
         return {
             "status": "ok",
             "active": resource_pool.active_runs,
             "queued": max(0, sum(not item.done for item in sessions.values()) - resource_pool.active_runs),
             "used_cpu_cores": resource_pool.used_cpu_cores,
             "used_memory_mb": resource_pool.used_memory_mb,
+            "capacity_cpu_cores": resource_pool.cpu_cores,
+            "capacity_memory_mb": resource_pool.memory_mb,
+            "pending_profiles": [
+                {
+                    "cpu_cores": item.request.resource_cpu_cores,
+                    "memory_mb": item.request.resource_memory_mb,
+                    "task_done": bool(item.task and item.task.done()),
+                }
+                for item in sessions.values()
+                if not item.done
+            ],
         }
 
     @app.post("/runs")
     async def create_run(
         body: CreateRun, authorization: str | None = Header(default=None)
     ) -> dict:
+        nonlocal next_executor_uid
         _auth(authorization, config)
+        prune_sessions()
+        if len(sessions) >= config.max_sessions:
+            raise HTTPException(status_code=503, detail="runtime session capacity exhausted")
         expected = {"low": FLASH_MODEL, "high": PRO_MODEL}
         if expected.get(body.model_tier) != body.model_name:
             raise HTTPException(status_code=400, detail="model tier mismatch")
@@ -330,14 +559,21 @@ def create_app(config: CodexRuntimeConfig) -> FastAPI:
             raise HTTPException(status_code=403, detail="Codex runtime requires code scope")
         if any(not isinstance(scope, str) or not scope for scope in body.scopes):
             raise HTTPException(status_code=400, detail="invalid scopes")
-        session_id = str(uuid.uuid4())
-        workspace = root / session_id
+        session_id = body.run_id
+        if session_id in sessions:
+            raise HTTPException(status_code=409, detail="run already exists")
+        workspace = root / str(uuid.uuid5(uuid.NAMESPACE_URL, f"simverse:codex:{session_id}"))
         workspace.mkdir(mode=0o700)
-        session = RuntimeSession(session_id, body, workspace)
+        executor_uid = next_executor_uid
+        next_executor_uid += 1
+        session = RuntimeSession(
+            session_id, body, workspace, executor_uid=executor_uid
+        )
         sessions[session_id] = session
         return {"session_id": session_id}
 
     def get_session(session_id: str) -> RuntimeSession:
+        prune_sessions()
         session = sessions.get(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail="run not found")
@@ -354,7 +590,7 @@ def create_app(config: CodexRuntimeConfig) -> FastAPI:
         if session.task is not None:
             raise HTTPException(status_code=409, detail="goal already submitted")
         session.task = asyncio.create_task(
-            _consume_codex(session, body, config, resource_pool)
+            consume_safely(session, body)
         )
         return {"accepted": True}
 
@@ -428,14 +664,13 @@ def create_app(config: CodexRuntimeConfig) -> FastAPI:
             raise HTTPException(status_code=404, detail="unknown action")
         session = get_session(session_id)
         if action in {"cancel", "terminate", "kill"}:
-            await stop_process(session, kill=action == "kill")
             if session.task and not session.task.done():
                 session.task.cancel()
+                await asyncio.gather(session.task, return_exceptions=True)
+            else:
+                await stop_process(session, kill=action == "kill")
         if action == "stop" and session.done:
-            resolved_root = root.resolve()
-            resolved_workspace = session.workspace.resolve()
-            if resolved_workspace.parent == resolved_root and resolved_workspace.exists():
-                shutil.rmtree(resolved_workspace)
+            sessions.pop(session_id, None)
         return {"stopped": True}
 
     @app.get("/runs/{session_id}/health")
