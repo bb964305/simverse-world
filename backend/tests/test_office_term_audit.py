@@ -300,3 +300,172 @@ async def test_overdue_vacancies_never_flags_an_occupied_election_office(db_sess
     await db_session.commit()
 
     assert await office_audit.overdue_vacancies(db_session, now=now) == []
+
+
+# ── Task 6: 出缺路径接线 ────────────────────────────────────────────
+
+@pytest.mark.anyio
+async def test_term_check_records_audit_for_departing_holder(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "polis_office_enabled", True)
+    db_session.add_all([
+        _res("ex-mayor", "前镇长"),
+        TownTreasury(key=TOWN_KEY, balance_sc=175),
+    ])
+    await db_session.commit()
+
+    svc = OfficeService(db_session)
+    await svc.appoint("mayor", "ex-mayor", fill_strategy="election", term_days=7)
+    assert await svc.term_check(now=datetime.now(UTC) + timedelta(days=365)) == 1
+
+    audits = await office_audit.list_term_audits(db_session, office_key="mayor")
+    assert len(audits) == 1
+    assert audits[0]["holder_slug"] == "ex-mayor"
+    assert audits[0]["town_balance_sc_end"] == 175
+    assert audits[0]["term_started_at"] is not None
+
+
+@pytest.mark.anyio
+async def test_vacate_audits_only_when_asked(db_session):
+    """默认 audit=False → 既有调用方(admin/测试/F2 之外的路径)行为不变。"""
+    db_session.add(_res("ex-mayor", "前镇长"))
+    await db_session.commit()
+
+    svc = OfficeService(db_session)
+    await svc.appoint("mayor", "ex-mayor", fill_strategy="election")
+    assert await svc.vacate("mayor") is True
+    assert await office_audit.list_term_audits(db_session) == []
+
+    await svc.appoint("mayor", "ex-mayor", fill_strategy="election")
+    assert await svc.vacate("mayor", audit=True) is True
+    audits = await office_audit.list_term_audits(db_session)
+    assert len(audits) == 1
+    assert audits[0]["holder_slug"] == "ex-mayor"
+
+
+@pytest.mark.anyio
+async def test_vacate_audit_noop_when_office_already_vacant(db_session):
+    """没有真正出缺就不该有审计行(guard UPDATE rowcount==0)。"""
+    svc = OfficeService(db_session)
+    await svc.appoint("mayor", "someone", fill_strategy="election")
+    await svc.vacate("mayor")
+    assert await svc.vacate("mayor", audit=True) is False
+    assert await office_audit.list_term_audits(db_session) == []
+
+
+@pytest.mark.anyio
+async def test_audit_failure_does_not_break_vacate(db_session, monkeypatch):
+    db_session.add(_res("ex-mayor", "前镇长"))
+    await db_session.commit()
+
+    async def _boom(db, **kwargs):
+        raise RuntimeError("audit backend down")
+
+    monkeypatch.setattr(office_audit, "collect_fiscal_audit", _boom)
+
+    svc = OfficeService(db_session)
+    await svc.appoint("mayor", "ex-mayor", fill_strategy="election")
+    assert await svc.vacate("mayor", audit=True) is True
+    assert await svc.get_holder("mayor") is None
+
+
+@pytest.mark.anyio
+async def test_audit_write_failure_leaves_session_usable(db_session, monkeypatch):
+    """上一条的 _boom 进门就 raise,session 从没脏过,加不加 rollback 都会绿。
+    真实故障形状是异常来自落盘那一步的 flush/commit(ConfigService.set 内部
+    有 db.commit()):那时 session 停在 needs-rollback 状态,后续任何语句都抛
+    PendingRollbackError——F2 拿到 vacate 的 True 之后还要在同一个 session 上
+    改档位 / 写历史行 / 断言 / 广播,那些写会全军覆没(spec §4.3 要防的半途状态)。
+    """
+    from app.services.config_service import ConfigService
+
+    db_session.add_all([
+        _res("ex-mayor", "前镇长"),
+        TownTreasury(key=TOWN_KEY, balance_sc=10),
+        # 它的主键待会儿被拿去制造 flush 期冲突(SystemConfig.key 是 PK)
+        SystemConfig(key="probe-dup", value="1", group="probe",
+                     updated_by="test"),
+    ])
+    await db_session.commit()
+
+    svc = OfficeService(db_session)
+    await svc.appoint("mayor", "ex-mayor", fill_strategy="election")
+
+    async def _boom_in_flush(self, key, value, *, group, updated_by):
+        self._db.add(SystemConfig(key="probe-dup", value="2", group="probe",
+                                  updated_by="test"))
+        await self._db.flush()    # IntegrityError:主键冲突,炸在 flush 里
+
+    monkeypatch.setattr(ConfigService, "set", _boom_in_flush)
+    assert await svc.vacate("mayor", audit=True) is True
+    # 关键断言:session 仍可用。没有 rollback 这里会抛 PendingRollbackError。
+    assert await svc.get_holder("mayor") is None
+    assert await office_audit.list_term_audits(db_session) == []
+
+
+@pytest.mark.anyio
+async def test_term_check_audit_failure_does_not_break_vacate_or_backfill(
+    db_session, monkeypatch,
+):
+    """brief 给定的 Step 1 测试只锁了 vacate(audit=True) 侧的审计失败,没有
+    覆盖 term_check 自动接线这一侧——而这恰恰是 brief 正文点名要求「自己论证
+    位置、并用测试锁住」的那条:record_term_audit 插在 term_check 循环里
+    self.db.commit()(出缺 + 清遗留)之后、trigger_backfill(补选)之前。
+
+    与姊妹测试 test_term_check_backfill_failure_does_not_break_vacate
+    (tests/test_office_backfill.py)对称:那条锁「补选失败不撕毁出缺」,
+    这条锁「审计失败既不撕毁出缺,也不拦住紧随其后的补选」——审计调用放在
+    vacate 的 commit() 之后,所以它失败时只回滚它自己尚未提交的工作,
+    出缺本身已经落盘,补选调用也在它之后正常触发。
+    """
+    monkeypatch.setattr(settings, "polis_office_enabled", True)
+    db_session.add_all([_res("a", "甲"), _res("b", "乙"), _res("c", "丙")])
+    await db_session.commit()
+
+    async def _boom(db, **kwargs):
+        raise RuntimeError("audit backend down")
+
+    # 挂 collect_fiscal_audit(record_term_audit 内部调用的第一步),让
+    # record_term_audit 自己的 fail-open(try/except + _rollback_quietly)
+    # 走到——而不是直接替掉 record_term_audit 本身(那样绕过了它自己的
+    # 兜底,只是在测「term_check 有没有 try/except」而不是在测「审计模块
+    # 自己的 fail-open 是否真的兜住了」)。
+    monkeypatch.setattr(office_audit, "collect_fiscal_audit", _boom)
+
+    svc = OfficeService(db_session)
+    await svc.appoint("mayor", "a", fill_strategy="election", term_days=7)
+    assert await svc.term_check(now=datetime.now(UTC) + timedelta(days=365)) == 1
+    # 出缺没被审计失败撕毁
+    assert await svc.get_holder("mayor") is None
+    # 补选也没被拦住(它在审计调用之后,审计的失败/rollback 不该波及它)
+    polls = (await db_session.execute(
+        select(Poll).where(Poll.status == "open")
+    )).scalars().all()
+    assert len(polls) == 1
+
+
+@pytest.mark.anyio
+async def test_term_check_audit_term_ended_at_follows_injected_clock(
+    db_session, monkeypatch,
+):
+    """term_check 的 ``now`` 是可注入的冻结时钟(测试脚手架的核心契约,见
+    test_office_backfill.py 里所有用 ``now=datetime.now(UTC)+timedelta(...)``
+    的用例)。写审计时若漏传 ``term_ended_at=now``,record_term_audit 会悄悄
+    落到它自己的默认值——真实墙钟时间——而不是循环判定"到期"时用的那个
+    ``now``。brief 给定的 test_term_check_records_audit_for_departing_holder
+    只断言了 term_started_at is not None,没有钉住 term_ended_at 必须等于注入
+    的 now,这条补上这个盲点。"""
+    monkeypatch.setattr(settings, "polis_office_enabled", True)
+    db_session.add_all([
+        _res("ex-mayor", "前镇长"),
+        TownTreasury(key=TOWN_KEY, balance_sc=1),
+    ])
+    await db_session.commit()
+
+    svc = OfficeService(db_session)
+    await svc.appoint("mayor", "ex-mayor", fill_strategy="election", term_days=7)
+    frozen_future = datetime.now(UTC) + timedelta(days=365)
+    assert await svc.term_check(now=frozen_future) == 1
+
+    audits = await office_audit.list_term_audits(db_session, office_key="mayor")
+    recorded_ended = datetime.fromisoformat(audits[0]["term_ended_at"])
+    assert abs((recorded_ended - frozen_future).total_seconds()) < 5

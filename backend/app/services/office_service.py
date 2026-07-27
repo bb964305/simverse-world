@@ -126,17 +126,28 @@ class OfficeService:
         )
         return True
 
-    async def vacate(self, office_key: str) -> bool:
+    async def vacate(self, office_key: str, *, audit: bool = False) -> bool:
         """Clear the office holder + term end. Guard UPDATE — returns True
         only when an actual holder was cleared (idempotent no-op otherwise).
 
+        ``audit=True`` additionally files a read-only term audit for the
+        departing holder (F2's revocation path uses it; default False keeps
+        every existing caller byte-identical). F2's ``revoke_citizenship``
+        does NOT call this method at all — it hand-rolls its own
+        ``update(Office)`` because ``vacate`` commits internally, which does
+        not compose with F2's own transaction. ``audit=True`` is for OTHER
+        callers only (term_check uses its own inline copy of this same
+        sequence, not this method).
+
         The pre-read is NOT a guard (the UPDATE's rowcount still decides): it
-        only captures who is leaving, because the legacy-store cleanup must be
-        keyed on that identity rather than on a membership predicate."""
+        captures who is leaving and when the term began, because both the
+        legacy-store cleanup and the audit are keyed on that identity.
+        """
         prior_row = (await self.db.execute(
             select(Office).where(Office.office_key == office_key)
         )).scalar_one_or_none()
         prior_holder = prior_row.holder_slug if prior_row is not None else None
+        prior_started = prior_row.term_started_at if prior_row is not None else None
         res = await self.db.execute(
             update(Office)
             .where(Office.office_key == office_key, Office.holder_slug.isnot(None))
@@ -152,6 +163,12 @@ class OfficeService:
             await self._emit_office_changed(
                 "office_vacated", office_key, holder_slug=None,
             )
+            if audit:
+                from app.tasks import office_audit
+                await office_audit.record_term_audit(
+                    self.db, office_key=office_key, holder_slug=prior_holder,
+                    term_started_at=prior_started,
+                )
         return vacated
 
     async def term_check(self, *, now: datetime | None = None) -> int:
@@ -187,9 +204,9 @@ class OfficeService:
         # (fix round 1: reproduced with 2 due offices where the first's
         # backfill fails — the second's attribute read crashed term_check
         # outright, taking down the whole nightly cron office segment).
-        due_rows = [(o.id, o.office_key, o.holder_slug) for o in due]
+        due_rows = [(o.id, o.office_key, o.holder_slug, o.term_started_at) for o in due]
         n = 0
-        for office_id, office_key, prior_holder in due_rows:
+        for office_id, office_key, prior_holder, prior_started in due_rows:
             res = await self.db.execute(
                 update(Office)
                 .where(
@@ -209,6 +226,23 @@ class OfficeService:
             n += 1
             await self._emit_office_changed(
                 "office_vacated", office_key, holder_slug=None,
+            )
+            # F3: 卸任财政审计 — read-only, fail-open, and chronologically
+            # before the backfill (it summarises the term that just ended).
+            # It runs AFTER the vacate's own commit() above, so a failure
+            # here (record_term_audit's own _rollback_quietly) only ever
+            # rolls back its OWN not-yet-committed work — the vacate and the
+            # legacy-store cleanup are already durable and cannot be undone
+            # by it. due_rows was extracted into plain tuples before this
+            # loop started specifically so that a rollback-triggered identity
+            # map expiry here can never strand a later iteration's ORM read
+            # (see the due_rows comment above) — office_key/prior_holder/
+            # prior_started are plain values, and trigger_backfill below only
+            # issues fresh SELECTs, never touching a previously-loaded row.
+            from app.tasks import office_audit
+            await office_audit.record_term_audit(
+                self.db, office_key=office_key, holder_slug=prior_holder,
+                term_started_at=prior_started, term_ended_at=now,
             )
             # F3: the second half. trigger_backfill is fail-open internally,
             # so a broken election can never turn a completed vacate into an
