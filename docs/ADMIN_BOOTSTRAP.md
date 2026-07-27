@@ -44,9 +44,11 @@ admin 身份——所以新部署的环境里没有任何人能通过界面拿�
 
 ## 配置密钥（api_key 等）：只能轮换，不能从后台清空
 
-`GET /admin/system/groups/{group}` 与 `GET /admin/system/entries` 对 key/secret/token/
-password 结尾的字段一律回传掩码字面量 `********`，从不下发真实值——`llm.api_key`、
-`portrait.api_key` 都在此列。
+`GET /admin/system/groups/{group}` 与 `GET /admin/system/entries` 对 `api_key`/`secret`/
+`token`/`password` 结尾的字段（`_SECRET_KEY_SUFFIXES`，`backend/app/routers/admin/system_config.py`）
+一律回传掩码字面量 `********`，从不下发真实值——`llm.api_key`、`portrait.api_key` 都在此列。
+注意是 `api_key` 而不是裸的 `key`：新加一个叫 `xxx_key`（不带 `api_` 前缀）的字段不会被
+自动掩码，得手动加进后缀表或换个名字。
 
 写侧规则（`PUT /admin/system/entry`、`PUT /admin/system/batch` 都一样）：
 
@@ -54,10 +56,12 @@ password 结尾的字段一律回传掩码字面量 `********`，从不下发真
   都视为「不修改」，后端跳过写入，DB 里的旧值原样保留。
 - 填入一个非空的新字符串才会真正轮换该密钥。
 
-**没有把已存密钥「清空、回退到 `.env` 默认值」的入口**——`backend/app/routers/admin/`
-下没有任何 DELETE/reset 端点，这是刻意的取舍，不打算补。一旦 `SystemConfig` 表里写过一条
-`llm.api_key`，这条 DB 覆盖值就会一直优先于 `.env` 里的默认值；唯一的退回方式是直接操作
-数据库（删掉那一行，或者把 `value` 手工改回想要的默认字符串）。
+**没有把已存密钥「清空、回退到 `.env` 默认值」的入口**——`system_config.py` 里没有任何
+重置/删除某条 config 的端点（`admin/` 下别的模块有自己的 DELETE 端点，比如
+`residents.py` 的 `/presets/{resident_id}`，但那些管的是别的资源，跟 config 密钥无关）。
+这是刻意的取舍，不打算补。一旦 `SystemConfig` 表里写过一条 `llm.api_key`，这条 DB 覆盖值
+就会一直优先于 `.env` 里的默认值；唯一的退回方式是直接操作数据库（删掉那一行，或者把
+`value` 手工改回想要的默认字符串）。
 
 ## 相关
 
