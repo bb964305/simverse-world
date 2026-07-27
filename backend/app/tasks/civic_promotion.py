@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, UTC
 
@@ -44,6 +45,96 @@ BACKFILL_MARK_KEY = "civic_backfill_done"
 
 #: 关系表里「居民」这一侧的 party 类型（另一种是 "player"）。
 _RESIDENT_PARTY = "resident"
+
+#: 三态旋钮 ``CIVIC_PROMOTION_MODE`` 的取值（``civic_membership.promotion_mode``）。
+MODE_OFF = "off"
+MODE_SHADOW = "shadow"
+MODE_ON = "on"
+
+#: Task 2 三个门槛的**占位值指纹**（``_DEFAULT_MIN_WORLD_DAYS`` /
+#: ``_DEFAULT_MIN_PEERS`` / ``_DEFAULT_MIN_FAMILIARITY`` 的当前取值）。
+#: 有测试断言它与那三个默认值逐字相等——那条断言是**绊线**：真标定完把默认值
+#: 换成实测值时测试会红，改指纹的那一笔 diff 就是「这组数字是量出来的」的
+#: 书面承认。
+PLACEHOLDER_THRESHOLDS: tuple[float, int, float] = (30.0, 3, 0.20)
+
+#: 显式标定凭据（报告日期 / commit）。只在「实测分布恰好落在占位值上」这种
+#: 罕见情形下需要——没有它，一个合法标定结果将永远无法开闸。
+CALIBRATION_ACK_ENV = "CIVIC_THRESHOLDS_CALIBRATED"
+
+_ACK_FALSEY = {"", "0", "false", "no", "off", "none", "null"}
+
+
+class UncalibratedThresholds(RuntimeError):
+    """在**门槛还是占位值**的情况下试图走真开闸路径（``mode="on"``）。
+
+    刻意不继承 ``CivicStandingRefused``：那个异常是「这一位居民的这次档位变更
+    被防呆拒绝」，pass 里很可能有 ``except CivicStandingRefused: continue`` 之类
+    的逐人处理；本异常是「整个判定的入参没资格用来写库」，必须整批中止而不是
+    被逐人吞掉。
+    """
+
+
+def _calibration_ack() -> str | None:
+    """``CIVIC_THRESHOLDS_CALIBRATED`` 的凭据文本；未设/空/假值 → None。
+
+    刻意不走 ``Settings`` 兜底：这是一次**人为声明**，只能来自部署时显式写下的
+    环境变量，不该有代码里的默认值可继承。
+    """
+    raw = (os.environ.get(CALIBRATION_ACK_ENV) or "").strip()
+    return None if raw.lower() in _ACK_FALSEY else raw
+
+
+def thresholds_are_placeholders(*, min_world_days: float, min_peers: int,
+                                min_familiarity: float) -> bool:
+    """这三个数字是不是原封不动的占位值（= 从来没有被标定过）。
+
+    判定按**整组**：只要有一个被动过，就说明有人真的看过分布——闸门的目标是
+    「拍出来的一整套默认值被当成已标定值」，不是逐个数字的真伪鉴定。
+    """
+    return (float(min_world_days), int(min_peers), float(min_familiarity)) == (
+        float(PLACEHOLDER_THRESHOLDS[0]), int(PLACEHOLDER_THRESHOLDS[1]),
+        float(PLACEHOLDER_THRESHOLDS[2]))
+
+
+def assert_thresholds_calibrated(*, mode: str, min_world_days: float,
+                                 min_peers: int, min_familiarity: float) -> None:
+    """开闸前置：``mode="on"`` 且三个门槛仍是占位值 → :exc:`UncalibratedThresholds`。
+
+    spec §4.2 要求门槛由实测分布标定，不许拍数字。本模块是这三个旋钮的**第一个
+    调用点**，所以这条纪律在这里第一次变成可执行的约束——教训是
+    ``rep_credit_min_score = -0.3``：它拍了一个数字，于是拒绝面长期 0/13，闸门
+    形同虚设，而没有任何机制在开闸那天喊出来。
+
+    ``off`` / ``shadow`` 一律放行：标定报告（``scripts/civic_calibration_report``）
+    与 shadow 名单**恰恰要在占位值上跑**，挡住它们就没人能量出真值了。
+
+    两条合法出口：① 把门槛改成实测值（指纹不再匹配）；② 实测恰好落在占位值上
+    时，在环境里写下 ``CIVIC_THRESHOLDS_CALIBRATED=<报告日期/commit>``。
+    """
+    if str(mode).strip().lower() != MODE_ON:
+        return
+    if not thresholds_are_placeholders(min_world_days=min_world_days,
+                                       min_peers=min_peers,
+                                       min_familiarity=min_familiarity):
+        return
+    ack = _calibration_ack()
+    if ack:
+        logger.warning(
+            "civic promotion 开闸使用的门槛与占位值相同，凭 %s=%r 放行 "
+            "(min_world_days=%s min_peers=%s min_familiarity=%s)",
+            CALIBRATION_ACK_ENV, ack, min_world_days, min_peers,
+            min_familiarity)
+        return
+    raise UncalibratedThresholds(
+        f"拒绝在未标定的门槛上开闸：(min_world_days, min_peers, "
+        f"min_familiarity) = ({min_world_days}, {min_peers}, "
+        f"{min_familiarity}) 与占位值 {PLACEHOLDER_THRESHOLDS} 逐字相同。"
+        f"spec §4.2 要求门槛由实测分布标定（使晋升面非空且非全量）——先跑 "
+        f"scripts/civic_calibration_report.py 量出真值再改这三个旋钮；"
+        f"若实测确实落在占位值上，用 {CALIBRATION_ACK_ENV}=<报告日期/commit> "
+        f"显式声明。mode={MODE_SHADOW!r} 不受本闸门限制。"
+    )
 
 
 @dataclass(frozen=True)
@@ -111,9 +202,18 @@ def qualified_peers(snap: PromotionSnapshot, anchors: frozenset[str],
 
 def select_promotions(
     snap: PromotionSnapshot, *, min_world_days: float, min_peers: int,
-    min_familiarity: float, seasoning_days: float,
+    min_familiarity: float, seasoning_days: float, mode: str = MODE_SHADOW,
 ) -> tuple[str, ...]:
-    """待晋升的居民 id，**按 id 升序**（顺序无关性 + 单夜上限的确定性截断）。"""
+    """待晋升的居民 id，**按 id 升序**（顺序无关性 + 单夜上限的确定性截断）。
+
+    ``mode`` 只影响一件事：:func:`assert_thresholds_calibrated` 这道开闸前置。
+    默认 ``"shadow"``（观测态，任何门槛值都放行）——夜间任务真要写库时必须
+    显式传 ``mode="on"``，那一态下原封不动的占位门槛会被拒绝。判定本身与
+    ``mode`` 无关：同一组入参在三态下选出同一批人。
+    """
+    assert_thresholds_calibrated(
+        mode=mode, min_world_days=min_world_days, min_peers=min_peers,
+        min_familiarity=min_familiarity)
     anchors = anchored_citizen_ids(snap, seasoning_days=seasoning_days)
     peers = qualified_peers(snap, anchors, min_familiarity)
     picked: list[str] = []
