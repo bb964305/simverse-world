@@ -40,7 +40,6 @@ services:
     secrets:
       - source: runtime_api_key
         target: runtime_api_key
-        mode: 0400
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=256m

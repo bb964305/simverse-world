@@ -51,7 +51,10 @@ release archive is pinned to SHA-256
 Create deployment-local files from `model-gateway.env.example` and
 `codex-runtime.env.example`. Create `secrets/runtime_api_key` as a mode-0400
 file containing the Runtime control key; do not put it in an environment file
-or commit it. The Lab backend uses matching values:
+or commit it. With rootless Docker, the `secrets` directory and key file must be
+owned by the user running the Docker daemon so it can traverse and bind-mount
+them; keep the directory mode 0700 and the file mode 0400. The Lab backend uses
+matching values:
 
 ```text
 LAB_ADAPTER=codex
