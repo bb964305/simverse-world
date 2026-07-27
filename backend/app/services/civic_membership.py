@@ -659,6 +659,101 @@ async def grant_citizenship(
     ) == 1
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# 写入口 ②：撤销 —— 防呆（Guard first）
+# ═══════════════════════════════════════════════════════════════════════
+
+
+async def _assert_revocable(db, resident_id: str) -> tuple[str, str]:
+    """撤销的射程白名单检查。返回 ``(slug, current_resident_type)``。
+
+    **在第一条 UPDATE 之前**全部做完（照抄 ``seed/reset_builtin_residents.py
+    :125-127`` 的 "Guard first: no DELETE has run yet" 姿势），使拒绝是真正的
+    no-op。两条设计选择照抄 07-25：**raise 而非静默跳过**、**读数据库而非信
+    传入对象**。
+
+    绝对不可被碰的四类 + 一道数值闸门，任一命中即
+    :class:`CivicStandingRefused`。
+    """
+    from sqlalchemy import func, select
+
+    from app.models.civic_standing_history import CivicStandingHistory
+    from app.models.resident import Resident
+    from app.models.user import User
+
+    row = (await db.execute(
+        select(Resident.id, Resident.slug, Resident.resident_type,
+               Resident.creator_id)
+        .where(Resident.id == resident_id)
+    )).first()
+    if row is None:
+        raise CivicStandingRefused(
+            f"revoke refused: no resident with id {resident_id!r}")
+    rid, slug, rtype, creator_id = row
+
+    # ① 玩家化身 —— 07-25 事故对象。type 与 FK 是 OR：admin 手滑可以把化身
+    #    改成 npc，那一刻 resident_type 已不可信，users.player_resident_id
+    #    （app/models/user.py:30）才是权威。
+    avatar_hits = (await db.execute(
+        select(func.count()).select_from(User)
+        .where(User.player_resident_id == rid)
+    )).scalar() or 0
+    if rtype == PLAYER_RESIDENT_TYPE or avatar_hits:
+        raise CivicStandingRefused(
+            f"revoke refused: {slug!r} is a player avatar "
+            f"(resident_type={rtype!r}, users.player_resident_id hits="
+            f"{avatar_hits}). 2026-07-25 16:53 的事故对象正是这一类；政治层"
+            "永不碰玩家化身。"
+        )
+    # ② 内置阵容 —— 被降 = 选举与法定人数熄火
+    if creator_id == SYSTEM_CREATOR_ID:
+        raise CivicStandingRefused(
+            f"revoke refused: {slug!r} is part of the built-in cast "
+            f"(creator_id == SYSTEM_CREATOR_ID). 降内置成员会让选举与法定人数"
+            "熄火：polis_office_mayor_term_days=0 下的真实稳态是「现任镇长被"
+            "永久冻结、再也选不出新人」。"
+        )
+    # ③ admin preset —— 两个集合之外，本来就不该被政治层动
+    if rtype == ADMIN_PRESET_TYPE:
+        raise CivicStandingRefused(
+            f"revoke refused: {slug!r} is an admin-created {ADMIN_PRESET_TYPE!r} "
+            "resident — outside both membership sets by design (U6 待决项)。"
+        )
+    # ④ 当前不在 citizen 档
+    if rtype != CIVIC_MEMBER_TYPE:
+        raise CivicStandingRefused(
+            f"revoke refused: {slug!r} is not in the {CITIZEN!r} tier "
+            f"(resident_type={rtype!r}, expected {CIVIC_MEMBER_TYPE!r})"
+        )
+    # ⑤ 无晋升记录者 —— 撤销是晋升的严格逆操作，白名单而非泛谓词
+    promotions = (await db.execute(
+        select(func.count()).select_from(CivicStandingHistory).where(
+            CivicStandingHistory.resident_id == rid,
+            CivicStandingHistory.new_standing == CITIZEN,
+        )
+    )).scalar() or 0
+    if not promotions:
+        raise CivicStandingRefused(
+            f"revoke refused: {slug!r} has no promotion record in "
+            "civic_standing_history. 撤销是晋升的严格逆操作——白名单，不是泛"
+            "谓词。（admin 手工改回 npc 的人会在探针上显示为「无晋升记录的 "
+            "UGC-origin 公民」，那是一条有用的红旗。）"
+        )
+    # 数值闸门 3：选民下限不变式
+    electorate = (await db.execute(
+        select(func.count()).select_from(Resident).where(Resident.is_civic_voter)
+    )).scalar() or 0
+    floor = max(min_peers() + 1, min_electorate())
+    if electorate - 1 < floor:
+        raise CivicStandingRefused(
+            f"revoke refused: electorate would drop to {electorate - 1}, below "
+            f"the floor max(min_peers+1, CIVIC_MIN_ELECTORATE) = {floor}. "
+            "open_election 需要 ≥2 候选（election_service.py:62-63）；这条不"
+            "变式在未来做逐出时同样成立。"
+        )
+    return slug, rtype
+
+
 __all__ = [
     # 既有的两个集合边界
     "CIVIC_VOTER_TYPES", "SIM_RESIDENT_TYPES", "UGC_RESIDENT_TYPE",
