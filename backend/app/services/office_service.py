@@ -300,3 +300,108 @@ class OfficeService:
             await broadcast_world_changed(payload)
         except Exception:
             logger.warning("office_changed broadcast failed", exc_info=True)
+
+
+# ── F3: the missing second half of a vacancy ───────────────────────────
+#
+# term_check() only ever vacated. current_mayor()'s two fallbacks were cleared
+# by the same pass, so the world settled into "no mayor and nobody arriving".
+# trigger_backfill is that missing link, and it is also the single entry point
+# F2's revocation calls (KICKOFF 2026-07-27 §5 与 F2 的接口约定).
+
+REASON_TERM_EXPIRED = "term_expired"
+REASON_CIVIC_REVOCATION = "civic_revocation"
+REASON_MANUAL = "manual"
+
+
+async def _rollback_quietly(db: AsyncSession) -> None:
+    """Roll back after a swallowed failure so the caller's session stays
+    usable. Never raises — a fail-open path may not explode on its way out."""
+    try:
+        await db.rollback()
+    except Exception:
+        logger.warning("rollback after a swallowed office failure also failed",
+                       exc_info=True)
+
+
+async def _fill_strategy(db: AsyncSession, office_key: str) -> str:
+    """The office's refill procedure, read off the offices row."""
+    row = (await db.execute(
+        select(Office.fill_strategy).where(Office.office_key == office_key)
+    )).scalar_one_or_none()
+    return str(row or "")
+
+
+async def _effective_holder(db: AsyncSession, office_key: str) -> str | None:
+    """Who holds ``office_key`` right now."""
+    return await OfficeService(db).get_holder(office_key)
+
+
+async def trigger_backfill(
+    db: AsyncSession, office_key: str, *, reason: str,
+) -> str | None:
+    """Refill a now-vacant office. Returns the opened Poll.id, else None.
+
+    None means: not an elected office / still occupied / an election poll is
+    already open / election|civic gates off / not enough candidates / an
+    internal failure (fail-open — a broken election must never break the
+    vacate that called us).
+    """
+    try:
+        if not office_key:
+            return None
+        if await _fill_strategy(db, office_key) != "election":
+            return None
+        from app.config import settings
+        if not (settings.election_enabled and settings.civic_polls_enabled):
+            return None
+        if await _effective_holder(db, office_key):
+            return None
+
+        from app.models.season import Poll
+        from app.services import election_service
+        existing = (await db.execute(
+            select(Poll).where(
+                Poll.status == "open",
+                Poll.question.like(f"{election_service.ELECTION_TAG}%"),
+            )
+        )).scalars().first()
+        if existing is not None:
+            logger.info("office backfill skipped (%s/%s): election already open",
+                        office_key, reason)
+            return None
+
+        poll = await election_service.open_election(db)
+        if poll is None:
+            logger.info("office backfill produced no poll (%s/%s)",
+                        office_key, reason)
+            return None
+        try:
+            from app.services.config_service import ConfigService
+            await ConfigService(db).set(
+                "election_last_opened",
+                datetime.now(UTC).date().isoformat(),
+                group="civic", updated_by=f"office_backfill:{reason}",
+            )
+        except Exception:
+            logger.warning("stamping election_last_opened failed", exc_info=True)
+            # Same reason as the outer handler: ConfigService.set writes and
+            # commits, so a failure here can leave the session needing a
+            # rollback. The poll itself is already committed by propose().
+            await _rollback_quietly(db)
+        logger.info("office backfill opened election %s for %s (%s)",
+                    poll.id, office_key, reason)
+        return poll.id
+    except Exception:
+        logger.warning("office backfill failed (%s/%s)", office_key, reason,
+                       exc_info=True)
+        # Fail-open has to cover the SESSION, not just the return value.
+        # open_election → civic_service.propose does db.add + db.commit, so the
+        # exception may well come out of a flush/commit (IntegrityError, a
+        # dropped connection, a column-width overflow). A session left in the
+        # needs-rollback state makes every LATER statement raise
+        # PendingRollbackError — i.e. returning None would merely move the
+        # explosion one statement down (term_check's next due office, or F2's
+        # 改档位 → 写历史行 → 广播 after vacate returned True).
+        await _rollback_quietly(db)
+        return None
