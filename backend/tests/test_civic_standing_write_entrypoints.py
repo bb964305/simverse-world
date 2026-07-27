@@ -221,6 +221,11 @@ _EVASIVE_WRITE_SHAPES = {
     # 形态③——直接构造，_construction_offenders 接住。
     "construction-npc-literal": (
         'Resident(resident_type="npc", creator_id=cid)\n'),
+    # 形态④——2026-07-27 评审 Important finding：setattr 是属性赋值的函数
+    # 等价物，绕开形态①的静态 `.attr = value` 扫描。此刻（本轮红提交）还没
+    # 接，应该红。
+    "setattr-literal-field-and-value": (
+        'setattr(resident, "resident_type", "npc")\n'),
 }
 
 
@@ -262,6 +267,17 @@ _EXEMPT_WRITE_SHAPES = {
         'stmt.values(status="idle")\n'),
     "values-call-unrelated-dict-key": (
         'stmt.values({"status": "idle"})\n'),
+    # 两个真实先例——通用字段编辑循环，field 是循环变量，不是字面量
+    # "resident_type"。形态④的属性名判据要求 2nd 参是字面量，这两个天然
+    # 落不进判据里，不需要为它们开任何豁免（app/routers/admin/events.py:105
+    # / app/routers/admin/items.py:73 原文照抄，逐字一致）。
+    "setattr-loop-variable-field-events-precedent": (
+        'setattr(event, field, value)\n'),
+    "setattr-loop-variable-field-items-precedent": (
+        'setattr(item, field, value)\n'),
+    # setattr 传符号引用——与形态②同一套"字面量 vs 符号引用"豁免机制。
+    "setattr-symbolic-value": (
+        'setattr(resident, "resident_type", CIVIC_MEMBER_TYPE)\n'),
 }
 
 
