@@ -200,6 +200,7 @@ async def _consume_codex(
                 *command,
                 cwd=session.workspace,
                 env=env,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=1024 * 1024,

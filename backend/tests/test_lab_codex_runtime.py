@@ -33,7 +33,17 @@ async def test_codex_runtime_exposes_lab_adapter_protocol(tmp_path, monkeypatch)
         return {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
                 "cost_usd_cents": 1}
 
+    real_spawn = asyncio.create_subprocess_exec
+    observed_stdin = []
+
+    async def capture_spawn(*args, **kwargs):
+        observed_stdin.append(kwargs.get("stdin"))
+        return await real_spawn(*args, **kwargs)
+
     monkeypatch.setattr("app.lab.codex_runtime.service._gateway_usage", fake_usage)
+    monkeypatch.setattr(
+        "app.lab.codex_runtime.service.asyncio.create_subprocess_exec", capture_spawn
+    )
     app = create_app(config)
     headers = {"Authorization": f"Bearer {API_KEY}"}
     async with httpx.AsyncClient(
@@ -76,6 +86,7 @@ async def test_codex_runtime_exposes_lab_adapter_protocol(tmp_path, monkeypatch)
         stopped = await client.post(f"/runs/{session_id}/stop", headers=headers)
         assert stopped.status_code == 200
         assert not (Path(config.workspace_root) / session_id).exists()
+    assert observed_stdin == [asyncio.subprocess.DEVNULL]
 
 
 def test_codex_shell_environment_excludes_gateway_token():
