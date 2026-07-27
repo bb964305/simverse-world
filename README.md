@@ -255,6 +255,7 @@ npm run dev
 - 打开 http://localhost:5173 应看到游戏界面
 - 访问 http://localhost:8000/health 应返回 `{"status": "ok"}`
 - 访问 http://localhost:8000/docs 查看 API 文档
+- 管理后台 `/admin` 需要 `is_admin` 账号——第一个管理员怎么来见 [docs/ADMIN_BOOTSTRAP.md](docs/ADMIN_BOOTSTRAP.md)
 
 ---
 
