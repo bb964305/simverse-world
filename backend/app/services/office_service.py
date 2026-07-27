@@ -21,6 +21,8 @@ Mayor special-case: vacating the mayor office also clears the two legacy
 stores — ``meta_json['mayor']`` (the wage-bonus multiplier, gotcha #1) and
 ``system_config['current_mayor']`` (the read-path fallback) — so the three
 representations never diverge after a term expiry. Fail-open throughout.
+Neither legacy-store query filters by resident_type / is_autonomous: the row
+that must be cleaned is precisely the one that may have just left that set.
 """
 from __future__ import annotations
 
@@ -124,7 +126,15 @@ class OfficeService:
 
     async def vacate(self, office_key: str) -> bool:
         """Clear the office holder + term end. Guard UPDATE — returns True
-        only when an actual holder was cleared (idempotent no-op otherwise)."""
+        only when an actual holder was cleared (idempotent no-op otherwise).
+
+        The pre-read is NOT a guard (the UPDATE's rowcount still decides): it
+        only captures who is leaving, because the legacy-store cleanup must be
+        keyed on that identity rather than on a membership predicate."""
+        prior_row = (await self.db.execute(
+            select(Office).where(Office.office_key == office_key)
+        )).scalar_one_or_none()
+        prior_holder = prior_row.holder_slug if prior_row is not None else None
         res = await self.db.execute(
             update(Office)
             .where(Office.office_key == office_key, Office.holder_slug.isnot(None))
@@ -134,7 +144,7 @@ class OfficeService:
         )
         vacated = (res.rowcount or 0) > 0
         if vacated and office_key == "mayor":
-            await self._clear_mayor_legacy_stores()
+            await self._clear_mayor_legacy_stores(holder_slug=prior_holder)
         await self.db.commit()
         if vacated:
             await self._emit_office_changed(
@@ -173,7 +183,9 @@ class OfficeService:
             if (res.rowcount or 0) == 0:
                 continue  # re-appointed concurrently — not expired anymore
             if office.office_key == "mayor":
-                await self._clear_mayor_legacy_stores()
+                await self._clear_mayor_legacy_stores(
+                    holder_slug=office.holder_slug,
+                )
             await self.db.commit()
             n += 1
             await self._emit_office_changed(
@@ -208,22 +220,41 @@ class OfficeService:
 
     # ── internals ──────────────────────────────────────────────────────
 
-    async def _clear_mayor_legacy_stores(self) -> None:
+    async def _clear_mayor_legacy_stores(
+        self, *, holder_slug: str | None = None,
+    ) -> None:
         """Keep the two legacy mayor stores in step with an offices-side
-        vacate: pop meta_json['mayor'] everywhere (the wage multiplier —
-        gotcha #1) and null system_config['current_mayor'] (the read
-        fallback). Flushed into the caller's transaction; fail-open."""
+        vacate: pop meta_json['mayor'] (the wage multiplier — gotcha #1) and
+        null system_config['current_mayor'] (the read fallback). Flushed into
+        the caller's transaction; fail-open.
+
+        NEITHER query may carry a membership predicate. The pre-F3 version
+        scanned ``WHERE Resident.is_autonomous``, i.e. it selected the set the
+        departing holder may have just left (demoted / exiled / a player
+        avatar) — exactly the row that must be cleaned. Two disjoint reads
+        replace it:
+
+        1. targeted — ``WHERE slug = :holder_slug``, identity not membership;
+        2. residual — ``WHERE meta_json IS NOT NULL AND slug <> :holder_slug``,
+           catching stale flags any other path left behind.
+        """
         try:
             from sqlalchemy.orm.attributes import flag_modified
             from app.models.resident import Resident
 
-            residents = (await self.db.execute(
-                select(Resident).where(
-                    Resident.is_autonomous,
-                    Resident.meta_json.isnot(None),
-                )
-            )).scalars().all()
-            for r in residents:
+            targets: list = []
+            if holder_slug:
+                leaving = (await self.db.execute(
+                    select(Resident).where(Resident.slug == holder_slug)
+                )).scalar_one_or_none()
+                if leaving is not None:
+                    targets.append(leaving)
+            residual_stmt = select(Resident).where(Resident.meta_json.isnot(None))
+            if holder_slug:
+                residual_stmt = residual_stmt.where(Resident.slug != holder_slug)
+            targets.extend((await self.db.execute(residual_stmt)).scalars().all())
+
+            for r in targets:
                 meta = dict(r.meta_json or {})
                 if meta.get("mayor"):
                     meta.pop("mayor", None)
