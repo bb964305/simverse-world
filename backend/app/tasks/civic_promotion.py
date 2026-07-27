@@ -25,6 +25,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -439,15 +440,37 @@ _REFUSED_DETAIL_MAX_CHARS = 300
 
 
 def _bounded_summary_payload(result: dict) -> dict:
-    """按**序列化后的字符预算**（不是 slug 个数）截断 ``candidates``，使
-    ``json.dumps(payload)`` 落在 ``SystemConfig.value`` 的 ``String(2000)``
-    列宽内——超限在 Postgres 上是 ``StringDataRightTruncation``，
-    ``_record_run`` 是 fail-open，会把那次异常整个吞掉只留一条 warning，
-    shadow 三夜观察期的名单就无声无息地从没写进去过。
+    """按**序列化后的字符预算**（不是 slug 个数）截断 ``candidates`` /
+    ``refused_detail``，使 ``json.dumps(payload)`` 落在 ``SystemConfig.value``
+    的 ``String(2000)`` 列宽内——超限在 Postgres 上是
+    ``StringDataRightTruncation``，``_record_run`` 是 fail-open，会把那次异常
+    整个吞掉只留一条 warning，shadow 三夜观察期的名单就无声无息地从没写
+    进去过。
 
     ``candidate_count`` 永远是真实候选总数，不受截断影响；
     ``candidates_truncated`` 显式标记「这份名单被砍过」——读者才分得清
     「刚好 50 个候选」和「300 个候选只看到一部分」。
+
+    截断顺序：先砍 ``candidates`` 到 0，再砍 ``refused_detail``——候选名单
+    是 shadow 观察期真正要看的东西，拒绝原因的自由文本次要。
+
+    ⚠️ 二次复审 Minor 1（F3 那个"截断按字符数、不按编码后长度"的洞在拒绝
+    路径上重演）：``_REFUSED_DETAIL_MAX_CHARS`` 只是把 ``refused_detail``
+    截到 300 个**原始字符**——但 ``json.dumps`` 默认 ``ensure_ascii=True``，
+    每个非 ASCII 字符会展开成 6 字符的 ``\\uXXXX`` 转义。300 个中文字符编码
+    后是 1800 字符，``candidates`` 已经砍到 0 时序列化仍可能超预算（实测：
+    ``refused_detail="拒"*5000, candidates=[]`` → 2014 字符）——本仓的异常
+    消息习惯用中文（``_assert_revocable`` / ``assert_thresholds_calibrated``
+    都是长中文串），所以下面把 ``refused_detail`` 也折进同一个"序列化后
+    字符预算"循环，不只是简单地按原始字符数一次性截断。
+
+    最后有一道硬钳制（``assert``）：就算两轮截断全部见底，序列化后仍然超
+    列宽，也不能悄悄把一个超限 payload 递给 ``ConfigService``——那样和没做
+    预算截断没有区别，只是把 ``StringDataRightTruncation`` 从 Postgres 搬到
+    这里。这条断言是绊线：以后有人往 payload 里加一个新的自由文本字段却
+    忘了折进预算循环，会在测试/burn-in 阶段就近炸出来（``AssertionError``
+    会被 ``_record_run`` 的 fail-open 捕获、以 warning + ``exc_info`` 记下
+    完整堆栈），而不是变成生产环境里一条无声无息的 Postgres 错误。
     """
     candidates = list(result.get("candidates") or [])
     refused_detail = result.get("refused_detail")
@@ -474,6 +497,22 @@ def _bounded_summary_payload(result: dict) -> dict:
     if kept == 0 and candidates:
         payload["candidates_truncated"] = True
 
+    # candidates 已经见底（kept == 0）时若仍然超预算，继续砍 refused_detail
+    # ——逐字符砍，直到落进预算或砍空为止。
+    while (payload.get("refused_detail")
+           and len(json.dumps(payload)) > _SUMMARY_VALUE_MAX_CHARS):
+        payload["refused_detail"] = payload["refused_detail"][:-1]
+    if payload.get("refused_detail") == "":
+        payload["refused_detail"] = None
+
+    serialized = json.dumps(payload)
+    assert len(serialized) <= _SUMMARY_VALUE_MAX_CHARS, (
+        f"civic_promotion run summary payload is {len(serialized)} chars "
+        f"after truncating candidates and refused_detail to nothing — "
+        f"exceeds SystemConfig.value's String({_SUMMARY_VALUE_MAX_CHARS}); "
+        f"a new field was added to the payload without folding it into "
+        f"this budget"
+    )
     return payload
 
 
@@ -507,6 +546,16 @@ async def _player_avatar_ids(db, resident_ids) -> frozenset[str]:
     return frozenset(hits)
 
 
+#: 专用 session 拿不到连接时最多等多久（复审 Minor 2）。生产 ``_pool_
+#: kwargs``（``app/database.py``）没有显式设 ``pool_timeout``，SQLAlchemy
+#: 默认 30s——那是给"正常想用连接的调用方"设的耐心，不该原样套在"顺手记一
+#: 条观测摘要"上：夜间任务链等 30s 才发现拿不到连接，代价与这条摘要的价值
+#: 不成比例。用 ``asyncio.wait_for`` 给这一次操作单独设一个更短的超时，
+#: 已用脚本验证过它会在这个更短的超时上正确打断一个卡在更长
+#: ``pool_timeout`` 里的 checkout（不是"等两个超时里更长的那个"）。
+_SCRATCH_SESSION_TIMEOUT_SECONDS = 3.0
+
+
 async def _record_run(db, result: dict) -> None:
     """把本次运行摘要写进 ``system_config``（fail-open）。
 
@@ -523,29 +572,77 @@ async def _record_run(db, result: dict) -> None:
     同一个 session），直接在 ``db`` 上 commit 会把那些改动一并带下去，与
     「shadow 对 residents / civic_standing_history 零写入」的承诺打架。
 
-    ``AsyncEngine(db.get_bind())`` 包住的是与 ``db`` 同一个底层 sync engine
-    （同一个连接池、同一个物理数据库）——不是重新 ``create_async_engine``，
-    那样在 SQLite ``:memory:`` 下会开出一个全新的空库，测试会读不到自己刚
-    写的东西；``AsyncSession.get_bind()`` 返回的本来就是这个 sync engine
-    （不是 ``AsyncEngine``），``AsyncEngine(...)`` 只是把它重新包一层给
-    ``async_sessionmaker`` 用，不建新连接池。
+    ⚠️ ``AsyncEngine(db.get_bind())`` 包住的是与 ``db`` 同一个底层 sync
+    engine，也就是**同一个连接池**（已用脚本验证过 ``wrapped.pool is
+    engine.pool``）——不是重新 ``create_async_engine``，那样在 SQLite
+    ``:memory:`` 下会开出一个全新的空库。**正因为共用同一个连接池，这个
+    包出来的 ``AsyncEngine`` 绝不能调用 ``.dispose()``**（复审 Minor 3）
+    ——那会把整个应用共用的连接池连根拔起（生产是全局 ``app.database.
+    engine`` / ``async_session`` 的那个池，``pool_size=20``），不是关掉这
+    一次专用 session 自己的什么东西。当前代码从不 dispose；以后如果有人来
+    "补上漏掉的 dispose"，会把生产数据库连接池打爆——**不要加**。
+
+    连接获取失败要单独识别、单独告警（复审 Minor 2）：``_record_run`` 期间
+    同时占用 2 条连接（调用方的 ``db`` 一条 + 这里的专用 session 一条）。
+    池耗尽时 checkout 会一直等到 ``pool_timeout`` 才抛超时——落进下面通用
+    的 fail-open 会和"没什么好记的"共用同一条 warning，运维分不清这次是
+    真的没数据还是连接池忙不过来。这里用 ``asyncio.wait_for`` 给整个专用
+    session 的生命周期设一个更短的超时（``_SCRATCH_SESSION_TIMEOUT_
+    SECONDS``），单独捕获、单独用 ERROR 级别告警。选 ``asyncio.wait_for``
+    而不是直接改 ``pool_timeout`` 本身：这个 scratch session 复用的是调用
+    方那个共享连接池，改池级别的 ``pool_timeout`` 会影响这个池的**所有**
+    其它使用者，不只是这一次摘要写。
+
+    ``AsyncSession.get_bind()`` 的返回类型是 ``Engine | Connection``（复审
+    Minor 4）——今天所有调用路径都是 engine-bound，但一旦有人传
+    ``AsyncSession(bind=<Connection>)``，实测 ``AsyncEngine(connection)``
+    **不会**抛异常，而是悄悄包出一个会复用同一条连接/同一个事务的坏
+    wrapper（相当于上面 Important 2 那个漏洞的另一种变种，而且比它更隐蔽
+    ——连异常都不抛，只是数据对不上）。这里显式判
+    ``isinstance(bind, Engine)``，不满足就直接拒绝、单独告警，不让这条
+    路径走到 ``AsyncEngine(...)``。
     """
     try:
+        from sqlalchemy import Engine
+        from sqlalchemy import exc as sa_exc
         from sqlalchemy.ext.asyncio import (
             AsyncEngine, AsyncSession, async_sessionmaker,
         )
 
         from app.services.config_service import ConfigService
 
+        bind = db.get_bind()
+        if not isinstance(bind, Engine):
+            logger.error(
+                "civic_promotion run summary write skipped: db.get_bind() "
+                "returned %s, not an Engine (AsyncSession must be "
+                "engine-bound for _record_run to get its own connection) "
+                "— this run's only artifact was NOT persisted",
+                type(bind).__name__)
+            return
+
         payload = _bounded_summary_payload(result)
+        # Minor 3：绝不对这个 wrapped engine 调用 .dispose()——见本函数
+        # docstring 的 ⚠️ 段落，它和 db 共用同一个连接池。
         scratch_factory = async_sessionmaker(
-            AsyncEngine(db.get_bind()), class_=AsyncSession,
-            expire_on_commit=False)
-        async with scratch_factory() as scratch:
-            await ConfigService(scratch).set(
-                RUN_SUMMARY_KEY, payload, group="civic",
-                updated_by=PROMOTION_ACTOR,
-            )
+            AsyncEngine(bind), class_=AsyncSession, expire_on_commit=False)
+
+        async def _write() -> None:
+            async with scratch_factory() as scratch:
+                await ConfigService(scratch).set(
+                    RUN_SUMMARY_KEY, payload, group="civic",
+                    updated_by=PROMOTION_ACTOR,
+                )
+
+        try:
+            await asyncio.wait_for(
+                _write(), timeout=_SCRATCH_SESSION_TIMEOUT_SECONDS)
+        except (TimeoutError, sa_exc.TimeoutError) as exc:
+            logger.error(
+                "civic_promotion run summary write timed out after %.1fs "
+                "waiting for a scratch DB connection (connection pool "
+                "exhausted?) — this run's only artifact was NOT persisted: "
+                "%s", _SCRATCH_SESSION_TIMEOUT_SECONDS, exc)
     except Exception:
         logger.warning("recording civic_promotion run summary failed",
                        exc_info=True)
