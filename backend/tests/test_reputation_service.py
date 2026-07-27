@@ -128,6 +128,14 @@ def test_gossip_tone_applies_distortion_penalty_and_clamps():
     assert gossip_tone(-1.0, distorted=True) == settings.rep_min
 
 
+def test_gossip_tone_sign_flips_at_one_gift_of_affinity():
+    # 钉死 GOSSIP_AFFINITY_WEIGHT=3.0：符号翻转点必须恰好落在一次送礼
+    # （realism_rel_affinity_gift=0.1）—— 这是全线标定叙事的地基
+    # （-0.3 + 3.0×0.1 = 0.0）。终审变异实测：改成 2.0 或 1.6，全线 38
+    # 条测试原样通过，唯独这条测试能钉住权重本身。
+    assert gossip_tone(settings.realism_rel_affinity_gift) == pytest.approx(0.0)
+
+
 def test_evidence_weight_damps_by_hops_and_floors_importance():
     assert evidence_weight(0.6, 0, -0.5) == pytest.approx(-0.3)
     assert evidence_weight(0.6, 3, -0.5) == pytest.approx(-0.075)
