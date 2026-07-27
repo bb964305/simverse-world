@@ -277,3 +277,42 @@ async def test_close_one_still_reports_a_plain_failure_for_non_mayor_effects(
         select(BulletinPost))).scalars().all()]
     assert any("议案生效时遇到问题" in b for b in bodies)
     assert not any("失去" in b for b in bodies)
+
+
+@pytest.mark.anyio
+async def test_a_failed_install_does_not_leak_into_the_announcement_commit(
+        db_session, monkeypatch):
+    """真实调用链上的原子性：``_execute_outcome`` 把异常吞掉（``civic_service``
+    :621），紧接着 ``_clerk_announce`` → ``create_post`` 自己 ``commit()``
+    （``bulletin_service.py:25``）。install_mayor 若把脏对象留在 session 里，
+    那次公告 commit 会替它落盘——「同一次 commit」的保证必须由 install_mayor
+    自己的错误路径回滚兜住，光靠调用方自觉是兜不住的。
+    """
+    from app.models.season import Poll
+    from app.services import civic_service
+
+    db_session.add_all([_res("old", meta={"mayor": True}), _res("new")])
+    poll = Poll(question=f"{election_service.ELECTION_TAG}:谁来当下一任镇长?",
+                options_json=[
+                    {"label": "新人", "effect": {"type": "mayor",
+                                                 "slug": "new"},
+                     "npc_votes": 3},
+                    {"label": "弃权", "effect": None, "npc_votes": 1},
+                ], status="open")
+    db_session.add(poll)
+    await db_session.commit()
+
+    async def _boom(db, slug):
+        raise RuntimeError("current_mayor write blew up")
+
+    monkeypatch.setattr(election_service, "_record_current_mayor", _boom)
+
+    await civic_service._close_one(db_session, poll)
+
+    metas = await _meta_by_slug(db_session)
+    assert metas["old"].get("mayor") is True, \
+        "旧镇长的标志被后续的公告 commit 顺手落盘了 —— 事务化没兜住"
+    assert metas["new"].get("mayor") in (None, False)
+    assert (await db_session.execute(
+        select(SystemConfig).where(SystemConfig.key == "current_mayor")
+    )).scalar_one_or_none() is None
