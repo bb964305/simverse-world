@@ -858,19 +858,33 @@ async def revoke_citizenship(
     ``_edit_resident`` 就是这么做的），或改用列级 SELECT / SQL 侧谓词。步骤 6
     的 :func:`_assert_demotion_invariants` 全部用列级 SELECT 正是这个原因。
 
-    ⚠️ **调用方契约（异常路径）**：任何一步失败（防呆之后的 guard UPDATE
-    rowcount 不符、步骤 6 的自查不过）都会命中下面的 ``except Exception:
-    await db.rollback(); raise``——这是真正的错误路径（本函数认为复合事务已经
-    坏了，必须整体回滚，不是某一步「按预期拒绝」还要保留会话继续用），
-    ``db.rollback()`` 在这属于正确用法。但它对**顶层事务** 调用
-    ``_restore_snapshot(dirty_only=False)``，会 expire 整个 identity map——不
-    只是本函数碰过的对象，调用方在同一 session 里更早加载的任何 ORM 实体都会
-    被 expire。之后对它们做一次同步属性读会触发隐式 lazy-reload，在没有
-    greenlet 上下文的地方炸出 ``sqlalchemy.exc.MissingGreenlet``（与
-    F3 线 ``office_audit.py`` 记录的是同一类故障，只是触发点是这里的守卫
-    UPDATE 分支）。**调用方在捕获到本函数抛出的异常之后，不得直接读之前在同一
-    session 里加载过的任何 ORM 对象的属性**——要么 ``await db.refresh(obj)``
-    先刷新，要么重新 SELECT。
+    ⚠️ **调用方契约（异常路径）**——两条失败路径的回滚粒度**不一样**，判据抄自
+    ``grant_citizenship_batch`` 完全同构的 rowcount 分支（本文件
+    :func:`grant_citizenship_batch`）：
+
+    - 步骤 4 的 guard UPDATE rowcount 不符：这是**非错误状态下拒绝一条 guarded
+      写入**（并发对手在防呆之后、guard UPDATE 之前改过这一行），不是 session
+      已经坏了。步骤 1-4 因此整个跑在 ``async with db.begin_nested()`` 一个
+      SAVEPOINT 里——rowcount 不符时它的自动回滚只
+      ``_restore_snapshot(dirty_only=True)``，**只影响这个 SAVEPOINT 里弄脏的
+      对象**，调用方在同一 session 里更早加载、本函数完全没碰过的其他 ORM
+      对象不受影响，异常之后可以照常读。
+    - 步骤 6 的自查（:func:`_assert_demotion_invariants`）不过：这是真正的错误
+      路径——本函数认为复合事务的不变量已经被破坏，必须整体回滚，不是「按预期
+      拒绝」还要保留会话继续用。这条命中下面的 ``except Exception: await
+      db.rollback(); raise``，``db.rollback()`` 在这属于正确用法。但它对
+      **顶层事务** 调用 ``_restore_snapshot(dirty_only=False)``，会 expire
+      **整个** identity map——不只是本函数碰过的对象，调用方在同一 session 里
+      更早加载的任何 ORM 实体都会被 expire。之后对它们做一次同步属性读会触发
+      隐式 lazy-reload，在没有 greenlet 上下文的地方炸出
+      ``sqlalchemy.exc.MissingGreenlet``（与 F3 线 ``office_audit.py`` 记录的
+      是同一类故障，只是触发点不同）。**调用方在捕获到这条路径抛出的异常之后，
+      不得直接读之前在同一 session 里加载过的任何 ORM 对象的属性**——要么
+      ``await db.refresh(obj)`` 先刷新，要么重新 SELECT。
+
+    两条路径都会把 :class:`CivicStandingRefused`（或其他异常）传给调用方，
+    调用方无法仅凭异常类型分辨走的是哪一条——**保守起见，一律按「步骤 6」那条
+    更严格的契约处理**：异常之后不直接读旧对象。
     """
     if tier == EXILED or tier == "exile":
         raise NotImplementedError(
@@ -900,7 +914,20 @@ async def revoke_citizenship(
     slug, current_type = await _assert_revocable(db, resident_id)
     assert_known_types(current_type, UGC_RESIDENT_TYPE)   # 数值闸门 4
 
-    try:
+    # 步骤 1-4：guarded 复合写入跑在同一个 SAVEPOINT 里。步骤 4 的 rowcount
+    # 不符是「非错误状态下拒绝一条 guarded 写入」（同 grant_citizenship_batch
+    # 完全同构的分支，civic_membership.py:614-627），不是「session 已经坏了」
+    # 的真错误——一个 begin_nested() 局部 savepoint 的自动回滚只
+    # ``_restore_snapshot(dirty_only=True)``，只影响这个 savepoint 里弄脏的
+    # 对象（这里是步骤 2/3 改过的 target / cfg，以及步骤 1/4 的两条裸
+    # UPDATE），不会碰调用方在同一 session 里更早加载、本函数完全没碰过的
+    # 其他 ORM 对象。若改走顶层 ``db.rollback()``，那些旁观对象会被 expire，
+    # 之后一次同步属性读会在没有 greenlet 上下文的地方炸
+    # ``MissingGreenlet``——见 :func:`revoke_citizenship` docstring 的「异常
+    # 路径调用方契约」与 ``tests/test_civic_revoke_citizenship.py::
+    # test_revoke_rowcount_mismatch_uses_a_savepoint_not_a_session_rollback``
+    # 的复现。
+    async with db.begin_nested():
         # 1. 卸民选职务。只 election 档；带 holder 校验（gate 关时 offices
         #    可能留着迁移 046 的陈旧值，无条件 vacate 会罢免错的人）。
         #    正确性不依赖 polis_office_enabled 的取值。
@@ -946,13 +973,18 @@ async def revoke_citizenship(
             raise CivicStandingRefused(
                 f"revoke refused: guarded UPDATE touched {res.rowcount} rows "
                 f"for {slug!r} — resident_type changed inside the window")
+
+    try:
         # 5. 历史行
         await _write_history(
             db, resident_id=resident_id, old_standing=CITIZEN,
             new_standing=DENIZEN, reason=reason, reason_code=reason_code,
             actor=actor, evidence=None,
         )
-        # 6. 断言（flush 让前面的 ORM 改动落到本事务里再自查）
+        # 6. 断言（flush 让前面的 ORM 改动落到本事务里再自查）——这是真错误
+        #    路径：不变量被破坏说明复合事务本身已经坏了，必须整体回滚，顶层
+        #    db.rollback() 在这里是正确用法（对比上面 begin_nested() 的判据
+        #    见 docstring「异常路径调用方契约」）。
         await db.flush()
         await _assert_demotion_invariants(db, resident_id=resident_id, slug=slug)
     except Exception:

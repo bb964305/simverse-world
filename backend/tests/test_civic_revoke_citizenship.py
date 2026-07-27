@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from app.config import settings
 from app.models.civic_standing_history import CivicStandingHistory
@@ -256,3 +256,120 @@ async def test_refused_revoke_leaves_the_database_untouched(db_session):
         .where(Resident.is_civic_voter))).scalar() == 6
     assert (await db_session.execute(
         select(func.count()).select_from(CivicStandingHistory))).scalar() == 0
+
+
+# ── fix round 1：真正能红的顺序断言 + rowcount 分支的回滚粒度 ──────────
+
+
+@pytest.mark.anyio
+async def test_cleanup_runs_before_the_guarded_tier_flip_update(
+        db_session, _no_ws):
+    """真正坐实「步骤 1-3 先于步骤 4」，不是只证「步骤 1-4 都先于步骤 5」。
+
+    ``test_cleanup_happens_before_the_tier_flip`` 的探针挂在 ``_write_history``
+    （步骤 5）上，只能证明步骤 4 在步骤 5 之前——这在代码里线性排列就天然成立，
+    测不出「步骤 1-3 在步骤 4 之前」这条真正要保证的强命题：把步骤 4 整段挪到
+    步骤 1-3 之前，那条探针一样不会红。
+
+    这里改用 ``test_batch_grant_is_all_or_nothing``
+    （tests/test_civic_grant_citizenship.py:158-181）同款技术：monkeypatch
+    ``db_session.execute``，在「档位 UPDATE」这条语句**即将执行、但还没执行**
+    的那一刻侧读三处镇长表示的当前 DB 值。用目标表名识别语句（``residents``
+    表的 UPDATE 只有步骤 4 这一条），不依赖调用顺序计数，所以哪怕实现把步骤 4
+    整段挪到最前面，探针照样能在它第一次出现时逮到它，此时看到的必然是「清理
+    还没做」的原始状态——探针与被测顺序解耦，不会跟着被测代码一起挪位置。
+    """
+    r = await _seed_citizen(db_session)
+    await _make_sitting_mayor(db_session, r)
+
+    real_execute = db_session.execute
+    seen: dict = {}
+
+    def _is_resident_tier_flip(statement) -> bool:
+        table = getattr(statement, "table", None)
+        return (getattr(statement, "is_update", False)
+                and table is not None and table.name == "residents")
+
+    async def _sneaky(statement, *args, **kwargs):
+        if "offices_cleared" not in seen and _is_resident_tier_flip(statement):
+            seen["offices_cleared"] = (await real_execute(
+                select(Office.holder_slug)
+                .where(Office.office_key == "mayor"))).scalar_one()
+            metas = (await real_execute(
+                select(Resident.meta_json))).scalars().all()
+            seen["meta_still_has_mayor"] = any(
+                (m or {}).get("mayor") for m in metas)
+            cfg_value = (await real_execute(
+                select(SystemConfig.value)
+                .where(SystemConfig.key == "current_mayor"))).scalar_one()
+            seen["cfg_still_points_at_slug"] = (
+                json.loads(cfg_value) == r.slug)
+        return await real_execute(statement, *args, **kwargs)
+
+    with patch.object(db_session, "execute", new=_sneaky):
+        assert await cm.revoke_citizenship(
+            db_session, r, reason="x", actor="admin:1") is True
+
+    assert "offices_cleared" in seen, "探针没有命中档位 UPDATE 语句"
+    assert seen["offices_cleared"] is None, (
+        "步骤 1 必须已经把 offices.holder_slug 清空——发生在档位翻转之前")
+    assert seen["meta_still_has_mayor"] is False, (
+        "步骤 2 必须已经清掉 meta_json['mayor']——发生在档位翻转之前")
+    assert seen["cfg_still_points_at_slug"] is False, (
+        "步骤 3 必须已经清掉 system_config['current_mayor']——发生在档位翻转"
+        "之前")
+
+
+@pytest.mark.anyio
+async def test_revoke_rowcount_mismatch_uses_a_savepoint_not_a_session_rollback(
+        db_session, _no_ws):
+    """步骤 4 guarded UPDATE 的 rowcount 不符是「非错误状态下拒绝一条 guarded
+    写入」，与 ``grant_citizenship_batch`` 完全同构的分支
+    （civic_membership.py:614-627）——必须用 ``begin_nested()`` savepoint，
+    不能走会 expire 整个 identity map 的顶层 ``db.rollback()``。
+
+    用 ``test_batch_grant_is_all_or_nothing`` 同款「插桩制造语句间隙的并发写」
+    技术复现：在本函数第一条 UPDATE 语句（步骤 1 的 offices UPDATE）执行完毕
+    之后、步骤 4 的 guarded UPDATE 执行之前，偷偷把 ``r`` 的 ``resident_type``
+    改掉，让步骤 4 的 guard（``resident_type == current_type``）命中 0 行。
+
+    ``bystander`` 全程没被 ``revoke_citizenship`` 碰过，只是恰好和 ``r`` 活在
+    同一个 session 里、且在调用前已经被这个 session 加载过。若实现走的是顶层
+    ``db.rollback()``，``bystander`` 会被一并 expire，之后对它做一次同步属性
+    读会在没有 greenlet 上下文的地方炸 ``MissingGreenlet``——这正是评审探针
+    复现的故障：
+    ``[reviewer] bystander access raised: MissingGreenlet: greenlet_spawn
+    has not been called...``
+    """
+    r = await _seed_citizen(db_session)
+    bystander = _res("ugc-bystander", cm.UGC_RESIDENT_TYPE)
+    db_session.add(bystander)
+    await db_session.commit()
+    # 显式把 bystander 拉进这个 session 的 identity map（commit 之后
+    # expire_on_commit=False，但依然确保它是一个真实加载过的 ORM 对象）。
+    bystander = (await db_session.execute(
+        select(Resident).where(Resident.id == bystander.id))).scalar_one()
+    bystander_name = bystander.name
+
+    real_execute = db_session.execute
+    seen = {"n": 0}
+
+    async def _sneaky(statement, *args, **kwargs):
+        result = await real_execute(statement, *args, **kwargs)
+        if seen["n"] == 0 and getattr(statement, "is_update", False):
+            seen["n"] = 1
+            # 并发窗口：另一个写者已经把 r 的档位改掉了，抢在我们自己的
+            # guarded UPDATE 之前。
+            await real_execute(
+                update(Resident).where(Resident.id == r.id)
+                .values(resident_type=cm.UGC_RESIDENT_TYPE)
+                .execution_options(synchronize_session=False))
+        return result
+
+    with patch.object(db_session, "execute", new=_sneaky):
+        with pytest.raises(cm.CivicStandingRefused):
+            await cm.revoke_citizenship(db_session, r, reason="x",
+                                        actor="admin:1")
+
+    # 旁观对象没被这次 revoke 碰过：同步属性读不应该炸 MissingGreenlet。
+    assert bystander.name == bystander_name
