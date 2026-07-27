@@ -458,6 +458,207 @@ def auto_demotion_enabled() -> bool:
     return _env_bool("CIVIC_AUTO_DEMOTION_ENABLED", False)
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# 写入口 ①：晋升
+# ═══════════════════════════════════════════════════════════════════════
+#
+# ``resident_type`` 在本轮之后只许由本模块的两个写入口（加 admin 路由的转调）
+# 改写。列上没有 CHECK，代码就是最后一道闸——``tests/
+# test_civic_standing_write_entrypoints.py`` 用 AST 扫描把这条钉住。
+
+
+async def _write_history(
+    db, *, resident_id: str, old_standing: str, new_standing: str,
+    reason: str | None, reason_code: str, actor: str,
+    evidence: dict | None,
+) -> None:
+    """落一行 ``civic_standing_history``（可回滚硬门 + 公民时钟锚点）。
+
+    不 commit——由调用方决定事务边界。``world_at`` 存 UTC-aware：
+    ``DateTime(timezone=True)`` 在 SQLite 上丢时区，统一转 UTC 存、读回补 UTC
+    才能无损往返。
+    """
+    from datetime import UTC
+
+    from app import world_clock
+    from app.models.civic_standing_history import CivicStandingHistory
+
+    db.add(CivicStandingHistory(
+        resident_id=resident_id,
+        old_standing=old_standing,
+        new_standing=new_standing,
+        reason=reason,
+        reason_code=reason_code,
+        actor=actor,
+        evidence_json=evidence or {},
+        world_at=world_clock.now_world().astimezone(UTC),
+    ))
+
+
+async def _emit_standing_changed(
+    db, *, slug: str, old_standing: str, new_standing: str, reason_code: str,
+) -> None:
+    """广播 ``civic_standing_changed``（world_changed v1 信封，fail-open）。
+
+    ⚠️ 事件名**不得**叫 ``resident_type_changed``——该名字已被 SBTI 人格类型
+    漂移占用（``app/ws/handlers/chat.py:474-482``），复用会让前端把政治事件
+    渲染成人格变化。payload 只带 ``reason_code`` 枚举码，**永不带 reason
+    文本**。挂 world_revision / seq 的写法参照
+    ``app/services/office_service.py:244-271``；注意那是易失的 WS 扇出、
+    **不落任何表**，不能拿它当「可回滚」硬门的载体。
+    """
+    try:
+        import uuid
+        from datetime import datetime, UTC
+
+        from app.services import world_revision_service as wrsvc
+
+        payload = {
+            "type": "civic_standing_changed",
+            "schema_version": wrsvc.SCHEMA_VERSION,
+            "event_id": str(uuid.uuid4()),
+            "seq": await wrsvc.current_source_cursor(db),
+            "world_revision_id": await wrsvc.current_revision_id(db),
+            "resident_slug": slug,
+            "old_standing": old_standing,
+            "new_standing": new_standing,
+            "reason_code": reason_code,
+            "occurred_at": datetime.now(UTC).isoformat(),
+        }
+        from app.lab.apply import broadcast_world_changed
+
+        await broadcast_world_changed(payload)
+    except Exception:
+        logger.warning("civic_standing_changed broadcast failed", exc_info=True)
+
+
+async def grant_citizenship_batch(
+    db, resident_ids, *, reason: str, reason_code: str, actor: str,
+    evidence_by_id: dict | None = None,
+) -> int:
+    """把一批 denizen 升为 citizen。返回实际晋升数。
+
+    形态是「guard 全做完 → 一次 guarded UPDATE → N 行历史 → 一次 commit」::
+
+        UPDATE residents SET resident_type = :new
+        WHERE id IN (:ids) AND resident_type = :expected
+
+    ``rowcount != len(ids)`` → **整批回滚 + 告警**（有人在窗口内改过
+    ``resident_type``，唯一的并发对手是 admin 手改）。绝不截断执行。
+
+    ⚠️ **调用方契约**：档位翻转走 ``update(...).execution_options(
+    synchronize_session=False)``，且本仓的会话是 ``expire_on_commit=False``
+    （``tests/conftest.py:119-122``、``app/database.py`` 的 ``async_session``），
+    所以**调用方手里的 ORM 对象在本函数返回后仍是旧值**，实体查询也会把同一个
+    陈旧对象取回来。需要读新值就 ``await db.refresh(resident)``（
+    ``app/routers/admin/residents.py`` 的 ``_edit_resident`` 就是这么做的），
+    或者改用列级 ``select(Resident.resident_type)`` / SQL 侧
+    ``where(Resident.is_civic_voter)``。
+    """
+    from sqlalchemy import select, update
+
+    from app.models.resident import Resident
+    from app.models.user import User
+
+    ids = sorted(set(resident_ids))
+    if not ids:
+        return 0
+
+    # 数值闸门 4：取值白名单（写错一个字符的唯一兜底）
+    assert_known_types(CIVIC_MEMBER_TYPE, UGC_RESIDENT_TYPE)
+
+    # Guard first: no UPDATE has run yet —— 查库，不信传入对象
+    rows = (await db.execute(
+        select(Resident.id, Resident.slug, Resident.resident_type)
+        .where(Resident.id.in_(ids))
+    )).all()
+    found = {rid: (slug, rtype) for rid, slug, rtype in rows}
+    missing = [rid for rid in ids if rid not in found]
+    if missing:
+        raise CivicStandingRefused(
+            f"grant refused: {len(missing)} unknown resident id(s): {missing}")
+    wrong_tier = sorted(rid for rid in ids
+                        if found[rid][1] != UGC_RESIDENT_TYPE)
+    if wrong_tier:
+        raise CivicStandingRefused(
+            f"grant refused: {len(wrong_tier)} resident(s) are not in the "
+            f"{DENIZEN!r} tier (expected resident_type={UGC_RESIDENT_TYPE!r}): "
+            + ", ".join(f"{found[r][0]}={found[r][1]!r}" for r in wrong_tier)
+        )
+    # 射程防呆：玩家化身即使被 admin 手滑改成 denizen 档也不得被晋升。这是
+    # _assert_revocable 第 ① 条的同一段 SQL —— 两个写入口的射程纪律必须对称，
+    # 否则「type 已不可信」只在撤销侧成立，晋升侧仍然裸奔（tier 检查会放行，
+    # is_ugc_resident 的兜底分支还会把它判成 UGC）。
+    avatar_ids = set((await db.execute(
+        select(User.player_resident_id).where(User.player_resident_id.in_(ids))
+    )).scalars().all())
+    if avatar_ids:
+        raise CivicStandingRefused(
+            f"grant refused: {len(avatar_ids)} target(s) are player avatars "
+            f"(users.player_resident_id hits: "
+            f"{sorted(found[a][0] for a in avatar_ids if a in found)}). "
+            "政治层永不碰玩家化身——2026-07-25 16:53 的事故对象正是这一类；"
+            "resident_type 在 admin 手滑那一刻就已不可信。"
+        )
+
+    # Guarded UPDATE runs inside its own SAVEPOINT (not a whole-session
+    # ``db.rollback()``): a plain ``Session.rollback()`` expires *every*
+    # identity-mapped object in the session (``SessionTransaction
+    # .rollback()`` calls ``_restore_snapshot(dirty_only=False)`` for a
+    # top-level transaction) — including objects the caller holds that were
+    # never touched by this write (e.g. the untouched member of the batch).
+    # Since ``synchronize_session=False`` never dirties ORM state in the
+    # first place, a nested savepoint's rollback (``dirty_only=True``) has
+    # nothing to expire and leaves the caller's objects intact. Pattern
+    # matches ``app/lab/control_plane.py:458``.
+    async with db.begin_nested():
+        res = await db.execute(
+            update(Resident)
+            .where(Resident.id.in_(ids), Resident.resident_type == UGC_RESIDENT_TYPE)
+            .values(resident_type=CIVIC_MEMBER_TYPE)
+            .execution_options(synchronize_session=False)
+        )
+        touched = res.rowcount or 0
+        if touched != len(ids):
+            raise CivicStandingRefused(
+                f"grant refused: guarded UPDATE touched {touched} of {len(ids)} "
+                "rows — resident_type changed inside the window; whole batch "
+                "rolled back (see relation_service.py:214-223 for the pattern)"
+            )
+
+    for rid in ids:
+        await _write_history(
+            db, resident_id=rid, old_standing=DENIZEN, new_standing=CITIZEN,
+            reason=reason, reason_code=reason_code, actor=actor,
+            evidence=(evidence_by_id or {}).get(rid),
+        )
+    await db.commit()
+
+    for rid in ids:
+        await _emit_standing_changed(
+            db, slug=found[rid][0], old_standing=DENIZEN,
+            new_standing=CITIZEN, reason_code=reason_code,
+        )
+    logger.info("civic grant: %d resident(s) promoted by %s (%s)",
+                len(ids), actor, reason_code)
+    return len(ids)
+
+
+async def grant_citizenship(
+    db, resident, *, reason: str, actor: str, evidence: dict | None = None,
+    reason_code: str = "granted",
+) -> bool:
+    """单条晋升（admin 路由用）。:func:`grant_citizenship_batch` 的薄包装——
+    两条路径共用同一份 guard 与同一份写形态，不存在实现漂移。"""
+    resident_id = getattr(resident, "id", None)
+    if not resident_id:
+        raise CivicStandingRefused("grant refused: resident has no id")
+    return await grant_citizenship_batch(
+        db, [resident_id], reason=reason, reason_code=reason_code, actor=actor,
+        evidence_by_id={resident_id: evidence or {}},
+    ) == 1
+
+
 __all__ = [
     # 既有的两个集合边界
     "CIVIC_VOTER_TYPES", "SIM_RESIDENT_TYPES", "UGC_RESIDENT_TYPE",
@@ -471,6 +672,8 @@ __all__ = [
     "ugc_filter", "POLITICAL_FILL_STRATEGY",
     # 防呆
     "CivicStandingRefused",
+    # 写入口
+    "grant_citizenship", "grant_citizenship_batch",
     # 运行时旋钮
     "promotion_mode", "min_world_days", "min_peers", "min_familiarity",
     "peer_seasoning_world_days", "promotion_max_per_run",
