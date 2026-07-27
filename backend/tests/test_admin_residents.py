@@ -1,6 +1,7 @@
 import pytest
 from app.models.user import User
 from app.models.resident import Resident
+from app.services.system_users import ADMIN_CREATOR_ID
 
 
 @pytest.mark.anyio
@@ -78,11 +79,11 @@ async def test_admin_create_preset_resident(db_session):
         resident_type="preset",
         reply_mode="auto",
         meta_json=None,
-        creator_id="system",
+        creator_id=ADMIN_CREATOR_ID,
     )
     assert preset.slug == "preset-sage"
     assert preset.resident_type == "preset"
-    assert preset.creator_id == "system"
+    assert preset.creator_id == ADMIN_CREATOR_ID
 
 
 @pytest.mark.anyio
@@ -106,3 +107,41 @@ async def test_admin_batch_district(db_session):
     await db_session.refresh(r2)
     assert r1.district == "engineering"
     assert r2.district == "engineering"
+
+
+@pytest.mark.anyio
+async def test_create_preset_owner_row_exists(client, db_session):
+    """admin 建的预设居民，其 creator_id 必须指向一行真实存在的 users
+    —— 否则生产 PG 直接外键违约（sqlite 不强制 FK，所以只能显式断言那一行在）。"""
+    from sqlalchemy import select
+
+    from app.models.resident import Resident
+    from app.models.user import User
+    from app.services.auth_service import create_token
+    from app.services.system_users import ADMIN_CREATOR_ID
+
+    admin = User(name="adm", email="adm-preset-fk@test.com", is_admin=True, is_banned=False)
+    db_session.add(admin)
+    await db_session.commit()
+
+    resp = await client.post(
+        "/admin/residents/presets",
+        headers={"Authorization": f"Bearer {create_token(admin.id)}"},
+        json={
+            "slug": "preset-fk", "name": "外键测试", "district": "academy",
+            "ability_md": "", "persona_md": "", "soul_md": "",
+            "sprite_key": "伊莎贝拉", "tile_x": 1, "tile_y": 1,
+            "resident_type": "preset", "reply_mode": "auto", "meta_json": None,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+    created = (await db_session.execute(
+        select(Resident).where(Resident.slug == "preset-fk")
+    )).scalar_one()
+    assert created.creator_id == ADMIN_CREATOR_ID
+
+    owner = (await db_session.execute(
+        select(User).where(User.id == created.creator_id)
+    )).scalar_one_or_none()
+    assert owner is not None, "creator_id points at a users row that does not exist"

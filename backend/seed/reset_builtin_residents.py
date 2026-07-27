@@ -43,6 +43,7 @@ from app.models.resident_treasury import ResidentTreasury
 from app.models.user import User
 from seed.preset_characters import PRESET_CHARACTERS, SYSTEM_USER_ID, seed_presets
 from seed.seed_residents import ensure_system_user
+from app.services.system_users import ensure_admin_creator_user
 
 # Old built-in roster: 14 legacy presets + 5 demo NPCs.
 LEGACY_BUILTIN_SLUGS = {
@@ -177,6 +178,7 @@ async def main() -> None:
             print("No old built-in residents found.")
 
         await ensure_system_user(db)
+        await ensure_admin_creator_user(db)
         created = await seed_presets(db)
 
         kept = (await db.execute(

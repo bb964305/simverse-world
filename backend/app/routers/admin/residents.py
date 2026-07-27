@@ -10,6 +10,7 @@ from app.routers.admin.middleware import require_admin
 from app.services.civic_membership import UGC_RESIDENT_TYPE
 from app.services.scoring_service import compute_star_rating
 from app.services.sbti_service import compute_sbti, update_meta_with_sbti
+from app.services.system_users import ADMIN_CREATOR_ID, ensure_admin_creator_user
 from app.schemas.admin import (
     AdminResidentListItem,
     ResidentPersonaEditRequest,
@@ -272,13 +273,17 @@ async def create_preset(
 ):
     """Create a new preset (admin-managed) resident."""
     try:
+        # residents.creator_id 是 users.id 的 FK；哨兵行可能还没被 seed 建出来
+        # （lifespan 的 seeding 只在 auto_create_tables 下跑，生产够不着），
+        # 所以在插入前自愈一次。幂等，命中时只多一次 SELECT。
+        await ensure_admin_creator_user(db)
         resident = await _create_preset(
             db,
             slug=req.slug, name=req.name, district=req.district,
             ability_md=req.ability_md, persona_md=req.persona_md, soul_md=req.soul_md,
             sprite_key=req.sprite_key, tile_x=req.tile_x, tile_y=req.tile_y,
             resident_type=req.resident_type, reply_mode=req.reply_mode,
-            meta_json=req.meta_json, creator_id="system",
+            meta_json=req.meta_json, creator_id=ADMIN_CREATOR_ID,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
