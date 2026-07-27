@@ -173,6 +173,104 @@ async def test_a_partial_face_is_the_target_shape(db_session, monkeypatch):
     assert "🔴" not in out
 
 
+# ── 门槛归因：哪道闸真的在拒人，哪道是装饰 ─────────────────────────────
+
+@pytest.mark.anyio
+async def test_gate_attribution_names_which_gate_did_the_rejecting(db_session,
+                                                                   monkeypatch):
+    """光有分布读不出「是谁在拒」。四个人各代表一种被拒方式，归因必须逐一对上。"""
+    monkeypatch.setenv("CIVIC_PROMOTION_MIN_WORLD_DAYS", "100")
+    monkeypatch.setenv("CIVIC_PROMOTION_MIN_PEERS", "1")
+    monkeypatch.setenv("CIVIC_PROMOTION_MIN_FAMILIARITY", "0.4")
+    b1 = _builtin("b1")
+    young = _ugc("u-young", created_days_ago=1)          # 仅世界日不够
+    lonely = _ugc("u-lonely")                            # 仅 θ 不够
+    both = _ugc("u-both", created_days_ago=1)            # 两道都不过
+    ok = _ugc("u-ok")
+    db_session.add_all([b1, young, lonely, both, ok])
+    await db_session.commit()
+    await _edge(db_session, young, b1, 0.9)
+    await _edge(db_session, lonely, b1, 0.1)
+    await _edge(db_session, ok, b1, 0.9)
+
+    data = await collect_calibration(db_session)
+    ga = data["gate_attribution"]
+    assert ga["passed"] == data["candidate_face"]["size"] == 1
+    assert ga["rejected_by"] == {"world_days": 2, "peers": 2, "banned": 0}
+    assert ga["blocked"] == {"world_days_only": 1, "peers_only": 1, "both": 1}
+    assert ga["peers_breakdown"] == {"too_few_anchored_edges": 1,
+                                     "kth_best_below_theta": 1}
+    assert ga["decorative_gates"] == []
+
+
+@pytest.mark.anyio
+async def test_a_gate_that_rejects_nobody_is_named_decorative(db_session,
+                                                              monkeypatch):
+    """``rep_credit_min_score = -0.3`` 的失效模式：闸门在，拒绝面 0/13。
+    verdict=partial **不足以**证明三道闸都生效——必须逐闸给出拒绝面。"""
+    monkeypatch.setenv("CIVIC_PROMOTION_MIN_WORLD_DAYS", "1")
+    monkeypatch.setenv("CIVIC_PROMOTION_MIN_PEERS", "1")
+    monkeypatch.setenv("CIVIC_PROMOTION_MIN_FAMILIARITY", "0.4")
+    b1, u1, u2 = _builtin("b1"), _ugc("u1"), _ugc("u2")
+    db_session.add_all([b1, u1, u2])
+    await db_session.commit()
+    await _edge(db_session, u1, b1, 0.9)
+    await _edge(db_session, u2, b1, 0.1)
+
+    data = await collect_calibration(db_session)
+    assert data["candidate_face"]["verdict"] == "partial"     # 形状是对的……
+    ga = data["gate_attribution"]
+    assert ga["rejected_by"]["world_days"] == 0               # ……但两道闸空转
+    assert ga["peers_breakdown"]["too_few_anchored_edges"] == 0
+    assert ga["decorative_gates"] == ["min_world_days", "min_peers"]
+    out = render_calibration(data)
+    assert "装饰性" in out
+    assert "🔴" not in out
+
+
+# ── 实测扫描：门槛值由分布推出，不得预填 ───────────────────────────────
+
+@pytest.mark.anyio
+async def test_sweep_candidates_are_measured_so_an_empty_world_yields_none(
+        db_session):
+    """候选阈值全部来自实测分布。库里没有读数 → 一个候选值都不许出现，
+    否则「标定」就退化成把常数抄进报告。"""
+    data = await collect_calibration(db_session)
+    assert data["sweep"]["candidates"] == {
+        "min_world_days": [], "min_peers": [], "min_familiarity": []}
+    assert data["sweep"]["grid"] == []
+    assert data["sweep"]["partial"] == []
+
+
+@pytest.mark.anyio
+async def test_sweep_names_the_measured_triples_that_make_the_face_partial(
+        db_session, monkeypatch):
+    """本任务的交付物：当前阈值给出全量（= 写松了）时，报告要直接答出
+    「哪几组实测取值能让晋升面非空且非全量」，而不是只说一句「写松了」。"""
+    monkeypatch.setenv("CIVIC_PROMOTION_MIN_WORLD_DAYS", "1")
+    monkeypatch.setenv("CIVIC_PROMOTION_MIN_PEERS", "1")
+    monkeypatch.setenv("CIVIC_PROMOTION_MIN_FAMILIARITY", "0.05")
+    b1 = _builtin("b1")
+    u1, u2, u3 = _ugc("u1"), _ugc("u2"), _ugc("u3")
+    db_session.add_all([b1, u1, u2, u3])
+    await db_session.commit()
+    for who, fam in ((u1, 0.9), (u2, 0.5), (u3, 0.1)):
+        await _edge(db_session, who, b1, fam)
+
+    data = await collect_calibration(db_session)
+    assert data["candidate_face"]["verdict"] == "full"
+    sweep = data["sweep"]
+    assert sweep["candidates"]["min_familiarity"] == [0.1, 0.5, 0.9]
+    assert sweep["candidates"]["min_peers"] == [1]
+    assert len(sweep["grid"]) == len(sweep["candidates"]["min_world_days"]) * 3
+    assert [(r["min_familiarity"], r["size"]) for r in sweep["partial"]] == [
+        (0.9, 1), (0.5, 2)]
+    # 每一行都能被照抄进 env：报告里的 size 就是用报告里的三个数字算出来的
+    assert all(r["verdict"] == "partial" and 0 < r["size"] < 3
+               for r in sweep["partial"])
+    assert "可用取值" in render_calibration(data)
+
+
 # ── 只读 ───────────────────────────────────────────────────────────────
 
 @pytest.mark.anyio
