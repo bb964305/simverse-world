@@ -199,3 +199,110 @@ async def test_backfill_declines_when_civic_gates_off(db_session, monkeypatch):
 
     assert await trigger_backfill(db_session, "mayor", reason=REASON_TERM_EXPIRED) is None
     assert await _open_election_polls(db_session) == []
+
+
+# ── Task 3: term_check 断链修复（硬门）──────────────────────────────
+
+@pytest.mark.anyio
+async def test_term_check_triggers_backfill_frozen_clock(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "polis_office_enabled", True)
+    await _seed_voters(db_session)
+
+    svc = OfficeService(db_session)
+    await svc.appoint("mayor", "a", fill_strategy="election", term_days=7)
+    assert await svc.term_check(now=datetime.now(UTC) + timedelta(days=365)) == 1
+
+    assert await svc.get_holder("mayor") is None
+    polls = await _open_election_polls(db_session)
+    assert len(polls) == 1  # 世界不得停在「无限期无镇长」
+
+
+@pytest.mark.anyio
+async def test_world_clock_advance_past_term_end_opens_backfill(db_session, monkeypatch):
+    """硬门：推进世界时钟越过 term_ends_at，断言补选已开。
+
+    term_days 是世界日；k=4 时 8 世界日 ≈ 2 真实日,所以把真实钟推 8/k+1 日
+    一定越过 term_ends_at。用 world_clock 换算而不是裸 utcnow 比较。
+    """
+    from app import world_clock
+
+    monkeypatch.setattr(settings, "polis_office_enabled", True)
+    monkeypatch.setattr(settings, "polis_office_mayor_term_days", 8)
+    await _seed_voters(db_session)
+
+    svc = OfficeService(db_session)
+    await svc.appoint("mayor", "a", fill_strategy="election",
+                      term_days=settings.polis_office_mayor_term_days)
+
+    base = world_clock.now_real()
+    jump = timedelta(days=8 / settings.world_clock_k + 1)
+    monkeypatch.setattr(world_clock, "now_real", lambda: base + jump)
+
+    assert await svc.term_check() == 1              # 默认 now 走世界时钟
+    assert await svc.get_holder("mayor") is None
+    polls = await _open_election_polls(db_session)
+    assert len(polls) == 1
+    assert polls[0].question.startswith(ELECTION_TAG)
+
+
+@pytest.mark.anyio
+async def test_term_check_backfill_failure_does_not_break_vacate(db_session, monkeypatch):
+    """补选炸了,出缺本身仍然成立(fail-open)。"""
+    monkeypatch.setattr(settings, "polis_office_enabled", True)
+    await _seed_voters(db_session)
+
+    async def _boom(db, **kwargs):
+        raise RuntimeError("election service down")
+
+    monkeypatch.setattr("app.services.election_service.open_election", _boom)
+
+    svc = OfficeService(db_session)
+    await svc.appoint("mayor", "a", fill_strategy="election", term_days=7)
+    assert await svc.term_check(now=datetime.now(UTC) + timedelta(days=365)) == 1
+    assert await svc.get_holder("mayor") is None
+
+
+@pytest.mark.anyio
+async def test_term_check_does_not_backfill_labour_office(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "polis_office_enabled", True)
+    await _seed_voters(db_session)
+
+    svc = OfficeService(db_session)
+    await svc.appoint("postman", "a", fill_strategy="seed", term_days=7)
+    assert await svc.term_check(now=datetime.now(UTC) + timedelta(days=365)) == 1
+    assert await _open_election_polls(db_session) == []
+
+
+@pytest.mark.anyio
+async def test_backfill_poll_closing_actually_seats_a_successor(db_session, monkeypatch):
+    """硬门本体:补选开出 → 关票 → 新镇长就位。
+
+    spec §5 的硬门目标是「任期到期后世界不得出现『无限期无镇长』状态」,
+    「开出一张 poll」只是半截:中间还隔着
+    close_due_polls → _close_one → _execute_outcome(type="mayor")
+    → install_mayor → OfficeService.appoint 这条链。这条链现在是通的,但只断言
+    poll 数的话,它哪天断了 F3 的测试仍然全绿而世界照样停在无镇长。
+    不违反独占文件约束:civic_service / election_service 只 import 调用。
+    """
+    from app.services import civic_service
+
+    monkeypatch.setattr(settings, "polis_office_enabled", True)
+    await _seed_voters(db_session)
+    svc = OfficeService(db_session)
+    await svc.appoint("mayor", "a", fill_strategy="election", term_days=7)
+    assert await svc.term_check(now=datetime.now(UTC) + timedelta(days=365)) == 1
+    assert await svc.get_holder("mayor") is None
+
+    polls = await _open_election_polls(db_session)
+    assert len(polls) == 1
+    poll = polls[0]
+    winner_slug = poll.options_json[0]["effect"]["slug"]
+    # 投一票给 0 号候选,并把截止时间挪到过去(与 test_m6_election 同姿势:
+    # 走 votes 表而不是手改 options_json,免得跟 flag_modified 较劲)
+    db_session.add(Vote(poll_id=poll.id, user_id="u1", option_idx=0))
+    poll.closes_at = datetime.now(UTC) - timedelta(minutes=1)
+    await db_session.commit()
+
+    assert await civic_service.close_due_polls(db_session) == 1
+    # 不再是「无限期无镇长」:继任者真的坐上了位置
+    assert await svc.get_holder("mayor") == winner_slug

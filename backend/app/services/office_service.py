@@ -12,6 +12,8 @@ coin_service atomicity pattern — never SELECT-then-write):
 - ``term_check``: per-row guard UPDATE ``WHERE id = :id AND term_ends_at <=
   :now`` so a concurrent re-appoint between SELECT and UPDATE is never
   clobbered.
+  A vacate that actually landed then calls ``trigger_backfill`` — without it
+  the office stays empty forever (F3 断链).
 
 Term semantics: ``term_days`` are WORLD days. All conversion goes through
 ``app/world_clock.py`` (the single time-scale entry point) — never a bare
@@ -153,10 +155,17 @@ class OfficeService:
         return vacated
 
     async def term_check(self, *, now: datetime | None = None) -> int:
-        """Nightly: vacate every office whose term_ends_at has passed.
-        Returns the number of offices vacated. ``now`` is injectable for
-        frozen-clock tests; the default reads the world clock's real 'now'
-        (term_ends_at is stored in real UTC, converted at appoint time)."""
+        """Nightly: vacate every office whose term_ends_at has passed, then
+        hand each freed seat to :func:`trigger_backfill`.
+
+        Returns the number of offices actually vacated. ``now`` is injectable
+        for frozen-clock tests; the default reads the world clock's real 'now'
+        (term_ends_at is stored in real UTC, converted at appoint time).
+
+        The backfill call is the F3 断链 fix: before it, an expired term left
+        the office empty AND cleared both current_mayor fallbacks, so nothing
+        in the world could ever seat a successor.
+        """
         if now is None:
             from app import world_clock
             now = world_clock.now_real().astimezone(UTC)
@@ -169,6 +178,11 @@ class OfficeService:
         )).scalars().all()
         n = 0
         for office in due:
+            # Captured BEFORE the guard UPDATE: synchronize_session=False keeps
+            # the loaded row at its pre-update values on purpose, and the
+            # departing holder is what the legacy-store clear is keyed on.
+            office_key = office.office_key
+            prior_holder = office.holder_slug
             res = await self.db.execute(
                 update(Office)
                 .where(
@@ -182,14 +196,19 @@ class OfficeService:
             )
             if (res.rowcount or 0) == 0:
                 continue  # re-appointed concurrently — not expired anymore
-            if office.office_key == "mayor":
-                await self._clear_mayor_legacy_stores(
-                    holder_slug=office.holder_slug,
-                )
+            if office_key == "mayor":
+                await self._clear_mayor_legacy_stores(holder_slug=prior_holder)
             await self.db.commit()
             n += 1
             await self._emit_office_changed(
-                "office_vacated", office.office_key, holder_slug=None,
+                "office_vacated", office_key, holder_slug=None,
+            )
+            # F3: the second half. trigger_backfill is fail-open internally,
+            # so a broken election can never turn a completed vacate into an
+            # exception. It runs AFTER the legacy stores were cleared above —
+            # that ordering is what makes the vacancy visible to it.
+            await trigger_backfill(
+                self.db, office_key, reason=REASON_TERM_EXPIRED,
             )
         return n
 
