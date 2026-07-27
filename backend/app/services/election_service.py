@@ -203,6 +203,14 @@ async def install_mayor(db, slug: str | None) -> bool:
     # 会自己 ``commit()``（``bulletin_service.py``），留在 session 里的清扫
     # 写入会被那次 commit 顺手落盘，「同一次 commit」的保证就破了。
     async with db.begin_nested():
+        # ⚠️ 这个 WHERE **几乎不筛掉任何行**，别误读成一次有意义的窄化：
+        # SQLAlchemy 的 ``JSON`` 类型默认 ``none_as_null=False``，Python ``None``
+        # 被序列化成 JSON 字面量 ``null`` 而不是 SQL NULL，所以 ``meta_json``
+        # 为空的居民这一列也是 ``'null'``、``IS NOT NULL`` 依然为真（实测：
+        # 两行两命中）。留着它是因为它是所需集合的**超集**——扫多了无害（多一次
+        # 无 mayor 键的 dict 拷贝），扫漏了才会留下第二个镇长。要点是**不能**
+        # 换成 ``is_autonomous`` 之类的成员谓词：那是「用集合 S 去清理刚离开 S
+        # 的人」。
         others = (await db.execute(
             select(Resident).where(Resident.meta_json.isnot(None))
         )).scalars().all()
