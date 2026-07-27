@@ -370,10 +370,17 @@ async def overdue_vacancies(
 
     Only offices with an ACTUAL refill path can go red, and the predicate is
     the same one ``trigger_backfill`` early-returns on
-    (``_fill_strategy(...) != "election"``). Of the four S2-1 slots only the
-    mayor is elected: ``town_clerk``/``postman`` are ``seed`` and ``doctor``
-    is ``appointment`` (``OFFICE_DEFS``), nothing in the world ever refills
-    them automatically, and migration 046 backfills neither ``doctor``'s
+    (``_fill_strategy(...) != "election"``). Since Task 7, ``_fill_strategy``
+    falls back to ``OFFICE_DEFS`` when the ``offices`` row is missing, while
+    this function stays a raw column read of ``Office.fill_strategy``. The
+    two only diverge on a row that does not exist at all — a case this
+    function structurally never sees, since it only iterates rows that DO
+    exist — so the divergence is inert, not a bug.
+
+    Of the four S2-1 slots only the mayor is elected: ``town_clerk``/``postman``
+    are ``seed`` and ``doctor`` is ``appointment`` (``OFFICE_DEFS``), nothing
+    in the world ever refills them automatically, and migration 046 backfills
+    neither ``doctor``'s
     holder nor its ``updated_at``. Without this filter the probe would raise
     2–3 red flags every single night forever and drown the one vacancy that
     actually means something.

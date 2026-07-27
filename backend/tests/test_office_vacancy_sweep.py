@@ -77,6 +77,33 @@ async def test_term_check_clears_flag_for_non_autonomous_holder(db_session):
 
 
 @pytest.mark.anyio
+async def test_vacate_non_mayor_office_leaves_mayor_stores_intact(db_session):
+    """`office_key == "mayor"` 这道限定无覆盖：去掉它后 vacate("postman")
+    会连带清掉在任镇长的 meta_json['mayor'] 与 system_config['current_mayor']。"""
+    from app.services.config_service import ConfigService
+
+    db_session.add_all([
+        _res("sitting-mayor", "在任镇长", meta={"mayor": True}),
+        _res("mailman", "邮差"),
+    ])
+    await db_session.commit()
+    await ConfigService(db_session).set(
+        "current_mayor", "sitting-mayor", group="civic", updated_by="test")
+
+    svc = OfficeService(db_session)
+    await svc.appoint("mayor", "sitting-mayor", fill_strategy="election")
+    await svc.appoint("postman", "mailman", fill_strategy="seed")
+    assert await svc.vacate("postman") is True
+
+    holder = (await db_session.execute(
+        select(Resident).where(Resident.slug == "sitting-mayor")
+    )).scalar_one()
+    await db_session.refresh(holder)
+    assert (holder.meta_json or {}).get("mayor") is True
+    assert await ConfigService(db_session).get("current_mayor") == "sitting-mayor"
+
+
+@pytest.mark.anyio
 async def test_vacate_still_nulls_system_config_current_mayor(db_session):
     """回归：slug 直查改造不得弄丢 system_config 回落值的清理。"""
     from app.services.config_service import ConfigService
