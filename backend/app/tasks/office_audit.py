@@ -279,6 +279,24 @@ async def record_term_audit(
     F2 contract: call this on the revocation path AFTER the office row was
     vacated, passing the holder and ``term_started_at`` read BEFORE the UPDATE
     (``OfficeService.vacate(..., audit=True)`` does exactly that for you).
+
+    CALLER CONTRACT on a ``None`` return (failure path): ``_rollback_quietly``
+    calls ``db.rollback()``, and ``Session.rollback()`` expires the ENTIRE
+    identity map (``dirty_only=False``) — not just objects this function
+    touched. Empirically reproduced: a caller that loaded an ORM object
+    earlier in the same session (e.g. the just-vacated ``Office`` row) and
+    then does a plain synchronous attribute read on it AFTER a failed call
+    here raises ``sqlalchemy.exc.MissingGreenlet`` (the lazy reload the
+    expired attribute triggers has no greenlet context to run in). This is
+    the same failure class flagged on the sister F2 line, just triggered by
+    a genuine exception path rather than a guarded-UPDATE rowcount branch —
+    which is why the fix there (``begin_nested()`` savepoints, narrower
+    ``dirty_only=True`` rollback scope) does not apply here: by the time
+    ``ConfigService.set``'s own commit can raise, the outer transaction/
+    connection may already be broken, so a plain ``db.rollback()`` is the
+    only thing that reliably resets it. The safe caller pattern instead:
+    after a ``None`` return, either don't touch previously-loaded objects
+    again without ``await db.refresh(obj)`` first, or re-``SELECT`` them.
     """
     if not office_key or not holder_slug:
         return None
