@@ -78,6 +78,15 @@ function ConfigSection({ token, icon, title, group, fields, defaultOpen = false 
         const data = (resp as { entries?: Record<string, unknown> }).entries ?? resp
         const initial: Record<string, string> = {}
         for (const field of fields) {
+          if (field.type === 'password') {
+            // Write-only: never bind the fetched value (real or masked) into a
+            // controlled input. Otherwise an admin who types without clearing
+            // first submits "<mask><typed>", which reads as a "genuine"
+            // rotation and silently corrupts the stored secret. The field
+            // starts empty; the placeholder communicates "already set".
+            initial[field.key] = ''
+            continue
+          }
           const raw = (data as Record<string, unknown>)[field.key]
           initial[field.key] = raw !== undefined && raw !== null ? String(raw) : ''
         }

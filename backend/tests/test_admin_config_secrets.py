@@ -77,3 +77,79 @@ async def test_writing_a_real_value_still_updates(client, db_session):
     )
     assert resp.status_code == 200
     assert await ConfigService(db_session).get("llm.api_key") == "sk-rotated"
+
+
+@pytest.mark.anyio
+async def test_batch_update_skips_masked_secret_but_writes_other_fields(client, db_session):
+    """/admin/system/batch 的过滤逻辑此前完全没有路由级覆盖：masked 密钥跳过，
+    同批次的非密钥字段照常写入，skipped_secrets 计数要对。"""
+    from app.routers.admin.system_config import MASKED_VALUE, _set_config
+    from app.services.config_service import ConfigService
+
+    headers = await _admin_headers(db_session)
+    await _set_config(db_session, key="llm.api_key", value="sk-original",
+                      group="llm", admin_id="x")
+
+    resp = await client.put(
+        "/admin/system/batch", headers=headers,
+        json={"updates": [
+            {"key": "api_key", "value": MASKED_VALUE, "group": "llm"},
+            {"key": "model", "value": "new-model", "group": "llm"},
+        ]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["skipped_secrets"] == 1
+    assert body["updated"] == 1
+
+    svc = ConfigService(db_session)
+    assert await svc.get("llm.api_key") == "sk-original"
+    assert await svc.get("llm.model") == "new-model"
+
+
+@pytest.mark.anyio
+async def test_batch_update_skips_blank_secret(client, db_session):
+    from app.routers.admin.system_config import _set_config
+    from app.services.config_service import ConfigService
+
+    headers = await _admin_headers(db_session)
+    await _set_config(db_session, key="llm.api_key", value="sk-original",
+                      group="llm", admin_id="x")
+
+    resp = await client.put(
+        "/admin/system/batch", headers=headers,
+        json={"updates": [{"key": "api_key", "value": "", "group": "llm"}]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["skipped_secrets"] == 1
+    assert body["updated"] == 0
+    assert await ConfigService(db_session).get("llm.api_key") == "sk-original"
+
+
+@pytest.mark.anyio
+async def test_batch_update_real_secret_value_still_writes(client, db_session):
+    """批量接口里带一个真正的新密钥值，必须照常轮换（不是所有密钥字段都被拦下）。"""
+    from app.services.config_service import ConfigService
+
+    headers = await _admin_headers(db_session)
+    resp = await client.put(
+        "/admin/system/batch", headers=headers,
+        json={"updates": [{"key": "api_key", "value": "sk-rotated", "group": "llm"}]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["skipped_secrets"] == 0
+    assert body["updated"] == 1
+    assert await ConfigService(db_session).get("llm.api_key") == "sk-rotated"
+
+
+def test_mask_leaves_non_string_config_values_untouched():
+    """DEFAULT_CONFIGS 里混着 int/float/dict；_mask 只应该动字符串密钥字段。"""
+    from app.routers.admin.system_config import _mask
+
+    assert _mask("llm.max_retries", 3) == 3
+    assert _mask("llm.temperature", 0.7) == 0.7
+    assert _mask("heat.scoring_weights", {"avg_rating": 0.4}) == {"avg_rating": 0.4}
+    # 非密钥字符串字段本来就不该被掩码
+    assert _mask("llm.model", "claude-sonnet-4-20250514") == "claude-sonnet-4-20250514"

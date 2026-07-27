@@ -42,6 +42,23 @@ admin 身份——所以新部署的环境里没有任何人能通过界面拿�
 
 该脚本是纯只读的，只报数不改数据。
 
+## 配置密钥（api_key 等）：只能轮换，不能从后台清空
+
+`GET /admin/system/groups/{group}` 与 `GET /admin/system/entries` 对 key/secret/token/
+password 结尾的字段一律回传掩码字面量 `********`，从不下发真实值——`llm.api_key`、
+`portrait.api_key` 都在此列。
+
+写侧规则（`PUT /admin/system/entry`、`PUT /admin/system/batch` 都一样）：
+
+- 面板保存时该字段留空，或者带着掩码 `********` 原样回传（未改动过的字段就是这样），
+  都视为「不修改」，后端跳过写入，DB 里的旧值原样保留。
+- 填入一个非空的新字符串才会真正轮换该密钥。
+
+**没有把已存密钥「清空、回退到 `.env` 默认值」的入口**——`backend/app/routers/admin/`
+下没有任何 DELETE/reset 端点，这是刻意的取舍，不打算补。一旦 `SystemConfig` 表里写过一条
+`llm.api_key`，这条 DB 覆盖值就会一直优先于 `.env` 里的默认值；唯一的退回方式是直接操作
+数据库（删掉那一行，或者把 `value` 手工改回想要的默认字符串）。
+
 ## 相关
 
 - 端点与风险全貌：`docs/plans/2026-07-27-admin-immediate-fixes.md`
