@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState } from 'react'
 import { getAdminSystemConfig, updateAdminSystemConfig } from '../../services/api'
 
 // ─── Shared sub-components ────────────────────────────────────────
@@ -62,16 +62,11 @@ interface ConfigSectionProps {
 function ConfigSection({ token, icon, title, group, fields, defaultOpen = false }: ConfigSectionProps) {
   const [open, setOpen] = useState(defaultOpen)
   const [values, setValues] = useState<Record<string, string>>({})
-  const [showPassword, setShowPassword] = useState<Record<string, boolean>>({})
   const [loaded, setLoaded] = useState(false)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  const toggleShowPassword = useCallback((key: string) => {
-    setShowPassword((prev) => ({ ...prev, [key]: !prev[key] }))
-  }, [])
 
   useEffect(() => {
     if (!open || loaded) return
@@ -168,30 +163,18 @@ function ConfigSection({ token, icon, title, group, fields, defaultOpen = false 
                   <div key={field.key} style={{ marginBottom: 14 }}>
                     <FieldLabel>{field.label}</FieldLabel>
                     {field.type === 'password' ? (
-                      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                        <input
-                          type={showPassword[field.key] ? 'text' : 'password'}
-                          value={values[field.key] ?? ''}
-                          onChange={(e) => setField(field.key, e.target.value)}
-                          style={{
-                            flex: 1, padding: '8px 12px',
-                            background: 'var(--bg-input)', border: '1px solid var(--border)',
-                            borderRadius: 6, color: 'var(--text-primary)', fontSize: 13,
-                            outline: 'none', boxSizing: 'border-box',
-                          }}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => toggleShowPassword(field.key)}
-                          style={{
-                            padding: '7px 10px', fontSize: 12, borderRadius: 6,
-                            background: 'var(--bg-input)', border: '1px solid var(--border)',
-                            color: 'var(--text-muted)', cursor: 'pointer', whiteSpace: 'nowrap',
-                          }}
-                        >
-                          {showPassword[field.key] ? '隐藏' : '显示'}
-                        </button>
-                      </div>
+                      <input
+                        type="password"
+                        value={values[field.key] ?? ''}
+                        onChange={(e) => setField(field.key, e.target.value)}
+                        placeholder="已设置 · 留空则不修改"
+                        style={{
+                          width: '100%', padding: '8px 12px',
+                          background: 'var(--bg-input)', border: '1px solid var(--border)',
+                          borderRadius: 6, color: 'var(--text-primary)', fontSize: 13,
+                          outline: 'none', boxSizing: 'border-box',
+                        }}
+                      />
                     ) : (
                       <input
                         type={field.type === 'text' ? 'text' : 'number'}
@@ -231,7 +214,7 @@ function ConfigSection({ token, icon, title, group, fields, defaultOpen = false 
 const LLM_FIELDS: FieldDef[] = [
   { key: 'model', label: '模型名称 (model)', type: 'text', hint: '例：gpt-4o / claude-3-5-sonnet-20241022' },
   { key: 'base_url', label: '接口地址 (base_url)', type: 'text', hint: 'LLM API 的 base URL' },
-  { key: 'api_key', label: 'API 密钥 (api_key)', type: 'password', hint: '鉴权用的 API Key，保存后不明文显示' },
+  { key: 'api_key', label: 'API 密钥 (api_key)', type: 'password', hint: '服务端只回传掩码；留空保存不会覆盖已有值' },
   { key: 'temperature', label: '温度 (temperature)', type: 'float', hint: '生成多样性，0.0 – 2.0' },
   { key: 'timeout', label: '超时时间 (timeout)', type: 'number', hint: '单次请求超时，单位秒' },
   { key: 'max_retries', label: '最大重试 (max_retries)', type: 'number', hint: '失败后最多重试次数' },
@@ -241,7 +224,7 @@ const LLM_FIELDS: FieldDef[] = [
 const PORTRAIT_FIELDS: FieldDef[] = [
   { key: 'model', label: '模型名称 (model)', type: 'text', hint: '用于生成角色肖像的图像模型' },
   { key: 'base_url', label: '接口地址 (base_url)', type: 'text', hint: '图像生成 API 的 base URL' },
-  { key: 'api_key', label: 'API 密钥 (api_key)', type: 'password', hint: '图像生成 API 的鉴权 Key' },
+  { key: 'api_key', label: 'API 密钥 (api_key)', type: 'password', hint: '服务端只回传掩码；留空保存不会覆盖已有值' },
   { key: 'timeout', label: '超时时间 (timeout)', type: 'number', hint: '图像生成请求超时，单位秒' },
 ]
 

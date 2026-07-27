@@ -79,6 +79,22 @@ DEFAULT_CONFIGS: dict[str, dict[str, object]] = {
 
 VALID_GROUPS = set(DEFAULT_CONFIGS.keys()) | {"economy", "district", "oauth", "sprite", "user_llm", "portrait"}
 
+# 密钥类 key 的读侧掩码。这些值的默认来源是 settings.effective_api_key /
+# portrait_llm_api_key，会随分组读取直接落到浏览器；写侧把掩码与空串都当成
+# 「不修改」，否则面板一次整组保存就会把真密钥覆盖成掩码字面量。
+_SECRET_KEY_SUFFIXES = ("api_key", "secret", "token", "password")
+MASKED_VALUE = "********"
+
+
+def _is_secret_key(key: str) -> bool:
+    return key.rsplit(".", 1)[-1].endswith(_SECRET_KEY_SUFFIXES)
+
+
+def _mask(key: str, value: object) -> object:
+    if _is_secret_key(key) and isinstance(value, str) and value:
+        return MASKED_VALUE
+    return value
+
 
 async def _get_config_group(db: AsyncSession, group: str) -> dict:
     """Get all config entries for a group, merged with defaults."""
@@ -95,7 +111,7 @@ async def _get_config_group(db: AsyncSession, group: str) -> dict:
     for db_key, db_val in db_values.items():
         short_key = db_key.removeprefix(f"{group}.")
         merged[short_key] = db_val
-    return merged
+    return {k: _mask(k, v) for k, v in merged.items()}
 
 
 async def _set_config(
@@ -161,12 +177,16 @@ async def list_all_config_entries(
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all config entries across all groups."""
+    """List all config entries across all groups (secret values masked)."""
     result = await db.execute(
         select(SystemConfig).order_by(SystemConfig.group, SystemConfig.key)
     )
     entries = result.scalars().all()
-    return [ConfigEntry.model_validate(e, from_attributes=True) for e in entries]
+    out = []
+    for e in entries:
+        item = ConfigEntry.model_validate(e, from_attributes=True)
+        out.append(item.model_copy(update={"value": _mask(item.key, item.value)}))
+    return out
 
 
 @router.put("/entry")
@@ -178,6 +198,9 @@ async def update_config_entry(
     """Update a single config entry."""
     # Always store with group prefix so runtime svc.get("llm.model") finds it
     full_key = req.key if "." in req.key else f"{req.group}.{req.key}"
+    if _is_secret_key(full_key) and req.value in (MASKED_VALUE, ""):
+        # 面板整组回传时，未改动的密钥字段带回来的是掩码；空串同理表示「不修改」。
+        return {"key": full_key, "value": MASKED_VALUE, "group": req.group, "unchanged": True}
     await _validate_config_value(full_key, req.value)
     await _set_config(db, key=full_key, value=req.value, group=req.group, admin_id=admin.id)
     return {"key": full_key, "value": req.value, "group": req.group}
@@ -194,10 +217,12 @@ async def update_config_batch(
         {"key": u.key if "." in u.key else f"{u.group}.{u.key}", "value": u.value, "group": u.group}
         for u in req.updates
     ]
+    skipped = [u for u in updates if _is_secret_key(u["key"]) and u["value"] in (MASKED_VALUE, "")]
+    updates = [u for u in updates if u not in skipped]
     for u in updates:
         await _validate_config_value(u["key"], u["value"])
     await _set_config_batch(db, updates, admin_id=admin.id)
-    return {"updated": len(updates)}
+    return {"updated": len(updates), "skipped_secrets": len(skipped)}
 
 
 # ── Convenience: LLM Config ───────────────────────────────
