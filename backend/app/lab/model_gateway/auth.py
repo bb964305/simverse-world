@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
+import uuid
 
 import jwt
 
@@ -85,4 +87,31 @@ def verify_gateway_token(token: str, secret: str) -> GatewayClaims:
         resource_cpu_cores=cpu_cores,
         resource_memory_mb=memory_mb,
         jti=raw["jti"],
+    )
+
+
+def renew_gateway_token(claims: GatewayClaims, secret: str, ttl_s: int) -> str:
+    now = int(time.time())
+    return jwt.encode(
+        {
+            "iss": MODEL_GATEWAY_ISSUER,
+            "aud": MODEL_GATEWAY_AUDIENCE,
+            "sub": claims.run_id,
+            "jti": str(uuid.uuid4()),
+            "tenant_id": claims.tenant_id,
+            "task_id": claims.task_id,
+            "run_id": claims.run_id,
+            "model_tier": claims.model_tier,
+            "model": claims.model,
+            "model_policy_version": claims.model_policy_version,
+            "budget_usd_cents": claims.budget_usd_cents,
+            "max_model_tokens": claims.max_model_tokens,
+            "resource_cpu_cores": claims.resource_cpu_cores,
+            "resource_memory_mb": claims.resource_memory_mb,
+            "iat": now,
+            "nbf": now,
+            "exp": now + ttl_s,
+        },
+        secret,
+        algorithm="HS256",
     )

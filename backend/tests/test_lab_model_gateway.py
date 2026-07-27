@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 from decimal import Decimal
@@ -7,8 +8,8 @@ import jwt
 import pytest
 
 from app.lab.model_gateway.config import GatewayConfig
-from app.lab.model_gateway.ledger import UsageLedger
-from app.lab.model_gateway.service import create_app
+from app.lab.model_gateway.ledger import RunRevokedError, UsageLedger
+from app.lab.model_gateway.service import ReasoningStore, create_app
 from app.lab.model_policy import MODEL_GATEWAY_AUDIENCE, MODEL_GATEWAY_ISSUER
 
 
@@ -30,7 +31,10 @@ def _config() -> GatewayConfig:
     )
 
 
-def _token(*, tier="low", model="deepseek-v4-flash", run_id="run-1") -> str:
+def _token(
+    *, tier="low", model="deepseek-v4-flash", run_id="run-1",
+    max_model_tokens=10_000, budget_usd_cents=50,
+) -> str:
     now = int(time.time())
     resources = {"low": (2, 2048), "high": (4, 4096)}[tier]
     return jwt.encode({
@@ -38,9 +42,9 @@ def _token(*, tier="low", model="deepseek-v4-flash", run_id="run-1") -> str:
         "sub": run_id, "jti": "jti-" + run_id,
         "tenant_id": "tenant", "task_id": "task", "run_id": run_id,
         "model_tier": tier, "model": model,
-        "model_policy_version": "test-policy", "budget_usd_cents": 50,
+        "model_policy_version": "test-policy", "budget_usd_cents": budget_usd_cents,
         "resource_cpu_cores": resources[0], "resource_memory_mb": resources[1],
-        "max_model_tokens": 10_000, "iat": now, "nbf": now, "exp": now + 600,
+        "max_model_tokens": max_model_tokens, "iat": now, "nbf": now, "exp": now + 600,
     }, SECRET, algorithm="HS256")
 
 
@@ -240,3 +244,241 @@ async def test_client_cannot_override_model():
         assert response.json()["error"]["code"] == "model_override_denied"
     await upstream_client.aclose()
     ledger.close()
+
+
+@pytest.mark.anyio
+async def test_concurrent_requests_cannot_spend_the_same_token_budget():
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def upstream(_request: httpx.Request) -> httpx.Response:
+        entered.set()
+        await release.wait()
+        return httpx.Response(200, json={
+            "choices": [{"message": {"role": "assistant", "content": "done"}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 100},
+        })
+
+    config = _config()
+    upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    ledger = UsageLedger(":memory:", config)
+    app = create_app(config, http_client=upstream_client, ledger=ledger)
+    token = _token(run_id="atomic-budget", max_model_tokens=1800)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://gateway"
+    ) as client:
+        first_task = asyncio.create_task(client.post(
+            "/v1/responses", headers=_headers(token),
+            json={"model": "lab-auto", "input": "first", "max_output_tokens": 1000},
+        ))
+        await entered.wait()
+        second = await client.post(
+            "/v1/responses", headers=_headers(token),
+            json={"model": "lab-auto", "input": "second", "max_output_tokens": 1000},
+        )
+        assert second.status_code == 402
+        assert second.json()["error"]["code"] == "budget_exhausted"
+        release.set()
+        assert (await first_task).status_code == 200
+        usage = (await client.get("/v1/lab/usage", headers=_headers(token))).json()
+        assert usage["request_count"] == 1
+        assert usage["inflight_requests"] == 0
+        assert usage["reserved_tokens"] == 0
+    await upstream_client.aclose()
+    ledger.close()
+
+
+@pytest.mark.anyio
+async def test_per_run_inflight_limit_is_enforced():
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def upstream(_request: httpx.Request) -> httpx.Response:
+        entered.set()
+        await release.wait()
+        return httpx.Response(200, json={
+            "choices": [{"message": {"role": "assistant", "content": "done"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        })
+
+    config = _config()
+    object.__setattr__(config, "max_inflight_per_run", 1)
+    upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    ledger = UsageLedger(":memory:", config)
+    app = create_app(config, http_client=upstream_client, ledger=ledger)
+    token = _token(run_id="inflight-limit")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://gateway"
+    ) as client:
+        first_task = asyncio.create_task(client.post(
+            "/v1/responses", headers=_headers(token),
+            json={"model": "lab-auto", "input": "first", "max_output_tokens": 10},
+        ))
+        await entered.wait()
+        second = await client.post(
+            "/v1/responses", headers=_headers(token),
+            json={"model": "lab-auto", "input": "second", "max_output_tokens": 10},
+        )
+        assert second.status_code == 429
+        assert second.json()["error"]["code"] == "inflight_exhausted"
+        release.set()
+        assert (await first_task).status_code == 200
+    await upstream_client.aclose()
+    ledger.close()
+
+
+@pytest.mark.anyio
+async def test_upstream_usage_is_recorded_before_response_translation():
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "choices": [],
+            "usage": {"prompt_tokens": 17, "completion_tokens": 3},
+        })
+
+    config = _config()
+    upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    ledger = UsageLedger(":memory:", config)
+    app = create_app(config, http_client=upstream_client, ledger=ledger)
+    token = _token(run_id="translation-failed")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://gateway"
+    ) as client:
+        response = await client.post(
+            "/v1/responses", headers=_headers(token),
+            json={"model": "lab-auto", "input": "invalid upstream"},
+        )
+        assert response.status_code == 502
+        usage = (await client.get("/v1/lab/usage", headers=_headers(token))).json()
+        assert usage["input_tokens"] == 17
+        assert usage["output_tokens"] == 3
+        assert usage["request_count"] == 1
+    await upstream_client.aclose()
+    ledger.close()
+
+
+@pytest.mark.anyio
+async def test_ambiguous_upstream_transport_failure_revokes_unknown_cost_run():
+    def upstream(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("provider outcome is unknown", request=request)
+
+    config = _config()
+    upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    ledger = UsageLedger(":memory:", config)
+    app = create_app(config, http_client=upstream_client, ledger=ledger)
+    token = _token(run_id="ambiguous-transport")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://gateway"
+    ) as client:
+        response = await client.post(
+            "/v1/responses", headers=_headers(token),
+            json={"model": "lab-auto", "input": "ambiguous provider request"},
+        )
+        assert response.status_code == 504
+        usage = (await client.get("/v1/lab/usage", headers=_headers(token))).json()
+        assert usage["cost_unknown"] is True
+        assert usage["revoked"] is True
+        denied = await client.post(
+            "/v1/responses", headers=_headers(token),
+            json={"model": "lab-auto", "input": "must not retry"},
+        )
+        assert denied.status_code == 401
+        assert denied.json()["error"]["code"] == "run_revoked"
+    await upstream_client.aclose()
+    ledger.close()
+
+
+@pytest.mark.anyio
+async def test_revoked_run_cannot_make_another_request():
+    config = _config()
+    upstream_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: pytest.fail("upstream must not be called"))
+    )
+    ledger = UsageLedger(":memory:", config)
+    app = create_app(config, http_client=upstream_client, ledger=ledger)
+    token = _token(run_id="revoked-run")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://gateway"
+    ) as client:
+        revoked = await client.post("/v1/lab/revoke", headers=_headers(token))
+        assert revoked.status_code == 200
+        assert revoked.json()["revoked"] is True
+        response = await client.post(
+            "/v1/responses", headers=_headers(token),
+            json={"model": "lab-auto", "input": "spend after terminal"},
+        )
+        assert response.status_code == 401
+        assert response.json()["error"]["code"] == "run_revoked"
+    await upstream_client.aclose()
+    ledger.close()
+
+
+@pytest.mark.anyio
+async def test_active_run_token_can_renew_but_revoked_run_cannot():
+    config = _config()
+    upstream_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: pytest.fail("upstream must not be called"))
+    )
+    ledger = UsageLedger(":memory:", config)
+    app = create_app(config, http_client=upstream_client, ledger=ledger)
+    token = _token(run_id="renewable-run")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://gateway"
+    ) as client:
+        renewed = await client.post("/v1/lab/renew", headers=_headers(token))
+        assert renewed.status_code == 200
+        renewed_token = renewed.json()["token"]
+        assert renewed_token != token
+        assert renewed.json()["expires_in_s"] == 300
+        await client.post("/v1/lab/revoke", headers=_headers(renewed_token))
+        denied = await client.post("/v1/lab/renew", headers=_headers(renewed_token))
+        assert denied.status_code == 401
+        assert denied.json()["error"]["code"] == "run_revoked"
+    await upstream_client.aclose()
+    ledger.close()
+
+
+def test_reasoning_store_is_run_scoped_bounded_and_expires(monkeypatch):
+    now = [10.0]
+    monkeypatch.setattr("app.lab.model_gateway.service.time.monotonic", lambda: now[0])
+    store = ReasoningStore(ttl_s=5, max_entries=2)
+    store.put_many("run-a", {"same-call": "private-a"})
+    assert store.get("run-a", "same-call") == "private-a"
+    assert store.get("run-b", "same-call") is None
+    store.put_many("run-a", {"second": "two", "third": "three"})
+    assert store.get("run-a", "same-call") is None
+    now[0] = 16.0
+    assert store.get("run-a", "third") is None
+
+
+def test_restart_marks_stranded_reservation_unknown_and_revoked(tmp_path):
+    ledger_path = str(tmp_path / "usage.db")
+    config = _config()
+    first = UsageLedger(ledger_path, config)
+    first.reserve(
+        run_id="interrupted-run",
+        model="deepseek-v4-flash",
+        estimated_input_tokens=100,
+        max_output_tokens=200,
+        max_model_tokens=1_000,
+        budget_usd_cents=50,
+        max_inflight_requests=1,
+    )
+    first.close()
+
+    recovered = UsageLedger(ledger_path, config)
+    totals = recovered.get("interrupted-run", "deepseek-v4-flash")
+    assert totals.cost_unknown is True
+    assert totals.revoked is True
+    assert totals.inflight_requests == 0
+    assert totals.reserved_tokens == 0
+    with pytest.raises(RunRevokedError, match="revoked"):
+        recovered.reserve(
+            run_id="interrupted-run",
+            model="deepseek-v4-flash",
+            estimated_input_tokens=1,
+            max_output_tokens=1,
+            max_model_tokens=1_000,
+            budget_usd_cents=50,
+            max_inflight_requests=1,
+        )
+    recovered.close()

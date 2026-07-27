@@ -58,6 +58,10 @@ class GatewayConfig:
     flash_output_cny_per_million: Decimal
     pro_input_cny_per_million: Decimal
     pro_output_cny_per_million: Decimal
+    max_inflight_per_run: int = 2
+    reasoning_ttl_s: int = 900
+    reasoning_max_entries: int = 4096
+    token_renewal_ttl_s: int = 300
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "GatewayConfig":
@@ -72,9 +76,18 @@ class GatewayConfig:
             max_bytes = int(env.get("LAB_MODEL_GATEWAY_MAX_REQUEST_BYTES", "1048576"))
             max_output = int(env.get("LAB_MODEL_GATEWAY_DEFAULT_MAX_OUTPUT_TOKENS", "8192"))
             timeout = float(env.get("LAB_MODEL_GATEWAY_REQUEST_TIMEOUT_S", "600"))
+            max_inflight = int(env.get("LAB_MODEL_GATEWAY_MAX_INFLIGHT_PER_RUN", "2"))
+            reasoning_ttl = int(env.get("LAB_MODEL_GATEWAY_REASONING_TTL_S", "900"))
+            reasoning_entries = int(env.get("LAB_MODEL_GATEWAY_REASONING_MAX_ENTRIES", "4096"))
+            renewal_ttl = int(env.get("LAB_MODEL_GATEWAY_TOKEN_RENEWAL_TTL_S", "300"))
         except ValueError as exc:
             raise ValueError("model gateway numeric configuration is invalid") from exc
-        if not 1 <= port <= 65535 or max_bytes <= 0 or max_output <= 0 or timeout <= 0:
+        if (
+            not 1 <= port <= 65535
+            or min(max_bytes, max_output, max_inflight, reasoning_ttl, reasoning_entries) <= 0
+            or not 60 <= renewal_ttl <= 900
+            or timeout <= 0
+        ):
             raise ValueError("model gateway numeric configuration is out of range")
         return cls(
             bind_host=env.get("LAB_MODEL_GATEWAY_BIND_HOST", "0.0.0.0"),
@@ -107,6 +120,10 @@ class GatewayConfig:
             pro_output_cny_per_million=_decimal(
                 env, "LAB_MODEL_GATEWAY_PRO_OUTPUT_CNY_PER_MILLION", "24"
             ),
+            max_inflight_per_run=max_inflight,
+            reasoning_ttl_s=reasoning_ttl,
+            reasoning_max_entries=reasoning_entries,
+            token_renewal_ttl_s=renewal_ttl,
         )
 
     def prices_for(self, model: str) -> tuple[Decimal, Decimal]:
