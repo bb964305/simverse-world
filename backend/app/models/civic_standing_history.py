@@ -38,7 +38,8 @@ class CivicStandingHistory(Base):
         String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
     resident_id: Mapped[str] = mapped_column(
-        String, ForeignKey("residents.id"), index=True, nullable=False
+        String, ForeignKey("residents.id", ondelete="CASCADE"),
+        index=True, nullable=False
     )
     # citizen / denizen / exiled —— app/services/civic_membership.CIVIC_STANDINGS
     old_standing: Mapped[str] = mapped_column(String(20), nullable=False)

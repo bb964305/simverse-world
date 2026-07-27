@@ -10,8 +10,10 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
-from sqlalchemy import select
+from sqlalchemy import event, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.database import Base
 from app.models.civic_standing_history import CivicStandingHistory
 from app.models.resident import Resident
 
@@ -139,3 +141,53 @@ async def test_row_roundtrips_with_world_and_real_time(db_session):
     if stored.tzinfo is None:          # sqlite 丢时区 → 按 UTC 补回
         stored = stored.replace(tzinfo=UTC)
     assert stored == world_at
+
+
+@pytest.fixture
+async def fk_session():
+    """自建一个 FK 强制开启的 sqlite 引擎——常规 fixture（db_session）跑的
+    sqlite 默认不强制外键，复现不了 PostgreSQL 的 ON DELETE CASCADE 行为。
+    同 tests/test_signup_fk_ordering.py 的口径。"""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _fk_on(dbapi_conn, _):
+        dbapi_conn.execute("PRAGMA foreign_keys=ON")
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        yield session
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+async def test_delete_resident_cascades_to_civic_standing_history(fk_session):
+    """外键缺 ``ondelete`` 会在 ``seed/reset_builtin_residents.py`` 的
+    ``purge_residents()``（手工逐表 delete，不依赖 DB 级联——2026-07-25
+    误删 12 个玩家角色的那条路径）上炸：本表一旦有写入方，任何对有档位历史
+    的居民跑 purge 都会撞 FK 约束报错。``ondelete="CASCADE"`` 与仓内先例
+    ``personality_history``（见 006_add_personality_history.py）一致：
+    resident 被删时其历史行由 DB 自动清理，purge 不需要为本表显式补 delete。
+    """
+    # creator_id 留 None：它自己也是 FK(users.id)，本测试只关心
+    # civic_standing_history -> residents 这一条约束，不为此另建 User 行。
+    r = Resident(slug="ugc-cascade", name="ugc-cascade", district="town_hall",
+                 status="idle", resident_type="resident", creator_id=None,
+                 tile_x=1, tile_y=1)
+    fk_session.add(r)
+    await fk_session.flush()
+    fk_session.add(CivicStandingHistory(
+        resident_id=r.id, old_standing="denizen", new_standing="citizen",
+        reason_code="threshold_met", actor="civic_promotion",
+        world_at=datetime(2026, 8, 1, tzinfo=UTC),
+    ))
+    await fk_session.commit()
+
+    await fk_session.delete(r)
+    await fk_session.commit()
+
+    remaining = (await fk_session.execute(select(CivicStandingHistory))).scalars().all()
+    assert remaining == [], (
+        "resident 删除后 civic_standing_history 行未被级联清除")

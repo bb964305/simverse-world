@@ -35,7 +35,8 @@ def upgrade() -> None:
         sa.Column("world_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False,
                   server_default=sa.text("CURRENT_TIMESTAMP")),
-        sa.ForeignKeyConstraint(["resident_id"], ["residents.id"]),
+        sa.ForeignKeyConstraint(["resident_id"], ["residents.id"],
+                                 ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_civic_standing_history_resident_id",
