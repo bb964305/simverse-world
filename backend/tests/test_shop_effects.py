@@ -118,6 +118,89 @@ async def test_portrait_redraw_schedules(db_session):
 
 
 @pytest.mark.anyio
+async def test_gift_share_does_not_mint_into_sentinel(db_session):
+    """gift_share: guarded ``creator_id not in ("system", user_id)`` — the
+    literal only catches ADMIN_CREATOR_ID. Seed NPCs carry
+    creator_id=SYSTEM_CREATOR_ID (a UUID), which slips through and mints the
+    20% creator share into the sentinel account."""
+    from app.services.shop_service import purchase
+    from app.services.system_users import SYSTEM_CREATOR_ID
+    await _seed(db_session)
+    db_session.add(User(id=SYSTEM_CREATOR_ID, name="System",
+                        email="system-gift@d2.com", soul_coin_balance=0))
+    await db_session.commit()
+    buyer = await _user(db_session, "gift-sentinel-buyer@d2.com", 200)
+    await _resident(db_session, "sentinel-gift", SYSTEM_CREATOR_ID)
+
+    await purchase(db_session, buyer.id, "gift_flower", 1, {"resident_slug": "sentinel-gift"})
+
+    sentinel = await db_session.get(User, SYSTEM_CREATOR_ID)
+    assert sentinel.soul_coin_balance == 0, \
+        "gift_share must never mint Soul Coin into the sentinel account"
+
+
+@pytest.mark.anyio
+async def test_tip_share_does_not_mint_into_sentinel(db_session):
+    """tip_share: same defect as gift_share — the bare literal ``"system"``
+    lets SYSTEM_CREATOR_ID (a UUID) through and mints the 80% creator share
+    into the sentinel account."""
+    from app.models.bulletin_post import BulletinPost
+    from app.services.shop_service import purchase
+    from app.services.system_users import SYSTEM_CREATOR_ID
+    await _seed(db_session)
+    db_session.add(User(id=SYSTEM_CREATOR_ID, name="System",
+                        email="system-tip@d2.com", soul_coin_balance=0))
+    await db_session.commit()
+    buyer = await _user(db_session, "tip-sentinel-buyer@d2.com", 200)
+    resident = await _resident(db_session, "sentinel-tip", SYSTEM_CREATOR_ID)
+    post = BulletinPost(kind="notice", title="t", content_md="c", author_resident_id=resident.id)
+    db_session.add(post)
+    await db_session.commit()
+
+    await purchase(db_session, buyer.id, "tip_5sc", 1, {"post_id": post.id})
+
+    sentinel = await db_session.get(User, SYSTEM_CREATOR_ID)
+    assert sentinel.soul_coin_balance == 0, \
+        "tip_share must never mint Soul Coin into the sentinel account"
+
+
+@pytest.mark.anyio
+async def test_gift_share_skips_sentinel_creator_but_still_levies_town_tax(db_session, monkeypatch):
+    """The sentinel guard and ``_skim_town_tax`` share the same ``if`` block in
+    ``_gift_effect``. Narrowing the guard must NOT skip the town tax too — a
+    naive "skip the whole branch for a sentinel-owned resident" fix would zero
+    out the town treasury's cut along with the (correctly) skipped payout.
+    This asserts both halves independently: creator share stays unpaid, town
+    tax is still skimmed."""
+    from app.config import settings
+    from app.models.shop import Item
+    from app.services import shop_effects, treasury_service
+    from app.services.system_users import SYSTEM_CREATOR_ID
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "town_tax_rate_gift", 0.2)
+
+    db_session.add(User(id=SYSTEM_CREATOR_ID, name="System",
+                        email="system-gift-tax@d2.com", soul_coin_balance=0))
+    await db_session.commit()
+    buyer = await _user(db_session, "gift-tax-buyer@d2.com", 200)
+    await _resident(db_session, "sentinel-gift-tax", SYSTEM_CREATOR_ID)
+    item = Item(code="flower-tax", kind="gift", name="花", price_sc=50, active=True,
+                payload_json={"relationship_boost": 0.1})
+    db_session.add(item)
+    await db_session.commit()
+
+    out = await shop_effects._gift_effect(
+        db_session, buyer.id, item, 1, {"resident_slug": "sentinel-gift-tax"})
+
+    sentinel = await db_session.get(User, SYSTEM_CREATOR_ID)
+    assert sentinel.soul_coin_balance == 0, "sentinel must not be paid the creator share"
+    assert out["gift_tax"] == 2, "town tax (20% of the 10 SC share) must still be skimmed"
+    assert await treasury_service.balance(db_session) == 2, \
+        "narrowing the sentinel guard must not skip the town-tax skim"
+
+
+@pytest.mark.anyio
 async def test_redraw_and_notify_updates_and_notifies(db_session):
     from app.services import shop_effects
     owner = await _user(db_session, "rn@d2.com", 0)

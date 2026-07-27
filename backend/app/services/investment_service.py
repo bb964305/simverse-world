@@ -47,12 +47,13 @@ async def invest(db, user_id: str, goal_id: str, amount: int) -> GoalInvestment:
     try:
         from app.memory.service import MemoryService
         from app.services.notification_service import notify
+        from app.services.system_users import NON_USER_CREATOR_IDS
         await MemoryService(db).add_memory(
             goal.resident_id, "event", "有人资助了我的梦想，这份信任我记在心里。",
             importance=0.85, source="investment", related_user_id=user_id,
         )
         resident = await db.get(Resident, goal.resident_id)
-        if resident and resident.creator_id and resident.creator_id != "system":
+        if resident and resident.creator_id and resident.creator_id not in NON_USER_CREATOR_IDS:
             await notify(db, resident.creator_id, "system", "有人投资了你的居民的目标",
                          f"{resident.name} 的目标「{goal.title}」收到一笔 {amount} 🪙 投资。", {"goal_id": goal_id})
     except Exception:

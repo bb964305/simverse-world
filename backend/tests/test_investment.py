@@ -105,6 +105,32 @@ async def test_settle_failed_half_refund(db_session):
 
 
 @pytest.mark.anyio
+async def test_invest_notify_skips_sentinel_creator(db_session):
+    """invest() notifies resident.creator_id — guarded only by the bare
+    literal "system". Seed NPCs carry creator_id=SYSTEM_CREATOR_ID (a UUID),
+    so investing in a built-in NPC's goal piles up Notification rows on the
+    sentinel account. No coin is minted here (lesser case than the other
+    three sites), but it's the same defect and worth closing for
+    consistency."""
+    from app.models.notification import Notification
+    from app.services.investment_service import invest
+    from app.services.system_users import SYSTEM_CREATOR_ID
+
+    db_session.add(User(id=SYSTEM_CREATOR_ID, name="System",
+                        email="system-invest@test.com", soul_coin_balance=0))
+    await db_session.commit()
+    investor = await _user(db_session, "sentinel-invest@i.com", bal=1000)
+    _, goal = await _goal(db_session, creator_id=SYSTEM_CREATOR_ID)
+
+    await invest(db_session, investor.id, goal.id, 100)
+
+    notes = (await db_session.execute(
+        select(Notification).where(Notification.user_id == SYSTEM_CREATOR_ID)
+    )).scalars().all()
+    assert notes == [], "invest() must never notify the sentinel account"
+
+
+@pytest.mark.anyio
 async def test_settle_abandoned_full_refund(db_session):
     from app.services.investment_service import invest, settle_goal_investments
     investor = await _user(db_session, "ab@i.com", bal=1000)

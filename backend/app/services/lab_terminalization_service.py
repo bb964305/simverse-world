@@ -25,6 +25,7 @@ from app.models.lab_terminalization import (
 from app.models.resident import Resident
 from app.models.user import User
 from app.services import coin_service
+from app.services.system_users import NON_USER_CREATOR_IDS
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +199,7 @@ async def settlement_splits(db: AsyncSession, task: LabTask) -> list[coin_servic
     creator_amount = reward * share_bps // 10_000
     treasury_amount = reward - creator_amount
     splits: list[coin_service.Split] = []
-    if creator_id and creator_id != "system" and creator_amount > 0:
+    if creator_id and creator_id not in NON_USER_CREATOR_IDS and creator_amount > 0:
         splits.append((creator_id, creator_amount, f"lab_reward:{task.id}"))
     else:
         treasury_amount = reward

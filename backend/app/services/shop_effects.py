@@ -15,6 +15,7 @@ import re
 from typing import Awaitable, Callable
 
 from app.config import settings
+from app.services.system_users import NON_USER_CREATOR_IDS
 
 logger = logging.getLogger(__name__)
 
@@ -230,15 +231,21 @@ async def _gift_effect(db, user_id, item, qty, context):
 
     share = 0
     gift_tax = 0
-    if resident.creator_id and resident.creator_id not in ("system", user_id):
+    if resident.creator_id and resident.creator_id != user_id:
         share = int(item.price_sc * qty * 0.2)
         # S1-5 optional knob: town_tax_rate_gift defaults to 0.0, so the shipped
         # behavior is byte-identical to the pre-S1-5 payout even with the master
         # gate ON — the rate is the only thing that makes it bite.
+        #
+        # The town tax is levied here regardless of who the creator is — only
+        # the payout below is conditioned on NON_USER_CREATOR_IDS. A
+        # sentinel-owned resident (creator_id == SYSTEM_CREATOR_ID/"system")
+        # still generates real town-tax revenue; it just never gets paid a
+        # personal share, since neither sentinel is a spendable account.
         gift_tax = await _skim_town_tax(
             db, share, settings.town_tax_rate_gift, f"gift_tax:{item.code}")
         share -= gift_tax
-        if share > 0:
+        if share > 0 and resident.creator_id not in NON_USER_CREATOR_IDS:
             await reward(db, resident.creator_id, share, f"gift_share:{item.code}")
 
     # E1: receiving a gift lifts the resident's mood.
@@ -294,13 +301,16 @@ async def _tip_effect(db, user_id, item, qty, context):
     tip_tax = 0
     if post.author_resident_id:
         resident = (await db.execute(select(Resident).where(Resident.id == post.author_resident_id))).scalar_one_or_none()
-        if resident and resident.creator_id and resident.creator_id not in ("system", user_id):
+        if resident and resident.creator_id and resident.creator_id != user_id:
             share = int(amount * 0.8)
-            # S1-5: shares the gift rate knob (default 0.0 → status quo).
+            # S1-5: shares the gift rate knob (default 0.0 → status quo). The
+            # town tax is levied regardless of who the creator is — see the
+            # matching comment in _gift_effect for why the payout below is
+            # gated separately on NON_USER_CREATOR_IDS.
             tip_tax = await _skim_town_tax(
                 db, share, settings.town_tax_rate_gift, f"tip_tax:{post_id}")
             share -= tip_tax
-            if share > 0:
+            if share > 0 and resident.creator_id not in NON_USER_CREATOR_IDS:
                 await reward(db, resident.creator_id, share, f"tip_share:{post_id}")
 
     await emit(db, "purchase_tip", user_id=user_id, post_id=post_id)  # D1 patron

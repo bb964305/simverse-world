@@ -42,20 +42,17 @@ async def ensure_admin_creator_user(db: AsyncSession) -> None:
     next (``create_preset`` goes straight on to its own insert+commit; a
     poisoned transaction would just move the bug there).
 
-    Deliberately not an admin account. It is only reliably protected from
-    ever carrying a balance via ``reward_creator_passive``, which skips every
-    id in ``NON_USER_CREATOR_IDS`` (this row included). Other credit paths are
-    weaker: ``shop_effects.py``'s ``gift_share:``/``tip_share:`` payouts and
+    Deliberately not an admin account. Reliably protected from ever carrying
+    a balance: every credit path that can reach a resident's creator now
+    imports ``NON_USER_CREATOR_IDS`` from this module and skips both ids —
+    ``coin_service.reward_creator_passive``, ``shop_effects.py``'s
+    ``gift_share:``/``tip_share:`` payouts (their sentinel check is separate
+    from the ``_skim_town_tax`` call they share an ``if`` with, so narrowing
+    the payout guard does not also skip the town-tax skim),
     ``lab_terminalization_service.py``'s ``lab_reward:`` split (lab line, off
-    by default) test the bare literal ``"system"`` — which happens to still
-    exclude this row (its id *is* the string ``"system"``) but does NOT
-    exclude ``SYSTEM_CREATOR_ID`` (a UUID), so built-in NPCs slip through
-    there. ``ws/handlers/rating.py``'s ``good_rating:`` reward has no
-    sentinel check at all and credits either sentinel outright. Narrowing
-    those sites is a separate task (the shop_effects.py checks share an
-    ``if`` with ``_skim_town_tax``, so tightening them changes economic
-    behaviour and needs its own test) — see ``docs/ADMIN_BOOTSTRAP.md`` for
-    the full list.
+    by default), ``ws/handlers/rating.py``'s ``good_rating:`` reward, and
+    ``investment_service.py``'s invest notification. See
+    ``docs/ADMIN_BOOTSTRAP.md`` for the account summary.
     """
     existing = await db.execute(select(User).where(User.id == ADMIN_CREATOR_ID))
     if existing.scalar_one_or_none():
