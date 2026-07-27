@@ -29,6 +29,18 @@ from app.models.season import Poll, Vote
 
 logger = logging.getLogger(__name__)
 
+#: F2 —— 开票那一刻的合格选民数，冻结在 ``options_json[0]`` 上（同
+#: ``_npc_voters`` / ``_proposer_slug`` 的 blob-on-opts[0] 约定）。
+#:
+#: 晋升与撤销都会在投票窗口内移动选民集。若法定人数的分母读结票时的实时
+#: :func:`_eligible_voter_count`，一张已经开出去的 poll 的判决门槛会在中途改变。
+#: 冻结分母对晋升与撤销**同时免疫**，且改动局限在本模块。
+#:
+#: 配套的语义决定：**幽灵票保留，不实现撤票**——「投票时具备资格即计票」。
+#: ``_npc_voters`` 是扁平 slug 列表，物理上没存票的归属，撤票要改
+#: ``options_json`` 的形状且要兼容存量 poll。
+META_ELIGIBLE_AT_OPEN = "_eligible_at_open"
+
 
 async def propose(
     db,
@@ -55,6 +67,10 @@ async def propose(
         # with the poll so NPC voting can weigh the relationship (option 0 is
         # the proposer's lead option by convention).
         opts[0]["_proposer_slug"] = proposer_slug
+    if opts:
+        # F2: freeze the quorum denominator at open time (see
+        # META_ELIGIBLE_AT_OPEN). Cheap — one COUNT on the same session.
+        opts[0][META_ELIGIBLE_AT_OPEN] = await _eligible_voter_count(db)
     poll = Poll(
         question=topic,
         options_json=opts,
@@ -588,6 +604,14 @@ async def _policy_threshold_verdict(db, opts: list[dict], tally: list[int],
     Returns ``None`` when the poll may execute (either it carries no tier
     metadata at all — an ordinary civic poll keeps pure plurality — or the
     winner cleared its bar), otherwise a 流会 reason code.
+
+    F2 冻结分母：法定人数的分母取 **开票那一刻** 的快照
+    (``options_json[0][META_ELIGIBLE_AT_OPEN]``，由 :func:`propose` 写入)，
+    而不是结票时的实时 :func:`_eligible_voter_count`。适用面：整段只在
+    ``polis_policy_approval_enabled`` 为真（``_close_one`` 的 gate）、且 opts[0]
+    带 ``META_THRESHOLD`` 时才计算；quorum 还要额外带 ``META_QUORUM``。普通
+    civic poll 与镇长选举 poll 走纯 plurality，分母不参与判决——撤销对它们的
+    影响是票差而非流会。
     """
     from app.services.policy_service import META_THRESHOLD, META_QUORUM
 
@@ -599,8 +623,19 @@ async def _policy_threshold_verdict(db, opts: list[dict], tally: list[int],
     if total <= 0:
         return "no_votes"
     if blob.get(META_QUORUM):
-        eligible = await _eligible_voter_count(db)
-        if eligible > 0 and total < eligible * settings.polis_policy_quorum_fraction:
+        # F2: 分母取开票那一刻的快照；存量 poll（本改动之前开的）没有快照，
+        # 回落实时计数 —— 行为与改动前逐字节一致。
+        frozen = blob.get(META_ELIGIBLE_AT_OPEN)
+        eligible = int(frozen if frozen is not None
+                       else await _eligible_voter_count(db))
+        if eligible <= 0:
+            # 行为不变（跳过法定人数判定），但不再是一句沉默的 `eligible > 0`
+            # 短路：安全阀在分母为 0 时自己关掉，语义上说不通，至少要留痕。
+            logger.warning(
+                "quorum check skipped: eligible electorate is %d "
+                "(frozen=%r) — 选民集为空，法定人数分母无意义",
+                eligible, frozen)
+        elif total < eligible * settings.polis_policy_quorum_fraction:
             return "quorum_not_met"
     if (tally[win] / total) < float(threshold):
         return "threshold_not_met"
