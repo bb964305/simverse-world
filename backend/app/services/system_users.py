@@ -42,9 +42,20 @@ async def ensure_admin_creator_user(db: AsyncSession) -> None:
     next (``create_preset`` goes straight on to its own insert+commit; a
     poisoned transaction would just move the bug there).
 
-    Deliberately NOT an admin account and never credited: it exists only to
-    satisfy the FK. ``reward_creator_passive`` skips every id in
-    ``NON_USER_CREATOR_IDS`` so this row's balance stays 0.
+    Deliberately not an admin account. It is only reliably protected from
+    ever carrying a balance via ``reward_creator_passive``, which skips every
+    id in ``NON_USER_CREATOR_IDS`` (this row included). Other credit paths are
+    weaker: ``shop_effects.py``'s ``gift_share:``/``tip_share:`` payouts and
+    ``lab_terminalization_service.py``'s ``lab_reward:`` split (lab line, off
+    by default) test the bare literal ``"system"`` — which happens to still
+    exclude this row (its id *is* the string ``"system"``) but does NOT
+    exclude ``SYSTEM_CREATOR_ID`` (a UUID), so built-in NPCs slip through
+    there. ``ws/handlers/rating.py``'s ``good_rating:`` reward has no
+    sentinel check at all and credits either sentinel outright. Narrowing
+    those sites is a separate task (the shop_effects.py checks share an
+    ``if`` with ``_skim_town_tax``, so tightening them changes economic
+    behaviour and needs its own test) — see ``docs/ADMIN_BOOTSTRAP.md`` for
+    the full list.
     """
     existing = await db.execute(select(User).where(User.id == ADMIN_CREATOR_ID))
     if existing.scalar_one_or_none():

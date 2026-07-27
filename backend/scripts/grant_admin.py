@@ -48,7 +48,9 @@ async def set_admin(db, email: str, *, grant: bool, dry_run: bool) -> str:
 
     if not grant:
         admin_count = (await db.execute(
-            select(func.count(User.id)).where(User.is_admin.is_(True))
+            select(func.count(User.id)).where(
+                User.is_admin.is_(True), User.is_banned.is_(False)
+            )
         )).scalar() or 0
         if admin_count <= 1:
             raise ValueError(

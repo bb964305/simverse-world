@@ -88,7 +88,7 @@ def render(rows: list[MintingRow], balances) -> str:
     for uid, name, balance in balances:
         out.append(f"{uid:40} {name:16} {balance:>8}")
 
-    out += ["", "误铸明细（账号 × UTC 日 × reason）", "-" * 64,
+    out += ["", "哨兵账号交易明细（账号 × UTC 日 × reason）", "-" * 64,
             f"{'账号':40} {'日期':12} {'reason':22} {'笔数':>6} {'净额':>8}"]
     if not rows:
         out.append("(无记录)")

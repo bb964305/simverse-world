@@ -35,8 +35,23 @@ admin 身份——所以新部署的环境里没有任何人能通过界面拿�
 建出来；`POST /admin/residents/presets` 另外会在插入前自愈调用一次，所以即使 seed 没跑过
 也不会外键违约。
 
-这两个账号**永远不该有余额**：`coin_service.reward_creator_passive` 跳过
-`NON_USER_CREATOR_IDS` 里的每一个 id。想确认历史上有没有被误铸过：
+这两个账号**理论上不该有余额**，但目前只有 `coin_service.reward_creator_passive`
+真正按 `NON_USER_CREATOR_IDS`（两个 id 都挡）跳过铸币；其余几处铸币/分账口径各不
+相同，都还没收紧（收紧是单独排期的任务：`shop_effects.py` 那两处判断跟
+`_skim_town_tax` 共用一个 `if`，改动会牵动镇税抽成，需要自己的经济行为测试）：
+
+- `shop_effects.py` 的 `gift_share:`（约第 233 行）与 `tip_share:`（约第 297 行）
+  只判断裸字面量 `"system"`——恰好挡住 `ADMIN_CREATOR_ID`（值本身就是
+  `"system"`），但挡不住 `SYSTEM_CREATOR_ID`（UUID），内置 NPC 会从这两处漏进
+  余额。
+- `lab_terminalization_service.py` 的 `lab_reward:` 分账（约第 201 行，lab 功能线，
+  默认关闭）同样只判断裸字面量 `"system"`，同样挡不住 `SYSTEM_CREATOR_ID`。
+- `ws/handlers/rating.py` 的 `good_rating:` 奖励（约第 92 行）完全没有哨兵判断，
+  两个哨兵账号都能从这里直接拿到余额。
+- `investment_service.py`（约第 55 行）也只判断裸字面量 `"system"`，但那里只发
+  通知、不铸币，影响较小。
+
+想确认历史上有没有被误铸过：
 
     docker compose exec api python scripts/audit_system_minting.py
 
