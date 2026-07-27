@@ -18,7 +18,7 @@ from app.schemas.forge import (
 from app.services.auth_service import get_current_user
 from app.forge.legacy_sessions import start_forge, submit_answer, get_status
 from app.forge.legacy_pipeline import run_generation_pipeline, run_quick_pipeline
-from app.forge.pipeline import ForgePipeline
+from app.forge.pipeline import ForgePipeline, TERMINAL_STATUSES as _TERMINAL_STATUSES
 from app.llm.client import get_client as get_llm_client
 from app.llm.budget import forge_blocked
 from app.models.forge_session import ForgeSession
@@ -162,7 +162,6 @@ FORGE_PIPELINE_TIMEOUT_S = 15 * 60
 # deep-status lazy sweep: a non-terminal session not updated for this long is
 # considered dead (its background task was lost, e.g. worker restart) → error.
 FORGE_STALE_AFTER = timedelta(minutes=20)
-_TERMINAL_STATUSES = {"done", "error"}
 
 # Strong references to fire-and-forget tasks: asyncio only keeps weak refs, so
 # an unreferenced task can be garbage-collected mid-await and silently vanish —

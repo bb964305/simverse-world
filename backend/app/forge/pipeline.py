@@ -18,6 +18,11 @@ from app.forge.progress import (
 )
 from app.config import settings
 
+# 流水线的两个终态。写在这里是因为本模块就是唯一给 session.status 赋终态的地方
+# （"done" / "error"）；admin 监控曾经自己抄了一份写成 "completed"，全仓没有任何
+# 地方产生该值，导致每个成功会话永久停留在「活跃会话」列表里。
+TERMINAL_STATUSES: frozenset[str] = frozenset({"done", "error"})
+
 
 class ForgeBudgetExceeded(RuntimeError):
     """单次 forge 请求花费超过 budget_forge_request_usd（burn-in 发现：deep 实测 $0.30）。"""
