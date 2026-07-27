@@ -72,32 +72,128 @@ async def test_demoted_resident_score_keeps_moving(db_session, monkeypatch):
     assert score_from_meta(r.meta_json) > 0.0
 
 
+# ── 守卫探测器 ───────────────────────────────────────────────────────────
+#
+# 抽出成独立函数，让「全仓真实扫描」与「喂源码文本的 hermetic 单元测试」共用
+# 同一份判定逻辑，两边不会各写一份而漂移。
+#
+# ⚠️ 评审 Important finding（本轮修复对象）：旧实现只认 `node.left`，漏检
+# 「字面量在左」的 Yoda 写法（`"npc" == resident.resident_type`）与经
+# `getattr(obj, "resident_type", ...)` 间接读取的同类比较——两者的
+# `node.left` 分别是 `Constant("npc")` 与 `ast.Call`，都不满足旧判定只认
+# `ast.Attribute`/`ast.Name` 的条件，会静默通过守卫。
+
+
+def _is_resident_type_read(node: ast.expr) -> bool:
+    """`node` 是否读取了 `resident_type`（直接：属性 / 裸名）。
+
+    TODO(评审 Important finding)：还不认 `getattr(obj, "resident_type", ...)`
+    间接读取——这正是本轮 guard-of-the-guard 要钉住的第二个缺口。
+    """
+    if isinstance(node, ast.Attribute) and node.attr == "resident_type":
+        return True
+    if isinstance(node, ast.Name) and node.id == "resident_type":
+        return True
+    return False
+
+
+def _is_npc_constant(node: ast.expr) -> bool:
+    return isinstance(node, ast.Constant) and node.value == "npc"
+
+
+def _npc_literal_offenders(tree: ast.AST, label: str) -> list[str]:
+    """结构性扫描：目前只看 `node.left`。
+
+    TODO(评审 Important finding)：Yoda 写法（`"npc" == resident.resident_type`）
+    的 `resident_type` 读取落在 `node.comparators` 里，`node.left` 是常量
+    `"npc"`——只查 `left` 会静默放过它。
+    """
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+        left = node.left
+        if not _is_resident_type_read(left):
+            continue
+        for op, comparator in zip(node.ops, node.comparators):
+            if not isinstance(op, (ast.Eq, ast.NotEq)):
+                continue
+            if _is_npc_constant(comparator):
+                offenders.append(f"{label}:{node.lineno}")
+    return offenders
+
+
+def _offenders_in_source(source: str, label: str = "<source>") -> list[str]:
+    """给 hermetic 单元测试用：喂源码文本，不碰真实文件。"""
+    return _npc_literal_offenders(ast.parse(source, filename=label), label)
+
+
+_GUARD_FAILURE_MESSAGE = (
+    "裸的 resident_type 与 \"npc\" 比较（含字面量在左的 Yoda 写法、"
+    "getattr(obj, \"resident_type\", ...) 间接读取）= 半状态源，改走 "
+    "is_autonomous / is_civic_voter：{}"
+)
+
+
 def test_no_bare_npc_literal_comparison_survives_in_app():
-    """结构性守卫：任何 `resident_type == "npc"` / `!= "npc"` 都是半状态源。
+    """结构性守卫：任何 `resident_type` 与 `"npc"` 的 `==`/`!=` 比较都是半状态
+    源——不论字面量写在哪一侧，也不论是直接属性读还是 `getattr()` 间接读取。
 
     成员判定必须走 Resident.is_autonomous（人口）或 Resident.is_civic_voter
     （政治），字面量只许出现在 civic_membership 的常量定义里。
     """
     offenders = []
     for path in (BACKEND_ROOT / "app").rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Compare):
-                continue
-            left = node.left
-            is_type_read = (
-                (isinstance(left, ast.Attribute) and left.attr == "resident_type")
-                or (isinstance(left, ast.Name) and left.id == "resident_type")
-            )
-            if not is_type_read:
-                continue
-            for op, comparator in zip(node.ops, node.comparators):
-                if not isinstance(op, (ast.Eq, ast.NotEq)):
-                    continue
-                if (isinstance(comparator, ast.Constant)
-                        and comparator.value == "npc"):
-                    offenders.append(
-                        f"{path.relative_to(BACKEND_ROOT)}:{node.lineno}")
-    assert offenders == [], (
-        "裸的 resident_type 与 \"npc\" 比较 = 半状态源，改走 "
-        f"is_autonomous / is_civic_voter：{offenders}")
+        label = str(path.relative_to(BACKEND_ROOT))
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=label)
+        offenders.extend(_npc_literal_offenders(tree, label))
+    assert offenders == [], _GUARD_FAILURE_MESSAGE.format(offenders)
+
+
+# ── Guard-of-the-guard（评审 Important finding）─────────────────────────
+#
+# 喂源码文本给探测器，不碰真实文件——hermetic，跑得快，且直接钉住"这个探测器
+# 认不认识这种句法形状"，与"全仓当下有没有这种代码"（上面那条真实扫描）是两
+# 件事。
+
+_EVASIVE_SHAPES = {
+    "attr-eq": 'if resident.resident_type == "npc":\n    pass\n',
+    "attr-ne": 'if resident.resident_type != "npc":\n    pass\n',
+    "bare-name-eq": 'if resident_type == "npc":\n    pass\n',
+    "yoda-attr-eq": 'if "npc" == resident.resident_type:\n    pass\n',
+    "yoda-attr-ne": 'if "npc" != resident.resident_type:\n    pass\n',
+    "getattr-eq": 'if getattr(resident, "resident_type", None) == "npc":\n    pass\n',
+    "yoda-getattr-eq": 'if "npc" == getattr(resident, "resident_type", None):\n    pass\n',
+    "getattr-no-default-ne": 'if getattr(resident, "resident_type") != "npc":\n    pass\n',
+}
+
+
+@pytest.mark.parametrize("source", _EVASIVE_SHAPES.values(),
+                        ids=_EVASIVE_SHAPES.keys())
+def test_guard_catches_every_evasive_shape(source):
+    """评审指出的两种绕过写法（Yoda / getattr 间接读取）各自单独钉住，附直接
+    形态（属性 / 裸名，两侧任意）做完整覆盖对照。"""
+    offenders = _offenders_in_source(source)
+    assert offenders, f"guard failed to flag an evasive shape: {source!r}"
+
+
+_EXEMPT_SHAPES = {
+    "membership-constant-assign": (
+        'CIVIC_VOTER_TYPES = frozenset({"npc"})\n'),
+    "creation-keyword-arg": (
+        'Resident(resident_type="npc")\n'),
+    "membership-in-operator": (
+        'x = resident_type in ("preset", "npc", UGC_RESIDENT_TYPE)\n'),
+    "compare-against-name-not-literal": (
+        'x = Resident.resident_type == UGC_RESIDENT_TYPE\n'),
+}
+
+
+@pytest.mark.parametrize("source", _EXEMPT_SHAPES.values(),
+                        ids=_EXEMPT_SHAPES.keys())
+def test_guard_does_not_flag_mechanism_exempt_shapes(source):
+    """加宽比较符两侧的判定之后，重新确认这四类"按机制豁免"的写法（
+    civic_membership 自身的常量定义 / 创建路径的关键字实参 / `in (...)` 成员
+    测试 / 比较对象是符号引用而非字面量）依旧不被误报——加宽比较项一侧，正是
+    最容易意外开始命中这些豁免写法的改法。"""
+    assert _offenders_in_source(source) == []
