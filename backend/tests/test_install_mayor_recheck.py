@@ -317,3 +317,50 @@ async def test_a_failed_install_does_not_leak_into_the_announcement_commit(
     assert (await db_session.execute(
         select(SystemConfig).where(SystemConfig.key == "current_mayor")
     )).scalar_one_or_none() is None
+
+
+@pytest.mark.anyio
+async def test_close_one_does_not_defame_an_eligible_winner_on_an_infra_failure(
+        db_session, monkeypatch):
+    """错误归因会在世界内诽谤一位在籍公民。
+
+    ``install_mayor`` 返回 ``False`` 的原因不止「结票复核不合格」一种——写入
+    故障也被 ``_execute_outcome`` 的 ``except Exception`` 吞成 ``False``。按
+    effect 类型无条件归因，就会把一次基础设施故障翻译成对一位具名角色的名誉
+    裁决，而 ``BulletinPost`` 会经 ``app/routers/bulletin.py`` 永久呈现在玩家
+    UI 上。「失去公民资格」只有在复核**确认**不合格时才说得出口。
+    """
+    from app.models.season import Poll
+    from app.services import civic_service
+
+    # winner 是一位完全合格的 npc 公民；失败的是写入，不是资格。
+    db_session.add_all([_res("old", meta={"mayor": True}), _res("new")])
+    poll = Poll(question=f"{election_service.ELECTION_TAG}:谁来当下一任镇长?",
+                options_json=[
+                    {"label": "新人", "effect": {"type": "mayor",
+                                                 "slug": "new"},
+                     "npc_votes": 3},
+                    {"label": "弃权", "effect": None, "npc_votes": 1},
+                ], status="open")
+    db_session.add(poll)
+    await db_session.commit()
+
+    async def _boom(db, slug):
+        raise RuntimeError("current_mayor write blew up")
+
+    monkeypatch.setattr(election_service, "_record_current_mayor", _boom)
+
+    await civic_service._close_one(db_session, poll)
+
+    from app.models.bulletin_post import BulletinPost
+    bodies = [p.content_md or "" for p in (await db_session.execute(
+        select(BulletinPost))).scalars().all()]
+    assert bodies, "公告本身必须发出来（否则下面的断言是空集恒真）"
+    assert not any("失去公民资格" in b for b in bodies), \
+        f"基础设施故障被公告成了对一位在籍公民的名誉裁决：{bodies}"
+    assert any("议案生效时遇到问题" in b for b in bodies), \
+        f"非资格原因的失败应回落到通用措辞：{bodies}"
+    # 该走的复核仍然要走：new 确实还是 civic voter
+    assert (await db_session.execute(
+        select(Resident.resident_type).where(Resident.slug == "new")
+    )).scalar_one() == cm.CIVIC_MEMBER_TYPE
