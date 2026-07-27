@@ -544,6 +544,9 @@ def test_bounded_summary_payload_does_not_mark_a_small_list_truncated():
     assert payload["candidates"] == ["u0", "u1"]
     assert payload["candidates_truncated"] is False
     assert payload["candidate_count"] == 2
+    # 没有 refused_detail 时（没有发生拒绝）也不能误报"被砍过"。
+    assert payload["refused_detail_truncated"] is False
+    assert payload["refused_detail_original_length"] is None
 
 
 def test_bounded_summary_payload_also_bounds_the_refused_detail_text():
@@ -613,6 +616,83 @@ def test_bounded_summary_payload_bounds_a_worst_case_chinese_refused_detail():
     serialized = json.dumps(payload)
     assert len(serialized) <= 2000
     assert payload["refused_detail"] is None or len(payload["refused_detail"]) < 300
+    # 三次复审：两轮截断（先按 _REFUSED_DETAIL_MAX_CHARS 原始字符裁，再按
+    # 序列化预算逐字符裁）都对同一份 5000 字符输入生效，标记必须是 True。
+    assert payload["refused_detail_truncated"] is True
+    assert payload["refused_detail_original_length"] == 5000
+
+
+# ── 三次复审：refused_detail 也要有对称的截断标记 ─────────────────────────
+#
+# candidates 有 candidates_truncated；refused_detail 的两轮截断（原始字符
+# 裁 _REFUSED_DETAIL_MAX_CHARS / 序列化预算裁）都没有等价标记——如果原始
+# 异常消息恰好落在裁剪后的长度上，payload 长得一模一样，读者分不清"完整"
+# 还是"被砍过"。两条独立的裁剪路径都要能各自把标记置位，不能只顾一条。
+
+def test_bounded_summary_payload_flags_the_raw_char_cap_cut_on_refused_detail():
+    """只触发第一轮裁剪（原始字符数 > _REFUSED_DETAIL_MAX_CHARS=300），
+    序列化后的结果本身不撞预算——ASCII 字符不会被 ensure_ascii 展开，300
+    个字符编码后还是 300 字符左右，远低于 2000。"""
+    result = {
+        "mode": cp.MODE_ON,
+        "world_at": datetime(2026, 8, 1, tzinfo=UTC).isoformat(),
+        "citizens_before": 11,
+        "candidates": [],
+        "promoted": 0,
+        "refused": "grant_refused",
+        "refused_detail": "x" * 5000,
+    }
+    payload = cp._bounded_summary_payload(result)
+    assert len(json.dumps(payload)) <= 2000
+    assert len(payload["refused_detail"]) == 300
+    assert payload["refused_detail_truncated"] is True
+    assert payload["refused_detail_original_length"] == 5000
+
+
+def test_bounded_summary_payload_flags_the_serialized_budget_cut_on_refused_detail():
+    """只触发第二轮裁剪：原始字符数 ≤ 300（第一轮不动它），但
+    ``ensure_ascii=True`` 把中文字符展开成 ``\\uXXXX`` 后序列化仍然超预算
+    （290 个中文字符编码后 ≈ 1740 字符，加上其它字段 > 2000；实测过
+    290 → 2028 字符）。这条路径专门证明：即使第一轮判定"没超原始字符上限"
+    ，第二轮仍然可能要裁，且必须一样把标记置位。"""
+    original = "拒" * 290
+    result = {
+        "mode": cp.MODE_ON,
+        "world_at": datetime(2026, 8, 1, tzinfo=UTC).isoformat(),
+        "citizens_before": 11,
+        "candidates": [],
+        "promoted": 0,
+        "refused": "grant_refused",
+        "refused_detail": original,
+    }
+    payload = cp._bounded_summary_payload(result)
+    assert len(json.dumps(payload)) <= 2000
+    assert payload["refused_detail_original_length"] == 290
+    # 第一轮（_REFUSED_DETAIL_MAX_CHARS=300）不会动它——290 ≤ 300
+    assert len(payload["refused_detail"]) < 290, (
+        "这条用例要测的是第二轮（序列化预算）裁剪；如果长度没变，说明 290 "
+        "个中文字符编码后其实没有撞预算，用例前提就不成立了")
+    assert payload["refused_detail_truncated"] is True
+
+
+def test_bounded_summary_payload_does_not_flag_an_untruncated_refused_detail():
+    """两轮裁剪都没碰到的正常情形——今天真实的化身拒绝消息就是这个量级
+    （序列化后 576 字符，参见附 6.3）——不能误报"被砍过"，
+    refused_detail_original_length 要能验证"确实原样保留"。"""
+    original = "grant refused: 1 target(s) are player avatars (users.player_resident_id hits: ['avatar'])"
+    result = {
+        "mode": cp.MODE_ON,
+        "world_at": datetime(2026, 8, 1, tzinfo=UTC).isoformat(),
+        "citizens_before": 11,
+        "candidates": ["u0", "u1"],
+        "promoted": 0,
+        "refused": "grant_refused",
+        "refused_detail": original,
+    }
+    payload = cp._bounded_summary_payload(result)
+    assert payload["refused_detail"] == original
+    assert payload["refused_detail_truncated"] is False
+    assert payload["refused_detail_original_length"] == len(original)
 
 
 @pytest.mark.anyio
