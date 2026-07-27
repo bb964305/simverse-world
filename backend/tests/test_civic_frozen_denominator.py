@@ -150,7 +150,7 @@ async def test_quorum_reads_the_snapshot_not_the_live_count(db_session,
              META_QUORUM: True, civic_service.META_ELIGIBLE_AT_OPEN: 10},
             {"label": "反对", "npc_votes": 0}]
     verdict = await civic_service._policy_threshold_verdict(
-        db_session, opts, [4, 0], 0)
+        db_session, opts, [4, 0], 0, poll_id="poll-under-test")
     assert verdict == "quorum_not_met"
 
 
@@ -168,7 +168,7 @@ async def test_legacy_poll_without_a_snapshot_falls_back_to_live_count(
              META_QUORUM: True},
             {"label": "反对", "npc_votes": 0}]
     assert await civic_service._policy_threshold_verdict(
-        db_session, opts, [4, 0], 0) == "quorum_not_met"
+        db_session, opts, [4, 0], 0, poll_id="poll-under-test") == "quorum_not_met"
 
 
 @pytest.mark.anyio
@@ -177,7 +177,7 @@ async def test_plain_civic_polls_are_untouched_by_the_denominator(db_session,
     """普通 civic poll 不带 META_THRESHOLD → 纯 plurality，分母不参与判决。"""
     opts = [{"label": "A", "npc_votes": 1}, {"label": "B", "npc_votes": 0}]
     assert await civic_service._policy_threshold_verdict(
-        db_session, opts, [1, 0], 0) is None
+        db_session, opts, [1, 0], 0, poll_id="poll-under-test") is None
 
 
 @pytest.mark.anyio
@@ -193,7 +193,7 @@ async def test_threshold_only_poll_never_touches_the_denominator(
             {"label": "反对", "npc_votes": 0}]
     with caplog.at_level("WARNING", logger=CIVIC_LOGGER):
         assert await civic_service._policy_threshold_verdict(
-            db_session, opts, [1, 0], 0) is None
+            db_session, opts, [1, 0], 0, poll_id="poll-under-test") is None
     assert [r for r in caplog.records if r.name == CIVIC_LOGGER] == []
 
 
@@ -201,18 +201,23 @@ async def test_threshold_only_poll_never_touches_the_denominator(
 async def test_zero_electorate_warns_instead_of_silently_short_circuiting(
         db_session, approval_gate, caplog):
     """行为不变（分母为 0 时仍跳过法定人数判定），但必须留下 WARNING——安全阀
-    在分母为 0 时自己关掉，语义上说不通。"""
+    在分母为 0 时自己关掉，语义上说不通。
+
+    告警必须**指名是哪张 poll**：一条运维无法定位的告警等于没留痕，而这条会
+    随部署即刻在 vm212 生效（``polis_policy_approval_enabled=true``）。
+    """
     opts = [{"label": "赞成", "npc_votes": 2, META_THRESHOLD: 0.5,
              META_QUORUM: True, civic_service.META_ELIGIBLE_AT_OPEN: 0},
             {"label": "反对", "npc_votes": 0}]
     with caplog.at_level("WARNING", logger=CIVIC_LOGGER):
         verdict = await civic_service._policy_threshold_verdict(
-            db_session, opts, [2, 0], 0)
+            db_session, opts, [2, 0], 0, poll_id="poll-under-test")
     assert verdict is None
     warned = [r for r in caplog.records
               if r.name == CIVIC_LOGGER and r.levelname == "WARNING"]
     assert len(warned) == 1
     assert "quorum" in warned[0].message and "eligible" in warned[0].message
+    assert "poll-under-test" in warned[0].message
 
 
 @pytest.mark.anyio
@@ -225,8 +230,41 @@ async def test_a_usable_denominator_stays_quiet(db_session, approval_gate,
             {"label": "反对", "npc_votes": 0}]
     with caplog.at_level("WARNING", logger=CIVIC_LOGGER):
         assert await civic_service._policy_threshold_verdict(
-            db_session, opts, [8, 0], 0) is None
+            db_session, opts, [8, 0], 0, poll_id="poll-under-test") is None
     assert [r for r in caplog.records if r.name == CIVIC_LOGGER] == []
+
+
+@pytest.mark.anyio
+async def test_the_zero_electorate_warning_names_the_real_poll(
+        db_session, approval_gate, caplog):
+    """结票路径必须把**真的 poll.id** 递下去，不是 ``None``、也不是别的常量。
+
+    上一条用的是手搓的 poll_id，只能证明参数被格式化进去了；这条走完整
+    ``propose → close_due_polls``，钉的是 ``_close_one`` 侧的接线。选民集为空
+    （库里只有一位 UGC 居民）→ 快照 0 → 告警路径。
+    """
+    db_session.add(_res("ugc-only", cm.UGC_RESIDENT_TYPE))
+    await db_session.commit()
+
+    poll = await civic_service.propose(
+        db_session, "选民集为空时开出的议案",
+        [{"label": "赞成", "effect": None}, {"label": "反对", "effect": None}])
+    opts = list(poll.options_json)
+    assert opts[0][civic_service.META_ELIGIBLE_AT_OPEN] == 0
+    opts[0][META_THRESHOLD] = 0.5
+    opts[0][META_QUORUM] = True
+    opts[0]["npc_votes"] = 2          # 幽灵票：投票时有资格，之后选民集空了
+    poll.options_json = opts
+    poll.closes_at = datetime.now(UTC) - timedelta(days=1)
+    flag_modified(poll, "options_json")
+    await db_session.commit()
+
+    with caplog.at_level("WARNING", logger=CIVIC_LOGGER):
+        assert await civic_service.close_due_polls(db_session) == 1
+    warned = [r for r in caplog.records
+              if r.name == CIVIC_LOGGER and r.levelname == "WARNING"]
+    assert len(warned) == 1
+    assert warned[0].message.startswith(f"poll {poll.id}:")
 
 
 @pytest.mark.anyio
