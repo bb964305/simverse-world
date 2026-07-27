@@ -363,12 +363,11 @@ async def _npc_choice(db, resident, poll, opts, relation_service, by_slug=None) 
         other = (by_slug or {}).get(target)
         if other is None:
             continue
-        if settings.rep_enabled:
-            from app.services.reputation_service import score_from_meta
-            scores[i] += (
-                settings.rep_vote_trust_weight
-                * score_from_meta(other.meta_json)
-            )
+        # F1 第 2 项:声誉只在这里影响选票。候选集选取已与声誉解耦
+        # (election_service.open_election),被动选举权不因名声受损而剥夺。
+        # 闸门关时 vote_trust_delta 返回 0.0 → 逐字节等价于改动前。
+        from app.services.reputation_service import vote_trust_delta
+        scores[i] += vote_trust_delta(other.meta_json)
         try:
             pair = await relation_service.get_pair(db, resident.id, other.id)
             if pair is not None and pair.affinity:

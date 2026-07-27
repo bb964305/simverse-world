@@ -50,14 +50,11 @@ async def open_election(db, *, candidate_slugs: list[str] | None = None, days: i
         ]
         if len(candidates) < 2:  # fallback: highest-heat residents
             candidates = sorted(residents, key=lambda r: r.heat or 0, reverse=True)[:3]
-    if settings.rep_enabled:
-        from app.services.reputation_service import score_from_meta
-        # Stable sort: equal reputation preserves the existing SBTI/heat order.
-        candidates = sorted(
-            candidates,
-            key=lambda resident: score_from_meta(resident.meta_json),
-            reverse=True,
-        )
+    # F1 第 2 项:声誉**不参与**候选集选取。此处曾按声誉排序再 [:4],等于把「被
+    # 议论最多、叙事最中心」的居民系统性挤出候选(tone 恒为负 → 被议论就扣分)。
+    # 被动选举权不因名声受损而剥夺;声誉的唯一入票通道是 civic_service._npc_choice
+    # 里的 vote_trust_delta(),影响得票而不决定谁能参选。
+    # 候选集口径回到 S1-1 之前:SBTI(Ac1/So1=H)优先,不足 2 人回落 heat 前三。
     candidates = candidates[:4]
     if len(candidates) < 2:
         return None

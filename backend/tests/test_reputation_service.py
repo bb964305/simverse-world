@@ -4,12 +4,18 @@ import pytest
 from app.config import settings
 from app.models.memory import Memory
 from app.models.resident import Resident
+from app.services import civic_service
 from app.services import election_service
+from app.services import relation_service
 from app.services.reputation_service import (
     credit_allowed,
+    evidence_weight,
     get_many,
+    gossip_tone,
+    project,
     recompute,
     score_from_meta,
+    vote_trust_delta,
 )
 
 
@@ -98,16 +104,291 @@ async def test_get_many_and_credit_threshold(db_session, monkeypatch):
     assert credit_allowed(0.8) is True
 
 
+# ── F1 第 1 项：tone 由关系 affinity 决定 ──────────────────────────────
+
+
+def test_gossip_tone_follows_affinity_sign():
+    assert gossip_tone(0.2) > 0
+    assert gossip_tone(-0.2) < 0
+    assert gossip_tone(0.5) > gossip_tone(0.1) > gossip_tone(-0.1)
+
+
+def test_gossip_tone_without_relation_keeps_the_legacy_constant():
+    # 无关系行 / affinity=0 → 与修复前逐字节相同，base_tone 退化为偏置项
+    assert gossip_tone(None) == settings.rep_gossip_base_tone
+    assert gossip_tone(0.0) == settings.rep_gossip_base_tone
+    assert gossip_tone("nonsense") == settings.rep_gossip_base_tone
+
+
+def test_gossip_tone_applies_distortion_penalty_and_clamps():
+    assert gossip_tone(0.0, distorted=True) == pytest.approx(
+        settings.rep_gossip_base_tone + settings.rep_distortion_penalty
+    )
+    assert gossip_tone(1.0) == settings.rep_max
+    assert gossip_tone(-1.0, distorted=True) == settings.rep_min
+
+
+def test_gossip_tone_sign_flips_at_one_gift_of_affinity():
+    # 钉死 GOSSIP_AFFINITY_WEIGHT=3.0：符号翻转点必须恰好落在一次送礼
+    # （realism_rel_affinity_gift=0.1）—— 这是全线标定叙事的地基
+    # （-0.3 + 3.0×0.1 = 0.0）。终审变异实测：改成 2.0 或 1.6，全线 38
+    # 条测试原样通过，唯独这条测试能钉住权重本身。
+    assert gossip_tone(settings.realism_rel_affinity_gift) == pytest.approx(0.0)
+
+
+def test_evidence_weight_damps_by_hops_and_floors_importance():
+    assert evidence_weight(0.6, 0, -0.5) == pytest.approx(-0.3)
+    assert evidence_weight(0.6, 3, -0.5) == pytest.approx(-0.075)
+    assert evidence_weight(0.6, 0, 0.5) == pytest.approx(0.3)
+    assert evidence_weight(-1.0, 0, 0.5) == 0.0
+    assert evidence_weight(None, 0, 0.5) == 0.0
+
+
+# ── F1 第 1 项：接进 recompute ─────────────────────────────────────────
+
+
 @pytest.mark.anyio
-async def test_open_election_ranks_reputation_when_enabled(db_session, monkeypatch):
+async def test_recompute_tone_follows_relation_affinity(db_session, monkeypatch):
+    """同一个传话人、同样的 importance/hops,只有 affinity 不同 → 分数异号。"""
     monkeypatch.setattr(settings, "rep_enabled", True)
-    low = _resident("low", reputation=-0.5)
-    high = _resident("high", reputation=0.9)
-    db_session.add_all([low, high])
+    teller = _resident("teller")
+    liked = _resident("liked")
+    disliked = _resident("disliked")
+    db_session.add_all([teller, liked, disliked])
+    await db_session.flush()
+    db_session.add_all([
+        Memory(
+            resident_id=teller.id, type="event", content="about liked",
+            importance=0.7, source="gossip", related_resident_id=liked.id,
+            metadata_json={"hops": 1, "distorted": False},
+        ),
+        Memory(
+            resident_id=teller.id, type="event", content="about disliked",
+            importance=0.7, source="gossip", related_resident_id=disliked.id,
+            metadata_json={"hops": 1, "distorted": False},
+        ),
+    ])
+    await db_session.commit()
+    await relation_service.bump(db_session, teller.id, liked.id, d_affinity=0.4)
+    await relation_service.bump(db_session, teller.id, disliked.id, d_affinity=-0.4)
+
+    assert await recompute(db_session) == 3
+    await db_session.refresh(liked)
+    await db_session.refresh(disliked)
+    assert score_from_meta(liked.meta_json) > 0      # 正面互动 → 正分
+    assert score_from_meta(disliked.meta_json) < 0   # 负面互动 → 负分
+
+
+@pytest.mark.anyio
+async def test_recompute_reads_relations_in_one_batch(db_session, monkeypatch):
+    """性能红线:关系读取必须是批量的,不能每条记忆一次查询。"""
+    monkeypatch.setattr(settings, "rep_enabled", True)
+    teller = _resident("batch_teller")
+    subjects = [_resident(f"batch_sub{i}") for i in range(5)]
+    db_session.add_all([teller, *subjects])
+    await db_session.flush()
+    for subject in subjects:
+        db_session.add(Memory(
+            resident_id=teller.id, type="event", content="x",
+            importance=0.7, source="gossip", related_resident_id=subject.id,
+            metadata_json={"hops": 1, "distorted": False},
+        ))
+    await db_session.commit()
+    for subject in subjects:
+        await relation_service.bump(db_session, teller.id, subject.id, d_affinity=0.4)
+
+    calls = {"n": 0}
+    original = db_session.execute
+
+    async def counting_execute(statement, *args, **kwargs):
+        # 用编译后的 SQL 文本判定,不碰 Select.froms(1.4.23 起 deprecated)
+        if "resident_relations" in str(statement):
+            calls["n"] += 1
+        return await original(statement, *args, **kwargs)
+
+    monkeypatch.setattr(db_session, "execute", counting_execute)
+    assert await recompute(db_session) == 6
+    assert calls["n"] == 1, f"关系查询 {calls['n']} 次,应为 1 次批量读"
+
+
+# ── F1 第 3 项:人口口径 is_autonomous(spec §4.4 第 11 处读点) ──────────
+
+
+@pytest.mark.anyio
+async def test_recompute_covers_ugc_residents_but_never_the_player_avatar(
+    db_session, monkeypatch
+):
+    """spec §4.4 第 11 处读点:声誉是社会属性,人口口径不是政治口径。
+
+    不改的后果是被降级者退出夜间重算、分数永久冻结在降级前那一刻。
+    """
+    from app.services.civic_membership import UGC_RESIDENT_TYPE
+
+    monkeypatch.setattr(settings, "rep_enabled", True)
+    builtin = _resident("builtin")
+    ugc = _resident("ugc")
+    ugc.resident_type = UGC_RESIDENT_TYPE
+    avatar = _resident("avatar")
+    avatar.resident_type = "player"
+    db_session.add_all([builtin, ugc, avatar])
+    await db_session.commit()
+
+    assert await recompute(db_session) == 2
+    await db_session.refresh(ugc)
+    await db_session.refresh(avatar)
+    assert "reputation" in (ugc.meta_json or {})
+    assert "reputation" not in (avatar.meta_json or {})
+
+
+# ── F1 第 4 项:project() 只读投影 ───────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_project_is_read_only_and_matches_recompute(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "rep_enabled", False)
+    subject = _resident("proj_subject")
+    teller = _resident("proj_teller")
+    db_session.add_all([subject, teller])
+    await db_session.flush()
+    db_session.add(Memory(
+        resident_id=teller.id, type="event", content="x",
+        importance=0.7, source="gossip", related_resident_id=subject.id,
+        metadata_json={"hops": 1, "distorted": False},
+    ))
+    await db_session.commit()
+
+    assert await project(db_session) == []            # 闸门关且未 force → 空
+    rows = await project(db_session, force=True)      # 标定路径:开闸前也能读
+    assert {row.slug for row in rows} == {"proj_subject", "proj_teller"}
+    await db_session.refresh(subject)
+    assert "reputation" not in (subject.meta_json or {})   # 只读,零写入
+
+    monkeypatch.setattr(settings, "rep_enabled", True)
+    projected = {row.resident_id: row.score for row in await project(db_session)}
+    assert await recompute(db_session) == 2
+    await db_session.refresh(subject)
+    assert score_from_meta(subject.meta_json) == pytest.approx(projected[subject.id])
+
+
+# ── F1 第 2 项：候选集由截断改为加权 ────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_open_election_keeps_low_reputation_candidates_on_the_ballot(
+    db_session, monkeypatch
+):
+    """硬门:候选集不得因「被议论多」而缩小。被动选举权不因名声受损而剥夺。"""
+    monkeypatch.setattr(settings, "rep_enabled", True)
+    worst = _resident("worst", reputation=-0.9)
+    others = [_resident(f"cand{i}", reputation=0.5) for i in range(4)]
+    db_session.add_all([worst, *others])
+    await db_session.commit()
+
+    # 显式候选名单:顺序由调用方决定,不依赖 DB 行序
+    poll = await election_service.open_election(
+        db_session,
+        candidate_slugs=["worst", "cand0", "cand1", "cand2", "cand3"],
+    )
+    slugs = [option["effect"]["slug"] for option in poll.options_json]
+    assert slugs == ["worst", "cand0", "cand1", "cand2"]   # [:4] 保留,顺序即入参顺序
+
+
+@pytest.mark.anyio
+async def test_open_election_candidate_set_is_reputation_blind(db_session, monkeypatch):
+    """开闸前后同一个世界,候选集必须逐项相同。"""
+    db_session.add_all([
+        _resident("blind_low", reputation=-0.9),
+        _resident("blind_mid", reputation=0.0),
+        _resident("blind_high", reputation=0.9),
+    ])
+    await db_session.commit()
+
+    monkeypatch.setattr(settings, "rep_enabled", True)
+    on = [o["effect"]["slug"] for o in (await election_service.open_election(db_session)).options_json]
+    monkeypatch.setattr(settings, "rep_enabled", False)
+    off = [o["effect"]["slug"] for o in (await election_service.open_election(db_session)).options_json]
+    assert on == off
+    assert set(on) == {"blind_low", "blind_mid", "blind_high"}
+
+
+@pytest.mark.anyio
+async def test_election_votes_still_weighted_by_reputation(db_session, monkeypatch):
+    """候选集与声誉解耦,但声誉仍是 `_npc_choice` 里的一项打分权重——不能矫枉
+    过正把这条影响力也一起删掉。用中性选民(无 SBTI 差异、无关系羁绊)隔离出
+    声誉这一项:+0.9 对 -0.9 的声誉差(× rep_vote_trust_weight=1.0 → 1.8)远超
+    taste 项的最大摆动(< _TASTE_MAG=0.25),对每个中性选民都应压倒性获胜。
+    """
+    monkeypatch.setattr(settings, "rep_enabled", True)
+    good = _resident("cand_good", reputation=0.9)
+    bad = _resident("cand_bad", reputation=-0.9)
+    voters = [_resident(f"voter{i}") for i in range(5)]
+    db_session.add_all([good, bad, *voters])
     await db_session.commit()
 
     poll = await election_service.open_election(
-        db_session,
-        candidate_slugs=["low", "high"],
+        db_session, candidate_slugs=["cand_good", "cand_bad"],
     )
-    assert poll.options_json[0]["effect"]["slug"] == "high"
+    n = await civic_service.run_npc_voting(db_session)
+    assert n == len(voters) + 2   # 5 中性选民 + 两个候选人各自的自投
+
+    await db_session.refresh(poll)
+    good_idx = next(
+        i for i, o in enumerate(poll.options_json) if o["effect"]["slug"] == "cand_good"
+    )
+    bad_idx = next(
+        i for i, o in enumerate(poll.options_json) if o["effect"]["slug"] == "cand_bad"
+    )
+    # 5 个中性选民全部倒向高声誉候选人,加上他自己的一票;声誉低的候选人只拿到
+    # 自己的一票。
+    assert poll.options_json[good_idx]["npc_votes"] == len(voters) + 1
+    assert poll.options_json[bad_idx]["npc_votes"] == 1
+
+
+# ── F1 第 2 项：声誉只影响得票 ──────────────────────────────────────────
+
+
+def test_vote_trust_delta_is_gated_and_weighted(monkeypatch):
+    monkeypatch.setattr(settings, "rep_enabled", False)
+    assert vote_trust_delta({"reputation": {"score": 0.8}}) == 0.0
+    monkeypatch.setattr(settings, "rep_enabled", True)
+    monkeypatch.setattr(settings, "rep_vote_trust_weight", 2.0)
+    assert vote_trust_delta({"reputation": {"score": 0.4}}) == pytest.approx(0.8)
+    assert vote_trust_delta(None) == pytest.approx(2.0 * settings.rep_neutral)
+
+
+@pytest.mark.anyio
+async def test_reputation_moves_votes_not_candidacy(db_session, monkeypatch):
+    """回归锁:声誉在候选集上失效之后,得票权重是它唯一的政治通道。"""
+    from types import SimpleNamespace
+
+    from app.services import civic_service, relation_service
+
+    voter = _resident("vote_caster")
+    good = _resident("vote_good", reputation=0.9)
+    bad = _resident("vote_bad", reputation=-0.9)
+    db_session.add_all([voter, good, bad])
+    await db_session.commit()
+
+    poll = SimpleNamespace(question="镇长选举:谁来当下一任镇长?", id=1)
+    opts = [
+        {"label": "bad", "effect": {"type": "mayor", "slug": "vote_bad"}},
+        {"label": "good", "effect": {"type": "mayor", "slug": "vote_good"}},
+    ]
+    by_slug = {"vote_caster": voter, "vote_good": good, "vote_bad": bad}
+
+    monkeypatch.setattr(settings, "rep_enabled", True)
+    idx = await civic_service._npc_choice(
+        db_session, voter, poll, opts, relation_service, by_slug
+    )
+    assert opts[idx]["effect"]["slug"] == "vote_good"
+
+    monkeypatch.setattr(settings, "rep_enabled", False)
+    idx_off = await civic_service._npc_choice(
+        db_session, voter, poll, opts, relation_service, by_slug
+    )
+    good.meta_json = {**good.meta_json, "reputation": {"score": -0.9, "samples": 1}}
+    bad.meta_json = {**bad.meta_json, "reputation": {"score": 0.9, "samples": 1}}
+    idx_off_swapped = await civic_service._npc_choice(
+        db_session, voter, poll, opts, relation_service, by_slug
+    )
+    assert idx_off_swapped == idx_off   # 闸门关 → 声誉一个字节都到不了选票
