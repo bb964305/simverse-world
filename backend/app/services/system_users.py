@@ -15,6 +15,7 @@
 从本模块 import，不要再声明第二份。
 """
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.user import User
@@ -25,7 +26,21 @@ NON_USER_CREATOR_IDS = frozenset({SYSTEM_CREATOR_ID, ADMIN_CREATOR_ID})
 
 
 async def ensure_admin_creator_user(db: AsyncSession) -> None:
-    """Idempotently create the ``users`` row admin-created residents point at.
+    """Make sure the ``users`` row admin-created residents point at exists.
+
+    Race-safe under concurrent callers, not just repeat calls within one
+    session: the SELECT-then-INSERT below has a window where two callers can
+    both miss the SELECT before either commits — exactly what happens when
+    two concurrent ``POST /admin/residents/presets`` requests both reach this
+    self-heal call before the sentinel row exists (production, where the
+    bootstrap seed path may not have run). The loser's INSERT then collides
+    with the winner's on the unique ``users.id``/``users.email`` columns;
+    that surfaces as ``IntegrityError`` when ``commit()`` flushes it. We
+    treat that as success — the row exists now, which is the only
+    postcondition this function promises — and roll back the loser's failed
+    transaction so its session stays usable for whatever the caller does
+    next (``create_preset`` goes straight on to its own insert+commit; a
+    poisoned transaction would just move the bug there).
 
     Deliberately NOT an admin account and never credited: it exists only to
     satisfy the FK. ``reward_creator_passive`` skips every id in
@@ -41,4 +56,9 @@ async def ensure_admin_creator_user(db: AsyncSession) -> None:
         soul_coin_balance=0,
         is_admin=False,
     ))
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Lost the race: a concurrent caller's INSERT for this same row won.
+        # Roll back our own failed attempt — the row exists either way.
+        await db.rollback()
