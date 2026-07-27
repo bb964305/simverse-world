@@ -90,3 +90,26 @@ async def test_vacate_still_nulls_system_config_current_mayor(db_session):
     await svc.appoint("mayor", "old", fill_strategy="election")
     assert await svc.vacate("mayor") is True
     assert await ConfigService(db_session).get("current_mayor") is None
+
+
+@pytest.mark.anyio
+async def test_vacate_clears_mayor_flag_when_gate_on(db_session, monkeypatch):
+    """约束 2 补丁：gate=on 态下同样要断言行为，不能只断言「路径被执行到」。
+
+    离任者用非自治 resident_type（player）构造——修复点正是「离任者已掉出
+    自治集合」这个场景，用 npc 造不出这个缺口，即使把 gate 打开也测不到。
+    """
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "polis_office_enabled", True)
+
+    holder = _res("gate-on-mayor", "gate开镇长", meta={"mayor": True}, rtype="player")
+    db_session.add(holder)
+    await db_session.commit()
+
+    svc = OfficeService(db_session)
+    await svc.appoint("mayor", "gate-on-mayor", fill_strategy="election")
+    assert await svc.vacate("mayor") is True
+
+    await db_session.refresh(holder)
+    assert not (holder.meta_json or {}).get("mayor")
