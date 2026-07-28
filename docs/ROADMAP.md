@@ -12,8 +12,8 @@
 | M1-M6 扩展 | 已完成并部署。经济、故事弧、镇务自治、记忆评估、空间扩展和镇长选举已接电 | 观察长期节律与成本 |
 | 拟真与世界时钟 | P0-P2 已实现并在 vm212 开启；世界时钟为 Asia/Shanghai、`k=4` | 继续校准需求、关系、信息扩散和真实账单 |
 | 生产修缮 | heat 时区混比、预算静默告警和 SBTI backfill 工具已完成并部署；`_npc_choice` 的 option-0 结构性偏向（三条根因）已修复并合入主线 | **修复后的投票样本已经取到**：2026-07-25 23:00:12 UTC 夜间任务投出 33 票（worker 日志 `33 NPC civic votes cast`），option-0 占比由 100% 降到 42.4%，归一化熵 0.895~0.994。样本来自事故后重新 seed 的 11 位居民，够证「偏向已消除」，不够做人格-选项相关性分析 |
-| 社会地基 | S2-1 职位实体化、S1-3 舆论动力学已完成并在 vm212 开闸；S1-5 财政闭环（迁移 048）与 S2-5 政策分级审批（迁移 049）**已部署且已开闸**（`TOWN_TREASURY_ENABLED` / `POLIS_POLICY_ENABLED` / `POLIS_POLICY_APPROVAL_ENABLED` 三个开关 2026-07-25 15:31 起全为 true，vm212 迁移链头 049；来源：`ops-deploy-2026-07-26-report.md`，代码默认值仍为关闭）；四个财政条目已接线到 TreasuryService；S1-1 声誉已实现，选举与 NPC 投票已消费同一份数据。**F1 声誉语义修复已合入主线**（`6128ecb`）：tone 改由关系 affinity 决定、base_tone 退为偏置项；候选集选取不再按声誉排序截断，被动选举权与名声解耦；声誉入票收敛到唯一通道 `vote_trust_delta()` | 声誉仍 `REP_ENABLED=false`。F1 三项里**前两项已落地，第三项未做**：`rep_credit_min_score` 仍是拍出来的 `-0.3`（`app/config.py:576`），`scripts/rep_calibrate.py` 只是把标定工具建好了，**没有用真实分布跑过一次**。开闸前必须先跑它并把阈值改成实测值；市政厅尚未展示声誉 |
-| 政治层边界 | 玩家创作居民（forge / import 五条创建路径）自动获得投票权与被选举权的泄漏已修复：新建居民类型为 `resident`，`is_autonomous`（人口）与 `is_civic_voter`（政治权利）按语义拆分；`purge_residents` 加玩家角色防呆；burn-in 报告加政治层边界探针。F2 已合入主线（`6128ecb`）：晋升/撤销写入口、`civic_standing_history` 表（迁移 051）、三态闸门 `CIVIC_PROMOTION_MODE`、读写双守卫 | **存量泄漏实例实测为 0**——`SELECT resident_type,count(*) FROM residents` → `npc\|11`，全是 07-25 事故后重新 seed 的内置阵容。所以回填（T2）在 vm212 上是**空跑，0 行是正确结果不是失败**。真正的洞是**修复尚未部署**：生产容器内无 `civic_membership.py`、`alembic current` = 049，今天在生产 forge 一个居民照旧拿到投票权与被选举权。**部署（T1）才是关泄漏的动作，不是回填** |
+| 社会地基 | S2-1 职位实体化、S1-3 舆论动力学已完成并在 vm212 开闸；S1-5 财政闭环（迁移 048）与 S2-5 政策分级审批（迁移 049）**已部署且已开闸**（`TOWN_TREASURY_ENABLED` / `POLIS_POLICY_ENABLED` / `POLIS_POLICY_APPROVAL_ENABLED` 三个开关 2026-07-25 15:31 起全为 true，代码默认值仍为关闭）；四个财政条目已接线到 TreasuryService；S1-1 声誉已实现，选举与 NPC 投票已消费同一份数据。**F1 声誉语义修复已合入主线**（`6128ecb`）：tone 改由关系 affinity 决定、base_tone 退为偏置项；候选集选取不再按声誉排序截断，被动选举权与名声解耦；声誉入票收敛到唯一通道 `vote_trust_delta()` | 声誉仍 `REP_ENABLED=false`。F1 三项里**前两项已落地，第三项未做**：`rep_credit_min_score` 仍是拍出来的 `-0.3`（`app/config.py:576`），`scripts/rep_calibrate.py` 只是把标定工具建好了，**没有用真实分布跑过一次**。开闸前必须先跑它并把阈值改成实测值；市政厅尚未展示声誉 |
+| 政治层边界 | 玩家创作居民（forge / import 五条创建路径）自动获得投票权与被选举权的泄漏已修复：新建居民类型为 `resident`，`is_autonomous`（人口）与 `is_civic_voter`（政治权利）按语义拆分；`purge_residents` 加玩家角色防呆；burn-in 报告加政治层边界探针。F2 已合入主线（`6128ecb`）：晋升/撤销写入口、`civic_standing_history` 表（迁移 051）、三态闸门 `CIVIC_PROMOTION_MODE`、读写双守卫 | **存量泄漏实例实测为 0**——`SELECT resident_type,count(*) FROM residents` → `npc\|11`，全是 07-25 事故后重新 seed 的内置阵容。所以回填（T2）在 vm212 上是**空跑，0 行是正确结果不是失败**。真正的洞是**修复尚未部署**：生产容器内无 `civic_membership.py`、`alembic current` = 049，今天在生产 forge 一个居民照旧拿到投票权与被选举权。**部署（T1）才是关泄漏的动作，不是回填**。T1 已于 2026-07-28 01:26 UTC 完成，生产实测 `CIVIC_VOTER_TYPES=['npc']` / `SIM_RESIDENT_TYPES=['npc','resident']` / `UGC_RESIDENT_TYPE='resident'`，边界探针读数「居民 11 / 有政治权利 11 / 算人口 11」为回填前基线 |
 | 工程健康 | 夜间任务错过窗口补跑、聊天锁 DB 侧回收、后台 loop 心跳与死亡告警（`GET /health/loops`）**已部署并在产**，自 2026-07-25 16:53:59 UTC 起生效 | 补跑已被真实触发（07-25 15:32 worker 日志 `nightly: anchor 07:00 … catching up now`）；`/health/loops` 五路 loop 全 `ok`、`stale` 为空。**尚未被检验的是告警路径本身**——线上从未出现过 stale，「loop 真死了会不会报」这一路仍无证据 |
 | 市政厅与实验楼 UI | 只读入口和面板已部署 | 随社会功能补充可操作流程和解释性数据 |
 | Lab Agent | Mock、安全边界、审批、预算、制品和部分 OCI 证据已实现 | 未选择真实 Adapter；生产身份、镜像、网络、存储和外部 attestation 仍未满足，保持关闭 |
@@ -46,14 +46,14 @@
 
 > 状态基线 2026-07-27 晚。`origin/master` = `6128ecb`（含管理系统「立刻做」批次 + F1/F2/F3 三条线）；vm212 仍停在 `049`，跑的是 2026-07-25 的镜像。**代码与生产之间隔着 3 个批次**，下面 1、2 两项是解开这个错位的动作。
 
-1. **部署主线到 vm212（迁移 049 → 051）。** 这一次部署同时把四批东西送上生产，逐条列出来免得漏验：
+1. ~~部署主线到 vm212（迁移 049 → 051）~~ —— **已完成**（2026-07-28 01:26 UTC，报告见 [`reports/ops-deploy-2026-07-28-T1.md`](reports/ops-deploy-2026-07-28-T1.md)）。落地内容：
    - 政治层边界修复（`civic_membership.py` 等）——**这才是关 UGC 投票权泄漏的动作**，不是回填
    - 管理系统批次：平台密钥读侧掩码、哨兵账号铸币收口、`0.0.0.0:8100` 收回回环
    - F1/F2/F3 的代码（开关全默认关，接线未做，**部署本身不改变任何运行时行为**）
    - bootstrap 会往 `users` 插一行 `id='system'` 哨兵（幂等 additive）。**部署前后各查一次** `SELECT id,email FROM users WHERE id='system';`（前应为空，后应恰好一行）
    `docker-compose.yml` 是宿主文件，`git archive backend` 送不上去，端口收窄要单独一步 scp + `docker compose up -d`。
 2. ~~回填存量泄漏居民~~ —— **在 vm212 上已无对象**。实测 `residents` 只有 11 行且全是 `npc` 内置阵容，泄漏实例为 0。回填脚本仍要写（其它环境可能有存量，且它是 F2 晋升判定的锚点载体），但在本环境跑出 0 行是正确结果。
-3. **在途 3 张 poll 已延期到 2026-07-31T23:29:43Z**（2026-07-27 执行，`scripts/postpone_open_polls.py`，完成标记 `system_config.civic_poll_postpone_until`）。原因：候选人在 07-25 事故中被整批删除，而生产镜像早于 `install_mayor` 的结票复核修复。**第 1 项必须在 2026-08-01 23:00 UTC 之前完成**，否则这三张 poll 会在旧镜像下结票。
+3. **在途 3 张 poll 已延期到 2026-07-31T23:29:43Z**（2026-07-27 执行，`scripts/postpone_open_polls.py`，完成标记 `system_config.civic_poll_postpone_until`）→ 实际关票在 **2026-08-01 23:00 UTC**。第 1 项已于 07-28 完成，**结票会走安全路径**：候选人全部不在籍 → `install_mayor` 零写入 + 流会公告，不会出现「公告说某人当选、库里没有镇长」。届时复核公告正文与 `SELECT slug, meta_json->'mayor' FROM residents` 读数即为验收证据。
 4. 跑 `scripts/rep_calibrate.py` 用真实分布重标定 `rep_credit_min_score`（现值 `-0.3` 是拍的），然后才谈 `REP_ENABLED` 开闸；再让市政厅消费同一份声誉数据。
 5. **统一收口**：`config.py` / `.env.example` 补齐三条线的旋钮；`nightly_cron` 接入 F2 晋升 pass（位置写死在 `close_due_polls` 之后、`run_npc_voting` 之前）与 F3 `office_audit`。**不做这一步，F1/F2/F3 的代码在运行时是死的。**
 6. 在真实 PostgreSQL / Redis / WebSocket 上以 25 与 40 名自治居民跑扩容与成本测试（确定性测试工具已完成）。
@@ -70,7 +70,7 @@
 - `TOWN_TREASURY_ENABLED`、`POLIS_POLICY_ENABLED`、`POLIS_POLICY_APPROVAL_ENABLED` 代码默认仍为关闭，但 **vm212 自 2026-07-25 15:31 起三个全部为 true**。关闭时行为与开发前逐字节一致（工资继续凭空铸造、售货不抽税、审批走单人 CAS、投票是相对多数）——该回退语义只对未开闸环境成立。
 - **`REP_ENABLED` 仍禁止开启，但理由已经缩到只剩一条。** 原先的三条问题里，F1（`6128ecb`）修掉了两条：tone 不再是常量负值、改由该条八卦对应的关系 affinity 决定（`rep_gossip_base_tone` 退为偏置项）；`election_service` 的候选集选取不再按声誉排序截断，声誉只经 `vote_trust_delta()` 影响得票、不决定谁能参选（被动选举权与名声解耦）。**剩下的一条是 `rep_credit_min_score` 仍为拍出来的 `-0.3`**（`app/config.py:576`）——`scripts/rep_calibrate.py` 已就位但从未用真实分布跑过，阈值有没有非空拒绝面仍属未知。跑完它并把值改成实测结果，才允许开闸。
 - 政治层有两条**不同**的边界，不得合并成一个谓词：`Resident.is_autonomous`（人口／仿真，读它的有 agent loop、市政厅名册、职务查找、mayor 清扫、讲座池）与 `Resident.is_civic_voter`（政治权利，只有投票、法定人数分母、镇长候选池三处）。取值定义在 `app/services/civic_membership.py`。玩家创作居民为 `resident`：算人口、无政治权利。任何新增的 `Resident(...)` 构造点必须显式写 `resident_type`——依赖模型默认值 `"npc"` 正是 07-25 泄漏的根因，`test_ugc_resident_no_political_rights.py` 会扫描并拦截。
-- 迁移链头为 `051_add_civic_standing_history`（047 → `048_add_town_treasury` → 049 → 050 → 051），单头，实测 `ScriptDirectory.get_heads()` 返回一个。vm212 当前停在 **049**。`feat/lab-codex-runtime` 分支上的 `051_add_lab_codex_model_tier` 也挂在 `050` 上，**合入前必须重编号为 052 并把 `down_revision` 改指 `051_add_civic_standing_history`**，否则一合就是双头 + 文件名撞号。
+- 迁移链头为 `051_add_civic_standing_history`（047 → `048_add_town_treasury` → 049 → 050 → 051），单头，实测 `ScriptDirectory.get_heads()` 返回一个。**vm212 已于 2026-07-28 01:26 UTC 部署到 051**（见 [`reports/ops-deploy-2026-07-28-T1.md`](reports/ops-deploy-2026-07-28-T1.md)）。`feat/lab-codex-runtime` 分支上的 `051_add_lab_codex_model_tier` 也挂在 `050` 上，**合入前必须重编号为 052 并把 `down_revision` 改指 `051_add_civic_standing_history`**，否则一合就是双头 + 文件名撞号。
 - 后台 loop 心跳与聊天锁回收的旋钮以环境变量为运行时来源（`LOOP_HEARTBEAT_*`、`SOCIAL_STATUS_*`），`Settings` 中的同名字段只提供默认值。
 - Lab 的代码默认仍为 `lab_adapter=mock`、`lab_oci_enabled=false`；任何真实执行能力都必须经过独立审批。
 - 运行时生成的居民精灵发布到后端持久化 static/media volume，不能写入 Vite 构建产物；`sprite_key` 继续作为逻辑标识，生成资源使用内容哈希 URL 规避 Phaser/CDN 旧缓存。
