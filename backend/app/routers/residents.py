@@ -148,15 +148,17 @@ async def resident_import(body: ImportBody, request: Request, db: AsyncSession =
     from datetime import datetime, UTC
     from sqlalchemy import select as _select, func as _func
     from app.services.resident_placement import allocate_resident_location, _generate_slug, SPRITE_KEYS
-    from app.services.shop_effects import _has_sensitive
+    from app.services.content_guard import assert_resident_content_clean
     import random as _random
 
     user = await _require_user_auth(request, db)
     if not body.name.strip() or not (body.ability_md or body.persona_md or body.soul_md):
         raise HTTPException(status_code=400, detail="name and at least one layer are required")
     # Lightweight anti-abuse (full LLM validation_stage deferred to vm212).
-    if _has_sensitive(body.name) or _has_sensitive(body.persona_md) or _has_sensitive(body.soul_md):
-        raise HTTPException(status_code=400, detail="content contains disallowed words")
+    # 走统一守卫而不是逐字段手写——手写的那版漏了 ability_md 整整一轮。
+    assert_resident_content_clean(
+        name=body.name, ability_md=body.ability_md,
+        persona_md=body.persona_md, soul_md=body.soul_md)
 
     # Daily cap (shared with forge creations for this user today).
     today = datetime.now(UTC).date()
@@ -252,6 +254,11 @@ async def import_resident(
             raise HTTPException(status_code=400, detail="Invalid zip file")
     else:
         raise HTTPException(status_code=400, detail="Unsupported file format. Use .md or .zip")
+
+    from app.services.content_guard import assert_resident_content_clean
+    assert_resident_content_clean(
+        name=name, ability_md=ability_md,
+        persona_md=persona_md, soul_md=soul_md)
 
     # Create a mock-like object for scoring
     class _ResidentForScoring:
@@ -362,6 +369,13 @@ async def edit_resident(
         raise HTTPException(status_code=404, detail="Resident not found")
     if r.creator_id != user.id:
         raise HTTPException(status_code=403, detail="Only the creator can edit this resident")
+
+    # 内容守卫必须先于快照——create_version_snapshot 会 commit，先快照再拒绝
+    # 等于给一次被拒的编辑留下一个版本行。
+    from app.services.content_guard import assert_resident_content_clean
+    assert_resident_content_clean(
+        ability_md=req.ability_md, persona_md=req.persona_md,
+        soul_md=req.soul_md)
 
     # Snapshot current state before editing
     await create_version_snapshot(db, r)

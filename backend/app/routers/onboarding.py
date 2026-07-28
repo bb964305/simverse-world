@@ -71,6 +71,10 @@ async def create_character(
 ):
     """Create a new player resident from scratch."""
     user = await _require_user(request, db)
+    from app.services.content_guard import assert_resident_content_clean
+    assert_resident_content_clean(
+        name=body.name, ability_md=body.ability_md,
+        persona_md=body.persona_md, soul_md=body.soul_md)
     try:
         resident = await create_player_resident(
             db=db,
