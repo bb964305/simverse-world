@@ -36,9 +36,14 @@ logger = logging.getLogger(__name__)
 #: :func:`_eligible_voter_count`，一张已经开出去的 poll 的判决门槛会在中途改变。
 #: 冻结分母对晋升与撤销**同时免疫**，且改动局限在本模块。
 #:
-#: 配套的语义决定：**幽灵票保留，不实现撤票**——「投票时具备资格即计票」。
-#: ``_npc_voters`` 是扁平 slug 列表，物理上没存票的归属，撤票要改
-#: ``options_json`` 的形状且要兼容存量 poll。
+#: 配套的语义决定：**降级者的幽灵票保留**——「投票时具备资格即计票」。降级
+#: 只改 ``resident_type``，人还在世界里，那张票是他有资格时投的。
+#:
+#: E8 补充（2026-07-28）：**物理删除**另论。2026-07-25 的花名册重置删掉了 25
+#: 位居民，票却留在 ``options_json`` 里，25 张幽灵票让 13 人小镇里的 2 个真
+#: 玩家永远投不赢任何议案。``run_npc_voting`` 现在按「slug 是否还在 residents
+#: 表」撤这一类票，并把 ``_npc_voters`` 从扁平 slug 列表升级成
+#: ``{slug: option_idx}`` 以便定向回滚（读侧兼容旧 list 格式）。
 META_ELIGIBLE_AT_OPEN = "_eligible_at_open"
 
 
@@ -153,6 +158,21 @@ async def seed_civic_agenda(db) -> int:
 
 # ── NPC voting (rule-based, zero LLM) ──────────────────────────────────
 
+def _voter_map(opts: list[dict]) -> tuple[dict[str, int], bool]:
+    """读出 ``_npc_voters``，统一成 ``{slug: option_idx}``。
+
+    返回 ``(voters, is_legacy)``。存量 poll 存的是扁平 ``list[str]``，物理上
+    没有票的归属 —— 那些条目映射成 ``-1``，``is_legacy`` 为 True，调用方据此
+    知道「知道谁投过，但不知道投了哪一项」。
+    """
+    raw = (opts[0] or {}).get("_npc_voters") if opts else None
+    if isinstance(raw, dict):
+        return {str(k): int(v) for k, v in raw.items()}, False
+    if isinstance(raw, list):
+        return {str(s): -1 for s in raw}, True
+    return {}, False
+
+
 async def run_npc_voting(db) -> int:
     """Each NPC casts one rule-based vote on each open poll it hasn't voted on.
 
@@ -171,25 +191,54 @@ async def run_npc_voting(db) -> int:
     if not residents:
         return 0
 
+    # 「还在不在这个世界里」是存在性问题，不是资格问题：上面的 residents 是
+    # is_civic_voter 集合（资格），降级者不在里面但人还在。撤票只针对物理
+    # 删除的 slug，所以另查一次全表。
+    live_slugs = set((await db.execute(select(Resident.slug))).scalars().all())
+
     from app.services import relation_service
     by_slug = {r.slug: r for r in residents}
     cast = 0
+    # 撤票与 list→dict 的格式升级都可能在 cast == 0 时发生（一张所有活人都
+    # 投过、只剩幽灵要清的 poll 就是这种情况）。用显式的 changed 追踪是否需要
+    # commit —— 只看 cast 会让撤票白做一场。
+    changed = False
     for poll in polls:
         opts = list(poll.options_json or [])
         if not opts:
             continue
-        voters = set(poll.options_json[0].get("_npc_voters", [])) if opts else set()
+        voters, is_legacy = _voter_map(opts)
+        if is_legacy:
+            changed = True   # 落库时会写成 dict，形状本身就变了
+
+        # E8 撤票：投票人已从 residents 表消失（2026-07-25 花名册重置的事故
+        # 残留）→ 把票收回。F2 的「投票时具备资格即计票」保护的是**降级者**
+        # （行还在、只是 resident_type 变了），那种票保留 —— 见本模块
+        # META_ELIGIBLE_AT_OPEN 的注释与 test_civic_frozen_denominator。
+        for slug in [s for s in voters if s not in live_slugs]:
+            idx = voters.pop(slug)
+            changed = True
+            if idx < 0 or idx >= len(opts):
+                # 旧 list 格式不知道他投了哪一项。减错票会凭空改变某个具体
+                # 选项的得票，比留一张来源不明的票更糟 —— 只移出名册，tally
+                # 的订正交给按备份数据做的一次性脚本。
+                logger.warning(
+                    "poll %s: dropping ghost voter %r with unknown ballot "
+                    "(legacy list format) — tally left untouched", poll.id, slug)
+                continue
+            opts[idx]["npc_votes"] = max(0, int(opts[idx].get("npc_votes", 0)) - 1)
+
         for r in residents:
             if r.slug in voters:
                 continue
             idx = await _npc_choice(db, r, poll, opts, relation_service, by_slug)
             opts[idx]["npc_votes"] = int(opts[idx].get("npc_votes", 0)) + 1
-            voters.add(r.slug)
+            voters[r.slug] = idx
             cast += 1
-        opts[0]["_npc_voters"] = sorted(voters)
+        opts[0]["_npc_voters"] = dict(sorted(voters.items()))
         poll.options_json = opts
         flag_modified(poll, "options_json")
-    if cast:
+    if cast or changed:
         await db.commit()
     return cast
 
@@ -483,7 +532,23 @@ async def close_due_polls(db, now: datetime | None = None) -> int:
 
 async def _close_one(db, poll: Poll) -> None:
     opts = list(poll.options_json or [])
-    # player votes from the votes table
+
+    # E8 结票兜底：选项即人（mayor/office/duty）时校验那个人是否还在世界里。
+    # 生产那张镇长选举的 4 个候选全部已被删除，不归零的话它会「以 17 票胜出」
+    # 然后在 install_mayor 阶段流会 —— 公告对玩家是误导的（明明有得票最高者，
+    # 却说本案流会）。归零让流会的原因在票面上就成立。
+    live_slugs = set((await db.execute(select(Resident.slug))).scalars().all())
+    for i, o in enumerate(opts):
+        eff = (o or {}).get("effect")
+        if not isinstance(eff, dict) or eff.get("type") not in _PERSON_TYPES:
+            continue
+        target = eff.get("slug")
+        if target and target not in live_slugs and int(o.get("npc_votes", 0)):
+            logger.warning(
+                "poll %s option %d: candidate %r no longer exists — zeroing its "
+                "%d votes before the tally", poll.id, i, target, o["npc_votes"])
+            o["npc_votes"] = 0
+
     rows = (await db.execute(
         select(Vote.option_idx, func.count()).where(Vote.poll_id == poll.id).group_by(Vote.option_idx)
     )).all()
