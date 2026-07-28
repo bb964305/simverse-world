@@ -34,13 +34,48 @@ DIGEST_SYSTEM = (
 DIGEST_MAX_TOKENS = 2000
 WEEKLY_MAX_TOKENS = 1500
 
+#: 「有实质正文」的阈值：去掉首行「# 标题」之后剩余文本的字符数下限。
+#: 特意压得很低（不是质量门槛）——这个守卫只负责拦住 CRIT-2 描述的那种
+#: 退化输出：`"# 今日头条"` 这样只有标题、标题之后什么都没有的字符串（生产
+#: 4 天实证正是 body 长度恰好为 0），不负责判断正文「写得够不够长/够不够
+#: 好」。真实 DIGEST_SYSTEM 产出是 3-5 段、上百字起，与「0 字」之间没有
+#: 现实中会出现的中间地带，所以阈值只要能把 0 和「>0」分开就够用；定得更高
+#: （比如 20）会连累 test_digest.py / test_opinion_service.py 里用短占位字符
+#: 串（"小镇很热闹" 5 字、"镇上为夜市吵起来了" 9 字）当"有效内容"的既有用
+#: 例——那些测的是别的东西（compose 是否被调用/opinion 素材是否进 prompt），
+#: 不该被这里的阈值连带打断。冷启动兜底文案（约 34 字正文）显然远超，不受
+#: 影响（见 test_cold_start_fallback_is_still_allowed_to_persist）。
+DIGEST_MIN_BODY_CHARS = 1
+
+
+def _digest_body(content: str) -> str:
+    """去掉首行「# 标题」（如果有）之后剩余的正文，已 strip。"""
+    body = content
+    if body.lstrip().startswith("#"):
+        body = "\n".join(body.splitlines()[1:])
+    return body.strip()
+
+
+def has_real_digest_body(content: str) -> bool:
+    """判据用一个函数喂三处调用点，避免标准不一致。
+
+    三处调用点：本模块 ``generate_village_digest`` 的存量早返回判据、
+    compose 结果的落库前守卫，以及 ``scripts/refill_empty_digests.py`` 的
+    ``find_targets``。三处标准若各写一套（尤其早返回若继续用松判据
+    ``.strip()``），回填脚本挑出的「标题行」问题行会被早返回悄悄放过——
+    脚本永远填不回去，这正是本轮要堵的洞，而不只是不让新的坏数据落库。
+    """
+    return len(_digest_body(content)) >= DIGEST_MIN_BODY_CHARS
+
 
 class DigestComposeEmpty(RuntimeError):
-    """LLM 返回了空正文。
+    """LLM 返回了空正文，或只有一行标题、没有实质正文。
 
-    宁可让 nightly_cron 的 try/except 记一条 error，也不要把空串写进
-    digests —— (scope, date, user_id) 唯一约束 + 幂等早返回会把这一天
-    永久钉死，玩家连着几天打开日报都是空白面板。
+    宁可让 nightly_cron 的 try/except 记一条 error，也不要把这种内容写进
+    digests —— (scope, date, user_id) 唯一约束 + 幂等早返回会把这一天永久
+    钉死，玩家连着几天打开日报都是空白面板。「只有标题行」比全空更隐蔽：
+    `content.strip()` 非空能骗过松判据的早返回和旧的落库前守卫，且不像
+    空字符串那样能从库里一眼查出来。
     """
 
 
@@ -189,17 +224,36 @@ async def compose_digest(day: date_type, material: dict) -> tuple[str, str]:
 
 
 async def _pin_digest_bulletin(db: AsyncSession, digest: Digest) -> None:
-    """A5→A4: pin the fresh village digest on the bulletin board.
+    """A5→A4: pin the village digest on the bulletin board.
 
     Unpins any previous digest pin first so only the latest stays pinned.
     Duty system: if the town has a chronicle editor (图书管理员), the digest is
     published under her name; otherwise author fields stay NULL (=「系统」).
-    Called only when a *new* digest row was inserted, so it is idempotent per
-    day for free (regenerating the same day's digest returns early upstream).
+
+    NOT "called only when a new row was inserted" — ``generate_village_digest``
+    also calls this after an UPDATE-in-place refill of a previously empty/
+    title-only row (that's the whole point of the refill script). The old
+    docstring claimed that made it "idempotent per day for free"; it doesn't,
+    because ``BulletinPost`` has no day column to key off of, so a second call
+    for the same day would blindly unpin-then-insert again, leaving two
+    ``kind="digest"`` posts around (one stale, one pinned). Instead this makes
+    itself idempotent directly: if the currently-pinned digest post is already
+    byte-identical (title + content_md) to the one we're about to publish, it
+    is left alone rather than duplicated. A genuinely different digest (new
+    day, or a refill that composed different text) still unpins the old post
+    and pins a fresh one, same as before.
     """
     from sqlalchemy import update
     from app.models.bulletin_post import BulletinPost
     from app.services.bulletin_service import create_post
+
+    current_pin = (await db.execute(
+        select(BulletinPost).where(BulletinPost.kind == "digest", BulletinPost.pinned.is_(True))
+    )).scalar_one_or_none()
+    if (current_pin is not None
+            and current_pin.title == digest.title
+            and current_pin.content_md == digest.content_md):
+        return  # already pinned, byte-identical — a repeat call, nothing to do
 
     await db.execute(
         update(BulletinPost)
@@ -225,9 +279,12 @@ async def generate_village_digest(db: AsyncSession, day: date_type | None = None
     existing = (await db.execute(
         select(Digest).where(Digest.scope == "village", Digest.date == day, Digest.user_id == "")
     )).scalar_one_or_none()
-    # 幂等的判据是「已经有正文」，不是「行存在」：存量空行（生产 07-17/24/25/26
-    # 四天）必须能被重新生成填回去，否则那几天永远是空白面板。
-    if existing is not None and (existing.content_md or "").strip():
+    # 幂等的判据是「已经有实质正文」，不是「行存在」或「非空字符串」：存量空行
+    # 与「只有标题行」的行（生产 07-17/24/25/26 四天 + 可能存在的标题行退化行）
+    # 都必须能被重新生成填回去，否则那几天永远是空白/残缺面板。这里必须与下面
+    # 落库前的守卫、以及 refill_empty_digests.py 的 find_targets 用同一个判据
+    # （has_real_digest_body），否则回填脚本挑出来的行会在这里被松判据早早放行。
+    if existing is not None and has_real_digest_body(existing.content_md or ""):
         return existing
 
     material = await gather_material(db, day)
@@ -237,10 +294,10 @@ async def generate_village_digest(db: AsyncSession, day: date_type | None = None
     else:
         title, content = await compose_digest(day, material)
 
-    if not content.strip():
-        logger.error("digest compose returned empty text for %s (stats=%s)",
-                     day, material["stats"])
-        raise DigestComposeEmpty(f"empty digest body for {day}")
+    if not has_real_digest_body(content):
+        logger.error("digest compose returned a title-only or empty body for %s (stats=%s): %r",
+                     day, material["stats"], content[:80])
+        raise DigestComposeEmpty(f"title-only or empty digest body for {day}")
 
     if existing is not None:
         # 回填已有的空行 —— UPDATE 而不是 INSERT，避开唯一约束。
@@ -316,7 +373,18 @@ def _week_sunday(today: date_type) -> date_type:
 
 
 async def generate_weekly_recap(db: AsyncSession, user_id: str) -> Digest:
-    """Lazily generate this week's personal recap (idempotent per week)."""
+    """Lazily generate this week's personal recap (idempotent per week).
+
+    No ``has_real_digest_body``-style guard here (considered, rejected): unlike
+    the village digest, ``content`` is never *just* the LLM's output — it's
+    always wrapped in a fixed non-LLM template (`"# {title}\n\n{body}\n\n本周
+    人格标签：**{tag}**"`), so even a degenerate/empty ``body`` from the LLM
+    still leaves a real, non-title-only row (the tag line alone clears
+    DIGEST_MIN_BODY_CHARS). The failure mode Fix 1 closes for the village
+    digest — a title-only string that reads as "non-empty" and gets
+    permanently idempotency-locked — doesn't arise here structurally, so the
+    same guard would be dead code, not a fix.
+    """
     from app.models.conversation import Conversation
     from app.models.user import User
     from app.models.achievement import UserAchievement

@@ -8,6 +8,14 @@ generate_village_digest 拿到空串后无条件落库，而 (scope,date,user_id
 
 生产实证：2026-07-17/24/25/26 四天 content_md 长度为 0，且四天全部落在
 output_tokens=801（max_tokens 触顶）的样本里。
+
+CRIT-2（final whole-branch review 升级）：上一轮的守卫 `if not
+content.strip()` 挡不住「只有标题行」——``"# 今日头条"`` 这种字符串本身非
+空，会骗过守卫落库，然后被幂等的「已经有正文」早返回永久钉死，且不像全空
+那样能从库里一眼查出来，比原 bug 更隐蔽。本文件同时钉住：新守卫改用「去掉
+标题行之后是否还有 ``DIGEST_MIN_BODY_CHARS`` 字以上的实质正文」判断，且
+早返回判据必须与之保持同一把尺子（否则回填脚本挑出来的行会在早返回这里被
+悄悄放过）。
 """
 from datetime import date, datetime, UTC
 from unittest.mock import AsyncMock, patch
@@ -86,7 +94,10 @@ async def test_an_existing_empty_row_is_refilled_not_short_circuited(db_session)
     await _material(db_session, day)
 
     with patch.object(ds, "compose_digest",
-                      AsyncMock(return_value=("补写的头条", "# 补写的头条\n有内容了"))):
+                      AsyncMock(return_value=(
+                          "补写的头条",
+                          "# 补写的头条\n有内容了，这是重新生成之后的真实正文，长度足够超过守卫阈值。",
+                      ))):
         d = await ds.generate_village_digest(db_session, day)
 
     assert d.title == "补写的头条" and "有内容了" in d.content_md
@@ -103,7 +114,8 @@ async def test_a_nonempty_row_still_short_circuits(db_session):
 
     day = date(2026, 7, 26)
     db_session.add(Digest(scope="village", date=day, user_id="", title="原标题",
-                          content_md="# 原标题\n原来的正文", stats_json={}))
+                          content_md="# 原标题\n原来的正文，这一段长度足够，不会被判定为只有标题的退化情况。",
+                          stats_json={}))
     await db_session.commit()
 
     compose = AsyncMock(return_value=("不该被调用", "不该被调用"))
@@ -112,6 +124,105 @@ async def test_a_nonempty_row_still_short_circuits(db_session):
 
     compose.assert_not_awaited()
     assert d.title == "原标题"
+
+
+@pytest.mark.anyio
+async def test_title_only_digest_body_is_rejected(db_session):
+    """CRIT-2 的直接回归：只有标题行的正文（``"# 今日头条"``）必须像空正文
+    一样被拒绝——旧守卫 ``if not content.strip()`` 会放它过去，因为这个
+    字符串本身非空。
+    """
+    from app.services import digest_service as ds
+
+    await _material(db_session, date(2026, 7, 27))
+    with patch.object(ds, "compose_digest", AsyncMock(return_value=("今日头条", "# 今日头条"))):
+        with pytest.raises(ds.DigestComposeEmpty):
+            await ds.generate_village_digest(db_session, date(2026, 7, 27))
+
+    n = (await db_session.execute(
+        select(func.count()).select_from(Digest))).scalar()
+    assert n == 0, "只有标题行的正文落库了 —— 这一天会被幂等永久钉死且没有 error 日志"
+
+
+@pytest.mark.anyio
+async def test_a_title_only_existing_row_is_also_refilled_not_short_circuited(db_session):
+    """存量「只有标题行」的行（旧守卫会放过的坏数据）同样不能被早返回放过。
+
+    早返回判据必须和落库前守卫用同一把尺子（has_real_digest_body）：如果
+    早返回继续用松判据 ``.strip()``，回填脚本挑出的这类行会在这里被悄悄
+    短路，永远填不回去——那样回填脚本的整个存在理由就落空了。
+    """
+    from app.services import digest_service as ds
+
+    day = date(2026, 7, 17)
+    db_session.add(Digest(scope="village", date=day, user_id="",
+                          title=f"{day} 村落日报", content_md="# 今日头条", stats_json={}))
+    await db_session.commit()
+    await _material(db_session, day)
+
+    with patch.object(ds, "compose_digest",
+                      AsyncMock(return_value=(
+                          "补写的头条",
+                          "# 补写的头条\n这次真的有实质正文内容了，长度超过阈值。",
+                      ))):
+        d = await ds.generate_village_digest(db_session, day)
+
+    assert d.title == "补写的头条" and "实质正文" in d.content_md
+    n = (await db_session.execute(select(func.count()).select_from(Digest))).scalar()
+    assert n == 1
+
+
+@pytest.mark.anyio
+async def test_pin_digest_bulletin_is_idempotent_for_the_same_content(db_session):
+    """升级为必修的那条：_pin_digest_bulletin 对同一天（同一份标题+正文）
+    幂等——同一天被回填两次只应留一条置顶 ``kind="digest"`` 公告。旧
+    docstring 声称「idempotent per day for free」，其实没有：BulletinPost
+    没有 day 列，第二次调用会盲目 unpin+insert，产生两条置顶公告。
+    """
+    from app.services import digest_service as ds
+    from app.models.bulletin_post import BulletinPost
+
+    day = date(2026, 7, 25)
+    digest = Digest(scope="village", date=day, user_id="", title="标题A",
+                    content_md="# 标题A\n正文内容一致，用来模拟同一天被回填两次。", stats_json={})
+    db_session.add(digest)
+    await db_session.commit()
+    await db_session.refresh(digest)
+
+    await ds._pin_digest_bulletin(db_session, digest)
+    await ds._pin_digest_bulletin(db_session, digest)  # 模拟同一天被回填两次
+
+    posts = (await db_session.execute(
+        select(BulletinPost).where(BulletinPost.kind == "digest"))).scalars().all()
+    assert len(posts) == 1
+    assert posts[0].pinned is True
+
+
+@pytest.mark.anyio
+async def test_pin_digest_bulletin_still_repins_for_a_genuinely_different_digest(db_session):
+    """幂等不能误伤正常场景：内容真的变了（换了一天，或回填时重新
+    composed 出了不同文本），仍要 unpin 旧的、pin 新的。
+    """
+    from app.services import digest_service as ds
+    from app.models.bulletin_post import BulletinPost
+
+    d1 = Digest(scope="village", date=date(2026, 7, 24), user_id="", title="标题A",
+                content_md="# 标题A\n第一天的正文内容，足够长，避免被判定为标题行。", stats_json={})
+    d2 = Digest(scope="village", date=date(2026, 7, 25), user_id="", title="标题B",
+                content_md="# 标题B\n第二天的正文内容，同样足够长，避免被判定为标题行。", stats_json={})
+    db_session.add_all([d1, d2])
+    await db_session.commit()
+
+    await ds._pin_digest_bulletin(db_session, d1)
+    await ds._pin_digest_bulletin(db_session, d2)
+
+    pinned = (await db_session.execute(
+        select(BulletinPost).where(BulletinPost.kind == "digest", BulletinPost.pinned.is_(True))
+    )).scalars().all()
+    assert len(pinned) == 1 and pinned[0].title == "标题B"
+    total = (await db_session.execute(
+        select(func.count()).select_from(BulletinPost))).scalar()
+    assert total == 2
 
 
 @pytest.mark.anyio
