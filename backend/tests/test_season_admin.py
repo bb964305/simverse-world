@@ -145,6 +145,20 @@ async def test_ensure_active_season_respects_the_gate(db_session, monkeypatch):
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("bad_days", [0, -5])
+async def test_ensure_active_season_clamps_nonpositive_length_to_one_day(
+        db_session, monkeypatch, bad_days):
+    """一个 env 打字错误（SEASON_LENGTH_DAYS=0 或负数）不该造成 ends_at<=starts_at：
+    那会让下一个 60s tick 的 settle_due_seasons 判定到期、结算，同一 tick 的
+    ensure_active_season 又开一季，形成每分钟一条置顶落幕公告的失控循环。"""
+    monkeypatch.setattr(settings, "season_length_days", bad_days)
+    s = await ss.ensure_active_season(db_session)
+    assert s is not None
+    assert s.ends_at > s.starts_at
+    assert (s.ends_at - s.starts_at) >= timedelta(days=1)
+
+
+@pytest.mark.anyio
 async def test_points_actually_land_once_a_season_exists(db_engine, db_session,
                                                          monkeypatch):
     """E7 的真正判据：开季之后 add_points 不再静默丢弃。"""

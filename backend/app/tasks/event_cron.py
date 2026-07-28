@@ -67,6 +67,15 @@ async def event_cron_loop():
                         logger.info("Event cron: opened season %s", opened.title)
                 except Exception:
                     logger.warning("C3 script/season cron step failed", exc_info=True)
+                    # A failed commit above leaves the shared session in
+                    # PendingRollbackError; without a rollback the next
+                    # statement on this session (drive_due_debates' select
+                    # below) raises immediately and gets misattributed to the
+                    # E3 except block, sending debugging the wrong way.
+                    try:
+                        await db.rollback()
+                    except Exception:
+                        logger.warning("C3 step rollback itself failed", exc_info=True)
                 # E3: 推进辩论生命周期（announced → live → voting → settled）。
                 # run_live/settle 此前在 app/ 下零调用方，押注币会被永久冻结。
                 try:
@@ -77,6 +86,10 @@ async def event_cron_loop():
                                     moved["live"], moved["settled"], moved["refunded"])
                 except Exception:
                     logger.warning("E3 debate driver step failed", exc_info=True)
+                    try:
+                        await db.rollback()
+                    except Exception:
+                        logger.warning("E3 step rollback itself failed", exc_info=True)
             for event, phase in changes:
                 await manager.broadcast({
                     "type": "world_event",

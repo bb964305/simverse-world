@@ -21,8 +21,10 @@ vi.mock('../stores/gameStore', () => ({
   useGameStore: (sel: (s: unknown) => unknown) => sel({ user: { id: 'u1' } }),
 }))
 
-// 生产 /polls/open 的真实形状：option 是对象，不是字符串。
-// 这里刻意保留旧后端才会出现的内部字段，钉住「前端自己也不能崩」。
+// 生产 /polls/open 的真实形状：option 是对象，不是字符串。当前后端
+// （script_service.public_option）已经把内部字段清洗掉了，所以这个 fixture
+// 只有 {label, npc_votes} —— 见下面 LEGACY_SHAPE_POLL，那个才是刻意保留
+// 内部字段/旧形状，用来钉住 PollCard 的防御分支。
 const CIVIC_POLL = {
   id: 'poll-civic',
   season_id: null,
@@ -30,6 +32,28 @@ const CIVIC_POLL = {
   options: [
     { label: '赞成兴建', npc_votes: 20 },
     { label: '暂缓,维持现状', npc_votes: 3 },
+  ],
+  closes_at: null,
+  is_election: false,
+}
+
+// PollCard 的防御分支（typeof opt === 'string' 兜字符串选项、
+// opt?.label ?? `选项 ${idx+1}` 兜缺 label）此前没有任何测试覆盖。这里造一个
+// 未过 public_option 清洗 / 旧后端才会吐出的形状：一个选项挂着 effect /
+// _npc_voters / _proposer_slug 等内部 blob，另一个是历史 string[] 数据
+// （test_script_season.py 手工造的季就是 ["管家", "园丁"]）。存在理由是
+// 「后端未部署新版本 / 回滚时页面不能崩」，值得钉住。
+const LEGACY_SHAPE_POLL = {
+  id: 'poll-legacy',
+  season_id: null,
+  question: '旧形状兼容性测试',
+  options: [
+    {
+      label: '赞成兴建', npc_votes: 20,
+      effect: { type: 'dynamic_location', data: { slug: 'post_office', bounds: [44, 100, 48, 106] } },
+      _npc_voters: ['a', 'b'], _proposer_slug: 'prop', _eligible_at_open: ['a', 'b', 'c'],
+    },
+    '园丁',
   ],
   closes_at: null,
   is_election: false,
@@ -97,5 +121,17 @@ describe('SeasonsPage', () => {
     renderPage()
     expect(await screen.findByText('🗳️ 议案投票')).toBeInTheDocument()
     expect(screen.queryByText('🏛️ 镇长选举')).not.toBeInTheDocument()
+  })
+
+  it('tolerates legacy option shapes (internal fields, raw strings) without crashing', async () => {
+    getOpenPolls.mockResolvedValue({ polls: [LEGACY_SHAPE_POLL] })
+    renderPage()
+    // Object option with internal blob still renders by its label only.
+    expect(await screen.findByRole('button', { name: /赞成兴建/ })).toBeInTheDocument()
+    // Raw string option (typeof opt === 'string' branch) renders as-is.
+    expect(screen.getByRole('button', { name: '园丁' })).toBeInTheDocument()
+    // None of the internal fields leak into the rendered DOM.
+    expect(screen.queryByText(/_npc_voters/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/dynamic_location/)).not.toBeInTheDocument()
   })
 })

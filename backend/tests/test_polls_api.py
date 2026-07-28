@@ -57,10 +57,18 @@ async def test_open_polls_leaks_no_internal_fields(db_session):
     )
     await civic_service.run_npc_voting(db_session)
 
-    blob = json.dumps(await script_service.open_polls(db_session), ensure_ascii=False)
-    for leaked in ("_npc_voters", "_proposer_slug", "_eligible_at_open",
-                   "effect", "theater", "175"):
+    polls = await script_service.open_polls(db_session)
+    blob = json.dumps(polls, ensure_ascii=False)
+    for leaked in ("_npc_voters", "_proposer_slug", "_eligible_at_open", "effect", "theater"):
         assert leaked not in blob, f"{leaked} 泄漏到了对外响应里"
+    # "175" (from center: [175, 45]) is checked against the parsed `options`
+    # substructure only, not the whole blob: the blob also contains poll.id
+    # (a uuid4's 32 hex chars) and closes_at.isoformat() (6-digit microseconds),
+    # where "175" as a substring turns up by pure chance ~1%/run combined —
+    # a flaky assertion that erodes trust in the whole suite once it flips red
+    # for no real reason.
+    options_blob = json.dumps([p["options"] for p in polls], ensure_ascii=False)
+    assert "175" not in options_blob, "175 泄漏到了对外响应的 options 里"
 
 
 @pytest.mark.anyio

@@ -259,13 +259,18 @@ async def ensure_active_season(db) -> Season | None:
         return None
 
     now = datetime.now(UTC)
-    n = len((await db.execute(select(Season))).scalars().all()) + 1
+    n = (await db.execute(select(func.count()).select_from(Season))).scalar_one() + 1
+    # Clamp to >=1: a mistyped/misconfigured SEASON_LENGTH_DAYS<=0 would make
+    # ends_at<=starts_at, which the next 60s tick's settle_due_seasons reads
+    # as "already ended" — settling and re-opening a season every tick, each
+    # cycle posting a pinned finale bulletin (1440/day flood + table bloat).
+    days = max(1, int(settings.season_length_days))
     season = Season(
         title=f"第 {n} 季",
         theme="",
         status="active",
         starts_at=now,
-        ends_at=now + timedelta(days=settings.season_length_days),
+        ends_at=now + timedelta(days=days),
         payload_json={},
     )
     db.add(season)
