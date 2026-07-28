@@ -220,6 +220,31 @@ async def run_nightly_jobs(*, once_per_day: bool = False) -> None:
     except Exception:
         logger.error("Civic poll close failed", exc_info=True)
 
+    # F2 civic promotion — MUST sit between the poll close above and the NPC
+    # vote below, and above the two poll-OPENING blocks that follow. Two
+    # separate ordering constraints, neither is style:
+    #   1. after close_due_polls — tonight's promotions must not move the
+    #      denominator of a poll that is being tallied this very night;
+    #   2. before the opening blocks + run_npc_voting — a resident promoted
+    #      tonight is inside `_eligible_at_open` for the polls opened tonight
+    #      and votes on them tonight, so numerator and denominator come from
+    #      the same electorate. Appending this to the end of the job list does
+    #      not "slightly reorder" things: it enters the promoted resident into
+    #      night N+1's quorum denominator with zero ballots cast, silently
+    #      raising the bar every poll has to clear that night.
+    # Keep this block immediately below the poll-close block; do not move it.
+    # `run_promotion_pass` gates on CIVIC_PROMOTION_MODE internally and returns
+    # immediately (zero reads, zero writes) in the default `off` state, so
+    # wiring it is a byte-for-byte no-op until the flag is flipped separately.
+    try:
+        from app.tasks.civic_promotion import run_promotion_pass
+        async with async_session() as db:
+            summary = await run_promotion_pass(db)
+        if summary.get("mode") != "off":
+            logger.info("F2 civic promotion pass: %s", summary)
+    except Exception:
+        logger.error("civic promotion pass failed", exc_info=True)
+
     # M5: open the standing building proposals (idempotent one-shot per topic —
     # an existing world picks them up here without a re-seed).
     try:

@@ -66,8 +66,37 @@ SIDECAR_ONLY_KEYS: frozenset[str] = frozenset({
 })
 
 
+#: API 进程自己读、但**刻意不做成 `Settings` 字段**的旋钮。
+#:
+#: `Settings` 是 import 期实例化的单例，值在进程启动那一刻就固化了。F2 的档位与
+#: 门槛需要按用例逐个改（近百条测试用 `monkeypatch.setenv`），所以
+#: `civic_membership.py` 把它们做成**调用时**读 `os.environ` 的函数。把它们搬进
+#: `Settings` 会同时打断那批测试、并丢掉运行时可读性——不是升级，是降级。
+#:
+#: 代价是这些键天然逃出 invariant 1。所以这里不是简单放行：
+#: `test_runtime_env_keys_are_actually_read` 会去源码里确认每个键真有读点，
+#: 改名或删掉照样红。
+RUNTIME_ENV_KEYS: frozenset[str] = frozenset({
+    # F2 公民权晋升／撤销，读点在 app/services/civic_membership.py
+    "civic_promotion_mode",
+    "civic_auto_demotion_enabled",
+    "civic_promotion_min_world_days",
+    "civic_promotion_min_peers",
+    "civic_promotion_min_familiarity",
+    "civic_peer_seasoning_world_days",
+    "civic_promotion_max_per_run",
+    "civic_promotion_breaker_fraction",
+    "civic_promotion_breaker_min_abs",
+    "civic_min_electorate",
+    "civic_min_tenure_world_days",
+    "civic_promotion_cooldown_world_days",
+})
+
+APP_DIR = Path(__file__).resolve().parents[1] / "app"
+
+
 def _is_sidecar_only(key: str) -> bool:
-    return key in SIDECAR_ONLY_KEYS
+    return key in SIDECAR_ONLY_KEYS or key in RUNTIME_ENV_KEYS
 
 
 # Settings fields intentionally NOT in .env.example (internal knobs with safe
@@ -122,6 +151,30 @@ def test_sidecar_carve_out_does_not_shadow_api_settings():
     assert not shadowed, (
         "这些 Settings 字段被 SIDECAR_ONLY_KEYS 盖住了，invariant 1 对它们"
         f"已失效，请把它们移出白名单: {shadowed}")
+
+
+def test_runtime_env_keys_are_actually_read():
+    """白名单里的每个键都必须在 `backend/app/` 下确有读点。
+
+    没有这一条，`RUNTIME_ENV_KEYS` 就是 invariant 1 的后门：往里加个名字就能
+    让任意 `.env.example` 死键蒙混过关。有了它，改名/删读点会立刻红——这正是
+    invariant 1 本来要抓的那类漂移，只是换了个地方抓。
+    """
+    sources = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in APP_DIR.rglob("*.py") if p.is_file())
+    unread = sorted(k for k in RUNTIME_ENV_KEYS if f'"{k.upper()}"' not in sources)
+    assert not unread, (
+        "RUNTIME_ENV_KEYS 里这些键在 backend/app/ 下找不到读点——要么读点被"
+        f"改名/删掉了（同步改这里），要么这个键本来就不该在白名单里: {unread}")
+
+
+def test_runtime_env_keys_do_not_shadow_api_settings():
+    """同 sidecar 那条：白名单不得盖住真的 `Settings` 字段。"""
+    shadowed = sorted(f for f in Settings.model_fields if f in RUNTIME_ENV_KEYS)
+    assert not shadowed, (
+        "这些字段既在 Settings 里又在 RUNTIME_ENV_KEYS 里，两份真值必然漂移，"
+        f"请二选一: {shadowed}")
 
 
 def test_every_settings_field_is_documented_or_allowlisted():

@@ -896,13 +896,22 @@ async def test_breaker_is_evaluated_on_the_full_candidate_set(db_session,
     assert result["promoted"] == 0
 
 
-# ── 本线不改 nightly_cron ───────────────────────────────────────────────
+# ── 接线已在收口完成 ───────────────────────────────────────────────────
 
-def test_this_line_does_not_wire_the_cron():
-    """共享文件线内不改，接线延到收口。位置写死在 close_due_polls 之后、
-    run_npc_voting 之前（≈nightly_cron.py:245）——见 civic_promotion 模块
-    docstring。"""
+def test_the_cron_is_now_wired():
+    """**改的是规格，不是为了让它绿。**
+
+    这条原本叫 `test_this_line_does_not_wire_the_cron`，断言的是
+    `"civic_promotion" not in nightly_cron.py`——它守的是 F2 开发期的一条**过程
+    约束**（共享文件线内不改，接线延到收口 §8 第 2 项），不是产品行为。收口在
+    2026-07-28 完成后，原断言的前提消失：它再红就只是在报告「收口做完了」。
+
+    位置约束（close_due_polls 之后、run_npc_voting 之前）是真正需要长期守住的
+    那一半，已迁到 `tests/test_nightly_civic_promotion_wiring.py`，那里按调用
+    次序做断言，比字符串包含检查强。这里只保留「确实接上了」这一条。
+    """
     src = (BACKEND_ROOT / "app" / "tasks" / "nightly_cron.py").read_text(
         encoding="utf-8")
-    assert "civic_promotion" not in src, (
-        "F2 本批不改 nightly_cron.py；接线是收口 §8 第 2 项")
+    assert "run_promotion_pass" in src, (
+        "收口第 2 项已完成，nightly_cron.py 必须调用 run_promotion_pass；"
+        "位置断言见 tests/test_nightly_civic_promotion_wiring.py")
