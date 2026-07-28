@@ -153,6 +153,9 @@ function PollCard({ poll }: { poll: PollData }) {
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 12 }}>
         {poll.options.map((opt, idx) => {
+          // 后端已投影成 {label, npc_votes}；保留 string 分支，使后端未部署 /
+          // 回滚到旧版本时页面仍然只是显示得糙，而不是整页崩。
+          const label = typeof opt === 'string' ? opt : (opt?.label ?? `选项 ${idx + 1}`)
           const chosen = state?.kind === 'voted' && state.idx === idx
           return (
             <button
@@ -174,7 +177,7 @@ function PollCard({ poll }: { poll: PollData }) {
                 if (!chosen) e.currentTarget.style.borderColor = 'var(--border)'
               }}
             >
-              {opt}{chosen && <span style={{ marginLeft: 8, fontWeight: 600 }}>✓已投</span>}
+              {label}{chosen && <span style={{ marginLeft: 8, fontWeight: 600 }}>✓已投</span>}
             </button>
           )
         })}
@@ -183,6 +186,14 @@ function PollCard({ poll }: { poll: PollData }) {
       <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 10 }}>
         {poll.closes_at ? `截止时间：${parseUTC(poll.closes_at).toLocaleString('zh-CN')}` : '长期开放'}
       </div>
+    </div>
+  )
+}
+
+function PollSection({ polls }: { polls: PollData[] }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {polls.map((p) => <PollCard key={p.id} poll={p} />)}
     </div>
   )
 }
@@ -322,6 +333,9 @@ export function SeasonsPage() {
       .catch(() => setPollsErr('投票加载失败，请稍后重试'))
   }, [])
 
+  const elections = (polls ?? []).filter((p) => p.is_election)
+  const proposals = (polls ?? []).filter((p) => !p.is_election)
+
   return (
     <>
       <TopNav />
@@ -332,16 +346,22 @@ export function SeasonsPage() {
         <div style={{ maxWidth: 860, margin: '0 auto', padding: '24px 16px 48px' }}>
           <SeasonHeader season={season} loading={seasonLoading} error={seasonErr} />
 
-          <SectionTitle>🗳️ 投票</SectionTitle>
+          <SectionTitle>🗳️ 议案投票</SectionTitle>
           {polls === null && !pollsErr && <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>加载中…</div>}
           {pollsErr && <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>{pollsErr}</div>}
-          {polls !== null && polls.length === 0 && (
-            <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>暂无进行中的投票。</div>
+          {polls !== null && proposals.length === 0 && (
+            <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>暂无进行中的议案。</div>
           )}
-          {polls !== null && polls.length > 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {polls.map((p) => <PollCard key={p.id} poll={p} />)}
-            </div>
+          {proposals.length > 0 && <PollSection polls={proposals} />}
+
+          {elections.length > 0 && (
+            <>
+              <SectionTitle>🏛️ 镇长选举</SectionTitle>
+              <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 8 }}>
+                镇长选举与普通议案分开计票，当选者将获得全镇工资加成。
+              </div>
+              <PollSection polls={elections} />
+            </>
           )}
 
           <SectionTitle>🏅 排行榜</SectionTitle>

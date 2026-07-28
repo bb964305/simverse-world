@@ -87,13 +87,21 @@ export interface LeaderboardResponse {
   around_me?: { my_rank: number; rows: LeaderboardAroundRow[] }
 }
 
+export interface PollOption {
+  label: string
+  npc_votes?: number
+}
+
 export interface PollData {
   id: string
-  season_id: string
+  /** 生产实测 civic poll 恒为 null（不挂赛季）——原来声明 string 是假的 */
+  season_id: string | null
   question: string
-  options: string[]
+  options: PollOption[]
   closes_at: string | null
   my_vote?: number
+  /** 镇长选举与普通议案共用 polls 表，后端标记，前端拆区块展示 */
+  is_election?: boolean
 }
 
 export function getCurrentSeason(): Promise<{ season: SeasonInfo | null }> {
