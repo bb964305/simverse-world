@@ -18,7 +18,7 @@ mint or destroy coins.
 """
 
 import logging
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
@@ -205,6 +205,83 @@ async def _auto_draw_refund(db, debate: Debate) -> None:
     await db.commit()
     for s in stakes:
         await reward(db, s.user_id, s.amount, f"debate_refund:{debate.id}")
+
+
+def _aware(ts: datetime | None) -> datetime | None:
+    """DB 可能回 naive datetime（sqlite 一定会）——统一补 UTC 再比较。"""
+    if ts is None:
+        return None
+    return ts if ts.tzinfo is not None else ts.replace(tzinfo=UTC)
+
+
+async def drive_due_debates(db) -> dict:
+    """把到期的辩论推过 announced → live → voting → settled。
+
+    E3/#3-1：``run_live`` 与 ``settle`` 在 app/ 下本来零调用方，辩论建出来就
+    停在 announced，而 stake 接口是开放的且真扣币 —— 玩家的押注被永久冻结。
+
+    时间判据全部从 ``Debate.starts_at`` 起算：debates 表没有记录进入 voting
+    时刻的列，不动 schema 就只能这么推算（``settle`` 的门槛 = stake_window +
+    vote_window）。
+
+    **超期兜底先跑**：卡在任何非终态超过 ``debate_stuck_hours`` 的一律平局
+    全额退款，且优先于 run_live —— 否则一场卡了两天的辩论会先被拉起来跑一轮
+    LLM，钱还是玩家的、时间却是错的。
+
+    每条辩论单独 try/except：一场炸了不能让整轮 cron 停摆。
+    """
+    from app.config import settings
+
+    now = datetime.now(UTC)
+    moved = {"live": 0, "settled": 0, "refunded": 0}
+
+    stuck_before = now - timedelta(hours=settings.debate_stuck_hours)
+    rows = (await db.execute(
+        select(Debate).where(Debate.status.in_(("announced", "live", "voting")))
+    )).scalars().all()
+
+    handled: set[str] = set()
+    for d in rows:
+        started = _aware(d.starts_at)
+        if started is None or started > stuck_before:
+            continue
+        try:
+            await _auto_draw_refund(db, d)
+            handled.add(d.id)
+            moved["refunded"] += 1
+            logger.warning("debate %s stuck in %s for over %dh — auto-draw refunded",
+                           d.id, d.status, settings.debate_stuck_hours)
+        except Exception:
+            logger.warning("debate stuck-sweep failed for %s", d.id, exc_info=True)
+
+    live_before = now - timedelta(minutes=settings.debate_stake_window_min)
+    for d in rows:
+        if d.id in handled or d.status != "announced":
+            continue
+        started = _aware(d.starts_at)
+        if started is None or started > live_before:
+            continue
+        try:
+            await run_live(db, d)
+            moved["live"] += 1
+        except Exception:
+            logger.warning("debate run_live failed for %s", d.id, exc_info=True)
+
+    settle_before = now - timedelta(
+        minutes=settings.debate_stake_window_min + settings.debate_vote_window_min)
+    for d in rows:
+        if d.id in handled or d.status != "voting":
+            continue
+        started = _aware(d.starts_at)
+        if started is None or started > settle_before:
+            continue
+        try:
+            await settle(db, d.id)
+            moved["settled"] += 1
+        except Exception:
+            logger.warning("debate settle failed for %s", d.id, exc_info=True)
+
+    return moved
 
 
 # --------------------------------------------------------------------------- #

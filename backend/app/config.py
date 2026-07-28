@@ -536,6 +536,13 @@ class Settings(BaseSettings):
     election_mayor_wage_bonus: float = 1.2
     election_interval_days: int = 28              # off-season election cadence (nightly trigger)        # winner's town-wide wage multiplier
 
+    # E9 辩论擂台生命周期推进（event_cron 每 60s 一轮）。两个窗口都从
+    # Debate.starts_at 起算——debates 表没有记录进入 voting 时刻的列，不动
+    # schema 的前提下 settle 的判据只能是 stake_window + vote_window 之和。
+    debate_stake_window_min: int = 30    # announced 满这么久 → 开打（run_live）
+    debate_vote_window_min: int = 60     # voting 满这么久 → 结算（settle）
+    debate_stuck_hours: int = 24         # 卡在非终态超过这么久 → 平局全额退款
+
     # ── S2-1 offices 职位实体化 (POLIS_OFFICE_*) — independent gate ─────
     # Unified offices table (mayor/town_clerk/postman/doctor) + OfficeService.
     # Default False (rollback-safe, realism-family pattern): off → byte-level

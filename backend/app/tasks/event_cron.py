@@ -59,6 +59,16 @@ async def event_cron_loop():
                         logger.info("Event cron: settled %d season(s)", len(settled))
                 except Exception:
                     logger.warning("C3 script/season cron step failed", exc_info=True)
+                # E3: 推进辩论生命周期（announced → live → voting → settled）。
+                # run_live/settle 此前在 app/ 下零调用方，押注币会被永久冻结。
+                try:
+                    from app.services.debate_service import drive_due_debates
+                    moved = await drive_due_debates(db)
+                    if any(moved.values()):
+                        logger.info("Event cron: debates live=%d settled=%d refunded=%d",
+                                    moved["live"], moved["settled"], moved["refunded"])
+                except Exception:
+                    logger.warning("E3 debate driver step failed", exc_info=True)
             for event, phase in changes:
                 await manager.broadcast({
                     "type": "world_event",
