@@ -92,9 +92,9 @@ string[] 渲染 dict 触发 React #31 整页崩，同时 _npc_voters 全名单�
 label + npc_votes」，杜绝形状与泄漏面再次漂移。
 """
 import json
+from datetime import datetime, timedelta, UTC
 
 import pytest
-from sqlalchemy import select
 
 from app.models.resident import Resident
 from app.models.season import Poll
@@ -168,8 +168,14 @@ async def test_open_polls_flags_elections(db_session):
 
 @pytest.mark.anyio
 async def test_string_options_still_supported(db_session):
-    """历史/回滚数据可能是 string[]（test_script_season 就这么造）——不许炸。"""
+    """历史/回滚数据可能是 string[]（test_script_season 就这么造）——不许炸。
+
+    closes_at 必须显式传：model 默认值是 ``datetime.now(UTC)``（创建时刻），
+    而 open_polls 既有的过滤是 ``closes <= now``，不传就 100% 被当过期跳过。
+    照 tests/test_script_season.py 的 _poll helper 风格给一个未来时刻。
+    """
     db_session.add(Poll(question="谁是凶手？", options_json=["管家", "园丁"],
+                        closes_at=datetime.now(UTC) + timedelta(hours=24),
                         status="open"))
     await db_session.commit()
 
