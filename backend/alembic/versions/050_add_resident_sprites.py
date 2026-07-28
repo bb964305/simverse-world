@@ -64,9 +64,9 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False,
                   server_default=sa.text("CURRENT_TIMESTAMP")),
         sa.ForeignKeyConstraint(["resident_id"], ["residents.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["reviewed_by"], ["users.id"]),
-        sa.ForeignKeyConstraint(["published_by"], ["users.id"]),
-        sa.ForeignKeyConstraint(["rolled_back_by"], ["users.id"]),
+        sa.ForeignKeyConstraint(["reviewed_by"], ["users.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(["published_by"], ["users.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(["rolled_back_by"], ["users.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("run_id", name="uq_resident_sprite_runs_run_id"),
     )

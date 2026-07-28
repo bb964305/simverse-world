@@ -64,18 +64,30 @@ TERMINALIZATION_TABLES = [
 
 
 def _required_postgres() -> tuple[str, str]:
+    """PG 证据的环境守卫：**没要求就 skip，要求了却给不出才 fail**。
+
+    原实现在 `LAB_POSTGRES_REQUIRED` 未设时就 `pytest.fail`——即「运维根本没要
+    这份证据」被判成硬失败。后果是本文件的 12 个用例在任何没有 PG 的机器上都是
+    `ERROR`（不是 skip），而 error 连 `xfail` 都盖不住，master 的默认门因此常年
+    带着这批红。范式取自隔壁 `test_lab_runtime_v2_postgres.py:29-31`。
+
+    「skip 会不会让 release gate 蒙混过关」——不会：`tests/conftest.py:143-147`
+    在 `LAB_RELEASE_GATE` 开启时把**任何** skip 判成失败。作者原本担心的事由那道
+    闸负责，不该硬编码进 fixture。
+    """
+    if os.environ.get("LAB_POSTGRES_REQUIRED", "").lower() not in {
+            "1", "true", "yes", "on"}:
+        pytest.skip("LAB_POSTGRES_REQUIRED is not set — opt-in PostgreSQL evidence")
+
     missing = [
-        name
-        for name in ("LAB_POSTGRES_REQUIRED", "LAB_TEST_DATABASE_URL", "LAB_RELEASE_RUN_ID")
+        name for name in ("LAB_TEST_DATABASE_URL", "LAB_RELEASE_RUN_ID")
         if not os.environ.get(name)
     ]
     if missing:
         pytest.fail(
-            "real PostgreSQL terminalization evidence requires environment: "
+            "LAB_POSTGRES_REQUIRED=1 but the environment is incomplete: "
             + ", ".join(missing)
         )
-    if os.environ["LAB_POSTGRES_REQUIRED"].lower() not in {"1", "true", "yes", "on"}:
-        pytest.fail("LAB_POSTGRES_REQUIRED must be true for required PostgreSQL evidence")
 
     database_url = os.environ["LAB_TEST_DATABASE_URL"]
     parsed = make_url(database_url)
