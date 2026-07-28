@@ -269,9 +269,16 @@ async def drive_due_debates(db) -> dict:
     E3/#3-1：``run_live`` 与 ``settle`` 在 app/ 下本来零调用方，辩论建出来就
     停在 announced，而 stake 接口是开放的且真扣币 —— 玩家的押注被永久冻结。
 
-    时间判据全部从 ``Debate.starts_at`` 起算：debates 表没有记录进入 voting
-    时刻的列，不动 schema 就只能这么推算（``settle`` 的门槛 = stake_window +
-    vote_window）。
+    两个阶段的判据来源不同，这是有意的：
+
+    - ``announced → live`` 用 ``starts_at``：押注窗口本来就从辩论公布开始算。
+    - ``voting → settled`` 用**进入 voting 的真实时刻**（``run_live`` 成功时
+      记进 Redis 的 ``_VOTING_SINCE_KEY``），而不是 ``starts_at`` 推算。判据
+      写成 ``starts_at + stake + vote`` 会让一场积压的辩论在同一轮里被
+      ``run_live`` 之后立刻 ``settle``：两者之间零耗时，票数全为初值，
+      ``settle`` 走平局分支，玩家一票都投不上。而这恰恰是驱动器首次跑积压时
+      的必然状态。Redis 标记缺失（重启，或本驱动器上线前就已在 voting 的历史
+      数据）时回落到 ``starts_at + stake_window``，退化成保守结算而不是卡死。
 
     **超期兜底先跑**：卡在任何非终态超过 ``debate_stuck_hours`` 的一律平局
     全额退款，且优先于 run_live —— 否则一场卡了两天的辩论会先被拉起来跑一轮
@@ -296,6 +303,8 @@ async def drive_due_debates(db) -> dict:
             continue
         try:
             await _auto_draw_refund(db, d)
+            # 本轮已终结（平局退款），后两个循环都不该再碰——与 loop 2 的
+            # finally 写的是同一个 handled 集合，不是两套独立的登记逻辑。
             handled.add(d.id)
             moved["refunded"] += 1
             logger.warning("debate %s stuck in %s for over %dh — auto-draw refunded",
