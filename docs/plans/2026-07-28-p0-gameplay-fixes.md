@@ -1138,11 +1138,17 @@ from app.models.digest import Digest
 from app.models.memory import Memory
 
 
-async def _material(db):
-    """给 gather_material 一点素材，避免走冷启动兜底分支。"""
+async def _material(db, day):
+    """给 gather_material 一点素材，避免走冷启动兜底分支。
+
+    时间戳必须落在 ``day`` 当天：gather_material 按 [day 00:00, day+1 00:00)
+    UTC 窗口过滤 Memory.created_at。用 now() 去喂一个查历史日期的窗口永远
+    查不到，has_material 恒为 False，测试就会静默地走冷启动兜底而根本不调用
+    compose_digest —— 那样用例测的就不是它们声称要测的东西了。
+    """
     db.add(Memory(resident_id="r1", type="event", content="今天大家聊得很开心",
                   importance=0.9, source="chat_resident",
-                  created_at=datetime.now(UTC)))
+                  created_at=datetime(day.year, day.month, day.day, 12, tzinfo=UTC)))
     await db.commit()
 
 
@@ -1177,7 +1183,7 @@ async def test_empty_compose_result_is_not_persisted(db_session):
     """空正文不许落库 —— 一旦落了，幂等会把这一天永久钉死。"""
     from app.services import digest_service as ds
 
-    await _material(db_session)
+    await _material(db_session, date(2026, 7, 24))
     with patch.object(ds, "compose_digest", AsyncMock(return_value=("t", "   "))):
         with pytest.raises(ds.DigestComposeEmpty):
             await ds.generate_village_digest(db_session, date(2026, 7, 24))
@@ -1196,7 +1202,7 @@ async def test_an_existing_empty_row_is_refilled_not_short_circuited(db_session)
     db_session.add(Digest(scope="village", date=day, user_id="",
                           title=f"{day} 村落日报", content_md="", stats_json={}))
     await db_session.commit()
-    await _material(db_session)
+    await _material(db_session, day)
 
     with patch.object(ds, "compose_digest",
                       AsyncMock(return_value=("补写的头条", "# 补写的头条\n有内容了"))):
@@ -1241,11 +1247,16 @@ async def test_cold_start_fallback_is_still_allowed_to_persist(db_session):
 
 @pytest.mark.anyio
 async def test_no_module_bypasses_the_chat_wrapper_in_digest(db_session):
-    """结构守卫：digest_service 不得再出现直调 messages.create。"""
+    """结构守卫：digest 路径不得再直调 SDK。
+
+    匹配的是调用形式 ``.messages.create(`` 而不是裸子串 ``messages.create``：
+    后者会把 compose_digest 的 docstring 里解释「为什么不能这么调」的那句话
+    一起命中，逼着文档为了绕开测试而扭曲措辞。守卫要防的是调用，不是提及。
+    """
     from pathlib import Path
     src = (Path(__file__).resolve().parent.parent / "app" / "services"
            / "digest_service.py").read_text(encoding="utf-8")
-    assert "messages.create" not in src, (
+    assert ".messages.create(" not in src, (
         "digest 路径必须走 app.llm.client.chat()——它是全仓唯一会加 "
         "thinking={'type':'disabled'} 的地方")
 ```
