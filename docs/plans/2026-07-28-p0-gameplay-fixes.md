@@ -798,6 +798,65 @@ async def test_one_failing_debate_does_not_block_the_others(db_session):
     assert moved["live"] == 1    # 好的那条成功推进
     await db_session.refresh(good)
     assert good.status == "voting"
+
+
+@pytest.mark.anyio
+async def test_a_backlog_debate_gets_a_real_voting_window(db_session):
+    """积压辩论不许在同一轮里被 run_live 之后立刻 settle。
+
+    这是驱动器首次跑积压时的必然状态：一场 announced 了 95 分钟的辩论同时
+    满足 stake 门槛（30min）与「从 starts_at 推算」的 settle 门槛（90min），
+    而没到 stuck 线（24h）。若 settle 的判据是 starts_at，它会在一次调用里
+    走完 live→settled，votes 全零判平局，玩家一票都投不上。
+    """
+    age = settings.debate_stake_window_min + settings.debate_vote_window_min + 5
+    d = await _debate(db_session, age_min=age)
+    with patch("app.llm.client.get_client", return_value=_mock_client()), \
+         patch("app.llm.metering.record_usage", new_callable=AsyncMock):
+        moved = await ds.drive_due_debates(db_session)
+
+    assert moved["live"] == 1
+    assert moved["settled"] == 0, "同一轮内被结算了——投票窗口被跳过"
+    await db_session.refresh(d)
+    assert d.status == "voting"
+
+
+@pytest.mark.anyio
+async def test_voting_window_is_measured_from_going_live(db_session):
+    """窗口从「进入 voting」起算，不是从「辩论创建」起算。"""
+    age = settings.debate_stake_window_min + settings.debate_vote_window_min + 5
+    d = await _debate(db_session, age_min=age)
+    with patch("app.llm.client.get_client", return_value=_mock_client()), \
+         patch("app.llm.metering.record_usage", new_callable=AsyncMock):
+        await ds.drive_due_debates(db_session)
+    await db_session.refresh(d)
+    assert d.status == "voting"
+
+    # 紧接着再跑一轮：投票窗口还没过，仍然不许结算。
+    assert (await ds.drive_due_debates(db_session))["settled"] == 0
+
+    # 把标记往前拨过一个完整投票窗口 → 这才该结算。
+    from app.redis_client import get_redis
+    past = datetime.now(UTC) - timedelta(
+        minutes=settings.debate_vote_window_min + 1)
+    await get_redis().set(ds._VOTING_SINCE_KEY.format(id=d.id), past.isoformat())
+
+    assert (await ds.drive_due_debates(db_session))["settled"] == 1
+    await db_session.refresh(d)
+    assert d.status == "settled"
+
+
+@pytest.mark.anyio
+async def test_missing_voting_since_falls_back_to_starts_at_math(db_session):
+    """没有 Redis 标记的历史数据（驱动器上线前就在 voting）仍能被结算。"""
+    d = await _debate(db_session, status="voting", age_min=(
+        settings.debate_stake_window_min + settings.debate_vote_window_min + 1))
+    from app.redis_client import get_redis
+    assert await get_redis().get(ds._VOTING_SINCE_KEY.format(id=d.id)) is None
+
+    assert (await ds.drive_due_debates(db_session))["settled"] == 1
+    await db_session.refresh(d)
+    assert d.status == "settled"
 ```
 
 - [ ] **Step 4: 跑测试确认失败**
@@ -811,11 +870,61 @@ Expected: FAIL —— `AttributeError: module 'app.services.debate_service' has 
 `backend/app/services/debate_service.py`，在 `_auto_draw_refund`（`:195-207`）之后、`# Settlement` 分节注释之前插入：
 
 ```python
+#: run_live 把辩论推进到 voting 的真实时刻。debates 表没有相位时间列，而本
+#: 批次不动 schema（红线：迁移与行为变更不得同一次变更）。settle 的判据必须
+#: 是「投票开了多久」而不是「辩论建了多久」——否则一场积压的 announced 辩论
+#: 会在同一轮里被 run_live 之后立刻 settle，玩家一票都投不上，结果恒为平局。
+#: Redis 丢失（重启 / 本驱动器上线前就已在 voting 的历史数据）时回落到
+#: starts_at 推算，退化成保守结算而不是卡死。
+_VOTING_SINCE_KEY = "sv:debate_voting_since:{id}"
+_VOTING_SINCE_TTL = 7 * 86400
+
+
 def _aware(ts: datetime | None) -> datetime | None:
     """DB 可能回 naive datetime（sqlite 一定会）——统一补 UTC 再比较。"""
     if ts is None:
         return None
     return ts if ts.tzinfo is not None else ts.replace(tzinfo=UTC)
+
+
+async def _mark_voting_since(debate_id: str, when: datetime) -> None:
+    """记下进入 voting 的时刻。Redis 不可用时静默跳过——有回落推算兜底。"""
+    try:
+        from app.redis_client import get_redis
+        await get_redis().set(_VOTING_SINCE_KEY.format(id=debate_id),
+                              when.isoformat(), ex=_VOTING_SINCE_TTL)
+    except Exception:
+        logger.warning("debate voting-since mark failed for %s", debate_id,
+                       exc_info=True)
+
+
+async def _voting_since(debate_id: str) -> datetime | None:
+    """读回进入 voting 的时刻；没有记录或读不出来则返回 None。"""
+    try:
+        from app.redis_client import get_redis
+        raw = await get_redis().get(_VOTING_SINCE_KEY.format(id=debate_id))
+    except Exception:
+        logger.warning("debate voting-since read failed for %s", debate_id,
+                       exc_info=True)
+        return None
+    if not raw:
+        return None
+    try:
+        return _aware(datetime.fromisoformat(raw))
+    except ValueError:
+        logger.warning("debate voting-since unparseable for %s: %r",
+                       debate_id, raw)
+        return None
+
+
+async def _clear_voting_since(debate_id: str) -> None:
+    """辩论进入终态后清掉标记，不留垃圾键。"""
+    try:
+        from app.redis_client import get_redis
+        await get_redis().delete(_VOTING_SINCE_KEY.format(id=debate_id))
+    except Exception:
+        logger.debug("debate voting-since clear failed for %s", debate_id,
+                     exc_info=True)
 
 
 async def drive_due_debates(db) -> dict:
@@ -853,6 +962,7 @@ async def drive_due_debates(db) -> dict:
             await _auto_draw_refund(db, d)
             handled.add(d.id)
             moved["refunded"] += 1
+            await _clear_voting_since(d.id)
             logger.warning("debate %s stuck in %s for over %dh — auto-draw refunded",
                            d.id, d.status, settings.debate_stuck_hours)
         except Exception:
@@ -868,20 +978,34 @@ async def drive_due_debates(db) -> dict:
         try:
             await run_live(db, d)
             moved["live"] += 1
+            if d.status == "voting":
+                # run_live 内部 LLM 失败会走 _auto_draw_refund 直接置 settled，
+                # 那种情况没有投票窗口可言，不记标记。
+                await _mark_voting_since(d.id, now)
         except Exception:
             logger.warning("debate run_live failed for %s", d.id, exc_info=True)
+        finally:
+            # 无论成功、auto-draw 还是抛异常，本轮都不再让它进入 settle 循环。
+            handled.add(d.id)
 
-    settle_before = now - timedelta(
-        minutes=settings.debate_stake_window_min + settings.debate_vote_window_min)
     for d in rows:
         if d.id in handled or d.status != "voting":
             continue
-        started = _aware(d.starts_at)
-        if started is None or started > settle_before:
+        voting_since = await _voting_since(d.id)
+        if voting_since is None:
+            # 回落：没有标记（Redis 重启，或本驱动器上线前就已在 voting 的
+            # 历史数据）→ 用 starts_at 推算。
+            started = _aware(d.starts_at)
+            if started is None:
+                continue
+            voting_since = started + timedelta(
+                minutes=settings.debate_stake_window_min)
+        if (now - voting_since).total_seconds() < settings.debate_vote_window_min * 60:
             continue
         try:
             await settle(db, d.id)
             moved["settled"] += 1
+            await _clear_voting_since(d.id)
         except Exception:
             logger.warning("debate settle failed for %s", d.id, exc_info=True)
 
@@ -894,7 +1018,8 @@ async def drive_due_debates(db) -> dict:
 from datetime import datetime, timedelta, UTC
 ```
 
-> 注意：`run_live` 在这一轮里会把 `announced` 推到 `voting`，第三个循环用的是同一批 `rows` 对象（已被 `run_live` 就地改成 `voting`）。这是有意的——同一轮内刚开打的辩论 `starts_at` 必然还很新，过不了 `settle_before` 的门槛，不会被立刻结算。
+> **为什么 settle 的判据不能用 `starts_at` 推算。** 本文档早先的版本在这里写过一句「同一轮内刚开打的辩论 `starts_at` 必然还很新，过不了 `settle_before` 的门槛」——**那句话是错的**，Task 2 的 review 用复现脚本证伪了它：只要辩论**首次被驱动器处理时**的年龄已经超过 `stake_window + vote_window`（默认 90 分钟）而尚未到 `stuck_hours`（24 小时），两个门槛就同时满足，同一次调用会 `run_live` 之后立刻 `settle`。live→settle 之间零耗时，`votes_a == votes_b`，`settle` 走 draw 分支——**结果恒为强制平局，玩家一票都投不上**。而 `(90min, 24h)` 这个年龄带正是驱动器首次跑积压时的必然状态，也是本 Task 存在的理由。
+> 所以 settle 的判据必须是「投票开了多久」而不是「辩论建了多久」，`handled` 也必须在 `finally` 里无条件登记。
 
 - [ ] **Step 6: 跑测试确认通过**
 
