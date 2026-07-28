@@ -50,13 +50,21 @@ async def event_cron_loop():
                             logger.warning("lecture debate step failed", exc_info=True)
                 # C3: fire due script acts + settle finished seasons.
                 try:
-                    from app.services.script_service import fire_due_scripts, settle_due_seasons
+                    from app.services.script_service import (
+                        fire_due_scripts, settle_due_seasons, ensure_active_season,
+                    )
                     fired = await fire_due_scripts(db)
                     settled = await settle_due_seasons(db)
+                    # E7: 结算之后补开下一季 —— 顺序不能反，否则刚开的季会被
+                    # 同一轮的 settle 扫到（它按 ends_at 判，新季不会中，但把
+                    # 开季放在结算前会让「一季结束到下一季开始」多等 60s）。
+                    opened = await ensure_active_season(db)
                     if fired:
                         logger.info("Event cron: fired %d script act(s)", len(fired))
                     if settled:
                         logger.info("Event cron: settled %d season(s)", len(settled))
+                    if opened is not None:
+                        logger.info("Event cron: opened season %s", opened.title)
                 except Exception:
                     logger.warning("C3 script/season cron step failed", exc_info=True)
                 # E3: 推进辩论生命周期（announced → live → voting → settled）。

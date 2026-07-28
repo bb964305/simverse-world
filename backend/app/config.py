@@ -543,6 +543,12 @@ class Settings(BaseSettings):
     debate_vote_window_min: int = 60     # voting 满这么久 → 结算（settle）
     debate_stuck_hours: int = 24         # 卡在非终态超过这么久 → 平局全额退款
 
+    # E12/C3 赛季：自动开季的季长（真实日）。seasons 表长期 0 行，导致
+    # season_service.add_points 的第一行 `if not season_id: return 0` 把所有
+    # 积分静默丢弃 —— 读端和记分端都在，缺的只是写端。
+    season_length_days: int = 14
+    season_auto_open: bool = True        # 关掉则只能由 admin 手动开季
+
     # ── S2-1 offices 职位实体化 (POLIS_OFFICE_*) — independent gate ─────
     # Unified offices table (mayor/town_clerk/postman/doctor) + OfficeService.
     # Default False (rollback-safe, realism-family pattern): off → byte-level

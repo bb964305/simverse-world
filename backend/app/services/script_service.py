@@ -240,6 +240,43 @@ async def settle_season_polls(db, season_id: str) -> list[dict]:
     return results
 
 
+async def ensure_active_season(db) -> Season | None:
+    """无 active season 时开下一季，否则返回 None（幂等）。
+
+    E7：全仓此前没有任何生产代码会创建 Season 行，于是
+    ``season_service._active_season_id()`` 恒为 None，``add_points()`` 第一行
+    就 ``return 0`` —— 读端和记分端都在，缺的只是写端。
+
+    注意 ``Season.status`` 的列默认值是 ``"voting"`` 而不是 ``"active"``，
+    必须显式写；开完季要打掉 ``_active_season_id`` 的 60s 缓存，否则新赛季
+    最长 1 分钟不可见、记分继续丢。
+    """
+    from app.services.season_service import get_active_season, _invalidate_active
+
+    if not settings.season_auto_open:
+        return None
+    if await get_active_season(db) is not None:
+        return None
+
+    now = datetime.now(UTC)
+    n = len((await db.execute(select(Season))).scalars().all()) + 1
+    season = Season(
+        title=f"第 {n} 季",
+        theme="",
+        status="active",
+        starts_at=now,
+        ends_at=now + timedelta(days=settings.season_length_days),
+        payload_json={},
+    )
+    db.add(season)
+    await db.commit()
+    await db.refresh(season)
+    _invalidate_active()
+    logger.info("Opened season %s (%s → %s)", season.title,
+                season.starts_at.date(), season.ends_at.date())
+    return season
+
+
 # --------------------------------------------------------------------------- #
 # Finale                                                                       #
 # --------------------------------------------------------------------------- #
@@ -265,6 +302,8 @@ async def settle_due_seasons(db) -> list[dict]:
         merged["poll_results"] = poll_results
         season.payload_json = merged
         await db.commit()
+        from app.services.season_service import _invalidate_active
+        _invalidate_active()   # 结算完必须打掉缓存，否则 add_points 还往旧季记
 
         # A5-style finale recap on the bulletin (template, no LLM).
         try:
