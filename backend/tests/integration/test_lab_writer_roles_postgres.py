@@ -24,14 +24,22 @@ TRUE = {"1", "true", "yes", "on"}
 
 
 def _required_database() -> tuple[str, str]:
-    required = os.environ.get("LAB_POSTGRES_REQUIRED", "").lower()
+    """AC04 的环境守卫：**没要求就 skip，要求了却给不出才 fail**。
+
+    原实现把「未设 `LAB_POSTGRES_REQUIRED`」也判成 `pytest.fail`，于是本文件的 4
+    个用例在任何没有 PG 的机器上都是 `ERROR` 而不是 skip。范式取自
+    `test_lab_runtime_v2_postgres.py:29-31`；release gate 由
+    `tests/conftest.py:143-147` 把任何 skip 判失败来兜底，不该硬编码进 fixture。
+    """
+    if os.environ.get("LAB_POSTGRES_REQUIRED", "").lower() not in TRUE:
+        pytest.skip("LAB_POSTGRES_REQUIRED is not set — opt-in AC04 evidence")
     database_url = os.environ.get("LAB_TEST_DATABASE_URL", "")
     run_id = os.environ.get("LAB_RELEASE_RUN_ID", "")
-    if required not in TRUE or not database_url or not run_id:
-        pytest.fail(
-            "AC04 requires LAB_POSTGRES_REQUIRED=true, LAB_TEST_DATABASE_URL, "
-            "and LAB_RELEASE_RUN_ID"
-        )
+    missing = [n for n, v in (("LAB_TEST_DATABASE_URL", database_url),
+                              ("LAB_RELEASE_RUN_ID", run_id)) if not v]
+    if missing:
+        pytest.fail("LAB_POSTGRES_REQUIRED=1 but AC04 environment is incomplete: "
+                    + ", ".join(missing))
     if make_url(database_url).drivername != "postgresql+asyncpg":
         pytest.fail("LAB_TEST_DATABASE_URL must use postgresql+asyncpg")
     return database_url, run_id
