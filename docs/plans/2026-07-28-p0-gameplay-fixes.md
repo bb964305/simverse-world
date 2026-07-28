@@ -482,34 +482,33 @@ function PollSection({ polls }: { polls: PollData[] }) {
 }
 ```
 
-(c) 把页面 body 里「🗳️ 投票」那一段（`:329-341`）整体替换为：
+(c) 在 `SeasonsPage` 组件的 `return (` **之前**（`useEffect` 之后）加两行分组：
 
 ```tsx
-          {(() => {
-            const elections = (polls ?? []).filter((p) => p.is_election)
-            const proposals = (polls ?? []).filter((p) => !p.is_election)
-            return (
-              <>
-                <SectionTitle>🗳️ 议案投票</SectionTitle>
-                {polls === null && !pollsErr && <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>加载中…</div>}
-                {pollsErr && <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>{pollsErr}</div>}
-                {polls !== null && proposals.length === 0 && (
-                  <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>暂无进行中的议案。</div>
-                )}
-                {proposals.length > 0 && <PollSection polls={proposals} />}
+  const elections = (polls ?? []).filter((p) => p.is_election)
+  const proposals = (polls ?? []).filter((p) => !p.is_election)
+```
 
-                {elections.length > 0 && (
-                  <>
-                    <SectionTitle>🏛️ 镇长选举</SectionTitle>
-                    <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 8 }}>
-                      镇长选举与普通议案分开计票，当选者将获得全镇工资加成。
-                    </div>
-                    <PollSection polls={elections} />
-                  </>
-                )}
-              </>
-            )
-          })()}
+再把页面 body 里「🗳️ 投票」那一段（`:329-341`）整体替换为：
+
+```tsx
+          <SectionTitle>🗳️ 议案投票</SectionTitle>
+          {polls === null && !pollsErr && <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>加载中…</div>}
+          {pollsErr && <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>{pollsErr}</div>}
+          {polls !== null && proposals.length === 0 && (
+            <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>暂无进行中的议案。</div>
+          )}
+          {proposals.length > 0 && <PollSection polls={proposals} />}
+
+          {elections.length > 0 && (
+            <>
+              <SectionTitle>🏛️ 镇长选举</SectionTitle>
+              <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 8 }}>
+                镇长选举与普通议案分开计票，当选者将获得全镇工资加成。
+              </div>
+              <PollSection polls={elections} />
+            </>
+          )}
 ```
 
 - [ ] **Step 12: 跑前端测试确认通过**
