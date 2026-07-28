@@ -35,6 +35,15 @@ ROUNDS = 6
 
 _VOTERS_KEY = "sv:debate_voters:{id}"
 
+#: run_live 把辩论推进到 voting 的真实时刻。debates 表没有相位时间列，而本
+#: 批次不动 schema（红线：迁移与行为变更不得同一次变更）。settle 的判据必须
+#: 是「投票开了多久」而不是「辩论建了多久」——否则一场积压的 announced 辩论
+#: 会在同一轮里被 run_live 之后立刻 settle，玩家一票都投不上，结果恒为平局。
+#: Redis 丢失（重启 / 本驱动器上线前就已在 voting 的历史数据）时回落到
+#: starts_at 推算，退化成保守结算而不是卡死。
+_VOTING_SINCE_KEY = "sv:debate_voting_since:{id}"
+_VOTING_SINCE_TTL = 7 * 86400
+
 DEBATE_SYSTEM = (
     "你正在参加一场辩论擂台。你要为自己的立场辩护，语气鲜明、有理有据，"
     "针对上一位发言者的观点回应。60 字以内，只输出你的发言。"
@@ -214,6 +223,46 @@ def _aware(ts: datetime | None) -> datetime | None:
     return ts if ts.tzinfo is not None else ts.replace(tzinfo=UTC)
 
 
+async def _mark_voting_since(debate_id: str, when: datetime) -> None:
+    """记下进入 voting 的时刻。Redis 不可用时静默跳过——有回落推算兜底。"""
+    try:
+        from app.redis_client import get_redis
+        await get_redis().set(_VOTING_SINCE_KEY.format(id=debate_id),
+                              when.isoformat(), ex=_VOTING_SINCE_TTL)
+    except Exception:
+        logger.warning("debate voting-since mark failed for %s", debate_id,
+                       exc_info=True)
+
+
+async def _voting_since(debate_id: str) -> datetime | None:
+    """读回进入 voting 的时刻；没有记录或读不出来则返回 None。"""
+    try:
+        from app.redis_client import get_redis
+        raw = await get_redis().get(_VOTING_SINCE_KEY.format(id=debate_id))
+    except Exception:
+        logger.warning("debate voting-since read failed for %s", debate_id,
+                       exc_info=True)
+        return None
+    if not raw:
+        return None
+    try:
+        return _aware(datetime.fromisoformat(raw))
+    except ValueError:
+        logger.warning("debate voting-since unparseable for %s: %r",
+                       debate_id, raw)
+        return None
+
+
+async def _clear_voting_since(debate_id: str) -> None:
+    """辩论进入终态后清掉标记，不留垃圾键。"""
+    try:
+        from app.redis_client import get_redis
+        await get_redis().delete(_VOTING_SINCE_KEY.format(id=debate_id))
+    except Exception:
+        logger.debug("debate voting-since clear failed for %s", debate_id,
+                     exc_info=True)
+
+
 async def drive_due_debates(db) -> dict:
     """把到期的辩论推过 announced → live → voting → settled。
 
@@ -251,6 +300,7 @@ async def drive_due_debates(db) -> dict:
             moved["refunded"] += 1
             logger.warning("debate %s stuck in %s for over %dh — auto-draw refunded",
                            d.id, d.status, settings.debate_stuck_hours)
+            await _clear_voting_since(d.id)
         except Exception:
             logger.warning("debate stuck-sweep failed for %s", d.id, exc_info=True)
 
@@ -264,20 +314,34 @@ async def drive_due_debates(db) -> dict:
         try:
             await run_live(db, d)
             moved["live"] += 1
+            if d.status == "voting":
+                # run_live 内部 LLM 失败会走 _auto_draw_refund 直接置 settled，
+                # 那种情况没有投票窗口可言，不记标记。
+                await _mark_voting_since(d.id, now)
         except Exception:
             logger.warning("debate run_live failed for %s", d.id, exc_info=True)
+        finally:
+            # 无论成功、auto-draw 还是抛异常，本轮都不再让它进入 settle 循环。
+            handled.add(d.id)
 
-    settle_before = now - timedelta(
-        minutes=settings.debate_stake_window_min + settings.debate_vote_window_min)
     for d in rows:
         if d.id in handled or d.status != "voting":
             continue
-        started = _aware(d.starts_at)
-        if started is None or started > settle_before:
+        voting_since = await _voting_since(d.id)
+        if voting_since is None:
+            # 回落：没有标记（Redis 重启，或本驱动器上线前就已在 voting 的
+            # 历史数据）→ 用 starts_at 推算，与本次修复前的行为一致。
+            started = _aware(d.starts_at)
+            if started is None:
+                continue
+            voting_since = started + timedelta(
+                minutes=settings.debate_stake_window_min)
+        if (now - voting_since).total_seconds() < settings.debate_vote_window_min * 60:
             continue
         try:
             await settle(db, d.id)
             moved["settled"] += 1
+            await _clear_voting_since(d.id)
         except Exception:
             logger.warning("debate settle failed for %s", d.id, exc_info=True)
 

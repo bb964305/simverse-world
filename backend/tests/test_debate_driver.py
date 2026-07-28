@@ -180,6 +180,65 @@ async def test_one_failing_debate_does_not_block_the_others(db_session):
     assert good.status == "voting"
 
 
+@pytest.mark.anyio
+async def test_a_backlog_debate_gets_a_real_voting_window(db_session):
+    """积压辩论不许在同一轮里被 run_live 之后立刻 settle。
+
+    这是驱动器首次跑积压时的必然状态：一场 announced 了 95 分钟的辩论同时
+    满足 stake 门槛（30min）与旧的 settle 门槛（90min），而没到 stuck 线
+    （24h）。修复前它会在一次调用里走完 live→settled，votes 全零判平局，
+    玩家一票都投不上。
+    """
+    age = settings.debate_stake_window_min + settings.debate_vote_window_min + 5
+    d = await _debate(db_session, age_min=age)
+    with patch("app.llm.client.get_client", return_value=_mock_client()), \
+         patch("app.llm.metering.record_usage", new_callable=AsyncMock):
+        moved = await ds.drive_due_debates(db_session)
+
+    assert moved["live"] == 1
+    assert moved["settled"] == 0, "同一轮内被结算了——投票窗口被跳过"
+    await db_session.refresh(d)
+    assert d.status == "voting"
+
+
+@pytest.mark.anyio
+async def test_voting_window_is_measured_from_going_live(db_session):
+    """窗口从「进入 voting」起算，不是从「辩论创建」起算。"""
+    age = settings.debate_stake_window_min + settings.debate_vote_window_min + 5
+    d = await _debate(db_session, age_min=age)
+    with patch("app.llm.client.get_client", return_value=_mock_client()), \
+         patch("app.llm.metering.record_usage", new_callable=AsyncMock):
+        await ds.drive_due_debates(db_session)
+    await db_session.refresh(d)
+    assert d.status == "voting"
+
+    # 紧接着再跑一轮：投票窗口还没过，仍然不许结算。
+    assert (await ds.drive_due_debates(db_session))["settled"] == 0
+
+    # 把标记往前拨过一个完整投票窗口 → 这才该结算。
+    from app.redis_client import get_redis
+    past = datetime.now(UTC) - timedelta(
+        minutes=settings.debate_vote_window_min + 1)
+    await get_redis().set(ds._VOTING_SINCE_KEY.format(id=d.id), past.isoformat())
+
+    assert (await ds.drive_due_debates(db_session))["settled"] == 1
+    await db_session.refresh(d)
+    assert d.status == "settled"
+
+
+@pytest.mark.anyio
+async def test_missing_voting_since_falls_back_to_starts_at_math(db_session):
+    """没有 Redis 标记的历史数据（驱动器上线前就在 voting）仍能被结算。"""
+    d = await _debate(db_session, status="voting", age_min=(
+        settings.debate_stake_window_min + settings.debate_vote_window_min + 1))
+    from app.redis_client import get_redis
+    assert await get_redis().get(ds._VOTING_SINCE_KEY.format(id=d.id)) is None
+
+    assert (await ds.drive_due_debates(db_session))["settled"] == 1
+    await db_session.refresh(d)
+    assert d.status == "settled"
+
+
 def test_event_cron_wires_the_debate_driver():
     """接线本身是回归面：推进器写好了但没人调 = 什么都没修。"""
     from pathlib import Path
