@@ -36,7 +36,11 @@ markers = [
     "lab_staging: required live isolated-service staging evidence",
     "lab_capacity: required fixed-seed release-capacity evidence",
 ]
-addopts = "-m 'not lab_oci'"
+# 默认门 = 一台只有 Python 和本仓依赖的机器上跑得过的那些。五个 marker 全部需要
+# 外部环境（真 PG / 真 Redis / 活的 staging 服务 / 真容器），用 `-m lab_xxx` 显式
+# opt-in。一致性由 tests/test_pytest_default_selection.py 守住——marker 加进上面
+# 的列表却忘了在这里选边，那道断言会红。
+addopts = "-m 'not lab_oci and not lab_postgres and not lab_redis and not lab_staging and not lab_capacity'"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
