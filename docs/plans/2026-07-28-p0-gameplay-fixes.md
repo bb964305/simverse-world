@@ -576,6 +576,9 @@ EOF
 - `config.py` 现在**没有任何 `debate_` 字段**，`.env.example` 也没有 `DEBATE_`。
 - `run_live` 内部 LLM 失败会自己走 `_auto_draw_refund` 并 `return debate`（不抛），所以推进器里调它是安全的。
 - 生产存量：辩论 `1c00ba36` 建于 2026-07-26，至今 `announced`；玩家 10 SC 已扣（`transactions` 有 `debate_stake:1c00ba36...` -10，无对应 win/refund）。上线后第一个 tick 会被 24h 兜底捞走并退款——这属于代码生效的自然结果，不算「写生产数据」。
+- **LLM 的 patch 目标必须是源模块，不是 `debate_service`**：`get_client` / `record_usage` 在 `debate_service.py:155-156` 是 **`run_live` 函数体内的局部 import**，模块上并不存在这两个属性，`patch.object(ds, "get_client", ...)` 会直接 `AttributeError`。所以新测试统一写 `patch("app.llm.client.get_client", ...)` / `patch("app.llm.metering.record_usage", ...)`——这也正是既有 `tests/test_debates.py:171` 用的方式，两套测试保持一致。
+  全仓其余 service（`digest_service` / `dream_service` / `gossip_service` 等）确实是模块顶部 import + `patch.object(module, ...)`，`debate_service` 是唯一的异类。**但本 Task 不去统一它**：改 import 位置会让 `test_debates.py:171` 那条既有 patch 静默失效，`run_live` 转而建真 Anthropic client 打真网络（测试环境 `LLM_API_KEY=test-dummy-key`、`llm_base_url` 空，会走 `api.anthropic.com` 并挂在 `user_llm_timeout` 上）。统一 import 风格不是本 Task 的目标，且要动一条不在改动清单里的既有测试——留给单独的清理批次。
+- `patch.object(ds, "run_live", ...)` 则**保持不变**且有效：`run_live` 是 `debate_service` 的模块级函数，`drive_due_debates` 内部按裸名调用它。
 
 - [ ] **Step 1: 加 Settings 字段 + .env.example**
 
@@ -673,7 +676,7 @@ async def _debate(db, *, status="announced", age_min=0):
 async def test_announced_inside_the_stake_window_is_left_alone(db_session):
     """押注窗口没满就开打 = 提前掐断玩家下注。"""
     d = await _debate(db_session, age_min=1)
-    with patch.object(ds, "get_client", return_value=_mock_client()):
+    with patch("app.llm.client.get_client", return_value=_mock_client()):
         moved = await ds.drive_due_debates(db_session)
     assert moved["live"] == 0
     await db_session.refresh(d)
@@ -683,8 +686,8 @@ async def test_announced_inside_the_stake_window_is_left_alone(db_session):
 @pytest.mark.anyio
 async def test_announced_past_the_stake_window_goes_live_then_voting(db_session):
     d = await _debate(db_session, age_min=settings.debate_stake_window_min + 1)
-    with patch.object(ds, "get_client", return_value=_mock_client()), \
-         patch.object(ds, "record_usage", new_callable=AsyncMock):
+    with patch("app.llm.client.get_client", return_value=_mock_client()), \
+         patch("app.llm.metering.record_usage", new_callable=AsyncMock):
         moved = await ds.drive_due_debates(db_session)
     assert moved["live"] == 1
     await db_session.refresh(d)
@@ -750,7 +753,7 @@ async def test_stuck_sweep_takes_priority_over_going_live(db_session):
     """超期的 announced 走退款，不该先被 run_live 拉起来再跑一场 LLM。"""
     d = await _debate(db_session, age_min=settings.debate_stuck_hours * 60 + 1)
     client = _mock_client()
-    with patch.object(ds, "get_client", return_value=client):
+    with patch("app.llm.client.get_client", return_value=client):
         moved = await ds.drive_due_debates(db_session)
     assert moved["refunded"] == 1 and moved["live"] == 0
     client.messages.create.assert_not_called()
@@ -787,8 +790,8 @@ async def test_one_failing_debate_does_not_block_the_others(db_session):
         return await real_run_live(db, debate)
 
     with patch.object(ds, "run_live", _flaky), \
-         patch.object(ds, "get_client", return_value=_mock_client()), \
-         patch.object(ds, "record_usage", new_callable=AsyncMock):
+         patch("app.llm.client.get_client", return_value=_mock_client()), \
+         patch("app.llm.metering.record_usage", new_callable=AsyncMock):
         moved = await ds.drive_due_debates(db_session)
 
     assert calls["n"] == 2       # 两条都试过了
