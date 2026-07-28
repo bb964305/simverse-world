@@ -81,8 +81,9 @@ def _duties(residents: list[Resident]) -> list[dict]:
 async def _open_proposals(db: AsyncSession) -> list[dict]:
     polls = await script_service.open_polls(db)
     # Elections ride the same Poll table; the panel lists them separately, so
-    # the "proposals" section drops anything tagged as a mayor election.
-    return [p for p in polls if not p["question"].startswith(election_service.ELECTION_TAG)]
+    # the "proposals" section drops anything flagged as a mayor election.
+    # 判据来自 open_polls 的 is_election，不在这里第二次写 startswith。
+    return [p for p in polls if not p.get("is_election")]
 
 
 async def _recent_election(db: AsyncSession) -> dict | None:
@@ -103,7 +104,14 @@ async def _recent_election(db: AsyncSession) -> dict | None:
         "winner_slug": winner_slug,
         "winner_name": (winner or {}).get("label") if winner else None,
         "winner_votes": (winner or {}).get("final_votes") if winner else None,
-        "options": opts,
+        # 结票场景额外放行 won / final_votes（面板要显示得票），其余内部键同样
+        # 不出网 —— 一旦有已结束选举，原样返回会漏 _npc_voters 全名单。
+        "options": [
+            {**script_service.public_option(o),
+             "won": bool((o or {}).get("won")),
+             "final_votes": (o or {}).get("final_votes")}
+            for o in opts
+        ],
     }
 
 

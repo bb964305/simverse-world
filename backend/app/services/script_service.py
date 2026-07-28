@@ -122,7 +122,28 @@ async def fire_due_scripts(db) -> list[dict]:
 # --------------------------------------------------------------------------- #
 # Polls                                                                        #
 # --------------------------------------------------------------------------- #
+def public_option(o) -> dict:
+    """把一个 poll option 投影成对外形状。
+
+    ``options_json`` 元素恒为 ``civic_service.propose`` 写的 dict，且 opts[0]
+    上挂着 ``effect`` / ``_proposer_slug`` / ``_npc_voters`` / ``_eligible_at_open``
+    / policy 的 ``_policy_*`` 等内部 blob —— 一个都不许出网。用白名单而不是
+    黑名单剔 ``_`` 前缀：黑名单挡不住将来新增的非下划线内部键（``won`` /
+    ``final_votes`` 就是现成的例子）。
+
+    string 分支只为兜历史/回滚数据（``tests/test_script_season.py`` 手工造的
+    season poll 用的就是 ``["管家", "园丁"]``）。
+    """
+    if isinstance(o, str):
+        return {"label": o, "npc_votes": 0}
+    return {
+        "label": str((o or {}).get("label", "")),
+        "npc_votes": int((o or {}).get("npc_votes") or 0),
+    }
+
+
 async def open_polls(db, season_id: str | None = None, user_id: str | None = None) -> list[dict]:
+    from app.services.election_service import ELECTION_TAG
     now = datetime.now(UTC)
     stmt = select(Poll).where(Poll.status == "open")
     if season_id is not None:
@@ -137,7 +158,11 @@ async def open_polls(db, season_id: str | None = None, user_id: str | None = Non
             continue
         out.append({
             "id": poll.id, "season_id": poll.season_id, "question": poll.question,
-            "options": poll.options_json or [], "closes_at": poll.closes_at.isoformat() if poll.closes_at else None,
+            "options": [public_option(o) for o in (poll.options_json or [])],
+            "closes_at": poll.closes_at.isoformat() if poll.closes_at else None,
+            # 选举与普通议案共用 polls 表；前端按这个标记拆区块，市政厅按它
+            # 过滤。判据集中在这一处，避免两边各写一次 startswith。
+            "is_election": bool((poll.question or "").startswith(ELECTION_TAG)),
         })
     # Let the UI restore the ✓已投 marker across reloads (my_vote = option idx).
     if user_id and out:
