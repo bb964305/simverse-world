@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.models.resident import Resident
-from app.models.season import Poll
+from app.models.season import Poll, Vote
 from app.services import civic_membership as cm
 from app.services import civic_service
 
@@ -184,3 +184,85 @@ async def test_non_person_effects_are_never_zeroed(db_session):
     await civic_service.close_due_polls(db_session)
     opts = await _stored(db_session, poll.id)
     assert opts[0].get("won") is True and opts[0]["final_votes"] == 5
+
+
+# ── Critical fix: ghost candidates must be excluded from the winner pool,
+#    not merely zeroed —— see the final-review report and the module docstring
+#    of civic_service.py:533 (_close_one). A player vote for a zeroed-out ghost
+#    option must not be able to make it win.
+
+@pytest.mark.anyio
+async def test_ghost_candidate_with_a_real_vote_never_gets_won(db_session):
+    """幽灵候选 + 真人票 → 不得带 won。
+
+    生产那张镇长选举的四个候选人全部已被删除，closes_at 在 2026-07-31。
+    本分支让投票按钮第一次真正出现在 DOM 里，所以合并后真人可以投它——归零
+    npc_votes 之后，一张真人票足以让 argmax 落在一个不存在的人身上，
+    ``opts[win]["won"] = True`` 从不看候选人是否存在。这条对修复前的代码必须
+    失败（修复前它会给这个选项写 won=True）。
+    """
+    poll = Poll(question="镇长选举:谁来当下一任镇长?", status="open",
+                closes_at=datetime.now(UTC) - timedelta(days=1),
+                options_json=[
+                    {"label": "幽灵候选甲", "effect": {"type": "mayor",
+                                                      "slug": "klaus"},
+                     "npc_votes": 0},
+                    {"label": "幽灵候选乙", "effect": {"type": "mayor",
+                                                      "slug": "isabella"},
+                     "npc_votes": 0},
+                ])
+    db_session.add(poll)
+    await db_session.commit()
+    db_session.add(Vote(poll_id=poll.id, user_id="real-player", option_idx=0))
+    await db_session.commit()
+
+    assert await civic_service.close_due_polls(db_session) == 1
+    opts = await _stored(db_session, poll.id)
+    assert not any(o.get("won") for o in opts), \
+        f"一个不存在的人被公告成了当选人：{opts}"
+    from app.services import election_service
+    assert await election_service.current_mayor(db_session) is None
+
+
+@pytest.mark.anyio
+async def test_zero_votes_forfeits_without_a_winner(db_session):
+    """全零票 → 流会，不得带 won。"""
+    poll = Poll(question="要不要建凉亭", status="open",
+                closes_at=datetime.now(UTC) - timedelta(days=1),
+                options_json=[
+                    {"label": "建", "effect": None, "npc_votes": 0},
+                    {"label": "不建", "effect": None, "npc_votes": 0},
+                ])
+    db_session.add(poll)
+    await db_session.commit()
+
+    assert await civic_service.close_due_polls(db_session) == 1
+    opts = await _stored(db_session, poll.id)
+    assert not any(o.get("won") for o in opts)
+
+
+@pytest.mark.anyio
+async def test_a_live_candidate_still_wins_alongside_a_high_vote_ghost(db_session):
+    """混合场景：幽灵候选带高 npc_votes、真候选带低票——真候选照常胜出，安装
+    镇长成功。保证排除幽灵候选没有把正常路径一起掐死。"""
+    db_session.add(_res("real-candidate"))
+    await db_session.commit()
+    poll = Poll(question="镇长选举:谁来当下一任镇长?", status="open",
+                closes_at=datetime.now(UTC) - timedelta(days=1),
+                options_json=[
+                    {"label": "幽灵候选", "effect": {"type": "mayor",
+                                                     "slug": "klaus"},
+                     "npc_votes": 17},
+                    {"label": "真候选", "effect": {"type": "mayor",
+                                                   "slug": "real-candidate"},
+                     "npc_votes": 3},
+                ])
+    db_session.add(poll)
+    await db_session.commit()
+
+    assert await civic_service.close_due_polls(db_session) == 1
+    opts = await _stored(db_session, poll.id)
+    assert opts[0].get("won") is not True
+    assert opts[1].get("won") is True
+    from app.services import election_service
+    assert await election_service.current_mayor(db_session) == "real-candidate"

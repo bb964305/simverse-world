@@ -534,20 +534,24 @@ async def _close_one(db, poll: Poll) -> None:
     opts = list(poll.options_json or [])
 
     # E8 结票兜底：选项即人（mayor/office/duty）时校验那个人是否还在世界里。
-    # 生产那张镇长选举的 4 个候选全部已被删除，不归零的话它会「以 17 票胜出」
-    # 然后在 install_mayor 阶段流会 —— 公告对玩家是误导的（明明有得票最高者，
-    # 却说本案流会）。归零让流会的原因在票面上就成立。
+    # 生产那张镇长选举的 4 个候选全部已被删除。光归零 npc_votes 不够——本分支
+    # 让投票按钮首次真正出现在 DOM 里，一张真人 Vote 行就能让 argmax 落在一个
+    # 不存在的人身上（`opts[win]["won"] = True` 从不看候选人是否存在）。所以
+    # 除了归零，还把这类选项整体逐出胜者候选集（见下面的 dead_person_opts）。
     live_slugs = set((await db.execute(select(Resident.slug))).scalars().all())
+    dead_person_opts: set[int] = set()
     for i, o in enumerate(opts):
         eff = (o or {}).get("effect")
         if not isinstance(eff, dict) or eff.get("type") not in _PERSON_TYPES:
             continue
         target = eff.get("slug")
-        if target and target not in live_slugs and int(o.get("npc_votes", 0)):
-            logger.warning(
-                "poll %s option %d: candidate %r no longer exists — zeroing its "
-                "%d votes before the tally", poll.id, i, target, o["npc_votes"])
-            o["npc_votes"] = 0
+        if target and target not in live_slugs:
+            dead_person_opts.add(i)
+            if int(o.get("npc_votes", 0)):
+                logger.warning(
+                    "poll %s option %d: candidate %r no longer exists — zeroing its "
+                    "%d votes before the tally", poll.id, i, target, o["npc_votes"])
+                o["npc_votes"] = 0
 
     rows = (await db.execute(
         select(Vote.option_idx, func.count()).where(Vote.poll_id == poll.id).group_by(Vote.option_idx)
@@ -561,7 +565,23 @@ async def _close_one(db, poll: Poll) -> None:
     if not tally:
         await db.commit()
         return
-    win = max(range(len(tally)), key=lambda i: (tally[i], -i))
+
+    # 胜者只能从「候选人仍存在」的选项里选——一张真人票也不能把一个已被物理
+    # 删除的人抬上「当选」。dead_person_opts 之外全是活选项（非人效果、或
+    # slug 仍在 residents 表的人效果）。
+    live_opts = [i for i in range(len(tally)) if i not in dead_person_opts]
+    win = max(live_opts, key=lambda i: (tally[i], -i)) if live_opts else None
+
+    if win is None:
+        # 有效候选全灭：一个能当选的人都没有，归零也没意义——不写任何 won。
+        poll.options_json = opts
+        flag_modified(poll, "options_json")
+        await db.commit()
+        await _clerk_announce(
+            db, f"镇务结果:{poll.question}",
+            f"「{poll.question}」投票结束,有效候选均已不在名册上,本案流会。",
+        )
+        return
 
     # S2-5 track B: a tier-governed poll must clear its threshold (and, at the
     # absolute-majority tier, quorum) before the winner is executed. Gate off →
@@ -582,6 +602,19 @@ async def _close_one(db, poll: Poll) -> None:
             db, f"镇务结果:{poll.question}",
             f"「{poll.question}」投票结束,「{opts[win]['label']}」得 {tally[win]} 票,"
             f"{_VERDICT_NOTE.get(verdict, '未达生效条件')},本案流会,政策维持原状。",
+        )
+        return
+
+    if tally[win] <= 0:
+        # 纯 plurality 路径今天没有 no_votes 保护（那是 _policy_threshold_verdict
+        # 的专利，且只在 polis_policy_approval_enabled=True 时才跑）——零票不该
+        # 有胜者，index 0 的 argmax 兜底会把「谁都没投」说成「klaus 以 0 票胜出」。
+        poll.options_json = opts
+        flag_modified(poll, "options_json")
+        await db.commit()
+        await _clerk_announce(
+            db, f"镇务结果:{poll.question}",
+            f"「{poll.question}」投票结束,无人投票,本案流会。",
         )
         return
 
