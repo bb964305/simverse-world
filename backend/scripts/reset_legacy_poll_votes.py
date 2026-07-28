@@ -15,11 +15,22 @@
 legacy 格式下**所有**投票人的归属都是未知的,不只是幽灵的,所以只能把那张 poll
 的 NPC 票整体清零重投,不能选择性减票。
 
-**关票时刻不是 ``closes_at``。** 同 ``postpone_open_polls.py`` 的提醒:
-``close_due_polls`` 的唯一调用方是夜间 cron(每天 Beijing 07:00 = 23:00 UTC),
-判据是 ``if due > now: continue``。重置之后,下一轮 ``run_npc_voting`` 在**当天
-23:00 UTC 之前**的任意一次夜间任务里就会用当前名册从零重投,不必等到
-``closes_at``。
+**不止两张建筑议案。** :func:`find_targets` 按格式查,不按 poll 类型查——生产
+现存的 3 张 open poll(两张建筑议案 + 一张镇长选举)如果都是 legacy list 格式,
+镇长选举那张也会被这次重置一并清零重投。这符合脚本"目标集自查、不接受调用
+方传 id 列表"的纪律,且结果无害(``_PERSON_TYPES`` 校验下 4 个候选人当前都不
+存在于 ``residents`` 表,选举结票本来就会走"无人当选"分支,清零重投不改变这
+个结局),但运维在跑之前应当知道这一点,不要误以为脚本只碰两张建筑议案。
+
+**关票时刻不是 ``closes_at``,且脚本必须在 07-31 23:00 UTC 之前落地。** 同
+``postpone_open_polls.py`` 的提醒:``close_due_polls`` 的唯一调用方是夜间 cron
+(每天 Beijing 07:00 = 23:00 UTC),判据是 ``if due > now: continue``。夜间 cron
+里 ``close_due_polls`` 排在 ``run_npc_voting`` 之前(见
+``app/tasks/nightly_cron.py``)——重置之后,当晚同一次夜间任务的
+``run_npc_voting`` 就会用当前名册从零重投,不必等到 ``closes_at``。但这意味着
+本脚本(``--apply``)**必须在 07-31 23:00 UTC 之前**执行完:如果晚于这个时刻,
+当晚的 ``close_due_polls``/``run_npc_voting`` 已经用旧的幽灵票跑过一轮,要再
+等到下一个夜间窗口才有下一次重投机会。
 
 **纪律**(与 ``postpone_open_polls.py`` 同源,``docs/PARALLEL_WORKSTREAMS_2026-07-27.md``
 的三条硬约束):
@@ -160,8 +171,13 @@ async def reset_legacy_votes(
         report.append(entry)
 
     if apply:
-        await cs.set(MARKER_KEY, current_ids, group=MARKER_GROUP,
-                     updated_by="reset_legacy_poll_votes")
+        if current_ids:
+            await cs.set(MARKER_KEY, current_ids, group=MARKER_GROUP,
+                         updated_by="reset_legacy_poll_votes")
+        # current_ids 为空(目标集已收敛)时不写标记——保留上一次实际重置过的
+        # 那批 id。防呆能力不受影响:上面的拒绝检查靠 `current_ids and ...`
+        # 短路,空目标集永远放行,与是否写标记无关;不写只是不让"这次收敛到
+        # 零"把"上次到底重置了哪几张 poll"这条审计线索覆盖成 []。
         await db.commit()
     return report
 

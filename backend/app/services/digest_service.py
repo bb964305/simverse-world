@@ -49,9 +49,18 @@ DIGEST_MIN_BODY_CHARS = 1
 
 
 def _digest_body(content: str) -> str:
-    """去掉首行「# 标题」（如果有）之后剩余的正文，已 strip。"""
-    body = content
-    if body.lstrip().startswith("#"):
+    """去掉首行「# 标题」（如果有）之后剩余的正文，已 strip。
+
+    必须先 strip() 整个字符串，再判断/切分——不能对 lstrip() 过的字符串判断
+    是否以 "#" 开头，却对未 strip 的原始字符串按物理行 splitlines()[1:] 切。
+    旧写法正是这样：``"\\n# 今日头条"`` 的 lstrip() 版本以 "#" 开头判为真，
+    但 splitlines()[1:] 砍掉的是原字符串的物理第一行——那是前导换行留下的
+    空行，标题行原封不动地留在结果里，body 变成 "# 今日头条"（长度 6），
+    骗过 has_real_digest_body 的守卫。先 strip() 让"判断用的字符串"和"用来
+    切分的字符串"是同一个，物理第一行与逻辑第一行才会一致。
+    """
+    body = content.strip()
+    if body.startswith("#"):
         body = "\n".join(body.splitlines()[1:])
     return body.strip()
 
@@ -242,17 +251,35 @@ async def _pin_digest_bulletin(db: AsyncSession, digest: Digest) -> None:
     is left alone rather than duplicated. A genuinely different digest (new
     day, or a refill that composed different text) still unpins the old post
     and pins a fresh one, same as before.
+
+    Load-bearing: the idempotency check below reads ALL currently-pinned
+    ``kind="digest"`` rows (``scalars().all()``), not a single row via
+    ``scalar_one_or_none()``. ``script_service.settle_due_seasons`` inserts its
+    own ``kind="digest", pinned=True`` finale-recap post on season close and
+    never unpins the standing digest pin — season length is 28 days by
+    default, so by day 28 the table already holds ≥2 pinned ``kind="digest"``
+    rows. ``scalar_one_or_none()`` raises ``MultipleResultsFound`` the moment
+    that happens; the caller's blanket ``except Exception`` swallows it, and
+    because the raise happens BEFORE the unconditional unpin UPDATE below, the
+    self-heal that UPDATE used to provide never runs either — the two pinned
+    rows stay stuck forever and every digest after that silently stops
+    reaching the bulletin board. Below, the idempotency short-circuit only
+    fires when there is EXACTLY one pinned row and it matches byte-for-byte;
+    any other shape (zero, one-but-different, or many) falls through to the
+    same unconditional "unpin every pinned digest, then pin the new one" path
+    that ran before this idempotency check was added, so a table full of N≥2
+    stale pinned rows still converges to exactly 1 without raising.
     """
     from sqlalchemy import update
     from app.models.bulletin_post import BulletinPost
     from app.services.bulletin_service import create_post
 
-    current_pin = (await db.execute(
+    current_pins = (await db.execute(
         select(BulletinPost).where(BulletinPost.kind == "digest", BulletinPost.pinned.is_(True))
-    )).scalar_one_or_none()
-    if (current_pin is not None
-            and current_pin.title == digest.title
-            and current_pin.content_md == digest.content_md):
+    )).scalars().all()
+    if (len(current_pins) == 1
+            and current_pins[0].title == digest.title
+            and current_pins[0].content_md == digest.content_md):
         return  # already pinned, byte-identical — a repeat call, nothing to do
 
     await db.execute(

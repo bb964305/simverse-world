@@ -40,9 +40,11 @@ const CIVIC_POLL = {
 // PollCard 的防御分支（typeof opt === 'string' 兜字符串选项、
 // opt?.label ?? `选项 ${idx+1}` 兜缺 label）此前没有任何测试覆盖。这里造一个
 // 未过 public_option 清洗 / 旧后端才会吐出的形状：一个选项挂着 effect /
-// _npc_voters / _proposer_slug 等内部 blob，另一个是历史 string[] 数据
-// （test_script_season.py 手工造的季就是 ["管家", "园丁"]）。存在理由是
-// 「后端未部署新版本 / 回滚时页面不能崩」，值得钉住。
+// _npc_voters / _proposer_slug 等内部 blob，一个是历史 string[] 数据
+// （test_script_season.py 手工造的季就是 ["管家", "园丁"]），第三个是对象但
+// 缺 label（`opt?.label ?? \`选项 ${idx + 1}\`` 分支此前只覆盖了
+// typeof opt === 'string'，没有任何用例覆盖"是对象但没有 label"这一半）。
+// 存在理由是「后端未部署新版本 / 回滚时页面不能崩」，值得钉住。
 const LEGACY_SHAPE_POLL = {
   id: 'poll-legacy',
   season_id: null,
@@ -54,6 +56,7 @@ const LEGACY_SHAPE_POLL = {
       _npc_voters: ['a', 'b'], _proposer_slug: 'prop', _eligible_at_open: ['a', 'b', 'c'],
     },
     '园丁',
+    { npc_votes: 3 },
   ],
   closes_at: null,
   is_election: false,
@@ -130,6 +133,9 @@ describe('SeasonsPage', () => {
     expect(await screen.findByRole('button', { name: /赞成兴建/ })).toBeInTheDocument()
     // Raw string option (typeof opt === 'string' branch) renders as-is.
     expect(screen.getByRole('button', { name: '园丁' })).toBeInTheDocument()
+    // Object option missing `label` (opt?.label ?? `选项 ${idx+1}` branch)
+    // falls back to the positional placeholder — it's the 3rd option (idx 2).
+    expect(screen.getByRole('button', { name: '选项 3' })).toBeInTheDocument()
     // None of the internal fields leak into the rendered DOM.
     expect(screen.queryByText(/_npc_voters/)).not.toBeInTheDocument()
     expect(screen.queryByText(/dynamic_location/)).not.toBeInTheDocument()

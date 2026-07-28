@@ -148,6 +148,36 @@ async def test_apply_rerun_converges_to_an_empty_target_set(db_session):
     assert opts[0]["_npc_voters"] == {}
 
 
+# ── ⑤b 空目标集重跑不得抹掉审计标记 ────────────────────────────────────
+
+@pytest.mark.anyio
+async def test_rerun_on_a_converged_empty_target_set_preserves_the_audit_marker(db_session):
+    """Minor 回归:``current_ids`` 为空时(目标集已收敛)不该无条件覆盖标记。
+
+    第一次 --apply 真的重置了一批 id 并把标记写成那批 id;第二次 --apply 此时
+    目标集已收敛为空(那张 poll 变成了 dict 格式,不再是目标)。旧代码
+    ``cs.set(MARKER_KEY, current_ids, ...)`` 无条件执行,会把标记覆盖成
+    ``[]``,丢失"上次实际重置了哪几张 poll"这条审计信息(防呆能力不受损——
+    ``[] is not None`` 且下次目标集非空时 ``sorted([]) != 新目标`` 仍会拒绝,
+    但审计线索没了)。标记应当保留第一次那批 id。
+    """
+    legacy = _legacy_poll("存量议题")
+    db_session.add(legacy)
+    await db_session.commit()
+
+    first = await reset_legacy_votes(db_session, apply=True)
+    first_marker = await ConfigService(db_session).get(MARKER_KEY)
+    assert first_marker == [legacy.id]
+    assert [e["action"] for e in first] == ["reset"]
+
+    second = await reset_legacy_votes(db_session, apply=True)  # 目标集已收敛为空
+
+    assert second == []
+    second_marker = await ConfigService(db_session).get(MARKER_KEY)
+    assert second_marker == [legacy.id], (
+        "空目标集重跑不该把标记覆盖成 []——必须保留上一次实际重置过的那批 id")
+
+
 # ── ⑥ 不可重放:目标集变了且无 --force-rerun 必须拒绝,且是真 no-op ─────
 
 @pytest.mark.anyio

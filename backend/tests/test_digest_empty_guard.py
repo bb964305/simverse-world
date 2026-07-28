@@ -226,6 +226,86 @@ async def test_pin_digest_bulletin_still_repins_for_a_genuinely_different_digest
 
 
 @pytest.mark.anyio
+async def test_pin_digest_bulletin_recovers_when_already_two_pins_exist(db_session):
+    """final review Important 回归：``script_service.settle_due_seasons`` 的
+    赛季落幕公告插入一条 ``kind="digest", pinned=True`` 的帖子，却不 unpin
+    任何已置顶的 digest（见 script_service.py 里那段 ``db.add(BulletinPost(
+    kind="digest", ..., pinned=True, ...))``）。默认 28 天季长下，部署后第
+    一次赛季落幕就会让库里同时存在 ≥2 条 ``kind="digest" AND pinned=True``
+    的行——这是本测试预置的库状态。
+
+    修复前的 ``scalar_one_or_none()`` 遇到这种状态会抛
+    ``sqlalchemy.exc.MultipleResultsFound``；抛在无差别 unpin UPDATE 之前，
+    所以那条本可以自愈的 UPDATE 永远跑不到，两条置顶行永久卡死，此后每天
+    的日报都不再能上公告板。函数必须：不抛异常、且收敛到恰好 1 条置顶
+    （新日报）。
+    """
+    from app.services import digest_service as ds
+    from app.models.bulletin_post import BulletinPost
+
+    # 模拟赛季落幕后的库状态：两条 kind="digest" pinned=True 的历史帖子
+    # （一条是赛季落幕公告，一条是更早的一条村落日报置顶帖）。
+    db_session.add_all([
+        BulletinPost(kind="digest", author_user_id=None, pinned=True,
+                     title="赛季一 · 赛季落幕", content_md="# 赛季一 · 赛季落幕\n落幕公告正文。"),
+        BulletinPost(kind="digest", author_user_id=None, pinned=True,
+                     title="旧日报", content_md="# 旧日报\n更早一天的历史正文。"),
+    ])
+    await db_session.commit()
+
+    digest = Digest(scope="village", date=date(2026, 7, 28), user_id="", title="今日新日报",
+                    content_md="# 今日新日报\n今天的新日报正文，长度足够超过守卫阈值。", stats_json={})
+    db_session.add(digest)
+    await db_session.commit()
+    await db_session.refresh(digest)
+
+    # 修复前：这一行直接抛 MultipleResultsFound（不经过任何 try/except 吞掉）。
+    await ds._pin_digest_bulletin(db_session, digest)
+
+    posts = (await db_session.execute(
+        select(BulletinPost).where(BulletinPost.kind == "digest", BulletinPost.pinned.is_(True))
+    )).scalars().all()
+    assert len(posts) == 1, "两条历史置顶行必须收敛到恰好一条，而不是继续卡在 2 条"
+    assert posts[0].title == "今日新日报"
+
+
+@pytest.mark.anyio
+async def test_generate_village_digest_still_reaches_the_bulletin_after_a_season_finale(db_session):
+    """端到端版本：走 generate_village_digest（生产的真实调用路径），而不是
+    直接调 _pin_digest_bulletin。这里的 ``_pin_digest_bulletin`` 调用被
+    generate_village_digest 自己的 ``except Exception: logger.warning(...)``
+    包着（这层包裹本身没变，也不该变——bulletin 失败不该打断日报生成），所以
+    这条测试即便在修复前也不会向上抛异常；它钉住的是可观测的最终状态：
+    修复前置顶数会停在 2（unpin 从未跑到），修复后必须是 1。
+    """
+    from app.services import digest_service as ds
+    from app.models.bulletin_post import BulletinPost
+
+    db_session.add_all([
+        BulletinPost(kind="digest", author_user_id=None, pinned=True,
+                     title="赛季一 · 赛季落幕", content_md="# 赛季一 · 赛季落幕\n落幕公告正文。"),
+        BulletinPost(kind="digest", author_user_id=None, pinned=True,
+                     title="旧日报", content_md="# 旧日报\n更早一天的历史正文。"),
+    ])
+    await db_session.commit()
+
+    day = date(2026, 7, 28)
+    await _material(db_session, day)
+    with patch.object(ds, "compose_digest",
+                      AsyncMock(return_value=(
+                          "今日新日报",
+                          "# 今日新日报\n今天的新日报正文，长度足够超过守卫阈值。",
+                      ))):
+        await ds.generate_village_digest(db_session, day)
+
+    posts = (await db_session.execute(
+        select(BulletinPost).where(BulletinPost.kind == "digest", BulletinPost.pinned.is_(True))
+    )).scalars().all()
+    assert len(posts) == 1, "修复前：MultipleResultsFound 被吞掉，unpin 跑不到，置顶数仍是 2"
+    assert posts[0].title == "今日新日报"
+
+
+@pytest.mark.anyio
 async def test_cold_start_fallback_is_still_allowed_to_persist(db_session):
     """冷启动兜底文案不是「空」—— 它有正文，必须照常落库。"""
     from app.services import digest_service as ds
@@ -251,3 +331,24 @@ async def test_no_module_bypasses_the_chat_wrapper_in_digest(db_session):
     assert ".messages.create(" not in src, (
         "digest 路径必须走 app.llm.client.chat()——它是全仓唯一会加 "
         "thinking={'type':'disabled'} 的地方")
+
+
+@pytest.mark.parametrize("degenerate_title_only", [
+    "# 今日头条",
+    "\n# 今日头条",
+    "  \n# 今日头条",
+])
+def test_has_real_digest_body_rejects_title_only_content_with_leading_whitespace(degenerate_title_only):
+    """Minor 回归：``_digest_body`` 曾经用 ``body.lstrip().startswith("#")``
+    判断（忽略前导空白），却用 ``body.splitlines()[1:]``（不忽略前导空白）
+    切分——两处标准不一致。``"\\n# 今日头条"`` 这种带前导换行的退化行，
+    lstrip() 后的判断认为第一行是标题行，但 splitlines()[1:] 砍掉的其实是
+    原字符串里那个前导空行，标题行原封不动地留在结果里，长度变成 6，骗过
+    ``has_real_digest_body`` 的守卫——可达性不高（compose_digest 的返回值
+    已 .strip()），但同一个判据同时被 generate_village_digest 的早返回和
+    refill_empty_digests.py 的 find_targets 使用，库里若真有这种退化行就永远
+    挑不出来、填不回去。三种前导空白形态都必须和干净的 "# 今日头条" 一样被
+    判为「没有实质正文」。
+    """
+    from app.services import digest_service as ds
+    assert ds.has_real_digest_body(degenerate_title_only) is False
