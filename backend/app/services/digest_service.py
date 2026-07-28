@@ -12,8 +12,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.llm.client import get_client
-from app.llm.metering import record_usage
+from app.llm.client import chat as llm_chat
+from app.llm.metering import Meter
 from app.models.digest import Digest
 from app.models.memory import Memory
 from app.models.personality_history import PersonalityHistory
@@ -28,12 +28,20 @@ DIGEST_SYSTEM = (
     "要求：以「# 」开头写一个标题，然后 3-5 段，总字数不超过 600 字，中文，突出居民故事与小镇氛围。"
 )
 
+#: DIGEST_SYSTEM 要的是「3-5 段、不超过 600 字中文 + 标题」，800 从一开始就
+#: 不够；叠上没关掉的 thinking 直接把输出吃光（生产 12 天里 7 天触顶 801，
+#: 其中 4 天正文长度为 0）。
+DIGEST_MAX_TOKENS = 2000
+WEEKLY_MAX_TOKENS = 1500
 
-def _extract_text(response) -> str:
-    for block in response.content:
-        if hasattr(block, "text"):
-            return block.text
-    return ""
+
+class DigestComposeEmpty(RuntimeError):
+    """LLM 返回了空正文。
+
+    宁可让 nightly_cron 的 try/except 记一条 error，也不要把空串写进
+    digests —— (scope, date, user_id) 唯一约束 + 幂等早返回会把这一天
+    永久钉死，玩家连着几天打开日报都是空白面板。
+    """
 
 
 async def gather_material(db: AsyncSession, day: date_type) -> dict:
@@ -151,14 +159,27 @@ def _build_prompt(day: date_type, material: dict) -> str:
 
 
 async def compose_digest(day: date_type, material: dict) -> tuple[str, str]:
-    client = get_client("system")
-    model = settings.effective_model
-    resp = await client.messages.create(
-        model=model, max_tokens=800, system=DIGEST_SYSTEM,
-        messages=[{"role": "user", "content": _build_prompt(day, material)}],
-    )
-    text = _extract_text(resp).strip()
-    await record_usage("digest", model=model, owner="system", response=resp)
+    """一次 LLM 调用产出（标题, 正文）。
+
+    必须走 ``app.llm.client.chat()``：它是全仓唯一会加
+    ``thinking={"type": "disabled"}`` 的地方（client.py:148-149，条件是
+    ``not settings.llm_thinking``，默认 False），也统一了 llm_usage 计量。
+    直调 ``messages.create`` 时推理会把 max_tokens 吃光，响应里没有可用的
+    text block。
+
+    ``model`` 显式传 ``effective_model``：``chat()`` 对 ``owner="system"``
+    默认解析的是 ``settings.background_model``（client.py:140），今天两者
+    恰好相等（生产未设 BACKGROUND_LLM_MODEL），但日报是玩家可见内容，模型
+    不该跟着后台路由走。
+    """
+    text = (await llm_chat(
+        DIGEST_SYSTEM,
+        [{"role": "user", "content": _build_prompt(day, material)}],
+        model=settings.effective_model,
+        max_tokens=DIGEST_MAX_TOKENS,
+        owner="system",
+        meter=Meter(scenario="digest"),
+    )).strip()
     title = f"{day} 村落日报"
     if text.startswith("#"):
         first_line = text.splitlines()[0].lstrip("# ").strip()
@@ -204,8 +225,10 @@ async def generate_village_digest(db: AsyncSession, day: date_type | None = None
     existing = (await db.execute(
         select(Digest).where(Digest.scope == "village", Digest.date == day, Digest.user_id == "")
     )).scalar_one_or_none()
-    if existing is not None:
-        return existing  # idempotent
+    # 幂等的判据是「已经有正文」，不是「行存在」：存量空行（生产 07-17/24/25/26
+    # 四天）必须能被重新生成填回去，否则那几天永远是空白面板。
+    if existing is not None and (existing.content_md or "").strip():
+        return existing
 
     material = await gather_material(db, day)
     if not material["has_material"]:
@@ -214,19 +237,33 @@ async def generate_village_digest(db: AsyncSession, day: date_type | None = None
     else:
         title, content = await compose_digest(day, material)
 
-    digest = Digest(
-        scope="village", date=day, user_id="", title=title,
-        content_md=content, stats_json=material["stats"],
-    )
-    db.add(digest)
-    try:
+    if not content.strip():
+        logger.error("digest compose returned empty text for %s (stats=%s)",
+                     day, material["stats"])
+        raise DigestComposeEmpty(f"empty digest body for {day}")
+
+    if existing is not None:
+        # 回填已有的空行 —— UPDATE 而不是 INSERT，避开唯一约束。
+        existing.title = title
+        existing.content_md = content
+        existing.stats_json = material["stats"]
         await db.commit()
-    except IntegrityError:
-        await db.rollback()
-        return (await db.execute(
-            select(Digest).where(Digest.scope == "village", Digest.date == day, Digest.user_id == "")
-        )).scalar_one()
-    await db.refresh(digest)
+        await db.refresh(existing)
+        digest = existing
+    else:
+        digest = Digest(
+            scope="village", date=day, user_id="", title=title,
+            content_md=content, stats_json=material["stats"],
+        )
+        db.add(digest)
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            return (await db.execute(
+                select(Digest).where(Digest.scope == "village", Digest.date == day, Digest.user_id == "")
+            )).scalar_one()
+        await db.refresh(digest)
 
     # A5→A4: pin the new digest on the bulletin board (best-effort; a bulletin
     # failure must never break digest generation).
@@ -325,14 +362,14 @@ async def generate_weekly_recap(db: AsyncSession, user_id: str) -> Digest:
         material = (f"对话 {chat_count} 次 / {turns} 轮，认识了 {distinct} 位居民；"
                     f"被写进 {len(mem_rows)} 条记忆；解锁成就 {ach_count} 个。\n"
                     + "记忆摘录：\n" + "\n".join(f"- {m}" for m in mem_rows))
-        client = get_client("system")
-        model = settings.effective_model
-        resp = await client.messages.create(
-            model=model, max_tokens=600, system=WEEKLY_SYSTEM,
-            messages=[{"role": "user", "content": f"本周人格标签：{tag}\n{material}"}],
-        )
-        body = _extract_text(resp).strip()
-        await record_usage("weekly_recap", model=model, owner="system", response=resp)
+        body = (await llm_chat(
+            WEEKLY_SYSTEM,
+            [{"role": "user", "content": f"本周人格标签：{tag}\n{material}"}],
+            model=settings.effective_model,
+            max_tokens=WEEKLY_MAX_TOKENS,
+            owner="system",
+            meter=Meter(scenario="weekly_recap"),
+        )).strip()
         title = f"{week_key} 本周回顾"
         content = f"# {title}\n\n{body}\n\n本周人格标签：**{tag}**"
 
