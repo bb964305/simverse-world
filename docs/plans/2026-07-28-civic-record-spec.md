@@ -100,7 +100,9 @@ B_triggered = (任内镇库最低水位 < 0) 或 (期末余额 < 期初余额 ×
 
 `g(C)`：`natural → +1`、`vacated → 0`、`revoked → -1`。
 
-`W_A` / `W_C` / `RECORD_MIN` / `RECORD_MAX` 全部由 shadow 定值。
+`W_A` / `W_C` 由 shadow 定值。
+
+`RECORD_MIN` / `RECORD_MAX` **不独立标定，由 W 派生**：`RECORD_MAX = W_A + W_C`（A、C 双满）、`RECORD_MIN = -W_C`（A 为 0 且被撤）。独立标定它们会与 W 打架——clamp 收得比可达上界还紧，等于悄悄改了权重；收得更宽则永不生效。所以需要 shadow 反推的**只有四个**：`W_A` / `W_C` / `A_REF` / `B_RUIN_RATIO`。
 
 ## 3. 合流点：`vote_trust_delta`，不进 `_score_all`
 
