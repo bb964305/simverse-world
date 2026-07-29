@@ -29,13 +29,18 @@ export interface SpriteTemplate {
   tags: string[]
 }
 
+export interface EconomySettings {
+  soul_coin_balance: number
+  low_balance_alert: number
+}
+
 export interface AllSettings {
   account: AccountSettings
   character: CharacterSettings | null
   interaction: Record<string, unknown>
   privacy: Record<string, unknown>
   llm: Record<string, unknown>
-  economy: Record<string, unknown>
+  economy: EconomySettings
 }
 
 export function getSettings(): Promise<AllSettings> {
@@ -98,7 +103,7 @@ export function testLLMConnection(data: {
   return apiFetch('/settings/llm/test', { method: 'POST', body: JSON.stringify(data) })
 }
 
-export function updateEconomy(data: { low_balance_alert?: number }): Promise<{ economy: Record<string, unknown> }> {
+export function updateEconomy(data: { low_balance_alert?: number }): Promise<{ economy: EconomySettings }> {
   return apiFetch('/settings/economy', { method: 'PATCH', body: JSON.stringify(data) })
 }
 

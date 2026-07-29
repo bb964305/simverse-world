@@ -4,10 +4,7 @@ import { FieldLabel, SaveButton, SectionCard, SectionHeader } from './shared'
 import { useSectionForm } from './useSectionForm'
 
 export function EconomySection({ settings }: { settings: AllSettings }) {
-  const economy = settings.economy as {
-    balance?: number
-    low_balance_alert?: number
-  }
+  const economy = settings.economy
 
   const [alertThreshold, setAlertThreshold] = useState(
     String(economy.low_balance_alert ?? '')
@@ -18,7 +15,7 @@ export function EconomySection({ settings }: { settings: AllSettings }) {
     await updateEconomy({ low_balance_alert: isNaN(parsed) ? undefined : parsed })
   })
 
-  const balance = economy.balance
+  const balance = economy.soul_coin_balance
 
   return (
     <SectionCard>

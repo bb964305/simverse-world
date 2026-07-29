@@ -98,6 +98,11 @@ class EconomyUpdateRequest(BaseModel):
     low_balance_alert: int | None = Field(default=None, ge=0)
 
 
+class EconomySettingsResponse(BaseModel):
+    soul_coin_balance: int
+    low_balance_alert: int
+
+
 # ─── Composite ───────────────────────────────────────────────────
 
 class AllSettingsResponse(BaseModel):
@@ -106,4 +111,4 @@ class AllSettingsResponse(BaseModel):
     interaction: dict
     privacy: dict
     llm: dict
-    economy: dict
+    economy: EconomySettingsResponse
