@@ -80,11 +80,41 @@ git archive --format=tar master backend | ssh vm212 'tar -x -C /opt/skills-world
 容器重建**独占一次变更**，不与数据操作混做。
 
 ```bash
-ssh vm212 'cd /opt/skills-world/deploy && docker compose up -d --build api agent-worker'
+# --wait：等 api 的 healthcheck 真正通过再返回，而不是"容器创建完"就返回
+ssh vm212 'cd /opt/skills-world/deploy && docker compose up -d --build --wait api agent-worker'
 
 # 迁移版本必须与部署前一致（本批次零迁移）
 ssh vm212 'cd /opt/skills-world/deploy && docker compose exec -T api alembic current'
 ```
+
+### ⚠️ 这条命令会连带触发 bootstrap
+
+`api` 的 `depends_on` 里有 `bootstrap: condition: service_completed_successfully`，所以 `up api` **必然先跑一次 bootstrap 容器**。bootstrap 会执行 `reset_builtin_residents`——就是 2026-07-25 删掉 12 个玩家角色的那类脚本。
+
+2026-07-29 那次部署实测是安全的 no-op（日志 `No old built-in residents found.` + `Seeded 0 new residents.`，居民数 `npc=11/player=2` 未变），因为当前 NPC 全在 `PRESET_CHARACTERS` 名册里。**但这不是永久保证**：一旦世界里出现不在名册里的 system NPC，这次部署就会删掉它们。
+
+每次部署后**必须**立刻核对：
+
+```bash
+ssh vm212 'cd /opt/skills-world/deploy && docker compose logs --tail=30 bootstrap 2>&1 | grep -iE "found|seeded|removed|delete"'
+ssh vm212 'docker exec deploy-db-1 psql -U postgres -d skills_world -c \
+  "SELECT resident_type, count(*) FROM residents GROUP BY resident_type;"'
+```
+
+对不上就立刻用 §2 的 DB 备份回滚。
+
+### healthcheck 能做什么、不能做什么
+
+`api` 服务此前是**唯一没有 healthcheck 的服务**（其余 9 个都有），于是 `docker compose up -d` 在容器**创建**后就返回，而容器的 CMD 要先跑完 `alembic upgrade head` 才轮到 uvicorn 绑端口。这中间端口已发布但连接被拒——cloudflared 把它转成一个**没有 CORS 头**的失败响应，浏览器则把它显示成 CORS 错误。E2E-06 最初被误判成"CORS 配置不一致"就是这么来的（实测证明 CORS 头在所有能抵达 FastAPI 的路径上都稳定正确）。
+
+加上 healthcheck 之后：
+
+- **能**：`--wait` 会等到 API 真的能应答才返回，部署脚本不再"假完成"；容器状态里能看到 `healthy`/`unhealthy`；未来接监控有了抓手。
+- **不能**：**这不是零停机部署**。单容器 + 固定发布端口，`stop → start` 的间隙依然存在，只是从"停旧→构建→起新→迁移→就绪"缩短到"停旧→起新→迁移→就绪"（构建本来就在旧容器还活着的时候完成）。要真正消除窗口需要蓝绿（两个 API 服务 + 可切换的上游），那是独立的改造。
+
+**所以部署仍应挑低峰期。**
+
+探测命令用 python 而非 curl（镜像 `python:3.12-slim` 只额外装了 `gcc libpq-dev`，没有 curl/wget），并且显式 `ProxyHandler({})` 禁用代理——urllib 会读 `http_proxy` 环境变量，容器一旦继承到代理变量，回环探测就会被路由出去，把健康的 API 报成 unhealthy（本地已实测复现：清掉 `NO_PROXY` 后旧写法退出码 1、新写法 0）。
 
 ### 上线后 5 分钟内核查
 
