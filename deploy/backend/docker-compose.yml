@@ -106,6 +106,38 @@ services:
         source: ${LAB_ARTIFACT_RECEIPT_TRUST_HOST_DIR:-/dev/null}
         target: /run/secrets/lab-artifact-receipt-trust
         read_only: true
+    # E2E-06: the API was the only service here without a healthcheck, so
+    # `docker compose up -d` returned as soon as the container was *created* —
+    # not when it could actually serve. The container's CMD runs
+    # `alembic upgrade head` before uvicorn binds, so there is a real window
+    # where the port is published but every request is refused. cloudflared
+    # reaches the origin at 127.0.0.1:8100, and a refused connection produces a
+    # response with no CORS headers — which browsers report to the user as a
+    # CORS error, not as "backend down". That is why the symptom was originally
+    # misdiagnosed as inconsistent CORS configuration (it is not: the headers
+    # are stable and correct on every code path that reaches FastAPI).
+    #
+    # Probing with python because the image (python:3.12-slim + gcc/libpq-dev)
+    # ships neither curl nor wget. start_period covers the migration step so a
+    # slow `alembic upgrade` is not counted as a failure.
+    #
+    # ProxyHandler({}) is not optional: urllib honours http_proxy/https_proxy
+    # from the environment, so if this container ever inherits a proxy var the
+    # probe would be routed out to it and report a perfectly healthy API as
+    # unhealthy (observed locally — the same one-liner came back 403 through a
+    # dev proxy). A loopback readiness probe must never leave the container.
+    #
+    # NOTE: this makes readiness *observable* (and `up -d --wait` meaningful);
+    # it does NOT give zero-downtime deploys. A single container on a fixed
+    # published port still has a stop→start gap. Removing that gap needs blue-
+    # green (two API services + a switchable upstream), which is a separate
+    # change. See docs/runbooks/2026-07-29-p0-gameplay-deploy.md.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import sys,urllib.request as u; o=u.build_opener(u.ProxyHandler({})); sys.exit(0 if o.open('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
     networks:
       - default
       - lab-api-storage-egress

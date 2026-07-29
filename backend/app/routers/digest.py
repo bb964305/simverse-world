@@ -11,7 +11,7 @@ from fastapi import Request
 from app.database import get_db
 from app.models.digest import Digest
 from app.services.auth_service import get_current_user
-from app.services.digest_service import serialize, generate_weekly_recap
+from app.services.digest_service import serialize, generate_weekly_recap, has_real_digest_body
 
 router = APIRouter(prefix="/digest", tags=["digest"])
 
@@ -31,10 +31,16 @@ async def weekly_recap(request: Request, db: AsyncSession = Depends(get_db)):
 
 @router.get("/latest")
 async def latest(db: AsyncSession = Depends(get_db)):
-    d = (await db.execute(
+    """E2E-08 读取侧: 只按日期倒序会把生产实测的 5 条空正文行当成"最新日报"
+    原样返回给前端（比如 2026-07-28 那条），前端拿到非 null 对象就会渲染出
+    一片空白，而不是「还没有日报」的空态文案。这里跳过空正文行，回退到最近
+    一条有实质正文的；一条都没有则返回 None，让前端走空态分支。
+    """
+    rows = (await db.execute(
         select(Digest).where(Digest.scope == "village", Digest.user_id == "")
-        .order_by(Digest.date.desc()).limit(1)
-    )).scalar_one_or_none()
+        .order_by(Digest.date.desc())
+    )).scalars().all()
+    d = next((row for row in rows if has_real_digest_body(row.content_md or "")), None)
     return {"digest": serialize(d) if d else None}
 
 
@@ -47,4 +53,7 @@ async def by_date(date: str, db: AsyncSession = Depends(get_db)):
     d = (await db.execute(
         select(Digest).where(Digest.scope == "village", Digest.user_id == "", Digest.date == day)
     )).scalar_one_or_none()
+    # 存量空正文行（同上）：行存在但没有实质正文，对前端来说应当等同于不存在。
+    if d is not None and not has_real_digest_body(d.content_md or ""):
+        d = None
     return {"digest": serialize(d) if d else None}

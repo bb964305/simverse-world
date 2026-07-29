@@ -18,6 +18,7 @@ from app.schemas.settings import (
     LLMTestRequest,
     LLMTestResponse,
     EconomyUpdateRequest,
+    EconomySettingsResponse,
     AllSettingsResponse,
 )
 from app.services.settings_service import merge_settings_json, build_settings_defaults
@@ -82,6 +83,20 @@ def test_economy_update_threshold():
 
     with pytest.raises(ValidationError):
         EconomyUpdateRequest(low_balance_alert=-5)
+
+
+def test_economy_settings_response_requires_soul_coin_balance():
+    """
+    Contract guard for E2E-07: the frontend reads `economy.soul_coin_balance`
+    (not `economy.balance`) from GET /settings, so the response schema must
+    require the field rather than leaving it as an untyped dict where a typo
+    silently disappears.
+    """
+    resp = EconomySettingsResponse(soul_coin_balance=155, low_balance_alert=10)
+    assert resp.soul_coin_balance == 155
+
+    with pytest.raises(ValidationError):
+        EconomySettingsResponse(low_balance_alert=10)  # type: ignore[call-arg]
 
 
 def test_all_settings_response_structure():

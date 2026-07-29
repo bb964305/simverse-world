@@ -142,6 +142,7 @@ export function NpcTooltip() {
           <div style={{ color: '#fafafa', fontWeight: 700, fontSize: 14 }}>{npc.name}</div>
           <div style={{ color: '#71717a', fontSize: 12 }}>
             {npc.meta_json?.role ?? ''}
+            {npc.meta_json?.role && npc.meta_json?.sbti && ' · '}
             {npc.meta_json?.sbti && (
               <span style={{
                 marginLeft: 4, fontSize: 9, padding: '0px 4px', borderRadius: 3,

@@ -134,10 +134,10 @@
       "release_condition": "Credit LimeZu; keep the files within the Simverse project and do not offer them as a standalone asset download."
     },
     {
-      "file": "tilemap/interiors_pt3.png", "sha256_16": "93d523ee6297d54c", "bytes": 798927, "dims": "512x10032",
+      "file": "tilemap/interiors_pt3.png", "sha256_16": "10cb38adeb33eac4", "bytes": 586649, "dims": "512x10016",
       "pack": "LimeZu — Modern Interiors (interiors part 3)", "author_store": "LimeZu (itch.io)",
       "source_url": "https://limezu.itch.io/moderninteriors", "license": "see Room_Builder_32x32.png", "license_version": "itch.io listing verified 2026-07-25",
-      "modifications": "none (as committed 2026-07-06)", "commercial_use": "allowed", "derivative_use": "allowed",
+      "modifications": "cropped bottom 16px on 2026-07-29 (10032 -> 10016) so the height is an exact multiple of the 32px tile size; the trimmed strip held no tile referenced by tilemap.json (tilecount 5008 = 313 rows x 16 cols), and Phaser's Tileset.updateTileData warned on every scene create because 10032/32 = 313.5. Derivative use is permitted by the pack license.", "commercial_use": "allowed", "derivative_use": "allowed",
       "distribution_status": "allowed", "audit_status": "cleared", "authorization_ref": "project-owner-attestation-2026-07-25",
       "release_condition": "Credit LimeZu; keep the files within the Simverse project and do not offer them as a standalone asset download."
     },

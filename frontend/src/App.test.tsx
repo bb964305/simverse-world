@@ -4,6 +4,7 @@ import { cleanup, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { AppRoutes } from './App'
 import { useGameStore } from './stores/gameStore'
+import { checkOnboarding } from './services/api'
 
 vi.mock('./pages/GamePage', () => ({
   GamePage: () => <main data-testid="game-page">Game World</main>,
@@ -11,6 +12,17 @@ vi.mock('./pages/GamePage', () => ({
 
 vi.mock('./pages/ForgePage', () => ({
   ForgePage: () => <main data-testid="forge-page">Forge</main>,
+}))
+
+vi.mock('./pages/OnboardingPage', () => ({
+  OnboardingPage: () => <main data-testid="onboarding-page">Onboarding</main>,
+}))
+
+// HomeRoute (E2E-01) re-checks onboarding before rendering GamePage so a
+// player landing on "/" directly (bookmark, closed tab, browser back) can't
+// skip the resident picker. Stub the API call; individual tests override it.
+vi.mock('./services/api', () => ({
+  checkOnboarding: vi.fn(),
 }))
 
 const user = {
@@ -37,6 +49,12 @@ beforeEach(() => {
     wsStatus: 'connected',
     achievementToast: null,
     pendingEncounter: null,
+  })
+  // Default: onboarding already completed, so existing authenticated-route
+  // tests that don't care about onboarding keep seeing GamePage.
+  vi.mocked(checkOnboarding).mockReset().mockResolvedValue({
+    needs_onboarding: false,
+    player_resident_id: 'resident-1',
   })
 })
 
@@ -105,5 +123,61 @@ describe('public and authenticated routes', () => {
     expect(screen.queryByText('连接已断开，正在重连…')).not.toBeInTheDocument()
     expect(screen.queryByText('First Visit')).not.toBeInTheDocument()
     expect(screen.queryByText('你好')).not.toBeInTheDocument()
+  })
+})
+
+// E2E-01: landing directly on "/" (bookmark, closed tab, browser back) used
+// to skip onboarding entirely because HomeRoute never asked. It now re-runs
+// the same checkOnboarding call the /onboarding route makes.
+describe('HomeRoute onboarding gate', () => {
+  it('redirects to /onboarding when the backend says onboarding is needed', async () => {
+    vi.mocked(checkOnboarding).mockResolvedValue({ needs_onboarding: true, player_resident_id: null })
+    useGameStore.setState({ user, token: 'token' })
+
+    renderRoute('/')
+
+    expect(await screen.findByTestId('onboarding-page')).toBeInTheDocument()
+    expect(screen.queryByTestId('game-page')).not.toBeInTheDocument()
+    expect(checkOnboarding).toHaveBeenCalledWith('token')
+  })
+
+  it('renders the game when the backend says onboarding is already done', async () => {
+    vi.mocked(checkOnboarding).mockResolvedValue({ needs_onboarding: false, player_resident_id: 'resident-1' })
+    useGameStore.setState({ user, token: 'token' })
+
+    renderRoute('/')
+
+    expect(await screen.findByTestId('game-page')).toBeInTheDocument()
+    expect(screen.queryByTestId('onboarding-page')).not.toBeInTheDocument()
+  })
+
+  it('fails open into the game when the onboarding check errors', async () => {
+    vi.mocked(checkOnboarding).mockRejectedValue(new Error('network error'))
+    useGameStore.setState({ user, token: 'token' })
+
+    renderRoute('/')
+
+    // Must not strand the player on the loading fallback just because the
+    // network call failed — fail open rather than fail closed.
+    expect(await screen.findByTestId('game-page')).toBeInTheDocument()
+    expect(screen.queryByTestId('onboarding-page')).not.toBeInTheDocument()
+  })
+
+  it('does not flash the game before the onboarding check resolves', async () => {
+    let resolveCheck!: (v: { needs_onboarding: boolean; player_resident_id: string | null }) => void
+    vi.mocked(checkOnboarding).mockReturnValue(
+      new Promise((resolve) => { resolveCheck = resolve })
+    )
+    useGameStore.setState({ user, token: 'token' })
+
+    renderRoute('/')
+
+    // While the check is in flight, neither the game nor onboarding should render.
+    expect(screen.queryByTestId('game-page')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('onboarding-page')).not.toBeInTheDocument()
+
+    resolveCheck({ needs_onboarding: true, player_resident_id: null })
+
+    expect(await screen.findByTestId('onboarding-page')).toBeInTheDocument()
   })
 })

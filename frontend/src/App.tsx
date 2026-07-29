@@ -1,5 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
-import { Suspense, lazy } from 'react'
+import { Suspense, lazy, useEffect, useState } from 'react'
 import { useGameStore } from './stores/gameStore'
 import { LoginPage } from './pages/LoginPage'
 import { AuthCallbackPage } from './pages/AuthCallbackPage'
@@ -7,6 +7,7 @@ import { AchievementToast } from './components/AchievementToast'
 import { ConnectionBanner } from './components/ConnectionBanner'
 import { EncounterCard } from './components/EncounterCard'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import { checkOnboarding } from './services/api'
 
 // Heavy pages are code-split so the login/first-load bundle stays lean:
 // GamePage pulls in Phaser (~1.4MB), ProfilePage pulls in @uiw/react-md-editor
@@ -29,9 +30,43 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
+// Landing directly on "/" (bookmark, closed tab, browser back) skips the
+// /login and /onboarding routes' checkOnboarding call entirely, so a player
+// who never picked a resident would fall straight into GamePage with the
+// default skin (E2E-01). Re-run the same check here before rendering the
+// game. Network failures fail OPEN (render GamePage) rather than stranding
+// an otherwise-fine player on a spinner.
 function HomeRoute() {
   const token = useGameStore((s) => s.token)
-  return token ? <GamePage /> : <LandingPage />
+  const [checking, setChecking] = useState(() => !!token)
+  const [needsOnboarding, setNeedsOnboarding] = useState(false)
+
+  useEffect(() => {
+    if (!token) {
+      setChecking(false)
+      return
+    }
+    let cancelled = false
+    setChecking(true)
+    checkOnboarding(token)
+      .then((result) => {
+        if (!cancelled) setNeedsOnboarding(result.needs_onboarding)
+      })
+      .catch(() => {
+        if (!cancelled) setNeedsOnboarding(false)
+      })
+      .finally(() => {
+        if (!cancelled) setChecking(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [token])
+
+  if (!token) return <LandingPage />
+  if (checking) return <PageFallback />
+  if (needsOnboarding) return <Navigate to="/onboarding" replace />
+  return <GamePage />
 }
 
 function LoginRoute() {

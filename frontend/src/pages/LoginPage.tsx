@@ -47,7 +47,7 @@ export function LoginPage() {
 
       const data = await response.json()
       setAuth(data.user, data.access_token)
-      navigate('/onboarding')
+      navigate('/onboarding', { replace: true })
     } catch {
       setError('网络错误，请重试')
     } finally {
