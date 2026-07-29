@@ -122,7 +122,28 @@ async def fire_due_scripts(db) -> list[dict]:
 # --------------------------------------------------------------------------- #
 # Polls                                                                        #
 # --------------------------------------------------------------------------- #
+def public_option(o) -> dict:
+    """把一个 poll option 投影成对外形状。
+
+    ``options_json`` 元素恒为 ``civic_service.propose`` 写的 dict，且 opts[0]
+    上挂着 ``effect`` / ``_proposer_slug`` / ``_npc_voters`` / ``_eligible_at_open``
+    / policy 的 ``_policy_*`` 等内部 blob —— 一个都不许出网。用白名单而不是
+    黑名单剔 ``_`` 前缀：黑名单挡不住将来新增的非下划线内部键（``won`` /
+    ``final_votes`` 就是现成的例子）。
+
+    string 分支只为兜历史/回滚数据（``tests/test_script_season.py`` 手工造的
+    season poll 用的就是 ``["管家", "园丁"]``）。
+    """
+    if isinstance(o, str):
+        return {"label": o, "npc_votes": 0}
+    return {
+        "label": str((o or {}).get("label", "")),
+        "npc_votes": int((o or {}).get("npc_votes") or 0),
+    }
+
+
 async def open_polls(db, season_id: str | None = None, user_id: str | None = None) -> list[dict]:
+    from app.services.election_service import ELECTION_TAG
     now = datetime.now(UTC)
     stmt = select(Poll).where(Poll.status == "open")
     if season_id is not None:
@@ -137,7 +158,11 @@ async def open_polls(db, season_id: str | None = None, user_id: str | None = Non
             continue
         out.append({
             "id": poll.id, "season_id": poll.season_id, "question": poll.question,
-            "options": poll.options_json or [], "closes_at": poll.closes_at.isoformat() if poll.closes_at else None,
+            "options": [public_option(o) for o in (poll.options_json or [])],
+            "closes_at": poll.closes_at.isoformat() if poll.closes_at else None,
+            # 选举与普通议案共用 polls 表；前端按这个标记拆区块，市政厅按它
+            # 过滤。判据集中在这一处，避免两边各写一次 startswith。
+            "is_election": bool((poll.question or "").startswith(ELECTION_TAG)),
         })
     # Let the UI restore the ✓已投 marker across reloads (my_vote = option idx).
     if user_id and out:
@@ -215,6 +240,48 @@ async def settle_season_polls(db, season_id: str) -> list[dict]:
     return results
 
 
+async def ensure_active_season(db) -> Season | None:
+    """无 active season 时开下一季，否则返回 None（幂等）。
+
+    E7：全仓此前没有任何生产代码会创建 Season 行，于是
+    ``season_service._active_season_id()`` 恒为 None，``add_points()`` 第一行
+    就 ``return 0`` —— 读端和记分端都在，缺的只是写端。
+
+    注意 ``Season.status`` 的列默认值是 ``"voting"`` 而不是 ``"active"``，
+    必须显式写；开完季要打掉 ``_active_season_id`` 的 60s 缓存，否则新赛季
+    最长 1 分钟不可见、记分继续丢。
+    """
+    from app.services.season_service import get_active_season, _invalidate_active
+
+    if not settings.season_auto_open:
+        return None
+    if await get_active_season(db) is not None:
+        return None
+
+    now = datetime.now(UTC)
+    n = (await db.execute(select(func.count()).select_from(Season))).scalar_one() + 1
+    # Clamp to >=1: a mistyped/misconfigured SEASON_LENGTH_DAYS<=0 would make
+    # ends_at<=starts_at, which the next 60s tick's settle_due_seasons reads
+    # as "already ended" — settling and re-opening a season every tick, each
+    # cycle posting a pinned finale bulletin (1440/day flood + table bloat).
+    days = max(1, int(settings.season_length_days))
+    season = Season(
+        title=f"第 {n} 季",
+        theme="",
+        status="active",
+        starts_at=now,
+        ends_at=now + timedelta(days=days),
+        payload_json={},
+    )
+    db.add(season)
+    await db.commit()
+    await db.refresh(season)
+    _invalidate_active()
+    logger.info("Opened season %s (%s → %s)", season.title,
+                season.starts_at.date(), season.ends_at.date())
+    return season
+
+
 # --------------------------------------------------------------------------- #
 # Finale                                                                       #
 # --------------------------------------------------------------------------- #
@@ -240,6 +307,8 @@ async def settle_due_seasons(db) -> list[dict]:
         merged["poll_results"] = poll_results
         season.payload_json = merged
         await db.commit()
+        from app.services.season_service import _invalidate_active
+        _invalidate_active()   # 结算完必须打掉缓存，否则 add_points 还往旧季记
 
         # A5-style finale recap on the bulletin (template, no LLM).
         try:

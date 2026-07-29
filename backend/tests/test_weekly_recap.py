@@ -40,10 +40,16 @@ async def test_cold_start_no_llm(db_session):
     user = await _user(db_session, "wk1@t.com")
     await _conv(db_session, user.id, "r1")  # only 1 chat < 2
 
-    with patch.object(ds, "get_client", return_value=_mock_client()) as gc:
+    called = []
+
+    async def _fake_chat(*a, **kw):
+        called.append(1)
+        return "不该被调用"
+
+    with patch.object(ds, "llm_chat", _fake_chat):
         d = await ds.generate_weekly_recap(db_session, user.id)
 
-    gc.return_value.messages.create.assert_not_called()
+    assert not called
     assert d.scope == "personal" and "太安静" in d.content_md
 
 
@@ -55,14 +61,18 @@ async def test_recap_one_llm_call_per_week(db_session):
     await _conv(db_session, user.id, "r2")
     await _conv(db_session, user.id, "r3")
 
-    client = _mock_client("你和三位居民建立了联系。")
-    with patch.object(ds, "get_client", return_value=client), \
-         patch.object(ds, "record_usage", new_callable=AsyncMock):
+    calls = []
+
+    async def _fake_chat(system_prompt, messages, model=None, max_tokens=None, **kw):
+        calls.append({"system": system_prompt, "messages": messages, "kw": kw})
+        return "你和三位居民建立了联系。"
+
+    with patch.object(ds, "llm_chat", _fake_chat):
         d1 = await ds.generate_weekly_recap(db_session, user.id)
         d2 = await ds.generate_weekly_recap(db_session, user.id)  # idempotent
 
     assert d1.id == d2.id
-    assert client.messages.create.await_count == 1  # only one LLM call this week
+    assert len(calls) == 1  # only one LLM call this week
     n = (await db_session.execute(select(func.count()).select_from(Digest))).scalar()
     assert n == 1
     assert d1.stats_json["distinct_residents"] == 3 and d1.stats_json["tag"]

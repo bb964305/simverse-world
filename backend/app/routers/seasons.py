@@ -1,13 +1,28 @@
 """Season endpoints (E12 leaderboard; C3 polls added later)."""
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.models.season import Season
 from app.services.auth_service import get_current_user
 from app.services.season_service import get_active_season, leaderboard
 
 router = APIRouter(prefix="/seasons", tags=["seasons"])
+
+
+@router.get("")
+async def list_seasons(db: AsyncSession = Depends(get_db)):
+    """公开的赛季列表（新的在前）——此前只有 /current，玩家看不到历史赛季。"""
+    rows = (await db.execute(
+        select(Season).order_by(Season.starts_at.desc()).limit(50)
+    )).scalars().all()
+    return {"seasons": [{
+        "id": s.id, "title": s.title, "theme": s.theme, "status": s.status,
+        "starts_at": s.starts_at.isoformat() if s.starts_at else None,
+        "ends_at": s.ends_at.isoformat() if s.ends_at else None,
+    } for s in rows]}
 
 
 @router.get("/current")

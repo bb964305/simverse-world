@@ -80,7 +80,7 @@ async def test_npc_voting_excludes_registered_player_residents(db_session):
 
     assert await civic_service.run_npc_voting(db_session) == 1
     await db_session.refresh(poll)
-    assert poll.options_json[0]["_npc_voters"] == [npc.slug]
+    assert set(poll.options_json[0]["_npc_voters"]) == {npc.slug}
     assert sum(int(o.get("npc_votes", 0)) for o in poll.options_json) == 1
 
 

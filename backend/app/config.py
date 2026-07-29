@@ -536,6 +536,32 @@ class Settings(BaseSettings):
     election_mayor_wage_bonus: float = 1.2
     election_interval_days: int = 28              # off-season election cadence (nightly trigger)        # winner's town-wide wage multiplier
 
+    # E9 辩论擂台生命周期推进（event_cron 每 60s 一轮）。两个窗口都从
+    # Debate.starts_at 起算——debates 表没有记录进入 voting 时刻的列，不动
+    # schema 的前提下 settle 的判据只能是 stake_window + vote_window 之和。
+    debate_stake_window_min: int = 30    # announced 满这么久 → 开打（run_live）
+    debate_vote_window_min: int = 60     # voting 满这么久 → 结算（settle）
+    debate_stuck_hours: int = 24         # 卡在非终态超过这么久 → 平局全额退款
+
+    # E12/C3 赛季：自动开季的季长（真实日）。seasons 表长期 0 行，导致
+    # season_service.add_points 的第一行 `if not season_id: return 0` 把所有
+    # 积分静默丢弃 —— 读端和记分端都在，缺的只是写端。
+    #
+    # 默认 28，与下面的 election_interval_days 对齐：SEASON_AUTO_OPEN 默认开、
+    # 部署即生效，开季后 election_service.maybe_open_seasonal_election 的
+    # season 分支会永久接管镇长选举节奏（从 election_interval_days 改成读
+    # season_length_days）；同时 season_service.settle_season 的赛季结算
+    # top-3 派彩（200/120/80 SC）首次可达，季越短派彩越频繁。28 让选举节奏
+    # 维持现状（不被开季顺带减半），派彩频率先按季观察，不在这次改动里
+    # 顺带调快。
+    #
+    # 下界 1：ensure_active_season 会把 <=0 的值 clamp 到 1 ——一个 env 打字
+    # 错误（0 或负数）本会让 ends_at<=starts_at，下一个 60s tick 就把这季
+    # 判定到期结算，同一 tick 又开一季，形成每 60 秒一条置顶落幕公告的失控
+    # 循环；clamp 之后最坏情况退化成"季长 1 天"而不是"每分钟开一季"。
+    season_length_days: int = 28
+    season_auto_open: bool = True        # 关掉则只能由 admin 手动开季
+
     # ── S2-1 offices 职位实体化 (POLIS_OFFICE_*) — independent gate ─────
     # Unified offices table (mayor/town_clerk/postman/doctor) + OfficeService.
     # Default False (rollback-safe, realism-family pattern): off → byte-level
