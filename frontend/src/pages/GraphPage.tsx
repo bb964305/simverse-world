@@ -4,25 +4,89 @@ import { getRelationshipGraph } from '../services/api'
 
 interface Sim { slug: string; name: string; x: number; y: number; vx: number; vy: number }
 
+interface CanvasCssSize { width: number; height: number }
+
+/**
+ * Resizes a canvas's backing pixel buffer to match its container's current
+ * CSS size (times devicePixelRatio) and resets the drawing transform so
+ * callers can keep drawing in CSS-pixel coordinates.
+ *
+ * Exported as a standalone function (rather than inlined in the effect) so
+ * the width/height/dpr math can be exercised directly in tests without
+ * needing a real canvas 2D context (jsdom has none) — see GraphPage.test.tsx.
+ */
+export function syncCanvasSize(canvas: HTMLCanvasElement, container: Element, dpr: number): CanvasCssSize {
+  const rect = container.getBoundingClientRect()
+  const width = Math.max(1, Math.round(rect.width))
+  const height = Math.max(1, Math.round(rect.height))
+  const bufferWidth = Math.max(1, Math.round(width * dpr))
+  const bufferHeight = Math.max(1, Math.round(height * dpr))
+  if (canvas.width !== bufferWidth) canvas.width = bufferWidth
+  if (canvas.height !== bufferHeight) canvas.height = bufferHeight
+  // Reset (not multiply) the transform: ResizeObserver can fire repeatedly,
+  // and setTransform is idempotent where ctx.scale would compound.
+  const ctx = canvas.getContext('2d')
+  ctx?.setTransform(dpr, 0, 0, dpr, 0, 0)
+  return { width, height }
+}
+
 export function GraphPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
   const [empty, setEmpty] = useState(false)
 
   useEffect(() => {
     let raf = 0
     let stop = false
+    let resizeObserver: ResizeObserver | null = null
     getRelationshipGraph(0.3).then((g) => {
+      if (stop) return
       if (g.nodes.length === 0 || g.edges.length === 0) { setEmpty(true); return }
       const canvas = canvasRef.current
-      if (!canvas) return
+      const container = containerRef.current
+      if (!canvas || !container) return
       const ctx = canvas.getContext('2d')!
-      const W = canvas.width = canvas.clientWidth
-      const H = canvas.height = canvas.clientHeight
+      const dpr = window.devicePixelRatio || 1
+      // W/H are CSS-pixel dimensions (what node positions & drawing use).
+      // `let`, not `const`: the ResizeObserver below reassigns them whenever
+      // the viewport changes (e.g. mobile orientation flip) so the physics
+      // loop and the canvas backing buffer stay in sync.
+      let { width: W, height: H } = syncCanvasSize(canvas, container, dpr)
       const sims: Record<string, Sim> = {}
       g.nodes.forEach((n, i) => {
         const ang = (i / g.nodes.length) * Math.PI * 2
         sims[n.slug] = { slug: n.slug, name: n.name, x: W / 2 + Math.cos(ang) * 160, y: H / 2 + Math.sin(ang) * 160, vx: 0, vy: 0 }
       })
+
+      if (typeof ResizeObserver !== 'undefined') {
+        resizeObserver = new ResizeObserver(() => {
+          if (stop) return
+          const prevW = W, prevH = H
+          const next = syncCanvasSize(canvas, container, window.devicePixelRatio || 1)
+          W = next.width
+          H = next.height
+          // Node coordinates are stored as absolute pixels laid out for the
+          // *old* canvas size. Rescale them proportionally right away so
+          // nothing sits outside the new bounds even for one frame; the
+          // existing center-seeking spring force (below, in tick) then
+          // keeps refining the layout as usual. A full re-layout (recomputing
+          // the initial radial positions) was the other option, but it would
+          // throw away the force-directed layout the simulation has already
+          // converged to — a jarring reset — whereas proportional scaling
+          // preserves relative structure and is a cheap, purely multiplicative
+          // fixup.
+          if (prevW > 0 && prevH > 0 && (prevW !== W || prevH !== H)) {
+            const sx = W / prevW
+            const sy = H / prevH
+            for (const sim of Object.values(sims)) {
+              sim.x *= sx
+              sim.y *= sy
+            }
+          }
+        })
+        resizeObserver.observe(container)
+      }
+
       const tick = () => {
         if (stop) return
         const arr = Object.values(sims)
@@ -64,20 +128,28 @@ export function GraphPage() {
         raf = requestAnimationFrame(tick)
       }
       tick()
-    }).catch(() => setEmpty(true))
-    return () => { stop = true; cancelAnimationFrame(raf) }
+    }).catch(() => { if (!stop) setEmpty(true) })
+    return () => {
+      stop = true
+      cancelAnimationFrame(raf)
+      resizeObserver?.disconnect()
+    }
   }, [])
 
   return (
     <>
       <TopNav />
-      <div style={{ marginTop: 'var(--nav-height)', height: 'calc(100vh - var(--nav-height))', position: 'relative' }}>
+      <div
+        ref={containerRef}
+        data-testid="graph-container"
+        style={{ marginTop: 'var(--nav-height)', height: 'calc(100vh - var(--nav-height))', position: 'relative' }}
+      >
         {empty ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-muted)' }}>
             还没有足够的关系可以画成图谱，多和居民互动看看吧。
           </div>
         ) : (
-          <canvas ref={canvasRef} style={{ width: '100%', height: '100%', display: 'block' }} />
+          <canvas ref={canvasRef} data-testid="graph-canvas" style={{ width: '100%', height: '100%', display: 'block' }} />
         )}
       </div>
     </>
