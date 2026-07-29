@@ -12,11 +12,13 @@ import { WeeklyRecap } from '../components/profile/WeeklyRecap'
 import { ExplorationCodex } from '../components/profile/ExplorationCodex'
 import { CreatorDashboard } from '../components/profile/CreatorDashboard'
 import { useGameStore } from '../stores/gameStore'
+import { useIsMobile } from '../hooks/useIsMobile'
 
 export function ProfilePage() {
   const profileTab = useGameStore((s) => s.profileTab)
   const [residentCount, setResidentCount] = useState(0)
   const [editingSlug, setEditingSlug] = useState<string | null>(null)
+  const isMobile = useIsMobile()
 
   if (editingSlug) {
     return (
@@ -32,9 +34,18 @@ export function ProfilePage() {
   return (
     <>
       <TopNav />
-      <div style={{ marginTop: 'var(--nav-height)', display: 'flex', height: 'calc(100vh - var(--nav-height))', overflow: 'hidden' }}>
+      <div
+        data-testid="profile-layout"
+        style={{
+          marginTop: 'var(--nav-height)',
+          display: 'flex',
+          flexDirection: isMobile ? 'column' : 'row',
+          height: 'calc(100vh - var(--nav-height))',
+          overflow: 'hidden',
+        }}
+      >
         <ProfileSidebar residentCount={residentCount} />
-        <div style={{ flex: 1, padding: 32, overflowY: 'auto' }}>
+        <div style={{ flex: 1, padding: isMobile ? 16 : 32, overflowY: 'auto', minWidth: isMobile ? 0 : undefined, minHeight: isMobile ? 0 : undefined }}>
           {profileTab === 'residents' && (
             <ResidentList
               onResidentCountChange={setResidentCount}

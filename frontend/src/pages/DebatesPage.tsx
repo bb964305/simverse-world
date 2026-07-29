@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { TopNav } from '../components/TopNav'
 import { connectWS, onWSMessage } from '../services/ws'
 import { useGameStore } from '../stores/gameStore'
+import { useIsMobile } from '../hooks/useIsMobile'
 import {
   getDebates,
   getDebate,
@@ -385,6 +386,7 @@ export function DebatesPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [detail, setDetail] = useState<DebateView | null>(null)
   const [detailErr, setDetailErr] = useState('')
+  const isMobile = useIsMobile()
 
   // Live debate_turn/voting_open frames arrive over WS. GamePage owns the
   // socket but tears it down on unmount — re-establish here (idempotent, and
@@ -450,60 +452,83 @@ export function DebatesPage() {
     if (selectedId) loadDetail(selectedId)
   }, [selectedId, loadList, loadDetail])
 
+  // Mobile: a fixed 330px list + flex:1 detail leaves the detail pane ~60px
+  // wide (see E2E-04 repro — its content collapses into a single vertical
+  // character column). Switch to a master/detail flow instead — full-width
+  // list until something's selected, then full-width detail with a way back.
+  const showList = !isMobile || !selectedId
+  const showDetail = !isMobile || !!selectedId
+
   return (
     <>
       <TopNav />
       <style>{'@keyframes debateLivePulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }'}</style>
       <div style={{
         marginTop: 'var(--nav-height)', height: 'calc(100vh - var(--nav-height))',
-        display: 'flex', background: 'var(--bg-page)',
+        display: 'flex', flexDirection: isMobile ? 'column' : 'row', background: 'var(--bg-page)',
       }}>
-        {/* Left: list */}
-        <div style={{
-          width: 330, flexShrink: 0, overflowY: 'auto',
-          borderRight: '1px solid var(--border)', padding: 16,
-          display: 'flex', flexDirection: 'column', gap: 10,
-        }}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)', marginBottom: 4 }}>
-            ⚔️ 辩论擂台
+        {/* Left: list (mobile: full-width, hidden once a debate is selected) */}
+        {showList && (
+          <div data-testid="debate-list-pane" style={{
+            width: isMobile ? '100%' : 330, flexShrink: 0, overflowY: 'auto',
+            borderRight: isMobile ? 'none' : '1px solid var(--border)', padding: 16,
+            display: 'flex', flexDirection: 'column', gap: 10,
+          }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)', marginBottom: 4 }}>
+              ⚔️ 辩论擂台
+            </div>
+            {debates === null && !listErr && <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>加载中…</div>}
+            {listErr && <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>{listErr}</div>}
+            {debates !== null && debates.length === 0 && (
+              <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>暂无辩论，等居民们吵起来再来看吧。</div>
+            )}
+            {debates?.map((d) => (
+              <DebateListItem
+                key={d.id}
+                d={d}
+                selected={d.id === selectedId}
+                onClick={() => { setDetailErr(''); setSelectedId(d.id) }}
+              />
+            ))}
           </div>
-          {debates === null && !listErr && <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>加载中…</div>}
-          {listErr && <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>{listErr}</div>}
-          {debates !== null && debates.length === 0 && (
-            <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>暂无辩论，等居民们吵起来再来看吧。</div>
-          )}
-          {debates?.map((d) => (
-            <DebateListItem
-              key={d.id}
-              d={d}
-              selected={d.id === selectedId}
-              onClick={() => { setDetailErr(''); setSelectedId(d.id) }}
-            />
-          ))}
-        </div>
+        )}
 
-        {/* Right: detail */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
-          {!selectedId && (
-            <div style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              height: '100%', color: 'var(--text-muted)', fontSize: 13,
-            }}>
-              从左侧选择一场辩论查看详情
-            </div>
-          )}
-          {selectedId && !currentDetail && !detailErr && (
-            <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>加载中…</div>
-          )}
-          {selectedId && detailErr && !currentDetail && (
-            <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>{detailErr}</div>
-          )}
-          {selectedId && currentDetail && (
-            <div style={{ maxWidth: 720, margin: '0 auto' }}>
-              <DebateDetail debate={currentDetail} onChanged={afterAction} />
-            </div>
-          )}
-        </div>
+        {/* Right: detail (mobile: only rendered once something's selected) */}
+        {showDetail && (
+          <div data-testid="debate-detail-pane" style={{ flex: 1, overflowY: 'auto', padding: isMobile ? 16 : 20 }}>
+            {isMobile && selectedId && (
+              <button
+                onClick={() => setSelectedId(null)}
+                style={{
+                  background: 'transparent', border: 'none', color: 'var(--accent-blue)',
+                  fontSize: 13, cursor: 'pointer', padding: 0, marginBottom: 14,
+                  display: 'flex', alignItems: 'center', gap: 4,
+                }}
+              >
+                ← 返回列表
+              </button>
+            )}
+            {!selectedId && (
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                height: '100%', color: 'var(--text-muted)', fontSize: 13,
+              }}>
+                从左侧选择一场辩论查看详情
+              </div>
+            )}
+            {selectedId && !currentDetail && !detailErr && (
+              <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>加载中…</div>
+            )}
+            {selectedId && detailErr && !currentDetail && (
+              <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>{detailErr}</div>
+            )}
+            {selectedId && currentDetail && (
+              <div style={{ maxWidth: isMobile ? undefined : 720, margin: isMobile ? undefined : '0 auto' }}>
+                <DebateDetail debate={currentDetail} onChanged={afterAction} />
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </>
   )

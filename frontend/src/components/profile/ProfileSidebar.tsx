@@ -1,4 +1,5 @@
 import { useGameStore } from '../../stores/gameStore'
+import { useIsMobile } from '../../hooks/useIsMobile'
 
 type Tab = 'residents' | 'creator' | 'conversations' | 'transactions' | 'achievements' | 'feed' | 'recap' | 'codex' | 'settings'
 
@@ -18,6 +19,59 @@ export function ProfileSidebar({ residentCount }: { residentCount: number }) {
   const user = useGameStore((s) => s.user)
   const profileTab = useGameStore((s) => s.profileTab)
   const setProfileTab = useGameStore((s) => s.setProfileTab)
+  const isMobile = useIsMobile()
+
+  // Mobile: the fixed 250px vertical sidebar leaves almost no room for the
+  // main content column (see E2E-03 repro — headings/names collapse into a
+  // single vertical character each). Replace it with a full-width, compact
+  // header + horizontally-scrolling tab strip instead of a side column.
+  if (isMobile) {
+    return (
+      <div data-testid="profile-sidebar-mobile" style={{
+        width: '100%',
+        background: 'var(--bg-card)',
+        borderBottom: '1px solid var(--border)',
+        borderRight: 'none',
+        padding: '12px 16px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+        flexShrink: 0,
+      }}>
+        {/* User info + balance, condensed into one row */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{
+            width: 40, height: 40, background: 'var(--bg-input)', borderRadius: 10,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 20, flexShrink: 0,
+          }}>
+            👤
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 700, fontSize: 14 }}>{user?.name}</div>
+            <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 2 }}>
+              创作了 {residentCount} 位居民 · 🪙 {user?.soul_coin_balance ?? 0}
+            </div>
+          </div>
+        </div>
+
+        {/* Navigation as a horizontal tab strip */}
+        <div style={{ display: 'flex', gap: 6, overflowX: 'auto' }}>
+          {NAV_ITEMS.map((item) => (
+            <button key={item.key} onClick={() => setProfileTab(item.key)} style={{
+              display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px',
+              borderRadius: 8, background: profileTab === item.key ? 'var(--bg-input)' : 'transparent',
+              border: 'none', color: profileTab === item.key ? 'var(--text-primary)' : 'var(--text-secondary)',
+              fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0,
+              fontWeight: profileTab === item.key ? 600 : 400,
+            }}>
+              <span style={{ fontSize: 14 }}>{item.icon}</span>{item.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div style={{
