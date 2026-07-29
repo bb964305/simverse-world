@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom/vitest'
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, waitFor, cleanup } from '@testing-library/react'
 import { DigestModal } from './DigestModal'
 import type { DigestData } from '../services/api'
