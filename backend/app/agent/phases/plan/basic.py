@@ -118,7 +118,9 @@ class BasicPlanPlugin:
                         action=p["action"],
                         target=p.get("target"),
                         location=p.get("location"),
-                        importance=p["importance"],
+                        # LLM 偶发漏 importance 键：缺省取 prompt 示例值 3，
+                        # 硬下标会 KeyError 导致整个 phase 反复失败（vm212 生产 bug）
+                        importance=p.get("importance", 3),
                         reason=p.get("reason", ""),
                         status=p.get("status", "pending"),
                     )
@@ -267,7 +269,7 @@ class BasicPlanPlugin:
                 "plan_count": len(plans),
                 "top_plan": {
                     "action": top_plan["action"],
-                    "importance": top_plan["importance"],
+                    "importance": top_plan.get("importance", 3),
                     "hour_range": top_plan.get("hour_range", []),
                 } if top_plan else None,
             })
