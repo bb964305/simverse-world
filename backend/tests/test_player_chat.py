@@ -297,3 +297,51 @@ async def test_charge_initiator_for_auto_reply(db_session):
 
     assert sender.soul_coin_balance == 48  # charged 2
     assert target.soul_coin_balance == 100  # unchanged
+
+
+@pytest.mark.anyio
+async def test_end_chat_restores_social(db_session, monkeypatch):
+    """Needs 恢复通路（0804）：玩家聊天收尾给 resident greet 量级的 social
+    回补（+realism_social_greet；满额 0.4 留给 resident-resident 主环路）。"""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from app.agent.needs import get_needs
+    from app.config import settings
+    from app.models.conversation import Conversation
+    from app.ws.handlers import chat as h
+    from app.ws.handlers.context import ConnectionContext
+
+    monkeypatch.setattr(settings, "realism_enabled", True)
+
+    user = User(name="P", email="p-endchat@test.com")
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+
+    r = Resident(id="pc-res", slug="pc-res", name="R", creator_id=user.id,
+                 status="chatting", heat=0,
+                 meta_json={"needs": {"energy": 0.8, "satiety": 0.8, "social": 0.0}})
+    conv = Conversation(id="pc-conv", resident_id="pc-res", user_id=user.id, turns=2)
+    db_session.add_all([r, conv])
+    await db_session.commit()
+
+    class _Ctx:
+        def __init__(self, s): self._s = s
+        async def __aenter__(self): return self._s
+        async def __aexit__(self, *a): return False
+
+    monkeypatch.setattr(h, "async_session", lambda: _Ctx(db_session))
+    mgr = MagicMock()
+    mgr.send = AsyncMock()
+    mgr.unlock_resident = AsyncMock()
+    mgr.dequeue = AsyncMock(return_value=None)
+    mgr.broadcast = AsyncMock()
+    monkeypatch.setattr(h, "manager", mgr)
+
+    ctx = ConnectionContext(user_id=user.id, user_name="P",
+                            conversation_id="pc-conv", resident=r)
+    with patch("app.events.bus.emit", new=AsyncMock()), \
+         patch.object(h, "extract_chat_memories", new=AsyncMock()):
+        await h.handle_end_chat(ctx, {"type": "end_chat"})
+
+    await db_session.refresh(r)
+    assert get_needs(r)["social"] == pytest.approx(settings.realism_social_greet)

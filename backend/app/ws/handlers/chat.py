@@ -343,6 +343,19 @@ async def handle_end_chat(ctx: ConnectionContext, data: dict) -> None:
             fresh_resident.total_conversations += 1
             fresh_resident.last_conversation_at = datetime.now(UTC)
 
+            # Needs P1-10 恢复通路：和玩家聊完也是社交接触——greet 量级回补
+            # （满额 realism_social_chat 留给 resident-resident 主环路，避免高热
+            # 度居民被玩家流量喂饱后不再在世界内社交）。write_needs clamp [0,1]，
+            # 随下方 commit 落库；fail-open 不打断收尾。
+            if settings.realism_enabled:
+                try:
+                    from app.agent.needs import get_needs, write_needs
+                    needs = get_needs(fresh_resident)
+                    needs["social"] = needs["social"] + settings.realism_social_greet
+                    write_needs(fresh_resident, needs)
+                except Exception:
+                    logger.warning("player-chat social restore failed", exc_info=True)
+
         conv_result = await db.execute(
             select(Conversation).where(Conversation.id == ctx.conversation_id)
         )
