@@ -135,3 +135,32 @@ class _Ctx:
     def __init__(self, s): self._s = s
     async def __aenter__(self): return self._s
     async def __aexit__(self, *a): return False
+
+
+def _simulate_days(days, *, chats_per_day, eats_per_day):
+    """按真实节奏的日平衡模型：1 世界日 = 360 轮 60s tick（k=4）；默认作息下
+    清醒 metabolize ≈84 次（should_tick 门控）+ 睡眠 ≈150 次（每轮），恢复
+    动作插在白天中段。纯函数复演 loop.py/tick.py 的节奏，不碰 DB。"""
+    needs = {k: settings.realism_needs_initial for k in N.NEEDS}
+    awake, asleep = 84, 150
+    for _ in range(days):
+        for _ in range(awake // 2):
+            needs = N.metabolize(needs, status="idle", sbti=None)
+        for _ in range(eats_per_day):
+            needs["satiety"] = min(1.0, needs["satiety"] + settings.realism_eat_restore)
+        for _ in range(chats_per_day):
+            needs["social"] = min(1.0, needs["social"] + settings.realism_social_chat)
+        for _ in range(awake - awake // 2):
+            needs = N.metabolize(needs, status="idle", sbti=None)
+        for _ in range(asleep):
+            needs = N.metabolize(needs, status="sleeping", sbti=None)
+    return needs
+
+
+def test_needs_daily_balance_not_locked_at_zero():
+    """平衡回归（0804 产线：9/11 satiety=0、11/11 social=0）：以实际可达的
+    恢复频率（1 EAT + 2 chat/世界日），两个世界日后 satiety/social 不得锁死 0。
+    旧 satiety_decay=-0.005 时日扣减 1.17 远超 1 次 EAT 的 +0.5 → 本测试红。"""
+    needs = _simulate_days(2, chats_per_day=2, eats_per_day=1)
+    assert needs["satiety"] >= 0.2
+    assert needs["social"] >= 0.2
