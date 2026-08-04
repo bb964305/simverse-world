@@ -350,6 +350,69 @@ async def test_basic_plan_broadcasts_on_generation():
     assert broadcast_data["resident_slug"] == resident.slug
 
 
+@pytest.mark.anyio
+async def test_basic_plan_missing_importance_still_persists_and_loads():
+    """LLM 偶发漏掉 slot 的 importance 键时，plan 仍要持久化、当前时段仍要
+    加载成功（importance 落到 prompt 示例默认值 3），不能抛 KeyError 让整个
+    phase 失败进入重试循环（vm212 生产 'Phase failed: importance' bug）。"""
+    from app.agent.phases.plan.basic import BasicPlanPlugin
+
+    ctx = _make_ctx()
+    resident = ctx.resident
+    resident.daily_plans_json = None
+    resident.daily_goal_json = None
+    resident.persona_md = "A curious learner."
+
+    # 覆盖 ctx.hour=10 的 slot 1 缺 importance 键
+    llm_response = '{"goal": {"goal": "学习新技能", "motivation": "好奇心驱使"}, "plans": [{"slot": 0, "hour_range": [7, 9], "action": "IDLE", "target": null, "location": "home", "importance": 2, "reason": "起床"}, {"slot": 1, "hour_range": [9, 11], "action": "STUDY", "target": null, "location": "library", "reason": "学习"}]}'
+
+    with patch("app.agent.phases.plan.basic.llm_chat", return_value=llm_response), \
+         patch("app.agent.phases.plan.basic.MemoryService") as MockMS, \
+         patch("app.agent.phases.plan.basic.manager") as mock_mgr:
+        mock_svc = AsyncMock()
+        mock_svc.get_memories = AsyncMock(return_value=[])
+        MockMS.return_value = mock_svc
+        mock_mgr.broadcast = AsyncMock()
+
+        plugin = BasicPlanPlugin(params={"hourly_slots": 2, "max_social_slots": 1, "max_high_importance": 1})
+        ctx = await plugin.execute(ctx)
+
+    assert resident.daily_plans_json is not None
+    assert len(resident.daily_plans_json["plans"]) == 2
+    assert ctx.current_plan is not None
+    assert ctx.current_plan.action == "STUDY"
+    assert ctx.current_plan.importance == 3
+
+
+@pytest.mark.anyio
+async def test_basic_plan_broadcast_survives_missing_importance():
+    """top_plan 缺 importance 时 broadcast 不能静默失败，importance 用默认值。"""
+    from app.agent.phases.plan.basic import BasicPlanPlugin
+
+    ctx = _make_ctx()
+    resident = ctx.resident
+    resident.daily_plans_json = None
+    resident.daily_goal_json = None
+    resident.persona_md = "A friendly person."
+
+    llm_response = '{"goal": {"goal": "test", "motivation": "test"}, "plans": [{"slot": 0, "hour_range": [7, 9], "action": "IDLE", "target": null, "location": "home", "reason": "rest"}]}'
+
+    with patch("app.agent.phases.plan.basic.llm_chat", return_value=llm_response), \
+         patch("app.agent.phases.plan.basic.MemoryService") as MockMS, \
+         patch("app.agent.phases.plan.basic.manager") as mock_mgr:
+        mock_svc = AsyncMock()
+        mock_svc.get_memories = AsyncMock(return_value=[])
+        MockMS.return_value = mock_svc
+        mock_mgr.broadcast = AsyncMock()
+
+        plugin = BasicPlanPlugin(params={"hourly_slots": 1, "max_social_slots": 1, "max_high_importance": 1})
+        ctx = await plugin.execute(ctx)
+
+    mock_mgr.broadcast.assert_called_once()
+    broadcast_data = mock_mgr.broadcast.call_args[0][0]
+    assert broadcast_data["top_plan"]["importance"] == 3
+
+
 # ── Execute Tests ────────────────────────────────────────────────────
 
 @pytest.mark.anyio
