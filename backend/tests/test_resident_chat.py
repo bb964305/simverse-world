@@ -206,3 +206,57 @@ async def test_resident_chat_busy_target_skipped(db_session, chat_pair):
     result = await resident_chat(db_session, initiator, target)
 
     assert result is None or result.get("skipped") is True
+
+
+@pytest.mark.anyio
+async def test_resident_chat_restores_social(db_session, chat_pair, monkeypatch):
+    """Needs 恢复通路（0804）：一场成功的 resident 对话必须给双方
+    social += realism_social_chat —— 此前 metabolize 是唯一写入方，
+    social 永久锁死 0，decide 的 social<0.4 聊天 nudge 永不熄火。"""
+    from app.agent.needs import get_needs
+    from app.config import settings
+    monkeypatch.setattr(settings, "realism_enabled", True)
+    initiator, target = chat_pair
+    for r in (initiator, target):
+        r.meta_json = {**r.meta_json,
+                       "needs": {"energy": 0.8, "satiety": 0.8, "social": 0.0}}
+    await db_session.commit()
+
+    responses = ["你好！", "你好呀。", "最近怎么样？", _wrapup_json()]
+    call_idx = 0
+
+    async def side_effect(*args, **kwargs):
+        nonlocal call_idx
+        resp = responses[min(call_idx, len(responses) - 1)]
+        call_idx += 1
+        return resp
+
+    with patch("app.agent.chat.llm_chat", side_effect=side_effect), \
+         patch("app.memory.service.llm_chat", side_effect=side_effect):
+        result = await resident_chat(db_session, initiator, target, max_turns=3)
+
+    assert result and not result.get("skipped")
+    await db_session.refresh(initiator)
+    await db_session.refresh(target)
+    assert get_needs(initiator)["social"] == pytest.approx(settings.realism_social_chat)
+    assert get_needs(target)["social"] == pytest.approx(settings.realism_social_chat)
+
+
+@pytest.mark.anyio
+async def test_resident_chat_skipped_no_social_restore(db_session, chat_pair, monkeypatch):
+    """cooldown 跳过的对话不得恢复 social（没聊上=没社交）。"""
+    from app.agent.needs import get_needs
+    from app.config import settings
+    monkeypatch.setattr(settings, "realism_enabled", True)
+    initiator, target = chat_pair
+    for r in (initiator, target):
+        r.meta_json = {**r.meta_json,
+                       "needs": {"energy": 0.8, "satiety": 0.8, "social": 0.0}}
+    await db_session.commit()
+    await _set_cooldown(initiator, target)
+
+    result = await resident_chat(db_session, initiator, target)
+
+    assert result is None or result.get("skipped")
+    assert get_needs(initiator)["social"] == 0.0
+    assert get_needs(target)["social"] == 0.0
