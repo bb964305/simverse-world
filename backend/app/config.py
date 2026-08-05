@@ -578,6 +578,11 @@ class Settings(BaseSettings):
     # entry point). 0 = unlimited term — byte-equivalent to today's
     # overwrite-on-reelection mayor; >0 enables nightly term expiry.
     polis_office_mayor_term_days: int = 0
+    # F3 空缺探针阈值（真实小时）：选举制职位空缺超过一个夜间周期就该亮红旗
+    # （overdue_vacancies 不传参时读它）。F3 合入时刻意没动 config.py（共享
+    # 文件延到收口）——这是 ROADMAP #5 收口补上的旋钮，默认值与原关键字默认
+    # 逐字一致（零行为变化）。
+    polis_office_vacancy_alert_hours: float = 24.0
     # ── F2 公民权晋升／撤销 (CIVIC_*) — ROADMAP #5 收口注册 ────────────────
     # 读点在 app/services/civic_membership.py：**调用时**先读进程 env（F2 的
     # 近百条测试按用例 monkeypatch.setenv 改档位/门槛，赖此成立），env 未设时
