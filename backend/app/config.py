@@ -604,7 +604,9 @@ class Settings(BaseSettings):
     rep_distortion_penalty: float = -0.2
     rep_mood_weight: float = 0.2
     rep_vote_trust_weight: float = 1.0
-    rep_credit_min_score: float = -0.3
+    # 2026-08-05 vm212 实测标定 (scripts/rep_calibrate.py, n=11, exit 0):
+    # 建议值 +0.005829(目标拒绝面 15%)→拒绝 2/11;旧值 -0.3 拒绝面为空(装饰性闸门)。
+    rep_credit_min_score: float = 0.0058
 
     # ── S1-5 镇财政闭环 (KICKOFF_S1-5_treasury.md §3, TOWN_* env prefix) ────
     # Independent gate, default False → byte-level fallback to the status quo:
