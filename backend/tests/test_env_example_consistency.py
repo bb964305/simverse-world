@@ -66,31 +66,18 @@ SIDECAR_ONLY_KEYS: frozenset[str] = frozenset({
 })
 
 
-#: API 进程自己读、但**刻意不做成 `Settings` 字段**的旋钮。
+#: API 进程自己读、但**刻意不做成 `Settings` 字段**的旋钮（调用时读 os.environ）。
 #:
-#: `Settings` 是 import 期实例化的单例，值在进程启动那一刻就固化了。F2 的档位与
-#: 门槛需要按用例逐个改（近百条测试用 `monkeypatch.setenv`），所以
-#: `civic_membership.py` 把它们做成**调用时**读 `os.environ` 的函数。把它们搬进
-#: `Settings` 会同时打断那批测试、并丢掉运行时可读性——不是升级，是降级。
+#: ROADMAP #5 收口后 F2 的 12 个 CIVIC_ 键已注册进 `Settings`（app/config.py），
+#: 从本清单移除——注意这不是把读点搬进 Settings：civic_membership 的 reader
+#: 仍在**调用时**先读进程 env（近百条 monkeypatch.setenv 测试赖此成立），env
+#: 未设时经 `_settings_default` 落到 Settings 同名字段。两份默认值的一致性由
+#: tests/test_civic_settings_knobs.py 钉住。
 #:
-#: 代价是这些键天然逃出 invariant 1。所以这里不是简单放行：
-#: `test_runtime_env_keys_are_actually_read` 会去源码里确认每个键真有读点，
-#: 改名或删掉照样红。
-RUNTIME_ENV_KEYS: frozenset[str] = frozenset({
-    # F2 公民权晋升／撤销，读点在 app/services/civic_membership.py
-    "civic_promotion_mode",
-    "civic_auto_demotion_enabled",
-    "civic_promotion_min_world_days",
-    "civic_promotion_min_peers",
-    "civic_promotion_min_familiarity",
-    "civic_peer_seasoning_world_days",
-    "civic_promotion_max_per_run",
-    "civic_promotion_breaker_fraction",
-    "civic_promotion_breaker_min_abs",
-    "civic_min_electorate",
-    "civic_min_tenure_world_days",
-    "civic_promotion_cooldown_world_days",
-})
+#: 本清单保留为机制：将来真有「只能运行时读」的键，登记进来即可——
+#: `test_runtime_env_keys_are_actually_read` 会继续要求每个键在 backend/app/
+#: 下确有读点。
+RUNTIME_ENV_KEYS: frozenset[str] = frozenset()
 
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
 
