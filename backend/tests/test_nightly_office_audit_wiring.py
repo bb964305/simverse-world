@@ -17,6 +17,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 BACKEND = Path(__file__).resolve().parents[1]
 CRON = BACKEND / "app" / "tasks" / "nightly_cron.py"
 OFFICE = BACKEND / "app" / "services" / "office_service.py"
@@ -68,3 +70,55 @@ def test_term_check_audits_then_backfills():
         "term_check 丢了 F3 补选触发——回到「无限期无镇长」断链")
     assert order.index("record_term_audit") < order.index("trigger_backfill"), (
         "审计必须先于补选：审计总结刚结束的任期，补选面向下一任")
+
+
+@pytest.mark.anyio
+async def test_nightly_chain_dry_run_all_gates_off(db_engine, monkeypatch, caplog):
+    """收口验收干跑：默认开关全关时整条夜间链真实跑通、政治层零写入。
+
+    真实调用 run_nightly_jobs（不 mock 任何 job），全链 DB 指到本测试的
+    in-memory sqlite（nightly_cron 模块级 import 与各 job 内 `from
+    app.database import async_session` 两条路径都要补——后者在函数调用时
+    才 import，读的是 app.database 当时的模块属性）。空世界下 digest 走
+    has_material=False 短路，零 LLM 调用。断言的是行为面：F2 pass 走 off
+    态零读零写、term_check 因 gate 关闭根本不被调用、civic_standing_history
+    / offices 保持空。
+    """
+    import app.database as app_db
+    from sqlalchemy import func, select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from app.models.civic_standing_history import CivicStandingHistory
+    from app.models.office import Office
+    from app.tasks import nightly_cron
+
+    factory = async_sessionmaker(db_engine, class_=AsyncSession,
+                                 expire_on_commit=False)
+    monkeypatch.setattr(app_db, "async_session", factory)
+    monkeypatch.setattr(nightly_cron, "async_session", factory)
+    for var in ("CIVIC_PROMOTION_MODE", "POLIS_OFFICE_ENABLED"):
+        monkeypatch.delenv(var, raising=False)
+
+    term_check_calls: list[int] = []
+
+    async def _term_check_spy(self, **kwargs):
+        term_check_calls.append(1)
+        return 0
+
+    monkeypatch.setattr(
+        "app.services.office_service.OfficeService.term_check", _term_check_spy)
+
+    with caplog.at_level("INFO"):
+        await nightly_cron.run_nightly_jobs()
+
+    async with factory() as db:
+        n_hist = (await db.execute(
+            select(func.count()).select_from(CivicStandingHistory))).scalar()
+        n_office = (await db.execute(
+            select(func.count()).select_from(Office))).scalar()
+    assert n_hist == 0, "开关全关的干跑不得写任何 civic_standing_history 行"
+    assert n_office == 0, "开关全关的干跑不得写 offices 行"
+    assert not term_check_calls, (
+        "polis_office_enabled 默认关——term_check 不得被夜间链调用")
+    assert "F2 civic promotion pass" not in caplog.text, (
+        "off 态不应产生晋升 pass 日志（run_promotion_pass 只在 mode!=off 时 log）")
