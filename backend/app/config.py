@@ -578,6 +578,33 @@ class Settings(BaseSettings):
     # entry point). 0 = unlimited term — byte-equivalent to today's
     # overwrite-on-reelection mayor; >0 enables nightly term expiry.
     polis_office_mayor_term_days: int = 0
+    # F3 空缺探针阈值（真实小时）：选举制职位空缺超过一个夜间周期就该亮红旗
+    # （overdue_vacancies 不传参时读它）。F3 合入时刻意没动 config.py（共享
+    # 文件延到收口）——这是 ROADMAP #5 收口补上的旋钮，默认值与原关键字默认
+    # 逐字一致（零行为变化）。
+    polis_office_vacancy_alert_hours: float = 24.0
+    # ── F2 公民权晋升／撤销 (CIVIC_*) — ROADMAP #5 收口注册 ────────────────
+    # 读点在 app/services/civic_membership.py：**调用时**先读进程 env（F2 的
+    # 近百条测试按用例 monkeypatch.setenv 改档位/门槛，赖此成立），env 未设时
+    # 经 _settings_default 落到这里。默认值必须与 civic_membership 的代码默认
+    # 逐字一致（tests/test_civic_settings_knobs.py 钉住）。
+    # 三态闸门：off=零读零写；shadow=只算名单不写库；on=真晋升（且被
+    # assert_thresholds_calibrated 挡住未标定的占位门槛）。默认 off，开闸是
+    # 独立一次变更（红线：行为开闸与代码变更分开）。
+    civic_promotion_mode: str = "off"
+    civic_auto_demotion_enabled: bool = False
+    # ⚠️ 三个门槛是占位值不是标定值——mode=on 前必须先跑
+    # scripts/civic_calibration_report.py 用真实分布标定。
+    civic_promotion_min_world_days: float = 30.0
+    civic_promotion_min_peers: int = 3
+    civic_promotion_min_familiarity: float = 0.20
+    civic_peer_seasoning_world_days: float = 28.0
+    civic_promotion_max_per_run: int = 5
+    civic_promotion_breaker_fraction: float = 0.20
+    civic_promotion_breaker_min_abs: int = 3
+    civic_min_electorate: int = 3
+    civic_min_tenure_world_days: float = 12.0
+    civic_promotion_cooldown_world_days: float = 12.0
     # ── S1-3 议题立场与舆论动力学 (KICKOFF_S1-3_opinion.md §3) ─────────────
     # Independent gate, default False → byte-identical fallback to the status
     # quo (debate/chat/digest/nightly paths unchanged, zero stance writes).

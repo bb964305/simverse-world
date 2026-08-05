@@ -472,3 +472,34 @@ async def test_term_check_audit_term_ended_at_follows_injected_clock(
     audits = await office_audit.list_term_audits(db_session, office_key="mayor")
     recorded_ended = datetime.fromisoformat(audits[0]["term_ended_at"])
     assert abs((recorded_ended - frozen_future).total_seconds()) < 5
+
+
+# ── ROADMAP #5 收口: 空缺阈值从关键字默认升级为 Settings 旋钮 ─────────
+
+def test_vacancy_alert_hours_is_a_settings_field():
+    """F3 合入时刻意不动 config.py（共享文件延到收口），24h 阈值只是关键字
+    默认。收口后它是 Settings 旋钮，默认值保持 24.0 不变（零行为变化）。"""
+    from app.config import Settings
+    assert Settings.model_fields["polis_office_vacancy_alert_hours"].default == 24.0
+
+
+@pytest.mark.anyio
+async def test_overdue_vacancies_default_threshold_reads_settings(
+        db_session, monkeypatch):
+    """不传 max_vacant_hours → 调用时读 settings.polis_office_vacancy_alert_hours；
+    显式传参仍压过设置。"""
+    now = datetime.now(UTC)
+    db_session.add(Office(
+        office_key="mayor", institution="town_hall",
+        fill_strategy="election", holder_slug=None,
+        updated_at=now - timedelta(hours=30)))
+    await db_session.commit()
+
+    # 默认 24h：30h 空缺 → 亮红旗
+    assert len(await office_audit.overdue_vacancies(db_session, now=now)) == 1
+    # 旋钮拉宽到 48h：同一空缺不再亮
+    monkeypatch.setattr(settings, "polis_office_vacancy_alert_hours", 48.0)
+    assert await office_audit.overdue_vacancies(db_session, now=now) == []
+    # 显式传参仍压过设置
+    assert len(await office_audit.overdue_vacancies(
+        db_session, max_vacant_hours=24.0, now=now)) == 1

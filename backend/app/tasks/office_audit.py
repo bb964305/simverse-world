@@ -357,7 +357,7 @@ async def list_term_audits(
 
 async def overdue_vacancies(
     db: AsyncSession, *,
-    max_vacant_hours: float = 24.0,
+    max_vacant_hours: float | None = None,
     strategies: frozenset[str] = frozenset({"election"}),
     now: datetime | None = None,
 ) -> list[dict]:
@@ -385,9 +385,14 @@ async def overdue_vacancies(
     2–3 red flags every single night forever and drown the one vacancy that
     actually means something.
 
-    The threshold is a keyword default rather than a settings knob on purpose:
-    F3 ships no ``config.py`` change (共享文件延到收口). Read-only, fail-open.
+    The threshold defaults to ``settings.polis_office_vacancy_alert_hours``
+    (ROADMAP #5 收口 promoted it from a bare keyword default — F3 shipped no
+    ``config.py`` change of its own, 共享文件延到收口). An explicit
+    ``max_vacant_hours`` argument still wins. Read-only, fail-open.
     """
+    if max_vacant_hours is None:
+        from app.config import settings
+        max_vacant_hours = settings.polis_office_vacancy_alert_hours
     ref = _as_utc(now) or datetime.now(UTC)
     cutoff = ref - timedelta(hours=float(max_vacant_hours))
     try:
