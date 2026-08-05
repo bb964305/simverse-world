@@ -171,3 +171,37 @@ def test_every_settings_field_is_documented_or_allowlisted():
         "Settings fields missing from .env.example (document them or add to "
         f"UNDOCUMENTED_OK with a reason): {missing}"
     )
+
+
+# ── ROADMAP #5 收口: 治理旋钮的双 env 模板 parity ──────────────────────
+
+DEPLOY_ENV_EXAMPLE = (
+    ENV_EXAMPLE.parents[1] / "deploy" / "backend" / ".env.example")
+
+#: 只对政治层三条线的前缀做窄校验——两份模板整体并不同构（deploy 版只含
+#: 部署面），全量 parity 会立刻误报 200+ 键。
+GOVERNANCE_PREFIXES = ("CIVIC_", "REP_", "POLIS_OFFICE_")
+
+
+def _raw_keys(path) -> set[str]:
+    keys = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^([A-Z][A-Z0-9_]*)=", line.strip())
+        if m:
+            keys.add(m.group(1))
+    return keys
+
+
+def test_governance_knobs_exist_in_deploy_env_example_too():
+    """F1/F2/F3 的旋钮必须同时出现在两份 env 参考里。
+
+    deploy/backend/.env.example 是 vm212 部署实际参照的模板；07-27B 审计 H2
+    把「多份 env 真值互相漂移」定为事故级问题类。收口前 deploy 版三条线的
+    旋钮整段缺失——运维照模板起环境，读到的是一个不存在这三条线的世界。
+    """
+    backend_keys = {k for k in _raw_keys(ENV_EXAMPLE)
+                    if k.startswith(GOVERNANCE_PREFIXES)}
+    assert backend_keys, "backend/.env.example 里没有任何治理旋钮？基线认知错误"
+    missing = sorted(backend_keys - _raw_keys(DEPLOY_ENV_EXAMPLE))
+    assert not missing, (
+        f"deploy/backend/.env.example 缺治理旋钮（补上并保持默认关/保守）: {missing}")
