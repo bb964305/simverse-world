@@ -70,6 +70,24 @@ async def _apply_chat_relations(db, a, b, mood: str | None) -> None:
         logger.warning("chat relation bump failed", exc_info=True)
 
 
+def _apply_chat_social(a, b) -> None:
+    """Needs P1-10 恢复通路补全：一场成功的 resident 对话给双方
+    social += realism_social_chat。此前 metabolize() 的每 tick 扣减是唯一
+    写入方，social 锁死 0 后 decide 的聊天 nudge（social<0.4）永久激活。
+    write_needs 负责 clamp [0,1]；持久化搭 resident_chat finally 块的
+    commit（与 _apply_chat_relations 同一次落库）。"""
+    if not settings.realism_enabled:
+        return
+    try:
+        from app.agent.needs import get_needs, write_needs
+        for res in (a, b):
+            needs = get_needs(res)
+            needs["social"] = needs["social"] + settings.realism_social_chat
+            write_needs(res, needs)
+    except Exception:
+        logger.warning("chat social restore failed", exc_info=True)
+
+
 async def _apply_contagion(db, a, b) -> None:
     """Realism P1-11: emotion contagion — after a conversation both residents'
     valence moves toward their shared mean (a bad day ripples out)."""
@@ -255,6 +273,8 @@ async def resident_chat(
         await _apply_contagion(svc.db, initiator, target)
         # Realism P2-2: numeric relation bump (familiarity + affinity by mood).
         await _apply_chat_relations(svc.db, initiator, target, summary_data.get("mood"))
+        # Needs P1-10 恢复通路：对话是 social 的（唯一主）回补来源。
+        _apply_chat_social(initiator, target)
         # Duty system: host-type residents leave the other party warmer.
         await _apply_duty_chat_effects(svc.db, initiator, target)
 

@@ -454,7 +454,12 @@ class Settings(BaseSettings):
     realism_energy_awake: float = -0.004
     realism_energy_walking: float = -0.006
     realism_energy_sleep: float = 0.02
-    realism_satiety_decay: float = -0.005
+    # 0804 重校准：k=4 下 1 世界日=360 轮 60s tick，默认作息 metabolize ≈
+    # 84(清醒,should_tick 门控)+150(睡眠,每轮) ≈234 次/日。旧 -0.005 日扣减
+    # 1.17，任何可达的 EAT 频率(+0.5/次)都补不回 → satiety 全员锁死 0。
+    # -0.0015 → 0.35/日：~1.4 世界日一次 EAT 即可维持（critical<0.25 强制
+    # EAT 环路真实可达），稳态在 0.25–0.75 震荡。
+    realism_satiety_decay: float = -0.0015
     realism_eat_restore: float = 0.5
     realism_social_introvert: float = -0.001
     realism_social_extravert: float = -0.006
