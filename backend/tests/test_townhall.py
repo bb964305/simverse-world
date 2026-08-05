@@ -129,3 +129,46 @@ async def test_townhall_router_registered(client):
     # Registered routes answer (non-404); an unregistered router would 404.
     assert (await client.get("/townhall/overview")).status_code != 404
     assert (await client.get("/townhall/market-day")).status_code != 404
+
+
+@pytest.mark.anyio
+async def test_overview_projects_stored_reputation(client, db_session, monkeypatch):
+    # 解耦对 config 默认值的隐式依赖:阈值在本测试内显式钉住(标定值)
+    monkeypatch.setattr(settings, "rep_credit_min_score", 0.0058)
+    db_session.add_all([
+        _res("gao", "高分居", meta_json={"reputation": {
+            "score": 0.17, "samples": 140,
+            "updated_at": "2026-08-05T00:00:00+00:00"}}),
+        _res("di", "低分居", meta_json={"reputation": {
+            "score": -0.07, "samples": 425,
+            "updated_at": "2026-08-05T00:00:00+00:00"}}),
+        # 显式 meta_json=None 经 JSON(none_as_null=False) 存成 'null' 而非 SQL
+        # NULL,不会被 _npc_residents 过滤 —— 由 _reputation 的 isinstance 守卫剔除
+        _res("wu", "无分居"),
+    ])
+    await db_session.commit()
+
+    data = (await client.get("/townhall/overview")).json()
+    rep = data["reputation"]
+    assert rep["enabled"] == settings.rep_enabled
+    assert rep["credit_min_score"] == pytest.approx(0.0058)
+    assert [r["slug"] for r in rep["residents"]] == ["gao", "di"]  # 按分数降序,只列落过库的
+    rows = {r["slug"]: r for r in rep["residents"]}
+    assert rows["gao"]["credit_ok"] is True
+    assert rows["di"]["credit_ok"] is False    # -0.07 < 0.0058
+    assert rows["di"]["samples"] == 425
+    assert rows["di"]["name"] == "低分居"
+    assert rows["di"]["updated_at"] == "2026-08-05T00:00:00+00:00"
+
+
+@pytest.mark.anyio
+async def test_overview_reputation_fails_open(client, db_session, monkeypatch):
+    from app.routers import townhall as th
+
+    def boom(residents):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(th, "_reputation", boom)
+    resp = await client.get("/townhall/overview")
+    assert resp.status_code == 200
+    assert resp.json()["reputation"]["residents"] == []
