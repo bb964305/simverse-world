@@ -76,28 +76,52 @@ def test_term_check_audits_then_backfills():
 async def test_nightly_chain_dry_run_all_gates_off(db_engine, monkeypatch, caplog):
     """收口验收干跑：默认开关全关时整条夜间链真实跑通、政治层零写入。
 
-    真实调用 run_nightly_jobs（不 mock 任何 job），全链 DB 指到本测试的
-    in-memory sqlite（nightly_cron 模块级 import 与各 job 内 `from
-    app.database import async_session` 两条路径都要补——后者在函数调用时
-    才 import，读的是 app.database 当时的模块属性）。空世界下 digest 走
-    has_material=False 短路，零 LLM 调用。断言的是行为面：F2 pass 走 off
-    态零读零写、term_check 因 gate 关闭根本不被调用、civic_standing_history
-    / offices 保持空。
+    真实调用 run_nightly_jobs（不 mock 任何 job）。DB 隔离覆盖的是三条不同
+    形状的路径，缺一条都会漏到共享全局 engine：
+    - nightly_cron 模块级 `from app.database import async_session`——patch
+      `nightly_cron.async_session`；
+    - 各 job 函数体内 `from app.database import async_session`——这是**调用
+      时**才 import，读的是 `app.database` 当时的模块属性，patch
+      `app_db.async_session` 就能覆盖它们全部；
+    - `app.services.dream_service` 是例外中的例外：它在**模块顶层**
+      `from app.database import async_session`（dream_service.py:16），只在
+      该模块第一次被 import 时求值一次并绑死引用，之后任何对
+      `app.database.async_session` 的 monkeypatch 都追不上——必须单独 patch
+      `dream_service.async_session` 本身（下方第三条 setattr）。
+
+    维护提示：夜间链新增的 job 如果也用「模块顶层 from app.database import
+    async_session」这种绑死引用写法，必须在这里补一条对应 monkeypatch，否则
+    它会静默打到共享全局 engine 而不是本测试的 in-memory sqlite，本测试的
+    隔离断言会假阴性地放过它（当前四条断言不受漏补 dream_service 影响，是
+    因为 dream 不写 civic_standing_history/offices，纯属巧合，不是设计）。
+
+    空世界下 digest 走 has_material=False 短路，零 LLM 调用。断言的是行为
+    面：F2 pass 走 off 态零读零写、term_check 因 gate 关闭根本不被调用、
+    civic_standing_history / offices 保持空。
     """
     import app.database as app_db
     from sqlalchemy import func, select
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+    from app.config import settings
     from app.models.civic_standing_history import CivicStandingHistory
     from app.models.office import Office
+    from app.services import dream_service
     from app.tasks import nightly_cron
 
     factory = async_sessionmaker(db_engine, class_=AsyncSession,
                                  expire_on_commit=False)
     monkeypatch.setattr(app_db, "async_session", factory)
     monkeypatch.setattr(nightly_cron, "async_session", factory)
-    for var in ("CIVIC_PROMOTION_MODE", "POLIS_OFFICE_ENABLED"):
-        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(dream_service, "async_session", factory)
+    # CIVIC_PROMOTION_MODE 是调用时活读（civic_membership._env_str 每次读
+    # os.environ），delenv 是有效隔离手段。polis_office_enabled 不是——它是
+    # Settings 单例在启动时定值的静态字段（app/config.py:683 `settings =
+    # Settings()`），运行中 delenv 环境变量不会让已构造好的单例重新读取，此前
+    # 那行 delenv 是死代码。改为直接 patch 单例属性，对开发机 .env 残留值也
+    # 免疫。
+    monkeypatch.delenv("CIVIC_PROMOTION_MODE", raising=False)
+    monkeypatch.setattr(settings, "polis_office_enabled", False)
 
     term_check_calls: list[int] = []
 
