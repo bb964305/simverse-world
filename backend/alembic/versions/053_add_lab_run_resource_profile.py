@@ -1,15 +1,15 @@
 """Add immutable compute resource profiles to Lab runs.
 
-Revision ID: 052_add_lab_run_resource_profile
-Revises: 051_add_lab_codex_model_tier
+Revision ID: 053_add_lab_run_resource_profile
+Revises: 052_add_lab_codex_model_tier
 Create Date: 2026-07-27
 """
 from alembic import op
 import sqlalchemy as sa
 
 
-revision = "052_add_lab_run_resource_profile"
-down_revision = "051_add_lab_codex_model_tier"
+revision = "053_add_lab_run_resource_profile"
+down_revision = "052_add_lab_codex_model_tier"
 branch_labels = None
 depends_on = None
 

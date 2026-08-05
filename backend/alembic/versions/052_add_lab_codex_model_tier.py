@@ -1,20 +1,20 @@
 """Add immutable model-routing snapshot fields to Lab runs.
 
-Integration note: this revision and the parallel civic-standing revision both
-descend from 050, producing two Alembic heads when combined. Integration must
-re-chain one branch (or add an intentional merge revision); renaming revision
-files or IDs alone does not resolve the graph fork.
+Integration note (resolved 2026-08-05): this revision originally took the 051
+prefix and descended from 050 in parallel with 051_add_civic_standing_history,
+which would fork the graph on merge. The lab chain has been re-chained onto the
+civic revision and renumbered as a whole: 051/052/053 -> 052/053/054.
 
-Revision ID: 051_add_lab_codex_model_tier
-Revises: 050_add_resident_sprites
+Revision ID: 052_add_lab_codex_model_tier
+Revises: 051_add_civic_standing_history
 Create Date: 2026-07-27
 """
 from alembic import op
 import sqlalchemy as sa
 
 
-revision = "051_add_lab_codex_model_tier"
-down_revision = "050_add_resident_sprites"
+revision = "052_add_lab_codex_model_tier"
+down_revision = "051_add_civic_standing_history"
 branch_labels = None
 depends_on = None
 
