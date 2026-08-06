@@ -61,3 +61,18 @@ def test_deploy_health_check_hits_published_port():
     text = DEPLOY_SH.read_text(encoding="utf-8")
     assert "localhost:8100/health" in text
     assert "localhost:8000/health" not in text
+
+
+def test_agent_llm_keys_in_deploy_env_example():
+    """agent-worker 的 LLM 端点三键必须出现在部署面模板里。
+
+    部署模板缺这三键，正是活配置流落到远端 backend/.env（继而只活在镜像内
+    /app/.env）的起点；模板补齐后运维照模板起环境即天然走 env_file 注入。
+    """
+    keys = set()
+    for line in DEPLOY_ENV_EXAMPLE.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^([A-Z][A-Z0-9_]*)=", line.strip())
+        if m:
+            keys.add(m.group(1))
+    missing = {"AGENT_BASE_URL", "AGENT_API_KEY", "AGENT_MODEL"} - keys
+    assert not missing, f"deploy/backend/.env.example 缺 agent-worker LLM 端点键: {sorted(missing)}"
