@@ -45,6 +45,9 @@ def test_backend_rsync_excludes_dotenv():
         assert "--exclude '.env'" in block, (
             "带 --delete 的 rsync 不排除 .env，会把远端活配置覆盖成本机 dev 版:\n"
             + block)
+        # --delete-excluded 会让 exclude 失去对接收端文件的保护（远端 .env 直接被删）
+        assert "--delete-excluded" not in block, (
+            "--delete-excluded 使 --exclude '.env' 不再保护远端活配置:\n" + block)
 
 
 def test_dockerignore_excludes_dotenv():
