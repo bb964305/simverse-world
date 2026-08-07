@@ -1,0 +1,15 @@
+# 配置绝不进镜像——运行时配置一律走 compose env_file（deploy/.env）注入进程 env。
+# 2026-08-06: vm212 agent-worker 的 LLM 活配置曾靠 `COPY . .` 烤进 /app/.env，
+# 导致 deploy/.env 盖不住它；这行是那次险情的根因修复。精确 `.env` 不会
+# 误伤 git 跟踪的 .env.example。
+.env
+# 本地开发产物（与 deploy.sh 的 rsync exclude 集对齐）
+__pycache__
+*.pyc
+.pytest_cache
+.venv
+venv
+data
+*.db
+*.db.bak*
+static/uploads
