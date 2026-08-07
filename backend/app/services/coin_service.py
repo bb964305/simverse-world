@@ -420,13 +420,16 @@ async def refund_pending(
     reason: str,
     *,
     operation_key: str | None = None,
+    splits: Sequence[Split] | None = None,
 ) -> CoinHold:
-    """Lock, validate, and flush a full refund without ending the transaction."""
+    """Lock, validate, and flush a refund distribution without committing."""
     hold = await _lock_hold(db, hold_id, action="refund")
     if not isinstance(reason, str) or not reason or len(reason) > 100:
         raise CoinError("refund reason must be a nonempty string of at most 100 characters")
-    split: Split = (hold.user_id, hold.amount, reason)
-    await lock_distribution_accounts(db, [split])
+    validated = validate_distribution(
+        splits or [(hold.user_id, hold.amount, reason)], hold.amount
+    )
+    await lock_distribution_accounts(db, validated)
 
     now = datetime.now(UTC)
     claimed = await db.execute(
@@ -436,19 +439,25 @@ async def refund_pending(
     )
     if (claimed.rowcount or 0) != 1:
         raise CoinError(f"hold {hold_id} lost refund ownership")
-    if not await reward_pending(db, hold.user_id, hold.amount, reason):
-        raise CoinError(f"refund recipient {hold.user_id} disappeared")
     prefix = operation_key or f"refund:{hold_id}"
-    db.add(
-        CoinHoldEntry(
-            hold_id=hold_id,
-            terminal_action="refund",
-            recipient_key=hold.user_id,
-            amount=hold.amount,
-            operation_key=f"{prefix}:{hold.user_id}",
-            reason=reason,
+    for recipient, amount, split_reason in validated:
+        if recipient.startswith("treasury:"):
+            await treasury_credit_pending(
+                db, recipient.removeprefix("treasury:"), amount, split_reason
+            )
+        elif recipient != "sink":
+            if not await reward_pending(db, recipient, amount, split_reason):
+                raise CoinError(f"refund recipient {recipient} disappeared")
+        db.add(
+            CoinHoldEntry(
+                hold_id=hold_id,
+                terminal_action="refund",
+                recipient_key=recipient,
+                amount=amount,
+                operation_key=f"{prefix}:{recipient}",
+                reason=split_reason,
+            )
         )
-    )
     await db.flush()
     return hold
 

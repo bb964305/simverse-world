@@ -36,6 +36,14 @@ class RunSpec:
     egress_allowlist: list[str] = field(default_factory=list)
     secrets: dict[str, str] = field(default_factory=dict)
     deliverable_kind: str = "report"
+    tenant_id: str = ""
+    model_tier: str = "low"
+    model_name: str = "deepseek-v4-flash"
+    model_policy_version: str = "lab-deepseek-v1"
+    resource_cpu_cores: int = 2
+    resource_memory_mb: int = 2048
+    model_gateway_base_url: str = ""
+    model_gateway_token: str = field(default="", repr=False)
 
 
 @dataclass

@@ -1,7 +1,7 @@
 # Lab Phase 8 staging drills — real Postgres + Redis
 
 Recovery plan Phase 8 (deployment smoke + operational drills), run 2026-07-19 on
-the dedicated Linux runner (`100.93.72.102`, Oracle Cloud aarch64, Ubuntu 22.04,
+the dedicated Linux runner (`<runner-host>`, Oracle Cloud aarch64, Ubuntu 22.04,
 rootless Docker 29.2.1) against **real infrastructure** — `pgvector/pgvector:pg16`
 Postgres and `redis:8-alpine`, both as rootless containers — NOT SQLite/fakeredis.
 

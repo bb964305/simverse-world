@@ -22,6 +22,28 @@ class LabRun(Base):
             "protocol_version IN (1, 2)",
             name="ck_lab_runs_protocol_version",
         ),
+        CheckConstraint(
+            "model_tier IN ('low','high')",
+            name="ck_lab_runs_model_tier",
+        ),
+        CheckConstraint(
+            "model_name IN ('deepseek-v4-flash','deepseek-v4-pro')",
+            name="ck_lab_runs_model_name",
+        ),
+        CheckConstraint(
+            "(model_tier = 'low' AND model_name = 'deepseek-v4-flash') OR "
+            "(model_tier = 'high' AND model_name = 'deepseek-v4-pro')",
+            name="ck_lab_runs_model_tier_name",
+        ),
+        CheckConstraint(
+            "(model_tier = 'low' AND resource_cpu_cores = 2 AND resource_memory_mb = 2048) OR "
+            "(model_tier = 'high' AND resource_cpu_cores = 4 AND resource_memory_mb = 4096)",
+            name="ck_lab_runs_resource_profile",
+        ),
+        CheckConstraint(
+            "model_cost_sc_per_usd > 0",
+            name="ck_lab_runs_model_cost_sc_per_usd_positive",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -31,8 +53,20 @@ class LabRun(Base):
     protocol_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="queued", index=True)  # queued|running|succeeded|failed|cancelled|needs_approval
     scopes_json: Mapped[list] = mapped_column(JSON, default=list)  # effective scopes (≤ task.scopes)
+    model_tier: Mapped[str] = mapped_column(String(10), default="low", nullable=False)
+    model_name: Mapped[str] = mapped_column(
+        String(64), default="deepseek-v4-flash", nullable=False
+    )
+    model_policy_version: Mapped[str] = mapped_column(
+        String(64), default="lab-deepseek-v1", nullable=False
+    )
+    resource_cpu_cores: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
+    resource_memory_mb: Mapped[int] = mapped_column(Integer, default=2048, nullable=False)
     budget_usd_cents: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd_cents: Mapped[int] = mapped_column(Integer, default=0)
+    model_cost_sc_per_usd: Mapped[int] = mapped_column(
+        Integer, default=100, nullable=False
+    )
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -48,9 +82,22 @@ class LabRun(Base):
 
 
 @event.listens_for(LabRun, "before_update")
-def _reject_protocol_version_update(_mapper, _connection, target: LabRun) -> None:
-    if inspect(target).attrs.protocol_version.history.has_changes():
-        raise ValueError("LabRun protocol_version is immutable after creation")
+def _reject_immutable_run_configuration_update(
+    _mapper, _connection, target: LabRun
+) -> None:
+    state = inspect(target).attrs
+    immutable_fields = (
+        "protocol_version",
+        "model_tier",
+        "model_name",
+        "model_policy_version",
+        "resource_cpu_cores",
+        "resource_memory_mb",
+        "model_cost_sc_per_usd",
+    )
+    changed = [name for name in immutable_fields if state[name].history.has_changes()]
+    if changed:
+        raise ValueError(f"LabRun {changed[0]} is immutable after creation")
 
 
 class LabRunStep(Base):

@@ -37,7 +37,13 @@ FINANCIAL_PATTERNS = (
 # written to lab_run_steps or streamed over WS.
 _SECRET_RE = re.compile(
     r"(sk-[A-Za-z0-9]{16,}|Bearer\s+[A-Za-z0-9._\-]{12,}|AKIA[0-9A-Z]{12,}|"
-    r"gh[pousr]_[A-Za-z0-9]{20,}|(?i:api[_-]?key|token|password|secret)\s*[:=]\s*\S+)"
+    r"gh[pousr]_[A-Za-z0-9]{20,}|"
+    r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|"
+    r"(?<![A-Fa-f0-9])[A-Fa-f0-9]{32,}(?![A-Fa-f0-9])|"
+    r"(?=[A-Za-z0-9+/_-]{40,}={0,2}(?![A-Za-z0-9+/_-]))"
+    r"(?=[A-Za-z0-9+/_-]*[A-Z])(?=[A-Za-z0-9+/_-]*[a-z])"
+    r"(?=[A-Za-z0-9+/_-]*[0-9])[A-Za-z0-9+/_-]{40,}={0,2}|"
+    r"(?i:api[_-]?key|token|password|secret)[\"']?\s*[:=]\s*[\"']?\S+)"
 )
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _REDACTED = "[REDACTED]"

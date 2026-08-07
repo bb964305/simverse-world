@@ -204,8 +204,9 @@ async def run_one(run_id: str) -> None:
                 f"protocol v{queued_run.protocol_version} run cannot enter the v1 execution path"
             )
     if settings.lab_agent_v1_enabled:
-        # v1 control-plane path (grant/policy/broker/ledger/budgets). The legacy
-        # body below is preserved byte-for-byte as the rollback path (flag off).
+        # v1 control-plane path (grant/policy/broker/ledger/budgets). The
+        # flag-off body remains a compatibility path, but real adapters may now
+        # enter it and therefore receive the same artifact trust treatment.
         from app.lab import orchestrator
         return await orchestrator.run_one_v1(run_id)
     async with async_session() as db:
@@ -232,16 +233,43 @@ async def run_one(run_id: str) -> None:
         await _ws_task_update(task)
 
         adapter = get_adapter(run.adapter)
+        model_gateway_token = ""
+        if run.adapter == "codex":
+            from app.lab.model_policy import ModelAssignment, issue_gateway_token
+
+            model_gateway_token = issue_gateway_token(
+                tenant_id=task.issuer_user_id,
+                task_id=task.id,
+                run_id=run.id,
+                assignment=ModelAssignment(
+                    tier=run.model_tier,
+                    model=run.model_name,
+                    policy_version=run.model_policy_version,
+                    budget_usd_cents=run.budget_usd_cents,
+                    cpu_cores=run.resource_cpu_cores,
+                    memory_mb=run.resource_memory_mb,
+                ),
+                max_model_tokens=settings.lab_budget_model_tokens,
+            )
         spec = RunSpec(
             run_id=run.id, task_id=task.id, researcher_slug=run.researcher_slug,
             brief=(task.brief_md or task.title or ""), scopes=list(run.scopes_json or []),
             budget_usd=(run.budget_usd_cents or 0) / 100.0, deadline=task.deadline_at,
             egress_allowlist=list(getattr(settings, "lab_egress_allowlist", []) or []),
             secrets={}, deliverable_kind=task.deliverable_kind,
+            tenant_id=task.issuer_user_id, model_tier=run.model_tier,
+            model_name=run.model_name,
+            model_policy_version=run.model_policy_version,
+            resource_cpu_cores=run.resource_cpu_cores,
+            resource_memory_mb=run.resource_memory_mb,
+            model_gateway_base_url=settings.lab_model_gateway_base_url,
+            model_gateway_token=model_gateway_token,
         )
 
         seq = 0
         cost_cents = 0
+        handle = None
+        adapter_stopped = False
         try:
             handle = await adapter.start(spec)
             await adapter.submit_goal(handle, spec.brief, spec.scopes)
@@ -284,16 +312,30 @@ async def run_one(run_id: str) -> None:
 
             artifacts = await adapter.collect_artifacts(handle)
             for a in artifacts:
-                db.add(LabArtifact(
-                    run_id=run.id, task_id=task.id, kind=a.kind, title=a.title,
-                    uri=a.uri, text_md=a.text_md, meta_json=(a.meta or None),
-                    # Legacy flag-off path runs only the trusted Mock adapter, so
-                    # its synthetic artifacts release after task completion (gap #10).
-                    scan_status="clean", verification_status="verified",
-                ))
-            await adapter.stop(handle)
+                artifact = LabArtifact(
+                    run_id=run.id, task_id=task.id, kind=a.kind,
+                    title=guard.redact_text(a.title) or "",
+                    uri=guard.redact_text(a.uri), text_md=guard.redact_text(a.text_md),
+                    meta_json=(guard.redact_payload(a.meta) or None),
+                )
+                from app.services import lab_artifact_service
 
-            summary = "; ".join(a.title for a in artifacts) if artifacts else "研究完成"
+                await lab_artifact_service.finalize_artifact(
+                    db,
+                    artifact=artifact,
+                    tenant_id=task.issuer_user_id,
+                    scanned_clean=(run.adapter == "mock"),
+                )
+                if run.adapter != "mock":
+                    artifact.scan_status = "pending"
+                    artifact.verification_status = "unverified"
+                db.add(artifact)
+            await adapter.stop(handle)
+            adapter_stopped = True
+
+            summary = guard.redact_text(
+                "; ".join(a.title for a in artifacts) if artifacts else "研究完成"
+            ) or ""
             from app.services.lab_task_service import mark_review
             # CAS-guarded: if the task was cancelled/finalized concurrently this is
             # a no-op (returns False) and we must NOT overwrite the cancel path's
@@ -342,16 +384,39 @@ async def run_one(run_id: str) -> None:
             await db.refresh(task)
             if run.status == "cancelled" or task.status == "cancelled":
                 return
+            cost_trusted = True
+            collect_usage = getattr(adapter, "cancel_and_collect_usage", None)
+            if run.adapter == "codex" and handle is not None and collect_usage:
+                try:
+                    cost_cents = await collect_usage(run.id)
+                except Exception:
+                    cost_trusted = False
+                    logger.error(
+                        "Codex terminal usage unavailable for run %s; settlement blocked",
+                        run.id,
+                        exc_info=True,
+                    )
             run.status = "failed"
             run.ended_at = datetime.now(UTC)
-            run.error = str(e)[:500]
+            run.cost_usd_cents = cost_cents
+            run.error = (guard.redact_text(
+                f"cost_unknown: {e}" if not cost_trusted else str(e)
+            ) or "")[:500]
             await db.commit()
+            if not cost_trusted:
+                return
             try:
                 from app.services.lab_task_service import fail_task
                 await fail_task(db, task, reason=f"run_failed:{run.id}")
                 await _ws_task_update(task)
             except Exception:
                 logger.error("lab task fail/refund failed for %s", task.id, exc_info=True)
+        finally:
+            if handle is not None and not adapter_stopped:
+                try:
+                    await adapter.stop(handle)
+                except Exception:
+                    logger.warning("lab adapter stop failed for %s", run.id, exc_info=True)
 
 
 async def _run_v1(run_id: str) -> None:

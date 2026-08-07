@@ -2,9 +2,11 @@ import { useState, useEffect, useCallback, type CSSProperties } from 'react'
 import { bridge } from '../game/phaserBridge'
 import {
   getLabTasks, getLabTask,
+  getLabRunSteps,
   type LabTask, type LabRun, type LabRunStep,
 } from '../services/api'
 import { resolveLabDisplay } from '../services/labState'
+import { formatLabRunProfile } from '../services/labModel'
 
 // LabTerminalPanel — read-only lab run monitor (Society Expansion §10). Unlike
 // ExperimentPanel this issues NO writes: no publish, no settle, no approve. It
@@ -58,16 +60,43 @@ export function LabTerminalPanel() {
     return () => document.removeEventListener('keydown', handler)
   }, [open])
 
-  // Read-only detail pull for the selected task (no live WS append needed).
+  // Read-only polling keeps the terminal useful without granting write actions.
   useEffect(() => {
     if (!selected) return
     let cancelled = false
-    getLabTask(selected).then((d) => {
-      if (cancelled) return
-      setRun(d.run)
-    }).catch(() => {})
-    return () => { cancelled = true }
+    let activeRunId: string | null = null
+    let lastSeq = 0
+    const pull = async () => {
+      try {
+        const detail = await getLabTask(selected)
+        if (cancelled) return
+        const nextRun = detail.run
+        setRun(nextRun)
+        if (!nextRun) return
+        if (activeRunId !== nextRun.id) {
+          activeRunId = nextRun.id
+          lastSeq = 0
+          setSteps([])
+        }
+        const result = await getLabRunSteps(nextRun.id, lastSeq)
+        if (cancelled || result.steps.length === 0) return
+        lastSeq = Math.max(lastSeq, ...result.steps.map((step) => step.seq))
+        setSteps((current) => {
+          const seen = new Set(current.map((step) => `${step.run_id}:${step.seq}`))
+          return [...current, ...result.steps.filter((step) => !seen.has(`${step.run_id}:${step.seq}`))]
+        })
+      } catch { /* keep the last readable snapshot */ }
+    }
+    void pull()
+    const timer = window.setInterval(() => { void pull() }, 2000)
+    return () => { cancelled = true; window.clearInterval(timer) }
   }, [selected])
+
+  const selectTask = (taskId: string) => {
+    setRun(null)
+    setSteps([])
+    setSelected(taskId)
+  }
 
   if (!open) return null
 
@@ -103,7 +132,7 @@ export function LabTerminalPanel() {
             {tasks.map((t) => {
               const b = resolveLabDisplay({ taskStatus: t.status }).task
               return (
-                <button key={t.id} onClick={() => setSelected(t.id)} style={{
+                <button key={t.id} onClick={() => selectTask(t.id)} style={{
                   display: 'block', width: '100%', textAlign: 'left',
                   background: selected === t.id ? `${ACCENT}14` : 'none',
                   border: 'none', borderRadius: 6, padding: '6px 8px', cursor: 'pointer',
@@ -127,7 +156,9 @@ export function LabTerminalPanel() {
                     <span style={{ fontSize: 13, fontWeight: 700, color: ACCENT }}>
                       运行状态：{d.run ? d.run.label : '—'}
                     </span>
-                    <span style={muted}>适配器 {run.adapter}</span>
+                    <span style={muted}>
+                      适配器 {run.adapter}{formatLabRunProfile(run) ? ` · ${formatLabRunProfile(run)}` : ''}
+                    </span>
                     {run.error && <span style={{ fontSize: 12, color: '#ef4444' }}>错误：{run.error}</span>}
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 300, overflowY: 'auto' }}>

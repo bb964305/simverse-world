@@ -21,9 +21,10 @@ from app.models.resident import Resident
 def test_migration_single_head_and_chains_onto_050():
     """`alembic heads` 单头，且建表迁移挂在本 worktree 实测的链头 050 上。
 
-    收口注记：主线并行的 lab 迁移也取 051 前缀（不同 revision id），两条线
-    合并后会出现双头，按仓内先例（048_add_town_treasury / 049_add_policies
-    的线性化）在收口时把后落地的一支 re-chain，本测试的断言随之更新。
+    收口注记（2026-08-05 已执行）：主线并行的 lab 迁移原取 051 前缀、与本表
+    同挂 050 形成双头，按仓内先例（048_add_town_treasury / 049_add_policies
+    的线性化）把后落地的 lab 一支 re-chain 到本迁移之后并整链重编号
+    051/052/053 → 052/053/054，此处断言即收口后的完整线性链。
     """
     from alembic.config import Config
     from alembic.script import ScriptDirectory
@@ -35,6 +36,14 @@ def test_migration_single_head_and_chains_onto_050():
     rev = script.get_revision("051_add_civic_standing_history")
     assert rev is not None
     assert rev.down_revision == "050_add_resident_sprites"
+    # lab 线 re-chain：052(lab codex) 必须紧跟在 051(civic) 之后，链头为 054。
+    lab = script.get_revision("052_add_lab_codex_model_tier")
+    assert lab is not None
+    assert lab.down_revision == "051_add_civic_standing_history"
+    assert script.get_revision("053_add_lab_run_resource_profile").down_revision == (
+        "052_add_lab_codex_model_tier"
+    )
+    assert heads == ["054_freeze_lab_model_cost_rate"]
 
 
 def test_migration_is_additive_only():

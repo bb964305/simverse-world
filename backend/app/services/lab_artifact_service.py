@@ -29,13 +29,14 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 from app.config import settings
-from app.lab import acl
+from app.lab import acl, guard
 from app.models.lab_artifact import (
     LabArtifact,
     LabArtifactHold,
     LabArtifactOperation,
 )
 from app.models.lab_event import OutboxEvent
+from app.models.lab_run import LabRun
 from app.models.lab_task import LabTask
 from app.models.world_change_proposal import WorldChangeProposal
 
@@ -195,6 +196,50 @@ async def verify_and_get(db, *, artifact_id: str, user_id: str, is_admin: bool) 
     if art.sha256 is not None and not is_releasable(art):
         raise ArtifactQuarantined(f"artifact {artifact_id} not scan-clean+verified")
     return art
+
+
+async def release_accepted_v1_text_artifacts(db, *, task: LabTask) -> int:
+    """Release redacted inline text when its issuer accepts a protocol-v1 result.
+
+    Protocol-v2 byte artifacts remain under the external scan/receipt pipeline.
+    This narrow bridge prevents real v1 report rows from staying quarantined
+    forever while retaining the completed-task gate on the download endpoint.
+    """
+    if not task.accepted_run_id:
+        return 0
+    run = await db.get(LabRun, task.accepted_run_id)
+    if run is None or run.protocol_version != 1:
+        return 0
+    artifacts = (
+        await db.execute(
+            select(LabArtifact).where(
+                LabArtifact.run_id == run.id,
+                LabArtifact.task_id == task.id,
+                LabArtifact.storage_status == "legacy",
+                LabArtifact.kind == "text",
+            )
+        )
+    ).scalars().all()
+    released = 0
+    now = datetime.now(UTC)
+    for artifact in artifacts:
+        if is_releasable(artifact) or artifact.text_md is None:
+            continue
+        artifact.title = guard.redact_text(artifact.title) or ""
+        artifact.text_md = guard.redact_text(artifact.text_md)
+        artifact.sha256 = compute_sha256(artifact)
+        artifact.byte_size = len(_digest_content(artifact).encode("utf-8"))
+        artifact.scan_status = "clean"
+        artifact.verification_status = "verified"
+        artifact.scanned_at = now
+        artifact.released_at = now
+        meta = dict(artifact.meta_json or {})
+        meta["release_basis"] = "issuer_acceptance_v1_text"
+        artifact.meta_json = meta
+        released += 1
+    if released:
+        await db.flush()
+    return released
 
 
 async def apply_retention_holds(db) -> int:

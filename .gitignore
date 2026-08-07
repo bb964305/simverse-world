@@ -3,6 +3,7 @@
 .env.local
 .env.*.local
 deploy/backend/resident-sprite-worker.env
+deploy/codex-arm-runner/secrets/
 frontend/public/assets/village/.resident-sprite-install.lock
 
 # Worktrees & AI context

@@ -503,7 +503,11 @@ async def sweep_orphan_lab_runs() -> int:
     from app.models.lab_run import LabRun
     from app.models.lab_task import LabTask
     from app.config import settings
-    from app.services.lab_task_service import fail_task
+    from app.services.lab_task_service import (
+        LabTaskError,
+        _sync_codex_terminal_cost,
+        fail_task,
+    )
 
     cutoff = datetime.now(UTC) - timedelta(seconds=settings.lab_run_heartbeat_ttl_s)
     n = 0
@@ -517,6 +521,49 @@ async def sweep_orphan_lab_runs() -> int:
             )
         )).scalars().all()
         for run in stale:
+            run_id = run.id
+            task_id = run.task_id
+            task = await db.get(LabTask, task_id)
+            if run.adapter == "codex":
+                if task is None:
+                    usage_error: Exception | None = RuntimeError("orphan task is missing")
+                else:
+                    try:
+                        await _sync_codex_terminal_cost(db, task)
+                    except LabTaskError as exc:
+                        usage_error = exc
+                    else:
+                        usage_error = None
+                if usage_error is not None:
+                    await db.rollback()
+                    run = await db.get(LabRun, run_id)
+                    task = await db.get(LabTask, task_id)
+                    if run is not None:
+                        run.status = "failed"
+                        run.ended_at = datetime.now(UTC)
+                        run.error = "cost_unknown: orphaned run usage unavailable"
+                        await db.commit()
+                    from app.lab import telemetry
+                    telemetry.emit_alert(
+                        telemetry.LabAlert.ORPHAN_HEARTBEAT,
+                        run_id=run_id,
+                        reason="cost_unknown",
+                    )
+                    logger.error(
+                        "orphan Codex usage unavailable for run %s; refund blocked",
+                        run_id,
+                        exc_info=(
+                            type(usage_error),
+                            usage_error,
+                            usage_error.__traceback__,
+                        ),
+                    )
+                    n += 1
+                    continue
+                run = await db.get(LabRun, run_id)
+                task = await db.get(LabTask, task_id)
+                if run is None:
+                    continue
             run.status = "failed"
             run.ended_at = datetime.now(UTC)
             run.error = "orphaned: heartbeat stale"
@@ -525,7 +572,7 @@ async def sweep_orphan_lab_runs() -> int:
             telemetry.emit_alert(
                 telemetry.LabAlert.ORPHAN_HEARTBEAT, run_id=run.id, reason="heartbeat_stale",
             )
-            task = await db.get(LabTask, run.task_id)
+            task = task or await db.get(LabTask, task_id)
             if task is not None and task.status not in ("completed", "cancelled", "expired", "failed"):
                 try:
                     await fail_task(db, task, reason=f"orphan_run:{run.id}")

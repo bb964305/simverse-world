@@ -22,7 +22,7 @@ separate, opt-in step documented in the ADR.
 """
 import pytest
 
-from app.config import settings
+from app.config import Settings, settings
 from app.lab.sandbox import get_adapter
 from app.lab.sandbox.base import (
     LabAdapterUnavailable,
@@ -30,6 +30,7 @@ from app.lab.sandbox.base import (
     RunSpec,
 )
 from app.lab.sandbox.computer_use import ComputerUseAdapter
+from app.lab.sandbox.codex import CodexAdapter
 from app.lab.sandbox.hermes import HermesAdapter
 from app.lab.sandbox.mock import MockAdapter
 from app.lab.sandbox.openclaw import OpenClawAdapter
@@ -38,6 +39,23 @@ from app.lab.sandbox.openclaw import OpenClawAdapter
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+@pytest.fixture(autouse=True)
+def _lab_code_defaults(monkeypatch):
+    """Exercise fail-closed code defaults, independent of dotenv or OS config."""
+    defaults = Settings.model_construct()
+    for name in (
+        "lab_adapter",
+        "lab_oci_enabled",
+        "lab_hermes_base_url",
+        "lab_openclaw_base_url",
+        "lab_computer_use_base_url",
+        "lab_codex_base_url",
+        "lab_simverse_ref_base_url",
+    ):
+        monkeypatch.setattr(settings, name, getattr(defaults, name))
+    return defaults
 
 
 def _spec() -> RunSpec:
@@ -59,15 +77,60 @@ def test_real_endpoints_are_unconfigured():
     assert settings.lab_hermes_base_url == ""
     assert settings.lab_openclaw_base_url == ""
     assert settings.lab_computer_use_base_url == ""
+    assert settings.lab_codex_base_url == ""
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("adapter_cls", [OpenClawAdapter, HermesAdapter, ComputerUseAdapter])
+@pytest.mark.parametrize(
+    "adapter_cls", [OpenClawAdapter, HermesAdapter, ComputerUseAdapter, CodexAdapter]
+)
 async def test_real_adapter_start_is_fail_closed_when_unconfigured(adapter_cls):
     adapter = adapter_cls()  # import + construct is always safe
     assert adapter.base_url == ""
     with pytest.raises(LabAdapterUnconfigured):
         await adapter.start(_spec())
+
+
+@pytest.mark.anyio
+async def test_codex_start_sends_model_grant_only_on_codex_protocol(monkeypatch):
+    import app.http
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"session_id": "provider-session"}
+
+    class Client:
+        request_json = None
+
+        async def post(self, _url, **kwargs):
+            self.request_json = kwargs["json"]
+            return Response()
+
+    client = Client()
+    monkeypatch.setattr(app.http, "get_client", lambda: client)
+    adapter = CodexAdapter()
+    adapter.base_url = "http://codex-runtime"
+    spec = _spec()
+    spec.tenant_id = "tenant"
+    spec.model_tier = "high"
+    spec.model_name = "deepseek-v4-pro"
+    spec.model_policy_version = "test-policy"
+    spec.resource_cpu_cores = 4
+    spec.resource_memory_mb = 4096
+    spec.model_gateway_base_url = "http://model-gateway/v1"
+    spec.model_gateway_token = "run-token"
+
+    handle = await adapter.start(spec)
+
+    assert handle.session_id == "provider-session"
+    assert client.request_json["tenant_id"] == "tenant"
+    assert client.request_json["model_name"] == "deepseek-v4-pro"
+    assert client.request_json["model_gateway_token"] == "run-token"
+    assert client.request_json["resource_cpu_cores"] == 4
+    assert client.request_json["resource_memory_mb"] == 4096
 
 
 def test_registry_returns_mock_only_for_explicit_mock():
@@ -102,6 +165,8 @@ def test_registry_returns_real_adapters_by_name_still_unconfigured():
     assert get_adapter("hermes").base_url == ""
     assert isinstance(get_adapter("openclaw"), OpenClawAdapter)
     assert isinstance(get_adapter("computer_use"), ComputerUseAdapter)
+    assert isinstance(get_adapter("codex"), CodexAdapter)
+    assert get_adapter("codex").base_url == ""
 
 
 def test_simverse_ref_is_a_real_adapter_and_fail_closed_when_unconfigured():

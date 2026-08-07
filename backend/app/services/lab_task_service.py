@@ -20,7 +20,7 @@ from sqlalchemy import select, func
 from app.config import settings
 from app.database import async_session
 from app.events.bus import on, emit
-from app.lab import transitions
+from app.lab import guard, transitions
 from app.models.lab_artifact import LabArtifact
 from app.models.lab_run import LabRun
 from app.models.lab_task import LabTask
@@ -39,6 +39,15 @@ class LabTaskError(Exception):
     """Publish/accept/reject/cancel conflicts (router maps to 400/402/403/409)."""
 
 
+def supported_scopes_for_adapter(adapter: str | None = None) -> list[str]:
+    """Return only capabilities the configured runtime can actually execute."""
+    selected = settings.lab_adapter if adapter is None else adapter
+    if selected == "codex":
+        # The ARM Codex runtime is deliberately no-egress and requires code.
+        return ["code"]
+    return list(ALLOWED_SCOPES)
+
+
 def _require_execution_consumer(protocol_version: int | None = None) -> int:
     """Freeze and validate the execution protocol before any domain mutation."""
     from app.lab import runner
@@ -52,6 +61,11 @@ def _require_execution_consumer(protocol_version: int | None = None) -> int:
         runner.require_protocol_handler(selected)
     except runner.ProtocolConsumerUnavailable as exc:
         raise LabTaskError(str(exc)) from exc
+    if settings.lab_adapter == "codex" and settings.lab_terminalizer_v2_enabled:
+        raise LabTaskError(
+            "Codex requires the cost-aware v1 escrow terminalizer; "
+            "the PostgreSQL v2 refund kernel is not yet cost-aware"
+        )
     return selected
 
 
@@ -100,6 +114,11 @@ def serialize_run(r: LabRun) -> dict:
         "adapter": r.adapter,
         "status": r.status,
         "scopes": r.scopes_json or [],
+        "model_tier": r.model_tier,
+        "model_name": r.model_name,
+        "model_policy_version": r.model_policy_version,
+        "resource_cpu_cores": r.resource_cpu_cores,
+        "resource_memory_mb": r.resource_memory_mb,
         "budget_usd_cents": r.budget_usd_cents,
         "cost_usd_cents": r.cost_usd_cents,
         "approvals": r.approvals_json or [],
@@ -236,6 +255,14 @@ async def create_task(
     scopes = [s for s in (scopes or []) if s in ALLOWED_SCOPES]
     if not scopes:
         raise LabTaskError("at least one valid scope is required")
+    unsupported_adapter_scopes = sorted(
+        set(scopes) - set(supported_scopes_for_adapter())
+    )
+    if unsupported_adapter_scopes:
+        raise LabTaskError(
+            f"adapter {settings.lab_adapter} does not support scopes: "
+            + ", ".join(unsupported_adapter_scopes)
+        )
     if protocol_version == 2:
         unsupported_scopes = sorted(set(scopes) - {"code"})
         if unsupported_scopes:
@@ -352,10 +379,19 @@ async def _start_run(
 
     protocol_version = _require_execution_consumer(protocol_version)
     _require_v2_tenant_admitted(protocol_version, task.issuer_user_id)
-    budget_cents = int(round(settings.lab_default_budget_usd * 100))
+    from app.lab.model_policy import assignment_for_reward, cost_usd_cents_to_sc
+
+    model = assignment_for_reward(task.reward_sc)
+    cost_usd_cents_to_sc(0, sc_per_usd=settings.lab_sc_per_usd)
     run = LabRun(
         task_id=task.id, researcher_slug=task.researcher_slug, adapter=settings.lab_adapter,
-        status="queued", scopes_json=list(task.scopes_json or []), budget_usd_cents=budget_cents,
+        status="queued", scopes_json=list(task.scopes_json or []),
+        model_tier=model.tier, model_name=model.model,
+        model_policy_version=model.policy_version,
+        resource_cpu_cores=model.cpu_cores,
+        resource_memory_mb=model.memory_mb,
+        budget_usd_cents=model.budget_usd_cents,
+        model_cost_sc_per_usd=settings.lab_sc_per_usd,
         protocol_version=protocol_version,
     )
     db.add(run)
@@ -420,10 +456,11 @@ async def mark_review(
     actually moved to review; False (no-op) means it was already terminal — the
     caller owns no completion for it. Belt-and-braces with the orchestrator's
     epoch fence."""
+    safe_summary = guard.redact_text(result_summary or task.result_summary_md)
     moved = await transitions.cas_task_status(
         db, task_id=task.id, expected=("assigned", "running"), new="review",
         accepted_run_id=run.id,
-        result_summary_md=result_summary or task.result_summary_md,
+        result_summary_md=safe_summary,
         review_deadline_at=datetime.now(UTC) + timedelta(hours=settings.lab_auto_release_hours),
     )
     if commit:
@@ -474,6 +511,9 @@ async def accept_result(db, task_id: str, user_id: str) -> LabTask:
     task = await _require_own_task(db, task_id, user_id)
     if task.status != "review":
         raise LabTaskError("task is not awaiting acceptance")
+    from app.services import lab_artifact_service
+
+    await lab_artifact_service.release_accepted_v1_text_artifacts(db, task=task)
     await _require_required_artifacts_releasable(db, task)
     try:
         await lab_terminalization_service.submit_for_caller(
@@ -503,6 +543,8 @@ async def cancel_task(db, task_id: str, user_id: str) -> LabTask:
     if task.status in ("completed", "cancelled", "failed", "expired"):
         raise LabTaskError("task already finalized")
 
+    await _sync_codex_terminal_cost(db, task)
+
     try:
         await lab_terminalization_service.submit_for_caller(
             db, task=task, operation="cancel", actor=user_id
@@ -510,6 +552,26 @@ async def cancel_task(db, task_id: str, user_id: str) -> LabTask:
     except lab_terminalization_service.LabTerminalizationError as exc:
         raise LabTaskError(str(exc)) from exc
     return task
+
+
+async def _sync_codex_terminal_cost(db, task: LabTask) -> None:
+    """Fence Codex and persist trusted usage before refund terminalization."""
+    if not task.accepted_run_id:
+        return
+    run = await db.get(LabRun, task.accepted_run_id)
+    if run is None or run.adapter != "codex" or run.status not in ACTIVE_RUN_STATES:
+        return
+    from app.lab.sandbox.codex import CodexAdapter
+
+    try:
+        run.cost_usd_cents = await CodexAdapter().cancel_and_collect_usage(run.id)
+        await db.commit()
+        await db.refresh(task)
+    except Exception as exc:
+        await db.rollback()
+        raise LabTaskError(
+            "Codex usage is unavailable; cancellation settlement is blocked"
+        ) from exc
 
 
 async def arbitrate_result(
@@ -565,6 +627,7 @@ async def expire_lab_tasks(db) -> int:
     )).scalars().all()
     for task in stale:
         try:
+            await _sync_codex_terminal_cost(db, task)
             await lab_terminalization_service.submit_for_caller(
                 db,
                 task=task,

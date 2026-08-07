@@ -55,6 +55,11 @@ export interface LabRun {
   adapter: string
   status: string
   scopes: string[]
+  model_tier?: string | null
+  model_name?: string | null
+  model_policy_version?: string | null
+  resource_cpu_cores?: number | null
+  resource_memory_mb?: number | null
   budget_usd_cents: number
   cost_usd_cents: number
   approvals: LabApproval[]
@@ -112,12 +117,34 @@ export interface CreateLabTaskInput {
   deadline_hours?: number | null
 }
 
+export interface LabTaskQuote {
+  reward_sc: number
+  platform_fee_sc: number
+  total_hold_sc: number
+  minimum_reward_sc: number
+  eligible: boolean
+  adapter: string
+  available_scopes: string[]
+  unsupported_scopes: string[]
+  model_tier: 'low' | 'high'
+  model_name: string
+  model_policy_version: string
+  resource_cpu_cores: number
+  resource_memory_mb: number
+  budget_usd_cents: number
+  pro_min_reward_sc: number
+}
+
 export function listLabResearchers(): Promise<{ researchers: LabResearcher[] }> {
   return apiFetch('/lab/researchers')
 }
 
 export function createLabTask(input: CreateLabTaskInput): Promise<LabTask> {
   return apiFetch('/lab/tasks', { method: 'POST', body: JSON.stringify(input) })
+}
+
+export function quoteLabTask(input: Pick<CreateLabTaskInput, 'reward_sc' | 'scopes'>): Promise<LabTaskQuote> {
+  return apiFetch('/lab/quote', { method: 'POST', body: JSON.stringify(input) })
 }
 
 export function getLabTasks(scope: 'mine' | 'open' = 'mine'): Promise<{ tasks: LabTask[] }> {

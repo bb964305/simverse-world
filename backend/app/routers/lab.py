@@ -6,6 +6,7 @@ stay available even when the Lab is paused (so nobody's escrow gets stuck).
 """
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -17,7 +18,8 @@ from starlette.responses import FileResponse
 
 from app.config import settings
 from app.database import get_db
-from app.lab import acl, broker
+from app.lab import acl, broker, pricing
+from app.lab.model_policy import assignment_for_reward
 from app.models.lab_action import LabApproval
 from app.models.lab_artifact import LabArtifact
 from app.models.lab_run import LabRun, LabRunStep
@@ -58,6 +60,11 @@ class CreateTaskBody(BaseModel):
     deadline_hours: int | None = None
 
 
+class TaskQuoteBody(BaseModel):
+    reward_sc: int = Field(gt=0)
+    scopes: list[str] = Field(default_factory=list)
+
+
 # ── researchers ───────────────────────────────────────────────────────
 
 @router.get("/researchers")
@@ -77,6 +84,35 @@ async def list_researchers(request: Request, db: AsyncSession = Depends(get_db))
 
 
 # ── tasks ─────────────────────────────────────────────────────────────
+
+@router.post("/quote")
+async def quote_task(body: TaskQuoteBody, request: Request, db: AsyncSession = Depends(get_db)):
+    """Preview the exact server-side price, model, and resource assignment."""
+    await _require_user(request, db)
+    scopes = [scope for scope in body.scopes if scope in svc.ALLOWED_SCOPES]
+    supported_scopes = svc.supported_scopes_for_adapter()
+    unsupported_scopes = sorted(set(scopes) - set(supported_scopes))
+    minimum_reward = pricing.minimum_reward_sc(scopes)
+    assignment = assignment_for_reward(body.reward_sc)
+    fee = math.ceil(body.reward_sc * settings.lab_platform_fee_rate)
+    return {
+        "reward_sc": body.reward_sc,
+        "platform_fee_sc": fee,
+        "total_hold_sc": body.reward_sc + fee,
+        "minimum_reward_sc": minimum_reward,
+        "eligible": bool(scopes) and not unsupported_scopes and body.reward_sc >= minimum_reward,
+        "adapter": settings.lab_adapter,
+        "available_scopes": supported_scopes,
+        "unsupported_scopes": unsupported_scopes,
+        "model_tier": assignment.tier,
+        "model_name": assignment.model,
+        "model_policy_version": assignment.policy_version,
+        "resource_cpu_cores": assignment.cpu_cores,
+        "resource_memory_mb": assignment.memory_mb,
+        "budget_usd_cents": assignment.budget_usd_cents,
+        "pro_min_reward_sc": settings.lab_pro_min_reward_sc,
+    }
+
 
 @router.post("/tasks")
 async def create_task(body: CreateTaskBody, request: Request, db: AsyncSession = Depends(get_db)):

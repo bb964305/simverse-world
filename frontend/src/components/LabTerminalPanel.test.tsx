@@ -7,10 +7,12 @@ import type { LabTask, LabRun } from '../services/api'
 
 const getLabTasks = vi.fn()
 const getLabTask = vi.fn()
+const getLabRunSteps = vi.fn()
 
 vi.mock('../services/api', () => ({
   getLabTasks: (...a: unknown[]) => getLabTasks(...a),
   getLabTask: (...a: unknown[]) => getLabTask(...a),
+  getLabRunSteps: (...a: unknown[]) => getLabRunSteps(...a),
 }))
 
 function task(over: Partial<LabTask> = {}): LabTask {
@@ -26,12 +28,17 @@ function task(over: Partial<LabTask> = {}): LabTask {
 const RUN: LabRun = {
   id: 'run-1', task_id: 't1', researcher_slug: 'r1', adapter: 'claude',
   status: 'running', scopes: ['web_search'], budget_usd_cents: 100,
+  model_tier: 'low', model_name: 'deepseek-v4-flash', model_policy_version: 'v1',
+  resource_cpu_cores: 2, resource_memory_mb: 2048,
   cost_usd_cents: 10, approvals: [], error: null, started_at: null, ended_at: null,
 }
 
 beforeEach(() => {
   getLabTasks.mockReset()
   getLabTask.mockReset().mockResolvedValue({ task: task(), run: RUN, artifacts: [] })
+  getLabRunSteps.mockReset().mockResolvedValue({
+    steps: [{ id: 's1', run_id: 'run-1', seq: 1, phase: 'message', tool: null, summary: '正在分析', payload: {}, created_at: null }],
+  })
 })
 
 afterEach(cleanup)
@@ -67,6 +74,9 @@ describe('LabTerminalPanel', () => {
     await openPanel()
     fireEvent.click(await screen.findByText('测算喷泉造价'))
     await waitFor(() => expect(getLabTask).toHaveBeenCalledWith('t1'))
+    await waitFor(() => expect(getLabRunSteps).toHaveBeenCalledWith('run-1', 0))
+    expect(screen.getByText(/deepseek-v4-flash/)).toBeInTheDocument()
+    expect(screen.getByText(/正在分析/)).toBeInTheDocument()
     // read-only: no publish/settle/approve buttons anywhere
     expect(screen.queryByRole('button', { name: /发布|放款|批准|拒收|取消委托/ })).not.toBeInTheDocument()
   })

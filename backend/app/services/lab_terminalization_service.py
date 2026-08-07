@@ -216,6 +216,37 @@ async def settlement_splits(db: AsyncSession, task: LabTask) -> list[coin_servic
     return splits
 
 
+async def refund_splits(
+    db: AsyncSession, task: LabTask, hold: CoinHold, operation: str, reason: str
+) -> list[coin_service.Split]:
+    """Refund escrow minus metered model cost for consumed-run terminal paths."""
+    chargeable = operation in {"fail", "cancel", "expire"}
+    cost_sc = 0
+    if chargeable and task.accepted_run_id:
+        run = await db.get(LabRun, task.accepted_run_id)
+        if run is not None and run.adapter != "mock":
+            if (run.error or "").startswith("cost_unknown:"):
+                raise LabTerminalizationError(
+                    "model cost is unknown; refund settlement is blocked"
+                )
+            from app.lab.model_policy import cost_usd_cents_to_sc
+
+            cost_sc = min(
+                hold.amount,
+                cost_usd_cents_to_sc(
+                    run.cost_usd_cents or 0,
+                    sc_per_usd=run.model_cost_sc_per_usd,
+                ),
+            )
+    refund_sc = hold.amount - cost_sc
+    splits: list[coin_service.Split] = []
+    if refund_sc > 0:
+        splits.append((hold.user_id, refund_sc, reason))
+    if cost_sc > 0:
+        splits.append(("sink", cost_sc, f"lab_model_cost:{task.id}"))
+    return coin_service.validate_distribution(splits, hold.amount)
+
+
 async def submit_command(
     db: AsyncSession,
     *,
@@ -313,12 +344,12 @@ async def submit_command(
             )
         ]
     else:
+        splits = await refund_splits(
+            db, task, hold, operation, payload["reason"]
+        )
         payload["splits"] = [
-            {
-                "recipient_key": hold.user_id,
-                "amount": hold.amount,
-                "reason": payload["reason"],
-            }
+            {"recipient_key": recipient, "amount": amount, "reason": reason}
+            for recipient, amount, reason in splits
         ]
 
     command = LabTerminalizationCommand(
@@ -576,9 +607,13 @@ async def _finalize_orm_attempt(
             raise LabTerminalizationError(
                 "terminalization command changed the canonical settlement distribution"
             )
-    elif splits != [
-        (hold.user_id, hold.amount, (command.payload_json or {}).get("reason"))
-    ]:
+    elif splits != await refund_splits(
+        db,
+        task,
+        hold,
+        command.operation,
+        str((command.payload_json or {}).get("reason") or ""),
+    ):
         raise LabTerminalizationError("refund distribution binding changed")
     await coin_service.lock_distribution_accounts(db, splits)
     await _prepare_task_runs(
@@ -603,8 +638,9 @@ async def _finalize_orm_attempt(
             command.hold_id,
             str((command.payload_json or {}).get("reason") or ""),
             operation_key=command.command_id,
+            splits=splits,
         )
-        journal_count = 1
+        journal_count = len(splits)
 
     now = datetime.now(UTC)
     moved = await db.execute(

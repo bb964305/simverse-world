@@ -4,12 +4,13 @@ import { bridge } from '../game/phaserBridge'
 import { onWSMessage } from '../services/ws'
 import { useGameStore } from '../stores/gameStore'
 import {
-  listLabResearchers, createLabTask, getLabTasks, getLabTask, getLabRun,
+  listLabResearchers, createLabTask, quoteLabTask, getLabTasks, getLabTask, getLabRun,
   cancelLabTask, acceptLabResult, rejectLabResult, getLabRunSteps, respondLabApproval,
   getWorldLocations, getMe, downloadLabArtifact,
   type LabResearcher, type LabTask, type LabRun, type LabRunStep, type LabArtifact,
-  type LabApproval, type WorldLocation,
+  type LabApproval, type LabTaskQuote, type WorldLocation,
 } from '../services/api'
+import { formatLabMemory, formatLabRunProfile } from '../services/labModel'
 import { resolveLabDisplay, selectLabTask, canDecideApproval, approvalId } from '../services/labState'
 import { artifactKindBadge, artifactStatusBadges } from '../services/labArtifactBadges'
 import { LabTimelineLive } from './LabTimelineLive'
@@ -30,8 +31,6 @@ const INERT_MD_COMPONENTS: Components = {
   a: ({ children }) => <span style={{ textDecoration: 'underline', textUnderlineOffset: 2 }}>{children}</span>,
   img: ({ alt }) => <span style={{ color: 'var(--text-muted)' }}>🖼️ {alt || '图片（远程加载已屏蔽）'}</span>,
 }
-const SCOPES = ['web_search', 'browse', 'code', 'http']
-
 const TABS: { key: LabTab; label: string }[] = [
   { key: 'publish', label: '发布委托' },
   { key: 'live', label: '运行直播' },
@@ -120,13 +119,29 @@ function PublishTab({ onPublished }: { onPublished: () => void }) {
   const [researchers, setResearchers] = useState<LabResearcher[]>([])
   const [title, setTitle] = useState('')
   const [brief, setBrief] = useState('')
-  const [scopes, setScopes] = useState<string[]>(['web_search'])
+  const [scopes, setScopes] = useState<string[]>(['code'])
+  const [availableScopes, setAvailableScopes] = useState<string[]>(['code'])
   const [reward, setReward] = useState(50)
   const [researcher, setResearcher] = useState<string>('')  // '' = open recruitment
   const [busy, setBusy] = useState(false)
+  const [quote, setQuote] = useState<LabTaskQuote | null>(null)
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null)
 
   useEffect(() => { listLabResearchers().then((r) => setResearchers(r.researchers)).catch(() => {}) }, [])
+  useEffect(() => {
+    let cancelled = false
+    setQuote(null)
+    const timer = window.setTimeout(() => {
+      quoteLabTask({ reward_sc: reward, scopes })
+        .then((value) => {
+          if (cancelled) return
+          setQuote(value)
+          setAvailableScopes(value.available_scopes)
+        })
+        .catch(() => { if (!cancelled) setQuote(null) })
+    }, 150)
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [reward, scopes])
 
   const toggleScope = (s: string) =>
     setScopes((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]))
@@ -155,9 +170,9 @@ function PublishTab({ onPublished }: { onPublished: () => void }) {
       <textarea style={{ ...labInput, minHeight: 90, resize: 'vertical' }} placeholder="任务说明（自然语言描述你想让研究员做什么）"
         value={brief} onChange={(e) => setBrief(e.target.value)} />
       <div>
-        <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>能力域（scope，越多费用越高）</div>
+        <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>当前执行环境允许的能力域</div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          {SCOPES.map((s) => (
+          {availableScopes.map((s) => (
             <label key={s} style={labChip(scopes.includes(s))}>
               <input type="checkbox" checked={scopes.includes(s)} onChange={() => toggleScope(s)} style={{ display: 'none' }} />
               {s}
@@ -183,8 +198,35 @@ function PublishTab({ onPublished }: { onPublished: () => void }) {
             onChange={(e) => setReward(Math.max(1, parseInt(e.target.value || '0', 10)))} />
         </div>
       </div>
+      {quote && (
+        <div style={{
+          borderTop: '1px solid var(--border)', borderBottom: '1px solid var(--border)',
+          padding: '10px 0', display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))',
+          gap: '6px 16px', fontSize: 12, overflowWrap: 'anywhere',
+        }}>
+          <div style={{ color: 'var(--text-secondary)' }}>
+            {quote.adapter} · {quote.model_tier === 'high' ? '高报酬档' : '低报酬档'} · <b>{quote.model_name}</b>
+          </div>
+          <div style={{ color: 'var(--text-secondary)' }}>
+            {quote.resource_cpu_cores} 核 · {formatLabMemory(quote.resource_memory_mb)}
+          </div>
+          <div style={{ color: 'var(--text-muted)' }}>
+            平台费 {quote.platform_fee_sc} SC · 共冻结 {quote.total_hold_sc} SC
+          </div>
+          <div style={{ color: quote.eligible ? 'var(--text-muted)' : '#ef4444' }}>
+            {quote.unsupported_scopes.length > 0
+              ? `${quote.adapter} 暂不支持 ${quote.unsupported_scopes.join('、')}`
+              : quote.eligible
+              ? quote.model_tier === 'high'
+                ? '已启用高报酬模型与资源'
+                : `达到 ${quote.pro_min_reward_sc} SC 自动升级高报酬档`
+              : `当前能力域最低悬赏 ${quote.minimum_reward_sc} SC`}
+          </div>
+        </div>
+      )}
       {notice && <div style={{ fontSize: 12, color: notice.ok ? ACCENT : '#ef4444' }}>{notice.text}</div>}
-      <button onClick={() => void submit()} disabled={busy} style={labPublishBtn(busy)}>{busy ? '发布中…' : '发布委托'}</button>
+      <button onClick={() => void submit()} disabled={busy || !quote?.eligible} style={labPublishBtn(busy || !quote?.eligible)}>{busy ? '发布中…' : '发布委托'}</button>
     </div>
   )
 }
@@ -312,7 +354,9 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
               })
               return <div style={{ marginBottom: 8 }}>
                 <LabTimelineLive display={d} />
-                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>适配器 {run.adapter}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  适配器 {run.adapter}{formatLabRunProfile(run) ? ` · ${formatLabRunProfile(run)}` : ''}
+                </div>
               </div>
             })()}
             {run && ((run.approvals as LabApproval[] | undefined) || [])
