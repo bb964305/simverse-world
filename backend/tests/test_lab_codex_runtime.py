@@ -491,7 +491,11 @@ async def test_usage_lookup_failure_marks_successful_process_failed(tmp_path, mo
 async def test_cancel_waits_for_usage_revoke_and_workspace_cleanup(tmp_path, monkeypatch):
     executable = tmp_path / "slow-codex"
     executable.write_text(
-        "#!/usr/bin/env python3\nimport time\ntime.sleep(60)\n",
+        "#!/usr/bin/env python3\n"
+        "import json, time\n"
+        "print(json.dumps({'type': 'item.started', 'item': {"
+        "'type': 'command_execution', 'command': 'sleep 60'}}), flush=True)\n"
+        "time.sleep(60)\n",
         encoding="utf-8",
     )
     executable.chmod(0o755)
@@ -531,11 +535,21 @@ async def test_cancel_waits_for_usage_revoke_and_workspace_cleanup(tmp_path, mon
             "/runs/cancelled-run/goal", headers=headers,
             json={"brief": "wait", "scopes": ["code"]},
         )
-        for _ in range(30):
-            health = (await client.get("/healthz")).json()
-            if health["active"] == 1:
+        # 就绪门必须等第一个 step 被消费:step 只可能产生于 readline 循环,
+        # 证明协程已越过 isolation setup 段(那里的 CancelledError 会逃逸并被
+        # 误报为 "runtime isolation setup failed"),cancel 才落在运行期语义上。
+        # healthz 的 active==1 在资源池 allocation 一进入就满足,不能当就绪门。
+        # GET /steps 自带 1s 条件变量长轮询,事件驱动;循环次数只是慢机上限。
+        polled = None
+        for _ in range(60):
+            polled = (await client.get(
+                "/runs/cancelled-run/steps", headers=headers, params={"after": 0}
+            )).json()
+            if polled["steps"] or polled["done"]:
                 break
-            await asyncio.sleep(0.01)
+        assert polled and polled["steps"], (
+            "codex child process never produced its first step"
+        )
         cancelled = await client.post("/runs/cancelled-run/cancel", headers=headers)
         assert cancelled.status_code == 200
         result = (await client.get("/runs/cancelled-run/steps", headers=headers)).json()
