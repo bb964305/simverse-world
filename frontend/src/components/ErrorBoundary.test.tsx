@@ -10,7 +10,7 @@ function Bomb({ blow }: { blow: boolean }) {
 
 function ChunkBomb() {
   throw new Error('Failed to fetch dynamically imported module: https://simverse.world/assets/SeasonsPage-mBwfgq0G.js')
-  // eslint-disable-next-line no-unreachable -- keeps this a valid JSX component type (throw alone infers `void`)
+  // Unreachable, but keeps this a valid JSX component type (throw alone infers `void`).
   return null
 }
 

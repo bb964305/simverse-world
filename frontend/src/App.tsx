@@ -38,25 +38,20 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 // an otherwise-fine player on a spinner.
 function HomeRoute() {
   const token = useGameStore((s) => s.token)
-  const [checking, setChecking] = useState(() => !!token)
-  const [needsOnboarding, setNeedsOnboarding] = useState(false)
+  // "Checking" is derived, not stored: the check for the current token is in
+  // flight exactly while `checked.token` doesn't match it, so a token change
+  // shows the spinner again without any synchronous setState in the effect.
+  const [checked, setChecked] = useState<{ token: string; needsOnboarding: boolean } | null>(null)
 
   useEffect(() => {
-    if (!token) {
-      setChecking(false)
-      return
-    }
+    if (!token) return
     let cancelled = false
-    setChecking(true)
     checkOnboarding(token)
       .then((result) => {
-        if (!cancelled) setNeedsOnboarding(result.needs_onboarding)
+        if (!cancelled) setChecked({ token, needsOnboarding: result.needs_onboarding })
       })
       .catch(() => {
-        if (!cancelled) setNeedsOnboarding(false)
-      })
-      .finally(() => {
-        if (!cancelled) setChecking(false)
+        if (!cancelled) setChecked({ token, needsOnboarding: false })
       })
     return () => {
       cancelled = true
@@ -64,8 +59,8 @@ function HomeRoute() {
   }, [token])
 
   if (!token) return <LandingPage />
-  if (checking) return <PageFallback />
-  if (needsOnboarding) return <Navigate to="/onboarding" replace />
+  if (checked?.token !== token) return <PageFallback />
+  if (checked.needsOnboarding) return <Navigate to="/onboarding" replace />
   return <GamePage />
 }
 

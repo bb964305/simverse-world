@@ -1,7 +1,8 @@
 import '@testing-library/jest-dom/vitest'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, cleanup, waitFor } from '@testing-library/react'
-import { GraphPage, syncCanvasSize } from './GraphPage'
+import { GraphPage } from './GraphPage'
+import { syncCanvasSize } from './syncCanvasSize'
 
 // GraphPage talks to the network (getRelationshipGraph) and draws on a real
 // canvas 2D context, neither of which jsdom provides. We mock/stub both so
