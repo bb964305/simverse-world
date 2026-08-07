@@ -7,7 +7,7 @@ import random
 import pytest
 from sqlalchemy.orm.attributes import flag_modified
 
-from app.config import settings
+from app.config import Settings, settings
 from app.models.memory import Memory
 from app.models.resident import Resident
 from app.services import gossip_service, relation_service
@@ -481,3 +481,51 @@ async def test_emergent_distribution_is_two_sided_and_has_a_reject_face(
     # ④ 现行 -0.3 在同一分布上仍然谁也拒绝不了 —— 装饰性闸门
     monkeypatch.setattr(settings, "rep_credit_min_score", -0.3)
     assert all(credit_allowed(score) for score in fixed)
+
+
+# ── F1 第 3 项收口:2026-08-05 vm212 生产标定(scripts/rep_calibrate.py, exit 0) ──
+# lowest5 = rank1-5, median = rank6, highest5 = rank7-11 → 11 个分值完整重建;
+# 重建向量的 mean 与生产 JSON 逐位一致(0.08572887607311888),证明无缺漏。
+VM212_SCORES_2026_08_05 = [
+    -0.07255692647058824,   # jiang-lin (n=425)
+    -0.01301682192982457,   # zhou-dahe (n=57)
+    0.024675734199134203,   # lin-wanqiu (n=231)
+    0.07742592133333333,    # zhao-qiwen (n=300)
+    0.07951788834951452,    # a-lan (n=206)
+    0.09686159192825113,    # median (rank 6)
+    0.0995802651515151,     # he-qiaoyun (n=132)
+    0.14430753164556964,    # chen-tiesheng (n=158)
+    0.1598606883116883,     # gu-mingyuan (n=77)
+    0.17258855,             # su-xiaoman (n=150)
+    0.1737732142857143,     # shen-jingshu (n=140)
+]
+
+
+def test_default_threshold_matches_vm212_calibration():
+    """默认值 = 实测建议值的 4 位舍入,拒绝面与建议值等价(2/11,非空非全量)。
+
+    断言编译期默认(model_fields)而非活 settings —— 后者会被宿主 backend/.env
+    覆盖,在带 REP_CREDIT_MIN_SCORE 的机器上误报。
+    """
+    default = Settings.model_fields["rep_credit_min_score"].default
+    assert default == pytest.approx(0.0058)
+    recommended = recommend_credit_min_score(VM212_SCORES_2026_08_05, 0.15)
+    assert recommended == pytest.approx(0.005829456134654817)
+    rejected_default = sum(1 for s in VM212_SCORES_2026_08_05 if s < default)
+    rejected_recommended = sum(
+        1 for s in VM212_SCORES_2026_08_05 if s < recommended
+    )
+    assert rejected_default == rejected_recommended == 2  # 非空且非全量
+
+
+def test_credit_allowed_has_nonempty_rejection_on_vm212_distribution(monkeypatch):
+    monkeypatch.setattr(
+        settings, "rep_credit_min_score",
+        Settings.model_fields["rep_credit_min_score"].default,
+    )
+    denied = [s for s in VM212_SCORES_2026_08_05 if not credit_allowed(s)]
+    granted = [s for s in VM212_SCORES_2026_08_05 if credit_allowed(s)]
+    assert len(denied) == 2 and len(granted) == 9
+    assert not credit_allowed(-0.07255692647058824)  # jiang-lin
+    assert not credit_allowed(-0.01301682192982457)  # zhou-dahe
+    assert credit_allowed(0.024675734199134203)      # lin-wanqiu

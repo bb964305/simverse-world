@@ -35,6 +35,21 @@ const OVERVIEW: TownHallOverview = {
     market_day_weekday: 5,
     market_day_discount: 0.9,
   },
+  // 开闸前 vm212 的真实形态:enabled=false 但 recompute 落库数据仍在
+  reputation: {
+    enabled: false,
+    credit_min_score: 0.0058,
+    residents: [
+      {
+        slug: 'gao', name: '高分居', score: 0.17, samples: 140,
+        updated_at: '2026-08-05T00:00:00+00:00', credit_ok: true,
+      },
+      {
+        slug: 'di', name: '低分居', score: -0.07, samples: 425,
+        updated_at: '2026-08-05T00:00:00+00:00', credit_ok: false,
+      },
+    ],
+  },
 }
 
 beforeEach(() => {
@@ -80,6 +95,30 @@ describe('TownHallPanel', () => {
     fireEvent.click(await screen.findByRole('button', { name: /选举结果/ }))
     await waitFor(() => expect(screen.getByText(/镇长选举/)).toBeInTheDocument())
     expect(screen.getByText(/12/)).toBeInTheDocument()
+  })
+
+  it('lists reputation rows sorted with a credit badge under the rep tab', async () => {
+    await openPanel()
+    fireEvent.click(await screen.findByRole('button', { name: /声誉/ }))
+    await waitFor(() => expect(screen.getByText('高分居')).toBeInTheDocument())
+    const names = screen.getAllByText(/分居$/).map((e) => e.textContent)
+    expect(names).toEqual(['高分居', '低分居'])
+    expect(screen.getAllByText('信用受限')).toHaveLength(1)
+    // enabled=false 且有数据 → 未开闸横幅与名单并存,而不是整页空态
+    expect(screen.getByText(/未开闸/)).toBeInTheDocument()
+    expect(screen.getByText(/信用阈值/)).toBeInTheDocument()
+  })
+
+  it('shows the gated empty state when reputation has no rows', async () => {
+    getTownHallOverview.mockResolvedValue({
+      ...OVERVIEW,
+      reputation: { enabled: false, credit_min_score: 0.0058, residents: [] },
+    })
+    await openPanel()
+    fireEvent.click(await screen.findByRole('button', { name: /声誉/ }))
+    await waitFor(() =>
+      expect(screen.getByText(/未开闸.*暂无公示数据/)).toBeInTheDocument())
+    expect(screen.queryByText('信用受限')).not.toBeInTheDocument()
   })
 
   it('closes on the close button', async () => {

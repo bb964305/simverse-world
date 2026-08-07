@@ -44,12 +44,29 @@ export interface TownHallFinances {
   election_interval_days?: number
 }
 
+export interface TownHallReputationRow {
+  slug: string
+  name: string
+  score: number
+  samples: number
+  updated_at: string | null
+  credit_ok: boolean
+}
+
+export interface TownHallReputation {
+  enabled: boolean
+  credit_min_score: number
+  residents: TownHallReputationRow[]
+}
+
 export interface TownHallOverview {
   mayor: TownHallMayor | null
   duties: TownHallDuty[]
   open_polls: TownHallPoll[]
   recent_election: TownHallElection | null
   finances: TownHallFinances
+  // 可选:旧后端 + 新前端(CF Workers 独立部署)时 fail-open 到空态
+  reputation?: TownHallReputation
 }
 
 export interface MarketDayInfo {

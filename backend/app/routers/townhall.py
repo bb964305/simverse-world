@@ -24,7 +24,7 @@ from app.services.auth_service import get_current_user
 from app.models.resident import Resident
 from app.models.season import Poll
 from app.services import duty_service, election_service, script_service
-from app.services import world_event_service
+from app.services import reputation_service, world_event_service
 from app.services.config_service import ConfigService
 
 logger = logging.getLogger(__name__)
@@ -115,6 +115,33 @@ async def _recent_election(db: AsyncSession) -> dict | None:
     }
 
 
+def _reputation(residents: list[Resident]) -> dict:
+    """S1-1 声誉公示:只读投影 meta_json["reputation"](夜间 recompute 的落库值),
+    不在请求路径上重算。只列真实被写过分数的居民——开闸前该键不存在,面板显示
+    空态而不是一排假中性 0。credit_ok 消费的正是实测标定后的 rep_credit_min_score。"""
+    rows = []
+    for r in residents:
+        stored = (r.meta_json or {}).get("reputation")
+        if not isinstance(stored, dict):
+            continue
+        score = reputation_service.score_from_meta(r.meta_json)
+        try:
+            samples = int(stored.get("samples") or 0)
+        except (TypeError, ValueError):
+            samples = 0
+        rows.append({
+            "slug": r.slug, "name": r.name, "score": score, "samples": samples,
+            "updated_at": stored.get("updated_at"),
+            "credit_ok": reputation_service.credit_allowed(score),
+        })
+    rows.sort(key=lambda row: row["score"], reverse=True)
+    return {
+        "enabled": settings.rep_enabled,
+        "credit_min_score": settings.rep_credit_min_score,
+        "residents": rows,
+    }
+
+
 async def _finances(db: AsyncSession) -> dict:
     """Config-projected town finances. DB config overrides the settings default
     (a civic vote can land a system_config change), else the compiled default."""
@@ -159,12 +186,23 @@ async def overview(db: AsyncSession = Depends(get_db)):
         logger.warning("townhall: finance projection failed", exc_info=True)
         finances = {}
 
+    try:
+        reputation = _reputation(residents)
+    except Exception:
+        logger.warning("townhall: reputation projection failed", exc_info=True)
+        reputation = {
+            "enabled": settings.rep_enabled,
+            "credit_min_score": settings.rep_credit_min_score,
+            "residents": [],
+        }
+
     return {
         "mayor": mayor,
         "duties": duties,
         "open_polls": open_polls,
         "recent_election": recent_election,
         "finances": finances,
+        "reputation": reputation,
     }
 
 

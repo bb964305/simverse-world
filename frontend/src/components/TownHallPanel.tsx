@@ -7,7 +7,7 @@ import { getTownHallOverview, type TownHallOverview } from '../services/api'
 // finances); there are NO write actions here. Self-mounted in TopNav, opened
 // via the `townhall:open` bridge event. Skeleton mirrors ExperimentPanel.
 
-type TownTab = 'policy' | 'office' | 'poll' | 'result'
+type TownTab = 'policy' | 'office' | 'poll' | 'result' | 'rep'
 const ACCENT = '#b98cff' // 紫 — distinct from the lab's teal
 
 const TABS: { key: TownTab; label: string }[] = [
@@ -15,6 +15,7 @@ const TABS: { key: TownTab; label: string }[] = [
   { key: 'office', label: '在任职位' },
   { key: 'poll', label: '议案投票' },
   { key: 'result', label: '选举结果' },
+  { key: 'rep', label: '声誉' },
 ]
 
 const FINANCE_LABELS: [keyof TownHallOverview['finances'], string, string][] = [
@@ -121,6 +122,7 @@ function TownTabBody({ tab, data }: { tab: TownTab; data: TownHallOverview }) {
   if (tab === 'policy') return <PolicyTab data={data} />
   if (tab === 'office') return <OfficeTab data={data} />
   if (tab === 'poll') return <PollTab data={data} />
+  if (tab === 'rep') return <RepTab data={data} />
   return <ResultTab data={data} />
 }
 
@@ -174,6 +176,47 @@ function PollTab({ data }: { data: TownHallOverview }) {
           {p.closes_at && <div style={{ ...muted, marginTop: 6 }}>截止 {p.closes_at}</div>}
         </div>
       ))}
+    </div>
+  )
+}
+
+function RepTab({ data }: { data: TownHallOverview }) {
+  const rep = data.reputation
+  const rows = rep?.residents ?? []
+  return (
+    <div>
+      <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8, color: ACCENT }}>⚖️ 公共声誉</div>
+      {rep && !rep.enabled && rows.length > 0 && (
+        <div style={{ ...muted, marginBottom: 8 }}>
+          声誉系统未开闸（REP_ENABLED=false）——以下为最近一次夜间聚合的落库数据。
+        </div>
+      )}
+      {rows.length === 0 && (
+        <div style={muted}>
+          {rep && !rep.enabled ? '声誉系统未开闸（REP_ENABLED=false），暂无公示数据。' : '暂无声誉数据。'}
+        </div>
+      )}
+      {rows.map((r) => (
+        <div key={r.slug} style={{ ...card, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: 13, fontWeight: 600 }}>{r.name}</span>
+          <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {!r.credit_ok && (
+              <span style={{
+                fontSize: 11, padding: '2px 8px', borderRadius: 999,
+                border: '1px solid #ef444455', color: '#ef4444',
+              }}>信用受限</span>
+            )}
+            <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+              {(r.score >= 0 ? '+' : '') + r.score.toFixed(3)} · n={r.samples}
+            </span>
+          </span>
+        </div>
+      ))}
+      {rep && rows.length > 0 && (
+        <div style={{ ...muted, marginTop: 6 }}>
+          信用阈值 {rep.credit_min_score}（低于则信用受限）· 数据来自夜间聚合
+        </div>
+      )}
     </div>
   )
 }
