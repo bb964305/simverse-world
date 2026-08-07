@@ -343,6 +343,44 @@ async def _consume_codex(
     config: CodexRuntimeConfig,
     resource_pool: RuntimeResourcePool,
 ) -> None:
+    try:
+        await _consume_codex_pooled(session, goal, config, resource_pool)
+    except asyncio.CancelledError:
+        # The run body swallows its own cancellation, so an escaping
+        # CancelledError means the cancel landed while the run was still
+        # queued in allocation.__aenter__: no proxy, process, or cgroup exist
+        # yet, but the gateway run token and the workspace (created by the
+        # /runs endpoint) do.
+        if session.done:
+            return
+        terminal_error = "Codex run cancelled"
+        try:
+            await _gateway_revoke(session, config.model_gateway_base_url)
+        except Exception as exc:
+            terminal_error = f"model token revoke failed: {exc}"[:1000]
+        session.request.model_gateway_token = ""
+        try:
+            _remove_workspace(
+                session.workspace,
+                config.workspace_root,
+                restore_controller_owner=config.enforce_process_isolation,
+            )
+        except OSError:
+            logger.critical(
+                "run workspace cleanup failed for session %s",
+                session.session_id,
+                exc_info=True,
+            )
+            terminal_error = "run workspace cleanup failed"
+        await session.finish(failed=True, error=terminal_error)
+
+
+async def _consume_codex_pooled(
+    session: RuntimeSession,
+    goal: Goal,
+    config: CodexRuntimeConfig,
+    resource_pool: RuntimeResourcePool,
+) -> None:
     async with resource_pool.allocation(
         cpu_cores=session.request.resource_cpu_cores,
         memory_mb=session.request.resource_memory_mb,

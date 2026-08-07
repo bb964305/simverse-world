@@ -1,6 +1,7 @@
 import asyncio
 import errno
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -603,6 +604,98 @@ async def test_cancel_during_isolation_setup_revokes_and_reports_cancelled(
         assert result["failed"] is True
         assert "cancelled" in result["error"]
         assert revoked.is_set()
+        assert list(Path(config.workspace_root).iterdir()) == []
+
+
+@pytest.mark.anyio
+async def test_cancel_while_queued_for_pool_revokes_and_reports_cancelled(
+    tmp_path, monkeypatch
+):
+    pool_holder_started = asyncio.Event()
+    queued_entered = asyncio.Event()
+    revoked_run_ids = []
+    allocation_calls = 0
+
+    # The holder hangs in proxy start while owning the only pool slot, so the
+    # queued run blocks inside allocation.__aenter__ (condition.wait_for) and
+    # never constructs a proxy before it is cancelled.
+    async def hanging_start(self):
+        pool_holder_started.set()
+        await asyncio.sleep(60)
+        return "http://127.0.0.1:4321/v1"
+
+    original_allocation = RuntimeResourcePool.allocation
+
+    @asynccontextmanager
+    async def tracking_allocation(self, *, cpu_cores, memory_mb):
+        nonlocal allocation_calls
+        allocation_calls += 1
+        if allocation_calls == 2:
+            queued_entered.set()
+        async with original_allocation(
+            self, cpu_cores=cpu_cores, memory_mb=memory_mb
+        ):
+            yield
+
+    async def fake_usage(_session, _base_url):
+        return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+                "cost_usd_cents": 0}
+
+    async def fake_revoke(session, _base_url):
+        revoked_run_ids.append(session.session_id)
+
+    monkeypatch.setattr(RunCredentialProxy, "start", hanging_start)
+    monkeypatch.setattr(RuntimeResourcePool, "allocation", tracking_allocation)
+    monkeypatch.setattr("app.lab.codex_runtime.service._gateway_usage", fake_usage)
+    monkeypatch.setattr("app.lab.codex_runtime.service._gateway_revoke", fake_revoke)
+    config = CodexRuntimeConfig(
+        bind_host="127.0.0.1", bind_port=8097, api_key=API_KEY,
+        codex_binary="/bin/false", workspace_root=str(tmp_path / "runs"),
+        max_active_runs=1, run_timeout_s=120, max_step_text_chars=1000,
+        model_gateway_base_url="http://trusted-gateway:8096/v1",
+        enforce_process_isolation=False,
+    )
+    app = create_app(config)
+    headers = {"Authorization": f"Bearer {API_KEY}"}
+
+    def run_body(run_id: str) -> dict:
+        return {
+            "run_id": run_id, "tenant_id": "tenant", "scopes": ["code"],
+            "budget_usd": 0.25, "egress_allowlist": [], "model_tier": "low",
+            "model_name": "deepseek-v4-flash", "model_policy_version": "test",
+            "resource_cpu_cores": 2, "resource_memory_mb": 2048,
+            "model_gateway_base_url": "http://ignored/v1",
+            "model_gateway_token": f"run-token-{run_id}",
+        }
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://runtime"
+    ) as client:
+        await client.post("/runs", headers=headers, json=run_body("pool-holder"))
+        await client.post(
+            "/runs/pool-holder/goal", headers=headers,
+            json={"brief": "hold", "scopes": ["code"]},
+        )
+        await asyncio.wait_for(pool_holder_started.wait(), timeout=5)
+        await client.post("/runs", headers=headers, json=run_body("queued-cancel"))
+        await client.post(
+            "/runs/queued-cancel/goal", headers=headers,
+            json={"brief": "wait", "scopes": ["code"]},
+        )
+        await asyncio.wait_for(queued_entered.wait(), timeout=5)
+        cancelled = await client.post("/runs/queued-cancel/cancel", headers=headers)
+        assert cancelled.status_code == 200
+        result = (await client.get("/runs/queued-cancel/steps", headers=headers)).json()
+        assert result["done"] is True
+        assert result["failed"] is True
+        assert "cancelled" in result["error"]
+        assert revoked_run_ids == ["queued-cancel"]
+        # The queued run never owned a pool slot: the holder still holds the
+        # only one and keeps its workspace.
+        health = (await client.get("/healthz")).json()
+        assert health["active"] == 1
+        assert len(list(Path(config.workspace_root).iterdir())) == 1
+        await client.post("/runs/pool-holder/cancel", headers=headers)
         assert list(Path(config.workspace_root).iterdir()) == []
 
 
