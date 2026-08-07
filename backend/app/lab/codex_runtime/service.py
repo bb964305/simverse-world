@@ -343,6 +343,44 @@ async def _consume_codex(
     config: CodexRuntimeConfig,
     resource_pool: RuntimeResourcePool,
 ) -> None:
+    try:
+        await _consume_codex_pooled(session, goal, config, resource_pool)
+    except asyncio.CancelledError:
+        # The run body swallows its own cancellation, so an escaping
+        # CancelledError means the cancel landed while the run was still
+        # queued in allocation.__aenter__: no proxy, process, or cgroup exist
+        # yet, but the gateway run token and the workspace (created by the
+        # /runs endpoint) do.
+        if session.done:
+            return
+        terminal_error = "Codex run cancelled"
+        try:
+            await _gateway_revoke(session, config.model_gateway_base_url)
+        except Exception as exc:
+            terminal_error = f"model token revoke failed: {exc}"[:1000]
+        session.request.model_gateway_token = ""
+        try:
+            _remove_workspace(
+                session.workspace,
+                config.workspace_root,
+                restore_controller_owner=config.enforce_process_isolation,
+            )
+        except OSError:
+            logger.critical(
+                "run workspace cleanup failed for session %s",
+                session.session_id,
+                exc_info=True,
+            )
+            terminal_error = "run workspace cleanup failed"
+        await session.finish(failed=True, error=terminal_error)
+
+
+async def _consume_codex_pooled(
+    session: RuntimeSession,
+    goal: Goal,
+    config: CodexRuntimeConfig,
+    resource_pool: RuntimeResourcePool,
+) -> None:
     async with resource_pool.allocation(
         cpu_cores=session.request.resource_cpu_cores,
         memory_mb=session.request.resource_memory_mb,
@@ -358,71 +396,75 @@ async def _consume_codex(
             client_token=client_token,
         )
         cgroup_path = None
-        try:
-            proxy_base_url = await credential_proxy.start()
-            config_path = codex_home / "config.toml"
-            config_path.write_text(_codex_config(proxy_base_url), encoding="utf-8")
-            cgroup_path = _create_run_cgroup(session, config)
-            if config.enforce_process_isolation:
-                os.chown(config_path, session.executor_uid, session.executor_uid)
-                os.chown(codex_home, session.executor_uid, session.executor_uid)
-                os.chown(run_tmp, session.executor_uid, session.executor_uid)
-                os.chown(session.workspace, session.executor_uid, session.executor_uid)
-        except BaseException:
-            await credential_proxy.close()
-            if cgroup_path is not None:
-                cgroup_path.rmdir()
-            raise
-        prompt = (
-            "You are the assigned Simverse Lab researcher. Complete the task inside "
-            "the provided workspace. Use shell/file tools only when needed. Do not "
-            "attempt network access or financial actions. End with a concise report "
-            "that states what you did and the result.\n\nTask:\n" + goal.brief
-        )
-        env = {
-            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-            "HOME": str(session.workspace),
-            "CODEX_HOME": str(codex_home),
-            "TMPDIR": str(run_tmp),
-            # This authenticates only to the per-run loopback proxy. It is not a
-            # gateway credential and cannot be used outside this run.
-            "LAB_RUN_TOKEN": client_token,
-            "LANG": os.environ.get("LANG", "C.UTF-8"),
-        }
-        for name in ("SSL_CERT_FILE", "SSL_CERT_DIR"):
-            if os.environ.get(name):
-                env[name] = os.environ[name]
-        codex_command = [
-            config.codex_binary,
-            "--ask-for-approval", "never",
-            "exec",
-            "--ephemeral",
-            "--json",
-            "--sandbox", config.codex_sandbox,
-            "--skip-git-repo-check",
-            "--model", "lab-auto",
-            prompt,
-        ]
-        command = codex_command
-        process_cwd: Path | None = session.workspace
-        if config.enforce_process_isolation:
-            assert cgroup_path is not None
-            command = [
-                sys.executable,
-                "-m", "app.lab.codex_runtime.launcher",
-                "--uid", str(session.executor_uid),
-                "--gid", str(session.executor_uid),
-                "--cgroup-path", str(cgroup_path),
-                "--cwd", str(session.workspace),
-                "--",
-                *codex_command,
-            ]
-            process_cwd = None
         terminal_error = ""
         failed = False
         cancelled = False
         budget_monitor: asyncio.Task[str] | None = None
         try:
+            # A cancel landing anywhere in isolation setup must still reach the
+            # shared finally below: revoke the gateway run token, close the
+            # proxy, and remove the workspace. The finally tolerates a
+            # partially built run (process is None, proxy never started,
+            # cgroup_path is None).
+            try:
+                proxy_base_url = await credential_proxy.start()
+                config_path = codex_home / "config.toml"
+                config_path.write_text(_codex_config(proxy_base_url), encoding="utf-8")
+                cgroup_path = _create_run_cgroup(session, config)
+                if config.enforce_process_isolation:
+                    os.chown(config_path, session.executor_uid, session.executor_uid)
+                    os.chown(codex_home, session.executor_uid, session.executor_uid)
+                    os.chown(run_tmp, session.executor_uid, session.executor_uid)
+                    os.chown(session.workspace, session.executor_uid, session.executor_uid)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                raise RuntimeError(f"runtime isolation setup failed: {exc}") from exc
+            prompt = (
+                "You are the assigned Simverse Lab researcher. Complete the task inside "
+                "the provided workspace. Use shell/file tools only when needed. Do not "
+                "attempt network access or financial actions. End with a concise report "
+                "that states what you did and the result.\n\nTask:\n" + goal.brief
+            )
+            env = {
+                "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+                "HOME": str(session.workspace),
+                "CODEX_HOME": str(codex_home),
+                "TMPDIR": str(run_tmp),
+                # This authenticates only to the per-run loopback proxy. It is not a
+                # gateway credential and cannot be used outside this run.
+                "LAB_RUN_TOKEN": client_token,
+                "LANG": os.environ.get("LANG", "C.UTF-8"),
+            }
+            for name in ("SSL_CERT_FILE", "SSL_CERT_DIR"):
+                if os.environ.get(name):
+                    env[name] = os.environ[name]
+            codex_command = [
+                config.codex_binary,
+                "--ask-for-approval", "never",
+                "exec",
+                "--ephemeral",
+                "--json",
+                "--sandbox", config.codex_sandbox,
+                "--skip-git-repo-check",
+                "--model", "lab-auto",
+                prompt,
+            ]
+            command = codex_command
+            process_cwd: Path | None = session.workspace
+            if config.enforce_process_isolation:
+                assert cgroup_path is not None
+                command = [
+                    sys.executable,
+                    "-m", "app.lab.codex_runtime.launcher",
+                    "--uid", str(session.executor_uid),
+                    "--gid", str(session.executor_uid),
+                    "--cgroup-path", str(cgroup_path),
+                    "--cwd", str(session.workspace),
+                    "--",
+                    *codex_command,
+                ]
+                process_cwd = None
             session.process = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=process_cwd,
