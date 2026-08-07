@@ -11,7 +11,15 @@ What it deletes (player characters are NEVER touched):
 - and, for each deleted resident, its dependent rows: messages/conversations,
   memories (own + about-them), personality history, goals, two-axis relations,
   follows/feed events, debates, treasury rows, llm_usage rows, bulletin posts
-  and commissions they authored; users.player_resident_id pointers are nulled.
+  and commissions they authored, issue stances (047), time capsules they carry
+  and unfinished daily quests naming them; users.player_resident_id pointers
+  are nulled and offices (046) they hold are vacated (the office row survives).
+
+Deliberately NOT touched (historical records — the slug is display-only there,
+and rewriting it would falsify the audit trail): lab_runs.researcher_slug,
+lab_tasks.researcher_slug, world_change_proposals.author_slug, and *done*
+daily quests. They keep pointing at a slug that no longer resolves to a
+resident, by design.
 
 Everything runs in one session against DATABASE_URL, so the same script works
 on the sqlite dev database and the production Postgres.
@@ -31,15 +39,19 @@ from app.database import async_session
 from app.models.bulletin_post import BulletinPost
 from app.models.commission import Commission
 from app.models.conversation import Conversation, Message
+from app.models.daily_quest import DailyQuest
 from app.models.debate import Debate
 from app.models.feed import FeedEvent, Follow
+from app.models.issue_stance import IssueStance
 from app.models.llm_usage import LLMUsage
 from app.models.memory import Memory
+from app.models.office import Office
 from app.models.personality_history import PersonalityHistory
 from app.models.resident import Resident
 from app.models.resident_goal import ResidentGoal
 from app.models.resident_relation import ResidentRelation
 from app.models.resident_treasury import ResidentTreasury
+from app.models.time_capsule import TimeCapsule
 from app.models.user import User
 from seed.preset_characters import PRESET_CHARACTERS, SYSTEM_USER_ID, seed_presets
 from seed.seed_residents import ensure_system_user
@@ -155,6 +167,36 @@ async def purge_residents(
         or_(Debate.resident_a_slug.in_(slugs), Debate.resident_b_slug.in_(slugs))
     ))
     await db.execute(delete(ResidentTreasury).where(ResidentTreasury.resident_slug.in_(slugs)))
+    # 047: a stance row outlives its resident and the next NPC reusing the slug
+    # would silently inherit its opinions.
+    await db.execute(delete(IssueStance).where(IssueStance.resident_slug.in_(slugs)))
+    # A capsule whose carrier is gone can never be delivered properly (the
+    # notify payload would name a resident that no longer exists).
+    await db.execute(delete(TimeCapsule).where(TimeCapsule.carrier_resident_slug.in_(slugs)))
+    # A pending quest naming a deleted resident can never be completed, and the
+    # generator only backfills when the user has NO row for today. Done quests
+    # are paid-out history: deleting one lets today's quest regenerate and pay
+    # a second time, so they stay. Filtering happens in Python because the slug
+    # sits inside a JSON blob and json_extract/->> differ across sqlite and PG.
+    stale_quests = [
+        qid
+        for qid, quest_json in (
+            await db.execute(
+                select(DailyQuest.id, DailyQuest.quest_json).where(DailyQuest.status != "done")
+            )
+        ).all()
+        if (quest_json or {}).get("resident_slug") in slugs
+    ]
+    if stale_quests:
+        await db.execute(delete(DailyQuest).where(DailyQuest.id.in_(stale_quests)))
+    # 046: an office row is never deleted (vacancy must stay observable) — just
+    # vacate it, or a ghost mayor/doctor blocks elections and duty lookups.
+    await db.execute(
+        update(Office)
+        .where(Office.holder_slug.in_(slugs))
+        .values(holder_slug=None)
+        .execution_options(synchronize_session=False)
+    )
     # A user "playing as" a deleted NPC would dangle — null the pointer.
     await db.execute(
         update(User)
