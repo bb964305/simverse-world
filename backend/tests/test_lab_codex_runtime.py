@@ -547,6 +547,66 @@ async def test_cancel_waits_for_usage_revoke_and_workspace_cleanup(tmp_path, mon
 
 
 @pytest.mark.anyio
+async def test_cancel_during_isolation_setup_revokes_and_reports_cancelled(
+    tmp_path, monkeypatch
+):
+    setup_entered = asyncio.Event()
+    revoked = asyncio.Event()
+
+    # Only start() is replaced: the teardown path must survive the real
+    # check_healthy()/close() with a proxy that never finished starting.
+    async def hanging_start(self):
+        setup_entered.set()
+        await asyncio.sleep(60)
+        return "http://127.0.0.1:4321/v1"
+
+    async def fake_usage(_session, _base_url):
+        return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+                "cost_usd_cents": 0}
+
+    async def fake_revoke(_session, _base_url):
+        revoked.set()
+
+    monkeypatch.setattr(RunCredentialProxy, "start", hanging_start)
+    monkeypatch.setattr("app.lab.codex_runtime.service._gateway_usage", fake_usage)
+    monkeypatch.setattr("app.lab.codex_runtime.service._gateway_revoke", fake_revoke)
+    config = CodexRuntimeConfig(
+        bind_host="127.0.0.1", bind_port=8097, api_key=API_KEY,
+        codex_binary="/bin/false", workspace_root=str(tmp_path / "runs"),
+        max_active_runs=1, run_timeout_s=120, max_step_text_chars=1000,
+        model_gateway_base_url="http://trusted-gateway:8096/v1",
+        enforce_process_isolation=False,
+    )
+    app = create_app(config)
+    headers = {"Authorization": f"Bearer {API_KEY}"}
+    body = {
+        "run_id": "setup-cancel", "tenant_id": "tenant", "scopes": ["code"],
+        "budget_usd": 0.25, "egress_allowlist": [], "model_tier": "low",
+        "model_name": "deepseek-v4-flash", "model_policy_version": "test",
+        "resource_cpu_cores": 2, "resource_memory_mb": 2048,
+        "model_gateway_base_url": "http://ignored/v1",
+        "model_gateway_token": "real-run-token",
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://runtime"
+    ) as client:
+        await client.post("/runs", headers=headers, json=body)
+        await client.post(
+            "/runs/setup-cancel/goal", headers=headers,
+            json={"brief": "wait", "scopes": ["code"]},
+        )
+        await asyncio.wait_for(setup_entered.wait(), timeout=5)
+        cancelled = await client.post("/runs/setup-cancel/cancel", headers=headers)
+        assert cancelled.status_code == 200
+        result = (await client.get("/runs/setup-cancel/steps", headers=headers)).json()
+        assert result["done"] is True
+        assert result["failed"] is True
+        assert "cancelled" in result["error"]
+        assert revoked.is_set()
+        assert list(Path(config.workspace_root).iterdir()) == []
+
+
+@pytest.mark.anyio
 async def test_codex_runtime_rejects_non_code_scope(tmp_path):
     config = CodexRuntimeConfig(
         bind_host="127.0.0.1", bind_port=8097, api_key=API_KEY,
