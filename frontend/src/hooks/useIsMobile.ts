@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useSyncExternalStore } from 'react'
 
 // Below this width the three-pane / sidebar layouts (Forge, Profile,
 // Debates) stop having room for two columns side by side — see the E2E-02/
@@ -9,35 +9,29 @@ const DEFAULT_BREAKPOINT = 720
 
 /**
  * Tracks whether the viewport is at or below `breakpointPx` wide, live.
- * Mirrors useReducedMotion's shape: the initial value is read via
- * `matchMedia` in the useState initializer (SSR/jsdom-safe — `matchMedia`
- * may be undefined there), and the effect only subscribes to subsequent
- * "change" events, falling back to the legacy `addListener` API for older
- * Safari. Degrades to `false` (desktop layout) when `matchMedia` is
- * unavailable so callers never crash.
+ * The MediaQueryList is treated as an external store: useSyncExternalStore
+ * reads the current value straight from `matchMedia` (SSR/jsdom-safe —
+ * `matchMedia` may be undefined there) and re-reads it whenever the query's
+ * "change" event fires, or when `breakpointPx` changes and swaps the
+ * subscription. Falls back to the legacy `addListener` API for older Safari.
+ * Degrades to `false` (desktop layout) when `matchMedia` is unavailable so
+ * callers never crash.
  */
 export function useIsMobile(breakpointPx: number = DEFAULT_BREAKPOINT): boolean {
   const query = `(max-width: ${breakpointPx}px)`
-  const [isMobile, setIsMobile] = useState<boolean>(
-    () => window.matchMedia?.(query).matches ?? false,
+  const subscribe = useCallback(
+    (onStoreChange: () => void) => {
+      const mql = window.matchMedia?.(query)
+      if (!mql) return () => {}
+      if (mql.addEventListener) {
+        mql.addEventListener('change', onStoreChange)
+        return () => mql.removeEventListener('change', onStoreChange)
+      }
+      // Legacy Safari (<14): addListener/removeListener.
+      mql.addListener(onStoreChange)
+      return () => mql.removeListener(onStoreChange)
+    },
+    [query],
   )
-
-  useEffect(() => {
-    const mql = window.matchMedia?.(query)
-    if (!mql) return
-    // Initial value already read in the useState initializer (and the
-    // query may have changed since then if breakpointPx changed) — sync
-    // once on effect setup, then only subscribe to live changes.
-    setIsMobile(mql.matches)
-    const onChange = (e: MediaQueryListEvent) => setIsMobile(e.matches)
-    if (mql.addEventListener) {
-      mql.addEventListener('change', onChange)
-      return () => mql.removeEventListener('change', onChange)
-    }
-    // Legacy Safari (<14): addListener/removeListener.
-    mql.addListener(onChange)
-    return () => mql.removeListener(onChange)
-  }, [query])
-
-  return isMobile
+  return useSyncExternalStore(subscribe, () => window.matchMedia?.(query).matches ?? false)
 }
