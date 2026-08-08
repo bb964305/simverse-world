@@ -491,6 +491,45 @@ async def treasury_credit(db: AsyncSession, slug: str, amount: int, reason: str 
     await db.commit()
 
 
+async def treasury_debit_pending(db: AsyncSession, slug: str, amount: int) -> bool:
+    """Flush-owned guarded debit — the caller owns the surrounding transaction
+    (mirror of ``treasury_credit_pending``). False when the row is missing or
+    short; it never commits, so the debit only exists once the caller says so."""
+    if not isinstance(slug, str) or not slug or len(slug) > 100:
+        raise CoinError("treasury slug is invalid")
+    if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+        raise CoinError("treasury amount must be a positive integer")
+
+    result = await db.execute(
+        update(ResidentTreasury)
+        .where(ResidentTreasury.resident_slug == slug, ResidentTreasury.balance_sc >= amount)
+        .values(balance_sc=ResidentTreasury.balance_sc - amount)
+        .execution_options(synchronize_session=False)
+    )
+    return (result.rowcount or 0) > 0
+
+
+async def treasury_transfer(
+    db: AsyncSession, from_slug: str, to_slug: str, amount: int, reason: str = ""
+) -> bool:
+    """M-A C0: atomic resident→resident move. Debit-first, then credit, then a
+    single commit — nothing survives a mid-flight failure: the pending debit is
+    rolled back on the spot, never left hanging to ride a later unrelated commit
+    (that is how the old debit+credit pair — each with its own commit — burned
+    coins when the second leg failed)."""
+    if from_slug == to_slug:
+        raise CoinError("treasury transfer to self")
+    if not await treasury_debit_pending(db, from_slug, amount):
+        return False
+    try:
+        await treasury_credit_pending(db, to_slug, amount, reason)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    return True
+
+
 async def treasury_debit(db: AsyncSession, slug: str, amount: int, reason: str = "") -> bool:
     """Atomically spend from a treasury: ``UPDATE ... WHERE balance_sc >= amount``.
     Returns False if the balance is insufficient (used for proposal fuel, P3)."""
