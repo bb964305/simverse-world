@@ -1,9 +1,10 @@
-"""M-A C2 — NPC 夜间消费 pass:居民之间的真实钱流(零 LLM 规则引擎)。
+"""M-A C2/C3 — NPC 夜间消费与委托接单/结算 pass:居民之间的真实钱流(零 LLM)。
 
 需求端在现状里整个外包给了玩家:作品市场、委托、打赏的需求侧全是 `user_id` 硬
-键,玩家一断流三个市场同时归零。这个模块补的是**居民自己会花钱**——选货、成交、
-纳税全是规则(仿 `civic_service._npc_choice` 的打分口径),不进任何 prompt,可关断
-(`npc_economy_enabled` + `npc_trade_enabled` 双闸,默认关 → 零 DB 写入)。
+键,玩家一断流三个市场同时归零。这个模块补的是**居民自己会花钱、也会替人跑腿**
+——选货、成交、纳税、接单全是规则(仿 `civic_service._npc_choice` 的打分口径),
+不进任何 prompt,可关断(`npc_economy_enabled` + `npc_trade_enabled` 双闸,默认关
+→ 零 DB 写入)。
 
 事务纪律(本里程碑的头号故障面):
 - 一笔成交 = **一个事务**:`treasury_debit_pending` + `skim_tax_pending` +
@@ -20,11 +21,13 @@ from __future__ import annotations
 import hashlib
 import logging
 import random
+from datetime import datetime, UTC
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.models.commission import Commission
 from app.models.resident import Resident
 from app.models.shop import Item
 from app.services import coin_service, relation_service, treasury_service
@@ -272,6 +275,233 @@ async def run_consumption_pass(db: AsyncSession, rng=None) -> dict:
             await db.rollback()
             logger.warning("npc_trade consumption failed for %s", buyer_slug,
                            exc_info=True)
+            continue
+
+    return summary
+
+
+# --------------------------------------------------------------------------- #
+# C3 — NPC 接单/结算(nightly #23 的前两段:先结算、后接单)                       #
+#                                                                             #
+# `commissions` 的两个承接列是互斥的:`acceptor_user_id`(玩家,赏金铸币,        #
+# commission_service.complete:108 的既有语义**不动**)与 `acceptor_resident_id`  #
+# (居民,赏金是发单人真实出资)。两个 pass 只认后者,前者非空一律绕开。          #
+# 两列存的都是 id,而钱包按 slug 记账 —— 所有资金动作前先解析 id→Resident。      #
+# --------------------------------------------------------------------------- #
+
+
+async def _resident_by_id(db: AsyncSession, resident_id: str | None) -> Resident | None:
+    """委托里存的是 Resident.id;人被 purge 之后这就是个死引用,查无即流单。"""
+    if not resident_id:
+        return None
+    return (await db.execute(
+        select(Resident).where(Resident.id == resident_id)
+    )).scalar_one_or_none()
+
+
+async def _reopen(db: AsyncSession, commission_id: str) -> bool:
+    """把一单退回 `open` 并清掉承接人(另起事务、显式 commit)。
+
+    guarded 到 `status='accepted' AND acceptor_user_id IS NULL`:玩家在这中间抢
+    接了的单不许被退回。退回后由既有的 48h 过期扫尾(nightly #3)。
+    """
+    result = await db.execute(
+        update(Commission)
+        .where(Commission.id == commission_id, Commission.status == "accepted",
+               Commission.acceptor_user_id.is_(None))
+        .values(status="open", acceptor_resident_id=None)
+        .execution_options(synchronize_session=False)
+    )
+    await db.commit()
+    return (result.rowcount or 0) > 0
+
+
+async def _narrate_commission(issuer: Resident, taker: Resident, *, commission_id: str,
+                              title: str, reward: int, stage: str,
+                              db: AsyncSession) -> None:
+    """commit 之后的叙事面(memory + feed),整段 fail-open —— 状态和钱都已经落库
+    了,一条记忆写不进去不该把整单连坐掉(`add_memory` 自带 commit,放进事务里会
+    把单事务撕成两半)。"""
+    from app.memory.service import MemoryService
+    from app.services import feed_service
+
+    if stage == "taken":
+        kind = "npc_commission_taken"
+        issuer_note = f"{taker.name}接下了我的「{title}」。"
+        taker_note = f"接下了{issuer.name}的委托「{title}」,酬劳 {reward} 枚硬币。"
+        weights = (0.5, 0.5)
+    else:
+        kind = "npc_commission_done"
+        # 发单人侧措辞与玩家完成路径同源(commission_service.py:112)——同一件事
+        # 在居民记忆里不该有两种说法。
+        issuer_note = f"{taker.name}帮我完成了「{title}」,付了 {reward} 枚硬币的酬劳。"
+        taker_note = f"帮{issuer.name}跑完了「{title}」,挣到 {reward} 枚硬币。"
+        weights = (0.7, 0.6)
+
+    try:
+        svc = MemoryService(db)
+        await svc.add_memory(issuer.id, "event", issuer_note, weights[0], "commission",
+                             related_resident_id=taker.id)
+        await svc.add_memory(taker.id, "event", taker_note, weights[1], "commission",
+                             related_resident_id=issuer.id)
+    except Exception:
+        logger.warning("npc_commission memory failed for %s", commission_id, exc_info=True)
+
+    try:
+        payload = {"commission": commission_id, "title": title, "reward": reward}
+        await feed_service.push(issuer.slug, kind, {
+            **payload, "acceptor": taker.slug, "role": "issuer"})
+        await feed_service.push(taker.slug, kind, {
+            **payload, "issuer": issuer.slug, "role": "acceptor"})
+    except Exception:
+        logger.warning("npc_commission feed failed for %s", commission_id, exc_info=True)
+
+
+async def run_commission_settle_pass(db: AsyncSession) -> dict:
+    """结算居民已承接的委托。返回 `{"settled", "paid", "reopened"}` 摘要。
+
+    一单结算 = **一个事务**:guarded `UPDATE ... status='completed'`(先占坑,防
+    与玩家/上一轮抢)+ `treasury_debit_pending`(发单人)+ `treasury_credit_pending`
+    (承接人)+ 双方钱包缓存 → 单次 `commit`。commit 前的任何一步失败都整体
+    `rollback` —— 钱和状态一起没动,下一轮重跑不会重复付款。
+    """
+    from app.services.duty_service import set_wallet_cache
+
+    summary = {"settled": 0, "paid": 0, "reopened": 0}
+    if not (settings.npc_economy_enabled and settings.npc_trade_enabled):
+        return summary
+
+    # 扫描阶段一律取标量行(plain tuple):单单失败的 rollback 会 expire 整个
+    # session 的 ORM 对象(异步下再读属性就是 MissingGreenlet)。
+    rows = (await db.execute(
+        select(Commission.id, Commission.issuer_resident_id,
+               Commission.acceptor_resident_id, Commission.reward_sc, Commission.title)
+        .where(Commission.status == "accepted",
+               Commission.acceptor_resident_id.is_not(None),
+               Commission.acceptor_user_id.is_(None))
+        .order_by(Commission.id)
+    )).all()
+
+    for cid, issuer_id, acceptor_id, reward, title in rows:
+        try:
+            issuer = await _resident_by_id(db, issuer_id)
+            taker = await _resident_by_id(db, acceptor_id)
+            if issuer is None or taker is None:
+                if await _reopen(db, cid):
+                    summary["reopened"] += 1
+                continue
+
+            claimed = await db.execute(
+                update(Commission)
+                .where(Commission.id == cid, Commission.status == "accepted",
+                       Commission.acceptor_user_id.is_(None))
+                .values(status="completed", completed_at=datetime.now(UTC))
+                .execution_options(synchronize_session=False)
+            )
+            if (claimed.rowcount or 0) == 0:
+                await db.rollback()          # 状态被别人动过 —— 这单不归我们结
+                continue
+
+            if reward > 0:
+                if not await coin_service.treasury_debit_pending(db, issuer.slug, reward):
+                    # 发单人付不起:占坑连同半笔账一起回滚,再另起事务退回 open。
+                    await db.rollback()
+                    if await _reopen(db, cid):
+                        summary["reopened"] += 1
+                    continue
+                await coin_service.treasury_credit_pending(
+                    db, taker.slug, reward, reason=f"npc_commission:{cid}")
+                # 钱包缓存(prompt 读的那份)——事务内 SELECT 看得到自己尚未
+                # commit 的改动。
+                set_wallet_cache(db, issuer,
+                                 await coin_service.treasury_balance(db, issuer.slug))
+                set_wallet_cache(db, taker,
+                                 await coin_service.treasury_balance(db, taker.slug))
+            await db.commit()
+
+            summary["settled"] += 1
+            summary["paid"] += max(0, reward)
+            await _narrate_commission(issuer, taker, commission_id=cid, title=title,
+                                      reward=reward, stage="done", db=db)
+        except Exception:
+            # 写了半截就必须就地回滚:悬挂的 debit 会被后面某一单的 commit 带落库。
+            await db.rollback()
+            logger.warning("npc_commission settle failed for %s", cid, exc_info=True)
+            continue
+
+    return summary
+
+
+async def _acceptor_candidates(db: AsyncSession, issuer_id: str) -> list[tuple[str, str]]:
+    """合格承接人:自主居民、且不是发单人自己(按 slug 稳定序)。"""
+    rows = (await db.execute(
+        select(Resident.id, Resident.slug)
+        .where(Resident.is_autonomous, Resident.id != issuer_id)
+        .order_by(Resident.slug)
+    )).all()
+    return [(r.id, r.slug) for r in rows]
+
+
+async def run_commission_accept_pass(db: AsyncSession, rng=None) -> dict:
+    """让居民接下 open 的委托。返回 `{"accepted"}` 摘要。
+
+    只接**发单人当下付得起**的单(NPC 路径的赏金是真实出资,不是铸币),挑人用
+    `_stable_unit(承接人 slug, 委托 id)` 的稳定口味哈希 + `npc_trade_buy_prob`
+    掷骰;占坑是 guarded UPDATE(`status='open' AND acceptor_user_id IS NULL AND
+    expires_at>now`,与 `commission_service.accept:69` 同款),抢输了就放弃。
+    同一个人一晚只接一单(与 C2 的"每人一笔"同口径)。钱在结算那一段才动。
+    """
+    summary = {"accepted": 0}
+    if not (settings.npc_economy_enabled and settings.npc_trade_enabled):
+        return summary
+
+    rng = rng or random.Random()
+    rows = (await db.execute(
+        select(Commission.id, Commission.issuer_resident_id, Commission.reward_sc,
+               Commission.title)
+        .where(Commission.status == "open", Commission.acceptor_user_id.is_(None),
+               Commission.expires_at > datetime.now(UTC))
+        .order_by(Commission.id)
+    )).all()
+
+    taken: set[str] = set()
+    for cid, issuer_id, reward, title in rows:
+        try:
+            if rng.random() >= settings.npc_trade_buy_prob:
+                continue
+            issuer = await _resident_by_id(db, issuer_id)
+            if issuer is None:
+                continue
+            if await coin_service.treasury_balance(db, issuer.slug) < reward:
+                continue        # 发单人现在就付不起 —— 别让人白跑一趟
+            pool = [c for c in await _acceptor_candidates(db, issuer_id)
+                    if c[1] not in taken]
+            if not pool:
+                continue
+            pick_id, pick_slug = max(pool, key=lambda c: _stable_unit(c[1], cid))
+
+            result = await db.execute(
+                update(Commission)
+                .where(Commission.id == cid, Commission.status == "open",
+                       Commission.acceptor_user_id.is_(None),
+                       Commission.expires_at > datetime.now(UTC))
+                .values(status="accepted", acceptor_resident_id=pick_id)
+                .execution_options(synchronize_session=False)
+            )
+            if (result.rowcount or 0) == 0:
+                await db.rollback()          # 玩家抢先接走了,认输
+                continue
+            await db.commit()
+
+            taken.add(pick_slug)
+            summary["accepted"] += 1
+            taker = await _resident_by_id(db, pick_id)
+            if taker is not None:
+                await _narrate_commission(issuer, taker, commission_id=cid, title=title,
+                                          reward=reward, stage="taken", db=db)
+        except Exception:
+            await db.rollback()
+            logger.warning("npc_commission accept failed for %s", cid, exc_info=True)
             continue
 
     return summary
