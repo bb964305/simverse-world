@@ -437,6 +437,33 @@ async def run_nightly_jobs(*, once_per_day: bool = False) -> None:
                 logger.info("S1-5: town public spending disbursed %d SC", spent)
     except Exception:
         logger.error("S1-5 town treasury nightly failed", exc_info=True)
+
+    # M-A: NPC↔NPC trade night (same realism-family shape: gate INSIDE the cron,
+    # own try/except, fail-open). Order is a hard requirement, not style:
+    # settle → accept → consume. Settling first keeps a commission accepted
+    # tonight from being completed the same night; consuming last lets a reward
+    # that just landed be spent without waiting a whole night. Both gates are
+    # read before the session opens — a disabled world touches no DB.
+    try:
+        from app.config import settings as _trade_settings
+        if _trade_settings.npc_economy_enabled and _trade_settings.npc_trade_enabled:
+            from app.services.npc_trade_service import (
+                run_commission_accept_pass, run_commission_settle_pass,
+                run_consumption_pass,
+            )
+            async with async_session() as db:
+                settled = await run_commission_settle_pass(db)
+                accepted = await run_commission_accept_pass(db)
+                bought = await run_consumption_pass(db)
+            if settled["settled"] or accepted["accepted"] or bought["bought"]:
+                logger.info(
+                    "M-A: %d commissions settled (%d SC paid, %d reopened), "
+                    "%d accepted, %d purchases for %d SC (tax %d)",
+                    settled["settled"], settled["paid"], settled["reopened"],
+                    accepted["accepted"], bought["bought"], bought["spent"],
+                    bought["tax"])
+    except Exception:
+        logger.error("M-A npc trade nightly failed", exc_info=True)
     # Future: E2 dreams, E7 capsule delivery — each own try/except.
 
 
