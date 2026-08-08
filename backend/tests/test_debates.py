@@ -1,5 +1,7 @@
 """E9 debate arena: staking, voting dedup, settlement math (burn/tie), auto-draw."""
 
+from unittest.mock import MagicMock
+
 import pytest
 from sqlalchemy import select
 
@@ -175,6 +177,74 @@ async def test_run_live_llm_failure_auto_draws(db_session, monkeypatch):
     await db_session.refresh(a1)
     await db_session.refresh(b1)
     assert a1.soul_coin_balance == 1000 and b1.soul_coin_balance == 1000  # all refunded
+
+
+@pytest.mark.anyio
+async def test_run_live_disables_thinking_so_transcript_has_text(db_session, monkeypatch):
+    """生产事故复现（vm212 debates 全空辩词）：dashscope 的 deepseek-v4-flash
+    是 hybrid-thinking 模型，thinking 未显式 disabled 时默认开推理；直调
+    ``messages.create`` 不带 ``thinking={"type": "disabled"}``，推理把
+    max_tokens=200 吃光——生产 12 轮 output_tokens 全部触顶 201、正文全空，
+    而状态机照常走完。修复 = 走 ``app.llm.client.chat()``（全仓唯一会加
+    thinking disabled 的地方，先例见 digest_service.compose_digest）。
+    """
+    d = await _debate(db_session, status="announced")
+
+    class _ThinkingOnlyBlock:
+        # 刻意没有 .text 属性 —— 模拟推理吃光预算后没有可用 text block 的响应。
+        type = "thinking"
+        thinking = "让我想想……"
+
+    class _HybridThinkingClient:
+        class messages:
+            @staticmethod
+            async def create(**kw):
+                resp = MagicMock()
+                resp.usage = None
+                if kw.get("thinking") == {"type": "disabled"}:
+                    resp.content = [MagicMock(text="猫的独立性更适合小镇生活。")]
+                else:
+                    resp.content = [_ThinkingOnlyBlock()]
+                return resp
+
+    monkeypatch.setattr("app.llm.client.get_client",
+                        lambda owner="system", **kw: _HybridThinkingClient())
+    await ds.run_live(db_session, d)
+    await db_session.refresh(d)
+    assert d.status == "voting"
+    assert len(d.transcript_json) == ds.ROUNDS
+    assert all(t["text"] for t in d.transcript_json), \
+        f"辩词不许为空: {d.transcript_json}"
+
+
+@pytest.mark.anyio
+async def test_run_live_empty_turn_auto_draws_and_refunds(db_session, monkeypatch):
+    """护栏：哪怕端点「成功」返回了空正文，也不许把空辩论静默写进 transcript
+    ——按设计意图（run_live docstring：LLM 失败自动平局退款）走 auto-draw。
+    """
+    d = await _debate(db_session, status="announced")
+    a1 = await _user(db_session, "ea@d.com", bal=1000)
+    b1 = await _user(db_session, "eb@d.com", bal=1000)
+    await ds.stake(db_session, d.id, a1.id, "a", 100)
+    await ds.stake(db_session, d.id, b1.id, "b", 100)
+
+    class _EmptyTextClient:
+        class messages:
+            @staticmethod
+            async def create(**kw):
+                resp = MagicMock()
+                resp.usage = None
+                resp.content = [MagicMock(text="   ")]
+                return resp
+
+    monkeypatch.setattr("app.llm.client.get_client",
+                        lambda owner="system", **kw: _EmptyTextClient())
+    await ds.run_live(db_session, d)
+    await db_session.refresh(d)
+    assert d.status == "settled" and d.winner == "draw"
+    await db_session.refresh(a1)
+    await db_session.refresh(b1)
+    assert a1.soul_coin_balance == 1000 and b1.soul_coin_balance == 1000
 
 
 @pytest.mark.anyio

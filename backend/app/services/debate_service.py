@@ -161,14 +161,13 @@ async def run_live(db, debate: Debate) -> Debate:
     await db.commit()
 
     from app.ws.manager import manager
-    from app.llm.client import get_client
-    from app.llm.metering import record_usage
+    from app.llm.client import chat
+    from app.llm.metering import Meter
     from app.config import settings
 
     res_a = await _resident(db, debate.resident_a_slug)
     res_b = await _resident(db, debate.resident_b_slug)
     transcript: list[dict] = []
-    client = get_client("system")
     model = settings.background_model
 
     try:
@@ -178,12 +177,25 @@ async def run_live(db, debate: Debate) -> Debate:
             speaker_name = speaker.name if speaker else ("正方" if side == "a" else "反方")
             history = "\n".join(f"{t['speaker']}：{t['text']}" for t in transcript) or "（你先发言）"
             prompt = f"辩题：{debate.topic}\n你是{speaker_name}。\n之前的发言：\n{history}"
-            resp = await client.messages.create(
-                model=model, max_tokens=200, system=DEBATE_SYSTEM,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            await record_usage("debate", model=model, owner="system", response=resp)
-            text = _extract_text(resp).strip()[:120]
+            # 必须走 ``app.llm.client.chat()``：它是全仓唯一会加
+            # ``thinking={"type": "disabled"}`` 的地方（client.py:148-149）。
+            # 直调 ``messages.create`` 时 dashscope 的 deepseek hybrid-thinking
+            # 默认开推理，把 max_tokens=200 吃光，响应里没有可用 text block——
+            # 生产三场辩论 12 轮辩词全空正是这么来的（llm_usage 里 debate 的
+            # output_tokens 全部触顶 201）。同款事故先例：digest_service
+            # ``compose_digest`` 的注释。
+            text = (await chat(
+                DEBATE_SYSTEM,
+                [{"role": "user", "content": prompt}],
+                model=model,
+                max_tokens=200,
+                owner="system",
+                meter=Meter(scenario="debate"),
+            )).strip()[:120]
+            if not text:
+                # 空辩词不算成功——当 LLM 失败处理，让 except 走 auto-draw
+                # 退款，不许把哑剧辩论静默写进 transcript。
+                raise RuntimeError(f"debate turn {i + 1} returned empty text")
             turn = {"round": i + 1, "side": side, "speaker": speaker_name, "text": text}
             transcript.append(turn)
             debate.transcript_json = list(transcript)
@@ -454,10 +466,3 @@ async def _resident_aftermath(db, d: Debate, winner: str) -> None:
 # --------------------------------------------------------------------------- #
 async def _resident(db, slug: str) -> Resident | None:
     return (await db.execute(select(Resident).where(Resident.slug == slug))).scalar_one_or_none()
-
-
-def _extract_text(resp) -> str:
-    for block in resp.content:
-        if hasattr(block, "text"):
-            return block.text
-    return ""
