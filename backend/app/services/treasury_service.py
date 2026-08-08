@@ -41,6 +41,7 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.system_config import SystemConfig
 from app.models.town_treasury import TOWN_KEY, TownTreasury
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,11 @@ logger = logging.getLogger(__name__)
 # ConfigService key stamped by the nightly public-spending job (§2 任务 5): the
 # scalar policy state lives in system_config, not in new columns.
 LAST_SPEND_KEY = "town_last_spend_at"
+
+# M-A C5: the fractional tax ledger. Same "scalar state lives in system_config"
+# discipline as LAST_SPEND_KEY — the sub-1-SC remainder of every skim accrues
+# here instead of evaporating in an ``int()``, so no migration is needed.
+TAX_CARRY_KEY = "town_tax_carry"
 
 
 async def balance(db: AsyncSession) -> int:
@@ -106,6 +112,140 @@ async def tax(db: AsyncSession, amount: int, reason: str = "") -> None:
         return
     await tax_pending(db, amount, reason)
     await db.commit()
+
+
+async def kv_read(db: AsyncSession, key: str, default: str | None = None) -> str | None:
+    """Read a raw ``system_config`` value (no JSON decoding, no session churn).
+
+    Deliberately not ``ConfigService.get``: this runs inside transactions that
+    the caller owns, and the value read here is written back by
+    ``kv_upsert_pending`` — both halves stay on the raw string so a decode/encode
+    round trip can never drift the ledger.
+    """
+    row = await db.execute(
+        select(SystemConfig.value).where(SystemConfig.key == key)
+    )
+    value = row.scalar_one_or_none()
+    return default if value is None else value
+
+
+async def kv_upsert_pending(
+    db: AsyncSession,
+    key: str,
+    value: str,
+    *,
+    group: str = "town",
+    updated_by: str,
+) -> None:
+    """Flush-owned ``system_config`` upsert. The caller owns the transaction.
+
+    Mirrors ``tax_pending`` exactly (dialect-native ``ON CONFLICT DO UPDATE`` on
+    postgres/sqlite, guarded UPDATE → insert-when-zero-rows elsewhere), and NOT
+    ``ConfigService.set`` — that one commits internally, which would tear a
+    single-transaction settlement in half.
+
+    ``group`` and ``updated_by`` are mandatory columns on ``SystemConfig`` (no
+    server default): omitting either is a NOT NULL crash under create_all.
+    """
+    now = datetime.now(UTC)
+    values = {
+        "key": key, "value": value, "group": group,
+        "updated_at": now, "updated_by": updated_by,
+    }
+    dialect = db.get_bind().dialect.name
+    if dialect in ("postgresql", "sqlite"):
+        insert = postgresql_insert if dialect == "postgresql" else sqlite_insert
+        statement = insert(SystemConfig).values(**values)
+        statement = statement.on_conflict_do_update(
+            index_elements=[SystemConfig.key],
+            set_={"value": value, "updated_at": now, "updated_by": updated_by},
+        )
+        await db.execute(statement)
+    else:
+        result = await db.execute(
+            update(SystemConfig)
+            .where(SystemConfig.key == key)
+            .values(value=value, updated_at=now, updated_by=updated_by)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount == 0:
+            db.add(SystemConfig(**values))
+    await db.flush()
+
+
+async def _skim(
+    db: AsyncSession, gross: int, fallback_rate: float, reason: str,
+) -> tuple[int, bool]:
+    """M-A C5 core: return ``(cut, wrote_anything)``.
+
+    The write flag is what lets ``skim_tax`` commit only when there is something
+    to commit — the legacy path never committed on a zero cut, and a gratuitous
+    commit would land whatever else the caller had pending.
+    """
+    from app.config import settings
+    if not settings.town_treasury_enabled:
+        return 0, False
+
+    # S2-5: once policy storage is enabled the typed tax_rate is the single town
+    # ratio; gate off keeps the caller's legacy per-channel rate.
+    from app.services import fiscal_policy_service
+    rate = await fiscal_policy_service.tax_rate(db, fallback=fallback_rate)
+    exact = gross * rate
+
+    if not settings.tax_carry_enabled:
+        # Byte-level status quo: plain ``int()`` truncation, carry row untouched.
+        # vm212 already runs with TOWN_TREASURY_ENABLED on, so this branch is the
+        # one a dark deploy must not move by a single SC.
+        cut = int(exact)
+        if cut <= 0:
+            return 0, False
+        cut = min(cut, gross)
+        await tax_pending(db, cut, reason)
+        return cut, True
+
+    carry = float(await kv_read(db, TAX_CARRY_KEY, "0") or "0")
+    total = exact + carry
+    cut = min(int(total), gross)
+    if cut <= 0 and exact <= 0:
+        # Nothing accrued (zero rate / zero gross): leave the ledger alone so a
+        # no-op skim stays a no-op write.
+        return 0, False
+    await kv_upsert_pending(
+        db, TAX_CARRY_KEY, f"{total - cut:.6f}", updated_by=f"skim_tax:{reason}",
+    )
+    if cut > 0:
+        await tax_pending(db, cut, reason)
+    return cut, True
+
+
+async def skim_tax_pending(
+    db: AsyncSession, gross: int, fallback_rate: float, reason: str = "",
+) -> int:
+    """Flush-owned tax skim for single-transaction NPC paths (M-A C2/C4).
+
+    Returns the SC actually levied. ``town_treasury_enabled`` off → 0 and zero
+    writes. With ``tax_carry_enabled`` on, the sub-SC remainder accrues into
+    ``town_tax_carry`` and is levied once it crosses 1 SC; with it off the result
+    is byte-identical to the legacy ``int(gross * rate)`` truncation.
+    """
+    cut, _ = await _skim(db, gross, fallback_rate, reason)
+    return cut
+
+
+async def skim_tax(
+    db: AsyncSession, gross: int, fallback_rate: float, reason: str = "",
+) -> int:
+    """Self-committing tax skim for the player paths (``shop_effects``).
+
+    The legacy implementation went through ``tax`` (self-committing), and the tip
+    path has no guaranteed commit after the sentinel-creator branch — a pending
+    version would silently drop the levy. So this version owns the commit, and
+    only when something was actually written (see ``_skim``).
+    """
+    cut, wrote = await _skim(db, gross, fallback_rate, reason)
+    if wrote:
+        await db.commit()
+    return cut
 
 
 async def disburse(db: AsyncSession, amount: int, reason: str = "") -> bool:

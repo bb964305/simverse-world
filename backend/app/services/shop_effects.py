@@ -40,9 +40,13 @@ def register_precheck(kind: str) -> Callable[[EffectHandler], EffectHandler]:
 
 
 async def _skim_town_tax(db, gross: int, rate: float, reason: str) -> int:
-    """S1-5: take ``int(gross * rate)`` out of a payout and credit the town
-    treasury. Returns the cut actually taken (0 when the gate is off, the rate
-    truncates to nothing, or the treasury write fails).
+    """S1-5: take the town's cut out of a payout and credit the treasury.
+    Returns the cut actually taken (0 when the gate is off, the rate truncates
+    to nothing, or the treasury write fails).
+
+    Thin delegate since M-A C5 — ``treasury_service.skim_tax`` owns the rule
+    (``int(gross * rate)`` by default; the sub-SC remainder accrues into the
+    ``town_tax_carry`` ledger once ``tax_carry_enabled`` is on).
 
     Pure rule — a multiplication and a truncation, zero LLM cost. Gated on
     ``town_treasury_enabled`` (off → byte-level status quo: the caller pays the
@@ -53,17 +57,12 @@ async def _skim_town_tax(db, gross: int, rate: float, reason: str) -> int:
     if not settings.town_treasury_enabled:
         return 0
     try:
-        # S2-5: once policy storage is enabled, the typed tax_rate becomes the
-        # single town tax ratio. Gate off keeps the legacy per-channel setting.
-        from app.services import fiscal_policy_service
-        rate = await fiscal_policy_service.tax_rate(db, fallback=rate)
-        cut = int(gross * rate)
-        if cut <= 0:
-            return 0
-        cut = min(cut, gross)
+        # M-A C5: the rule itself (policy rate lookup, truncation / fractional
+        # carry, town credit) now lives in treasury_service. This must stay the
+        # SELF-COMMITTING version: the tip path has no guaranteed commit after
+        # the sentinel-creator branch, so a flush-owned skim would drop the levy.
         from app.services import treasury_service
-        await treasury_service.tax(db, cut, reason=reason)
-        return cut
+        return await treasury_service.skim_tax(db, gross, rate, reason)
     except Exception:
         logger.warning("town tax skim failed (%s)", reason, exc_info=True)
         return 0

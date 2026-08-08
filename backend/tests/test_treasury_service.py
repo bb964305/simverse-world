@@ -314,7 +314,9 @@ async def test_sales_tax_failure_is_fail_open(db_session, monkeypatch):
     async def _boom(*a, **kw):
         raise RuntimeError("treasury down")
 
-    monkeypatch.setattr(treasury_service, "tax", _boom)
+    # M-A C5: the write seam moved from ``tax`` to ``tax_pending`` (``skim_tax``
+    # owns the commit now) — the injected failure has to sit on the real write.
+    monkeypatch.setattr(treasury_service, "tax_pending", _boom)
     item = _work_item("cai", price_sc=20)
     db_session.add_all([
         item,
