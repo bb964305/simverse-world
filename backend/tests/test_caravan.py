@@ -430,3 +430,22 @@ async def test_orphan_work_is_delisted_instead_of_bought(sessions, caravan_on, t
     assert (await _item(sessions, "work_ghost")).active is False
     assert await _town(sessions) == 5                         # 只有摊位费
     assert feed_pushes == []
+
+
+async def test_shop_keeper_restock_skips_import_goods(sessions):
+    """终审修复:何巧云补货/调价只看本店商品——商队进口货不补、不调价、不发公告
+    (进口货对玩家目录不可见,「到货公告」会把玩家引向一件搜不到也买不到的商品)。"""
+    from app.services import duty_service
+
+    async with sessions() as db:
+        keeper = _res("r-keeper", "he-qiaoyun", "何巧云")
+        db.add(keeper)
+        db.add(Item(code="import_tea", kind="import_good", name="茶叶", description="",
+                    price_sc=6, payload_json={"caravan": True, "stock": 2}, active=True))
+        await db.commit()
+        out = await duty_service._work_shop_keeper(db, keeper)
+        assert out is None
+
+    async with sessions() as db:
+        tea = (await db.execute(select(Item).where(Item.code == "import_tea"))).scalar_one()
+        assert tea.price_sc == 6

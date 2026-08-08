@@ -74,7 +74,7 @@ async def sessions(tmp_path):
 
 @pytest.fixture
 def all_gates_on(monkeypatch):
-    """M-A 四闸全开 + 镇库在产开着(vm212 现状),政策存储关 → 走 fallback 税率。"""
+    """M-A 三闸全开 + 镇库在产开着(vm212 现状),政策存储关 → 走 fallback 税率。"""
     monkeypatch.setattr(settings, "npc_economy_enabled", True)
     monkeypatch.setattr(settings, "npc_trade_enabled", True)
     monkeypatch.setattr(settings, "caravan_enabled", True)
