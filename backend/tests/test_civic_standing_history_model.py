@@ -43,7 +43,9 @@ def test_migration_single_head_and_chains_onto_050():
     assert script.get_revision("053_add_lab_run_resource_profile").down_revision == (
         "052_add_lab_codex_model_tier"
     )
-    assert heads == ["054_freeze_lab_model_cost_rate"]
+    # 链尾随新迁移前移：M-A 的 055_add_commission_acceptor 挂在 054 之后
+    # （单头断言本身才是这条测试的硬门，链尾具体是谁由最新一条迁移决定）。
+    assert heads == ["055_add_commission_acceptor"]
 
 
 def test_migration_is_additive_only():
