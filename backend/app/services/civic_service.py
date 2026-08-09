@@ -98,6 +98,7 @@ async def propose(
         f"镇务征询:{topic}",
         f"现就「{topic}」公开征询全镇意见,选项:{'、'.join(o['label'] for o in opts)}。"
         f"{proposer_line}投票于 {poll.closes_at.date()} 截止,请各位居民踊跃参与。",
+        civic_ref=f"poll_open:{poll.id}",
     )
     return poll
 
@@ -580,6 +581,7 @@ async def _close_one(db, poll: Poll) -> None:
         await _clerk_announce(
             db, f"镇务结果:{poll.question}",
             f"「{poll.question}」投票结束,有效候选均已不在名册上,本案流会。",
+            civic_ref=f"poll_result:{poll.id}",
         )
         return
 
@@ -602,6 +604,7 @@ async def _close_one(db, poll: Poll) -> None:
             db, f"镇务结果:{poll.question}",
             f"「{poll.question}」投票结束,「{opts[win]['label']}」得 {tally[win]} 票,"
             f"{_VERDICT_NOTE.get(verdict, '未达生效条件')},本案流会,政策维持原状。",
+            civic_ref=f"poll_result:{poll.id}",
         )
         return
 
@@ -615,6 +618,7 @@ async def _close_one(db, poll: Poll) -> None:
         await _clerk_announce(
             db, f"镇务结果:{poll.question}",
             f"「{poll.question}」投票结束,无人投票,本案流会。",
+            civic_ref=f"poll_result:{poll.id}",
         )
         return
 
@@ -626,10 +630,18 @@ async def _close_one(db, poll: Poll) -> None:
 
     effect = opts[win].get("effect")
     result_note = f"「{poll.question}」投票结束,「{opts[win]['label']}」以 {tally[win]} 票胜出。"
+    # 赢家在 install_mayor 里已经写过第一人称那条记忆（election_service 的
+    # mayor install side-effects），再收一条第三人称的广播就是同一件事在同一
+    # 个人脑子里记两遍。只在真装上了（applied）之后才排除——流会分支没有赢家。
+    exclude_id = None
     if effect:
         applied = await _execute_outcome(db, effect, poll_id=poll.id)
         if applied:
             result_note += "议案已生效。"
+            if effect.get("type") == "mayor" and effect.get("slug"):
+                exclude_id = (await db.execute(
+                    select(Resident.id).where(Resident.slug == effect["slug"])
+                )).scalar_one_or_none()
         elif (effect.get("type") == "mayor"
               and await _winner_lost_civic_rights(db, effect.get("slug"))):
             # F2: install_mayor 的结票复核不通过 —— 当选人在投票窗口内被撤销了
@@ -638,7 +650,9 @@ async def _close_one(db, poll: Poll) -> None:
             result_note += f"{_VERDICT_NOTE['winner_ineligible']},本案流会。"
         else:
             result_note += "议案生效时遇到问题,已记录。"
-    await _clerk_announce(db, f"镇务结果:{poll.question}", result_note)
+    await _clerk_announce(db, f"镇务结果:{poll.question}", result_note,
+                          civic_ref=f"poll_result:{poll.id}",
+                          exclude_resident_id=exclude_id)
 
 
 #: 流会原因 → 公告措辞（世界内信息物；探针数值永不进 NPC prompt）。
@@ -872,12 +886,39 @@ async def maybe_spawn_lecture_debate(db, event: dict) -> bool:
 
 # ── helper ─────────────────────────────────────────────────────────────
 
-async def _clerk_announce(db, title: str, body: str) -> None:
+async def _clerk_announce(db, title: str, body: str, *,
+                          civic_ref: str | None = None,
+                          exclude_resident_id: str | None = None) -> None:
+    """镇务公告的唯一出口:公告板一份,全体自治居民的记忆一份(S7)。
+
+    **广播只挂在这一处。** ``_close_one`` → ``_execute_outcome`` →
+    ``install_mayor`` 是一条嵌套调用链,三处各广播一次会让一次选举给每人写 3
+    条 —— ``_fetch_event_candidates`` 只静态截前 30 条
+    (``app/memory/service.py``),镇务记忆会反过来把个人记忆挤出候选池。这里是
+    ``_close_one`` 全部终止分支(流会 / 未达门槛 / 无人投票 / 正常胜出)与
+    :func:`propose` 开票征询的唯一汇合点,收敛到一处既不漏也不重。
+
+    ``civic_ref`` 必须是调用方给的**稳定值**(``poll_result:{poll.id}`` /
+    ``poll_open:{poll.id}``)。回落值 ``post:{post.id}`` 只服务还没有稳定键的
+    临时调用点:公告行主键每次补跑都是新 uuid,拿它当幂等键等于没有幂等。
+
+    分档 importance:结果类(``poll_result:``)是「这件事定了」,进最高档;征询与
+    日常公告是「镇上在议一件事」,走 notice 档。两档都可在 S1 的闸门里调。
+    """
     try:
         from app.services.bulletin_service import create_post
         from app.services.duty_service import find_duty_resident
         clerk = await find_duty_resident(db, "town_clerk")
         author_id = clerk.id if clerk else None
-        await create_post(db, "notice", title, body, author_resident_id=author_id)
+        post = await create_post(db, "notice", title, body, author_resident_id=author_id)
+        # 闸关时 broadcast_civic_memory 零查询零写入直接返 0,整条链逐字节不变。
+        from app.services.civic_memory import broadcast_civic_memory
+        await broadcast_civic_memory(
+            db, body, kind="civic", ref=civic_ref or f"post:{post.id}",
+            importance=(settings.civic_memory_importance
+                        if civic_ref and civic_ref.startswith("poll_result:")
+                        else settings.civic_memory_notice_importance),
+            exclude_resident_id=exclude_resident_id,
+        )
     except Exception:
         logger.warning("civic clerk announce failed", exc_info=True)
