@@ -92,3 +92,40 @@ async def test_concurrent_skims_never_lose_a_millisecond_of_carry(
     assert town * treasury_service.CARRY_SCALE + carry == expected, (
         f"尾数丢了:入库 {town} SC + 账上 {carry} milli ≠ 应征 {expected} milli")
     assert 0 <= carry < treasury_service.CARRY_SCALE
+
+
+async def test_concurrent_buyers_cannot_oversell_a_single_copy(
+    pg_sessions, monkeypatch,
+):
+    """8 个并发买家抢同一件 stock=1 的作品:恰好一个抢到,其余全 None。
+
+    真行锁的实证:PG 把 8 条 ``UPDATE ... WHERE stock >= 1`` 串起来,第一条之后
+    的 7 条守卫都不再匹配。闸关(旧 payload 读-改-写)时 8 条会全部"成交"。
+    """
+    from app.services import item_stock
+
+    monkeypatch.setattr(settings, "item_stock_guard_enabled", True)
+    async with pg_sessions() as db:
+        db.add(Item(code="work_a", kind="resident_work", name="陶罐",
+                    description="", price_sc=15,
+                    payload_json={"creator_slug": "maker", "stock": 1},
+                    stock=1, active=True))
+        await db.commit()
+
+    async def buy() -> int | None:
+        async with pg_sessions() as db:
+            item = (await db.execute(
+                select(Item).where(Item.code == "work_a"))).scalar_one()
+            got = await item_stock.take_stock(db, item, 1)
+            await db.commit()
+            return got
+
+    results = await asyncio.gather(*(buy() for _ in range(8)))
+
+    assert sum(1 for r in results if r is not None) == 1, (
+        f"一件货只能卖一次,实测成交 {[r for r in results if r is not None]}")
+    async with pg_sessions() as db:
+        row = (await db.execute(
+            select(Item.stock, Item.active).where(Item.code == "work_a"))).one()
+    assert row.stock == 0
+    assert row.active is False
