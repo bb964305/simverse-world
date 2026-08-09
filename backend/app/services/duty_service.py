@@ -23,6 +23,22 @@ tick or the calling service):
 - ``find_duty_resident(db, key)``→ signature lookups (digest editor, town clerk)
 
 No new ActionType is introduced and no schema changes are needed.
+
+S10 —— 与 ``offices`` 的边界,以及两个读法方向(``app/services/office_service.py``
+顶部有对向的同一段说明):
+
+- 营生(本模块,11 键)不是官职(``OFFICE_DEFS``,4 键)。营生带 ``prompt_hint``
+  与 ``perks``,决定 WORK 产出、prompt 口吻与各类系数;官职带任期 / 机构 /
+  权限,运行时只有 ``mayor`` 被写。重叠只有 ``{town_clerk, postman}``,是迁移
+  046 的一次性快照拷贝,之后**零同步**——生产那两行 ``holder_slug`` 恒为 NULL,
+  下面 ``find_duty_resident`` 的 offices 索引优化对这两键永久失效(恒回落 O(N)
+  扫描)。
+- **按 key 反查持有人** = :func:`find_duty_resident`(吃 key 吐人,要 db)。
+- **按人读营生** = :func:`get_duty` / :func:`duty_key`(吃 resident 吐值,纯
+  函数)。
+
+两个方向的唯一入口都在本模块。业务代码手写 ``meta_json['duty']['key']`` 原始链
+会被 ``tests/test_office_duty_boundary.py`` 的 AST 扫描判红。
 """
 from __future__ import annotations
 

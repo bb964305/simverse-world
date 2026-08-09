@@ -372,7 +372,10 @@ async def _npc_choice(db, resident, poll, opts, relation_service, by_slug=None) 
     sbti = (resident.meta_json or {}).get("sbti", {})
     dims = sbti.get("dimensions", {})
     a2 = dims.get("A2", "M")  # 规则与灵活度: H=守序
-    duty = (resident.meta_json or {}).get("duty", {}).get("key")
+    # S10:按人读营生只走 duty_service(手写 meta_json 链在 "duty": None 时会
+    # 抛 AttributeError,且绕开未来所有读法变更)。取值与旧链逐字节相同。
+    from app.services.duty_service import duty_key as _duty_key
+    duty = _duty_key(resident)
     # Recurring polls (elections repeat verbatim) key off the question, not the
     # per-run poll id, so a replay of the same fixture is bit-identical.
     poll_key = getattr(poll, "question", None) or getattr(poll, "id", "")
@@ -471,7 +474,9 @@ async def _npc_choice_legacy(db, resident, poll, opts, relation_service, by_slug
     sbti = (resident.meta_json or {}).get("sbti", {})
     dims = sbti.get("dimensions", {})
     a2 = dims.get("A2", "M")  # 规则与灵活度: H=守序
-    duty = (resident.meta_json or {}).get("duty", {}).get("key")
+    # S10:同 _npc_choice——读法换成官方访问器,取值不变,legacy 打分逻辑未动。
+    from app.services.duty_service import duty_key as _duty_key
+    duty = _duty_key(resident)
 
     scores = [0.0] * len(opts)
     for i, o in enumerate(opts):
@@ -856,12 +861,16 @@ async def maybe_spawn_lecture_debate(db, event: dict) -> bool:
             select(Resident).where(Resident.is_autonomous)
         )).scalars().all()
         # socially active (So1 != L), lecturer excluded
+        # S10:讲席的判定走 duty_service.duty_key(按人读营生的唯一入口),不手写
+        # meta_json 链——这里是逐人过滤,不是「按 key 反查持有人」,所以不该用
+        # find_duty_resident(那条路在 polis_office_enabled 时先查 offices)。
+        from app.services.duty_service import duty_key as _duty_key
         pool = []
         for r in residents:
             dims = (r.meta_json or {}).get("sbti", {}).get("dimensions", {})
             if dims.get("So1") == "L":
                 continue
-            if (r.meta_json or {}).get("duty", {}).get("key") == "lecturer":
+            if _duty_key(r) == "lecturer":
                 continue
             pool.append(r)
         if len(pool) < 2:
