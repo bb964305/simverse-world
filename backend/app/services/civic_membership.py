@@ -532,6 +532,65 @@ async def _emit_standing_changed(
         logger.warning("civic_standing_changed broadcast failed", exc_info=True)
 
 
+#: 档位变动 → 世界内措辞（S9）。只说人名与档位，**永不带 reason 自由文本**
+#: ——与 :func:`_emit_standing_changed` 的 payload 同一条纪律：理由是给运维
+#: 看的，记忆是给全镇看的。
+_STANDING_NOTICE = {
+    CITIZEN: "{name}正式成为小镇公民,从此在镇上的公决里也有一票。",
+    DENIZEN: "{name}不再是小镇公民,人还住在镇上,只是暂时没有投票的资格。",
+}
+
+
+async def _broadcast_standing_memory(
+    db, *, resident_id: str, slug: str, new_standing: str, reason_code: str,
+) -> None:
+    """把一次公民权变动写成全镇的一等记忆（S9，fail-open）。
+
+    ⚠️ **只许在事务 commit 之后调**。:func:`_write_history` 的契约是「不
+    commit——由调用方决定事务边界」，而 ``MemoryService.add_memory`` 自带
+    commit：本函数一旦被挪进 :func:`revoke_citizenship` 的步骤 5-6 之间，就会
+    在 :func:`_assert_demotion_invariants` 之前把复合事务劈成两半——断言失败
+    时前半段已经落地，再也整体回滚不掉，世界会停在「没人降档、全镇却都记得他
+    降了档」。所以它与 :func:`_emit_standing_changed` 并列站在 commit 之后，
+    两者都是「事情已经定了」之后的对外扇出。
+
+    幂等键 ``civic_standing:{resident_id}:{new_standing}:{reason_code}``。**不
+    用** ``civic_standing_history`` 的行主键——那是 flush 期才拿得到的默认值，
+    ``_write_history`` 又刻意既不 flush 也不返回它。
+
+    收件人是全体 ``is_autonomous``（含本人）：与 ``install_mayor`` 的赢家不同，
+    档位变动没有任何地方给当事人写过第一人称版本，排除他等于让唯一的当事人成
+    为镇上唯一不知情的人。importance 走 ``broadcast_civic_memory`` 的缺省档
+    （``civic_memory_importance``）：档位变动是「这件事定了」的结果类，不是征询。
+
+    已知边界：同一人以**同一 ``reason_code``** 二度同向变动（升→降→再升）时，
+    第二轮广播会被幂等键静默吞掉。代价是罕见场景下少一轮记忆，换来的是夜间补跑
+    （``nightly: catching up``，真实触发过的机制）不会重复灌——两害相权取轻。
+    """
+    try:
+        from sqlalchemy import select
+
+        from app.models.resident import Resident
+        from app.services.civic_memory import broadcast_civic_memory
+
+        template = _STANDING_NOTICE.get(new_standing)
+        if template is None:                       # 逐出档（v1 未实现）不广播
+            return
+        # 记忆里说人名不说 slug：这条要进 NPC 的脑子，不是进运维日志。
+        name = (await db.execute(
+            select(Resident.name).where(Resident.id == resident_id)
+        )).scalar_one_or_none() or slug
+        # 闸关时 broadcast_civic_memory 零查询零写入直接返 0，两个写入口逐字节
+        # 回到今天。
+        await broadcast_civic_memory(
+            db, template.format(name=name), kind="civic_standing",
+            ref=f"{resident_id}:{new_standing}:{reason_code}",
+        )
+    except Exception:
+        logger.warning("civic standing memory broadcast failed for %s", slug,
+                       exc_info=True)
+
+
 async def grant_citizenship_batch(
     db, resident_ids, *, reason: str, reason_code: str, actor: str,
     evidence_by_id: dict | None = None,
@@ -638,6 +697,13 @@ async def grant_citizenship_batch(
         await _emit_standing_changed(
             db, slug=found[rid][0], old_standing=DENIZEN,
             new_standing=CITIZEN, reason_code=reason_code,
+        )
+    # S9：记忆广播排在易失的 WS 扇出之后——它每人一次 commit，比 WS 慢得多，
+    # 前端不该为它多等一拍。两者同在 commit 之后，都不影响上面的复合事务。
+    for rid in ids:
+        await _broadcast_standing_memory(
+            db, resident_id=rid, slug=found[rid][0], new_standing=CITIZEN,
+            reason_code=reason_code,
         )
     logger.info("civic grant: %d resident(s) promoted by %s (%s)",
                 len(ids), actor, reason_code)
@@ -994,6 +1060,12 @@ async def revoke_citizenship(
     await db.commit()
     await _emit_standing_changed(
         db, slug=slug, old_standing=CITIZEN, new_standing=DENIZEN,
+        reason_code=reason_code,
+    )
+    # S9：全镇记忆。位置就是本步的全部要害——挪进上面的 try 块（步骤 5-6）会
+    # 在 _assert_demotion_invariants 之前 commit 掉半截复合事务。
+    await _broadcast_standing_memory(
+        db, resident_id=resident_id, slug=slug, new_standing=DENIZEN,
         reason_code=reason_code,
     )
     logger.info("civic revoke: %s demoted by %s (%s)", slug, actor, reason_code)
