@@ -232,10 +232,101 @@ def _stance_row(slug: str, issue: str, stance: float) -> IssueStance:
 
 
 def test_self_section_renders_duty_title_and_hint_verbatim():
-    """M5:真正可对话的事实是 ``prompt_hint`` 原文,``title`` 只是个标签。"""
+    """M5:真正可对话的事实是 ``prompt_hint`` 原文,``title`` 只是个标签。
+
+    这条 hint 里没有动作码,所以「原文」与 C2 剥壳后的结果是同一个串 —— 带动作
+    码的 hint 归下面那一组测试管。"""
     text = format_town_facts(_facts(self=_SELF))
     assert "邮差" in text
     assert _DUTY["prompt_hint"] in text
+
+
+# ── C2:玩家可见的 duty_hint 不带内部动作码 ──────────────────────────────
+#
+# seed 的 prompt_hint 是照 **decide 语境**写的,里面嵌着 ActionType 的取值
+# (``seed/preset_characters.py:113`` 的 ``倾听心事(WORK/CHAT_RESIDENT)``、
+# ``:691`` 的 ``优先 RESEARCH``)。M5 要求「用原文」,但那条要求写在 decide 语
+# 境下;S4 把这段 hint 送进了**玩家可见**的对话 prompt,NPC 于是可能对玩家复读
+# ``WORK/CHAT_RESIDENT``。与 F1 把 ``tax_rate`` 折成中文标签是同一个道理:内部
+# 词汇不出网。decide 侧照旧拿原文(它就是靠这些码做决策的)。
+
+#: seed 里两种带码写法的真样本(逐字取自 seed/preset_characters.py)。
+_HINT_BRACKETED = ("你经营着咖啡馆,白天多在店里招待客人、倾听心事"
+                   "(WORK/CHAT_RESIDENT);和你聊过的人心情会好起来。")
+_HINT_BARE = ("你在实验楼做研究,维护着小镇唯一的镇况日志;在实验楼时优先 "
+              "RESEARCH,平日记录观测(WORK/REFLECT)。")
+
+
+def _self_text(hint: str) -> str:
+    return format_town_facts({"self": {"duty_title": "客厅主理人",
+                                       "duty_hint": hint, "stances": []}})
+
+
+def test_player_facing_duty_hint_strips_bracketed_action_codes():
+    """括号里的动作码整组剥掉,中文正文一个字不少。"""
+    text = _self_text(_HINT_BRACKETED)
+    assert "WORK" not in text and "CHAT_RESIDENT" not in text
+    assert "(" not in text and ")" not in text, "空括号也不能留"
+    for kept in ("客厅主理人", "你经营着咖啡馆", "倾听心事",
+                 "和你聊过的人心情会好起来"):
+        assert kept in text, f"hint 的中文正文被误伤:{kept} 不见了"
+
+
+def test_player_facing_duty_hint_strips_bare_action_codes():
+    """裸的全大写动作词(``优先 RESEARCH``)同样要剥 —— 它不在括号里。"""
+    text = _self_text(_HINT_BARE)
+    for code in ("RESEARCH", "WORK", "REFLECT"):
+        assert code not in text, f"动作码 {code} 漏进了玩家可见的 prompt"
+    for kept in ("你在实验楼做研究", "维护着小镇唯一的镇况日志", "平日记录观测"):
+        assert kept in text
+    assert "优先 ," not in text and "优先 。" not in text, \
+        "剥完要顺手收拾掉动作码留下的空格"
+
+
+def test_no_preset_duty_hint_leaks_an_action_code_to_players():
+    """漂移网:seed 里**每一条** duty hint 过一遍渲染,ActionType 的取值一个都
+    不许留下 —— 将来新增角色时照 decide 口吻写 hint 也不会漏出去。"""
+    from app.agent.actions import ActionType
+    from seed.preset_characters import PRESET_CHARACTERS
+
+    hints = [(c["slug"], ((c.get("meta_json") or {}).get("duty") or {}).get("prompt_hint"))
+             for c in PRESET_CHARACTERS]
+    hints = [(slug, h) for slug, h in hints if h]
+    assert len(hints) >= 11, "seed 的营生 hint 少了,这条网就是空转的"
+    coded = [(slug, h) for slug, h in hints
+             if any(a.value in h for a in ActionType)]
+    assert coded, "seed 里必须确有带动作码的 hint,否则这条网证明不了什么"
+
+    for slug, hint in hints:
+        text = _self_text(hint)
+        for action in ActionType:
+            assert action.value not in text, \
+                f"{slug} 的 duty hint 把 {action.value} 带进了玩家可见的 prompt"
+
+
+def test_decide_side_still_gets_the_verbatim_hint_with_action_codes():
+    """decide 侧**保持原文**:那条链路靠动作码把 NPC 的一天安排在营生上,剥了
+    等于把 M5 接的线又拆掉。它走 ``duty_service.prompt_hint``,与玩家对话侧的
+    ``self.duty_hint`` 是两条独立通路。"""
+    from unittest.mock import MagicMock
+
+    from app.agent.actions import ActionType
+    from app.agent.prompts import build_decision_prompt
+
+    r = MagicMock()
+    r.name = "伊莎贝拉"
+    r.persona_md = "p"
+    r.tile_x, r.tile_y, r.status = 1, 1, "idle"
+    r.mood_json = None
+    r.meta_json = {"duty": {"key": "cafe_host", "title": "客厅主理人",
+                            "prompt_hint": _HINT_BRACKETED}}
+
+    system, user = build_decision_prompt(
+        resident=r, schedule_phase="afternoon", world_time="14:00",
+        nearby_residents=[], memories=[], today_actions=[],
+        available_actions=[ActionType.IDLE], max_daily_actions=20,
+    )
+    assert _HINT_BRACKETED in system + user, "decide prompt 必须还是 hint 原文"
 
 
 def test_self_stances_are_qualitative_never_numeric():

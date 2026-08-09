@@ -1,3 +1,6 @@
+import re
+
+from app.agent.actions import ActionType
 from app.models.resident import Resident
 from app.services.policy_labels import policy_label
 
@@ -61,6 +64,56 @@ def _policy_text(key: str, value) -> str:
     if key in ("npc_default_wage_sc", "medical_subsidy_sc"):
         return f"{value} 枚硬币"
     return str(value)
+
+
+# ── 动作码剥壳(C2:内部词汇不出网) ─────────────────────────────────────────
+#
+# seed 的 ``meta_json["duty"]["prompt_hint"]`` 是照 **decide 语境**写的,里面嵌着
+# ``ActionType`` 的取值(``seed/preset_characters.py:113`` 的
+# ``倾听心事(WORK/CHAT_RESIDENT)``、``:691`` 的 ``优先 RESEARCH``)。S4 把这段
+# hint 挂进了 ``self``,而 ``self`` 只出现在**玩家可见**的对话 prompt 里
+# (``DECIDE_FACT_KEYS`` 不含它)—— NPC 于是可能对着玩家复读 ``WORK/CHAT_RESIDENT``。
+# 与「原始政策键出网前折成中文标签」是同一条:内部词汇不出网。
+#
+# decide 侧不受影响:它走 ``duty_service.prompt_hint(resident)`` 拿原文
+# (``app/agent/prompts.py``),那条链路正是靠这些码把 NPC 的一天安排在营生上。
+
+#: 动作码词汇表。只认 ``ActionType`` 的取值 —— 泛用的「全大写单词」正则会顺手
+#: 吃掉 hint 里合法的 NPC / SC 这类词(UGC 的 duty hint 是玩家自由文本)。
+_ACTION_CODES = frozenset(a.value for a in ActionType)
+
+#: 整组括号(中英文括号都收):内容只由全大写词与分隔符组成时才考虑剥。
+_BRACKETED_CODES = re.compile(r"[(（]\s*([A-Z][A-Z_]*(?:[/、,，\s]+[A-Z][A-Z_]*)*)\s*[)）]")
+
+#: 裸的动作码(``在实验楼时优先 RESEARCH``)。前后不许接字母/下划线,免得吃掉
+#: 某个恰好以动作码开头的长词。按长度倒序拼是免费的保险(今天没有前缀重叠的码)。
+_BARE_CODE = re.compile(
+    r"(?<![A-Za-z_])(?:%s)(?![A-Za-z_])"
+    % "|".join(sorted(_ACTION_CODES, key=len, reverse=True)))
+
+#: 剥完留下的空格:``优先 ,`` / 段尾多余空白。
+_SPACE_BEFORE_PUNCT = re.compile(r"[ \t]+(?=[,，;；。、!！?？)）])")
+
+
+def _strip_action_codes(text: str) -> str:
+    """把玩家可见文本里的内部动作码剥掉(整组括号 + 裸词),中文正文一字不动。
+
+    括号那一路要求**组内至少有一个真动作码**才整组剥:``(SC)`` 这类全大写的普
+    通括注留着,剥错比留着更难发现。
+
+    裸码剥完可能留下一个语义残句(seed 的 ``在实验楼时优先 RESEARCH,`` →
+    ``在实验楼时优先,``)。**刻意不连着整个短句一起丢**:短句里往往还有真内容,
+    丢多了是静默丢信息;残句最多是读着别扭,既不泄密也不编事实。
+    """
+    if not text:
+        return text
+
+    def _drop(match: re.Match) -> str:
+        tokens = re.split(r"[/、,，\s]+", match.group(1).strip())
+        return "" if any(t in _ACTION_CODES for t in tokens) else match.group(0)
+
+    out = _BARE_CODE.sub("", _BRACKETED_CODES.sub(_drop, text))
+    return _SPACE_BEFORE_PUNCT.sub("", out).strip()
 
 
 def format_town_facts(facts: dict) -> str:
@@ -128,9 +181,12 @@ def format_town_facts(facts: dict) -> str:
     # 自身事实(S4)排在最后:先把公共的说完,再说「关于你自己」。这一段只有
     # build_town_facts(db, resident) 才会带上,公共快照与 decide 的裁剪子集都没有。
     me = facts.get("self") or {}
-    duty_title, duty_hint = me.get("duty_title"), me.get("duty_hint")
+    duty_title = me.get("duty_title")
+    # C2:hint 出网前剥掉 decide 侧的动作码(``self`` 只进玩家可见的对话 prompt,
+    # decide 拿的是 DECIDE_FACT_KEYS 裁剪子集,不含这一段)。
+    duty_hint = _strip_action_codes(me.get("duty_hint") or "")
     if duty_title or duty_hint:
-        # hint 原文才是可对话的事实(M5),title 只是个能报得出口的名头。
+        # hint 正文才是可对话的事实(M5),title 只是个能报得出口的名头。
         lines.append((f"你自己的营生：{duty_title}。" if duty_title else "")
                      + (duty_hint or ""))
 
