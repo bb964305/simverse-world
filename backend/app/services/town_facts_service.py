@@ -137,7 +137,16 @@ class _SectionFailed(Exception):
 
 
 def invalidate_town_facts_cache() -> None:
-    """强制下一次调用重取(镇务写入侧在事实变更后调用)。
+    """强制下一次调用重取。镇务写入侧在事实变更后调用,今天接了三处:
+    ``civic_service._close_one``(结票)、``election_service.install_mayor``
+    (装镇长)、``PolicyService.apply_amend``(改政策)。
+
+    **只清本进程,跨进程仍受 TTL 约束**:这份快照是模块级的,而生产跑着 api
+    的 2 个 worker + 独立的 agent-worker 容器 —— 谁写谁清自己那份,别的进程照
+    旧最多陈旧 ``civic_facts_cache_ttl_seconds``。这是已知取舍:公共事实是天级
+    变更,不为它引入 Redis(与模块 docstring「进程内快照」同一条)。它换来的是
+    **写入方自己那条链路**上立刻自洽 —— 结票的 worker 紧接着渲染公告 / 回给玩
+    家的下一句话,不会还在说上一分钟的事实。
 
     只清 ``ts`` 不清 ``facts``:``facts`` 留着是给 fail-open 兜底用的,但因为
     ``ts`` 被清成 0,陈旧度判定必然不通过 —— 「已知作废的快照」不会被回落到。

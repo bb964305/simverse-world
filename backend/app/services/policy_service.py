@@ -386,6 +386,16 @@ class PolicyService:
         )
         won = (result.rowcount or 0) == 1
         await self._db.commit()
+        # C1: 政策值变了 —— 作废本进程的「小镇现况」快照(``policies`` 白名单里
+        # 的 6 条直接进 prompt)。**无条件清**,不看 ``won``:CAS 输了说明有别人
+        # 刚改成功,本进程手上那份快照照样是旧的。跨进程仍受 TTL 约束(见
+        # ``invalidate_town_facts_cache`` 的 docstring)。局部 import:
+        # town_facts_service 模块级 import 本模块,反向模块级会成环。
+        try:
+            from app.services.town_facts_service import invalidate_town_facts_cache
+            invalidate_town_facts_cache()
+        except Exception:  # pragma: no cover - 缓存清理不该反过来打断写入
+            logger.warning("town facts cache invalidation failed", exc_info=True)
         return won
 
     async def propose_amend(

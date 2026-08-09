@@ -537,6 +537,35 @@ async def close_due_polls(db, now: datetime | None = None) -> int:
 
 
 async def _close_one(db, poll: Poll) -> None:
+    """结票的唯一入口。事实层快照在这里统一作废(C1)。
+
+    包一层是因为 :func:`_close_one_tally` 有五个终止分支(流会 / 未达门槛 /
+    有效候选全灭 / 无人投票 / 正常胜出),每个分支都已经改过世界:``poll.status``
+    首行就置 ``closed``(``open_polls`` 必变),胜出分支还可能经 ``_execute_outcome``
+    换掉镇长或改掉政策。逐个分支贴一行 invalidate 迟早会漏一个,``finally`` 顺带
+    把抛出路径也盖住 —— 多清一次的代价只是下一次读事实多查一遍库。
+    """
+    try:
+        await _close_one_tally(db, poll)
+    finally:
+        _invalidate_town_facts()
+
+
+def _invalidate_town_facts() -> None:
+    """作废本进程的「小镇现况」快照(局部 import:事实层反过来 import 本模块的
+    邻居 policy_service / election_service,模块级会成环)。
+
+    整段 fail-open 且吞异常:它跑在 :func:`_close_one` 的 ``finally`` 里,让一次
+    缓存清理去顶掉真正的结票异常是本末倒置。
+    """
+    try:
+        from app.services.town_facts_service import invalidate_town_facts_cache
+        invalidate_town_facts_cache()
+    except Exception:  # pragma: no cover - 缓存清理不该反过来打断调用方
+        logger.warning("town facts cache invalidation failed", exc_info=True)
+
+
+async def _close_one_tally(db, poll: Poll) -> None:
     opts = list(poll.options_json or [])
 
     # E8 结票兜底：选项即人（mayor/office/duty）时校验那个人是否还在世界里。

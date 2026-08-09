@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, UTC
 
 import pytest
 from prometheus_client import REGISTRY
+from sqlalchemy import select
 
 from app import world_clock
 from app.config import settings
@@ -419,6 +420,92 @@ async def test_snapshot_is_cached_and_invalidatable(db_session, facts_on, monkey
     tfs.invalidate_town_facts_cache()
     await tfs.get_town_facts_cached(db_session)
     assert len(calls) == 2, "invalidate 之后必须重查"
+
+
+# ── 写入侧接上 invalidate(C1) ───────────────────────────────────────────
+#
+# ``invalidate_town_facts_cache`` 的 docstring 自称「镇务写入侧在事实变更后调用」,
+# 但在 C1 之前全仓零调用方 —— 结票 / 装镇长 / 改政策之后,同一个 worker 里的
+# NPC 最长 60s 还在说旧事实。下面三条测试各钉一处接线:既数 spy 调用次数(接线
+# 本身),也断言 TTL 之内**真的**读到了新事实(接线的效果)。
+
+@pytest.fixture
+def invalidations(monkeypatch):
+    """数写入侧到底调没调 ``invalidate_town_facts_cache``。
+
+    三处写入口都是**函数体内**的局部 import(避免 town_facts_service ↔
+    policy/election/civic 的模块级循环依赖),属性在调用那一刻才解析,所以打在
+    模块属性上的 monkeypatch 拦得住。spy 仍会转调真实实现 —— 同一条测试要接着
+    断言快照真的重取了。
+    """
+    calls: list[str] = []
+    real = tfs.invalidate_town_facts_cache
+
+    def _spy() -> None:
+        calls.append("invalidate")
+        real()
+
+    monkeypatch.setattr(tfs, "invalidate_town_facts_cache", _spy)
+    return calls
+
+
+@pytest.mark.anyio
+async def test_closing_a_poll_invalidates_the_snapshot(
+        db_session, facts_on, invalidations):
+    """结票 → ``open_polls`` 立刻少一张(不等 TTL)。"""
+    from app.services import civic_service
+
+    db_session.add(Poll(
+        question="是否在东岸花园兴建剧院",
+        options_json=[{"label": "赞成"}, {"label": "反对"}],
+        closes_at=datetime.now(UTC) - timedelta(hours=1), status="open",
+    ))
+    await db_session.commit()
+    poll = (await db_session.execute(select(Poll))).scalars().one()
+
+    assert len((await tfs.get_town_facts_cached(db_session))["open_polls"]) == 1
+
+    await civic_service._close_one(db_session, poll)
+
+    assert invalidations, "_close_one 之后必须作废事实快照"
+    assert (await tfs.get_town_facts_cached(db_session))["open_polls"] == [], \
+        "已结票的公投不能在 TTL 内继续被当成「镇上正在议的事」"
+
+
+@pytest.mark.anyio
+async def test_installing_a_mayor_invalidates_the_snapshot(
+        db_session, facts_on, invalidations):
+    """装镇长 → ``mayor`` 立刻换人(不等 TTL)。"""
+    db_session.add(_resident("he-qiaoyun", "何巧云"))
+    await db_session.commit()
+
+    assert (await tfs.get_town_facts_cached(db_session))["mayor"] is None
+
+    assert await election_service.install_mayor(db_session, "he-qiaoyun") is True
+
+    assert invalidations, "install_mayor 之后必须作废事实快照"
+    facts = await tfs.get_town_facts_cached(db_session)
+    assert facts["mayor"]["name"] == "何巧云", \
+        "镇长换人后 TTL 内还说「空缺」正是本批要修的那类幻觉"
+
+
+@pytest.mark.anyio
+async def test_amending_a_policy_invalidates_the_snapshot(
+        db_session, facts_on, invalidations, monkeypatch):
+    """改政策 → ``policies`` 立刻换值(不等 TTL)。"""
+    from app.services.policy_service import PolicyService
+
+    monkeypatch.setattr(settings, "polis_policy_enabled", True)
+    svc = PolicyService(db_session)
+    await svc.seed_defaults()
+
+    before = (await tfs.get_town_facts_cached(db_session))["policies"]["tax_rate"]
+    assert before != 0.07, "取一个与默认值不同的新值,否则断言是空转的"
+
+    assert await svc.apply_amend("tax_rate", 0.07, updated_by="test") is True
+
+    assert invalidations, "apply_amend 之后必须作废事实快照"
+    assert (await tfs.get_town_facts_cached(db_session))["policies"]["tax_rate"] == 0.07
 
 
 # ── 有界 fail-open(M7) ──────────────────────────────────────────────────
