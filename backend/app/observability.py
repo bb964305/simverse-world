@@ -54,6 +54,17 @@ TICK_ROUND_DURATION = Histogram(
     buckets=(0.1, 0.5, 1, 2, 5, 10, 30, 60, 120),
 )
 
+# --- Civic public memory (town facts) ----------------------------------------
+
+# Name deliberately carries no ``sv_`` prefix: the S2 plan and the vm212
+# verification step (`curl /metrics | grep civic_facts_failopen_total`) name it
+# this way. ``reason`` is the fact section that raised (mayor / policies / …).
+CIVIC_FACTS_FAILOPEN = Counter(
+    "civic_facts_failopen_total",
+    "Town-facts snapshot reads that fell back to the previous snapshot (or gave up)",
+    ["reason"],
+)
+
 # --- Runtime gauges (wired lazily to avoid import cycles) --------------------
 
 WS_ONLINE_LOCAL = Gauge(
