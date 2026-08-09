@@ -87,6 +87,20 @@ _FACTS_PROMPT_SHARE_LIMIT = 0.25
 #: 候选池里镇务记忆的占比上限。
 _CIVIC_POOL_SHARE_LIMIT = 1 / 3
 
+#: **合并口径**的占比上限:镇务 + 世界事件这两条公共通道加起来,也不许占过池子的
+#: 三分之二 —— 个人记忆保住 1/3。
+#:
+#: 为什么要单开这一条:两条通道各自守着自己那笔账(镇务 < 1/3),但它们抢的是**同
+#: 一个** 30 个坑的池子。world_event 记忆此前恒卡在 0.5-0.6、一条都进不来,所以镇务
+#: 那条断言等于在一个只有一个竞争者的池子里量占比;分档把实质世界事件抬进池子之
+#: 后,那个前提就不成立了。分开量两条通道会同时漏掉「两条都合规、加起来把个人记忆
+#: 挤没了」这种形状。
+_PUBLIC_POOL_SHARE_LIMIT = 2 / 3
+
+#: 两条公共通道的 ``memories.source``。civic 那个从实现里取(``MEMORY_SOURCE``),
+#: world_event 这个是 ``world_event_service`` 直写与 ``_write_substantive`` 共用的字面量。
+_PUBLIC_SOURCES = (MEMORY_SOURCE, "world_event")
+
 #: ``_retrieve_events`` 真正用的池深 = ``max(max_events * 3, 30)``,默认 10 → 30
 #: (app/memory/service.py:364)。相关度只在这 30 条里算,进不来等于没写。
 _POOL_CAP = 30
@@ -120,6 +134,16 @@ def all_facts_on(monkeypatch):
 @pytest.fixture
 def broadcast_on(monkeypatch):
     monkeypatch.setattr(settings, "civic_memory_broadcast_enabled", True)
+
+
+@pytest.fixture
+def event_tier_on(monkeypatch):
+    """world_event 记忆分档(``REALISM_EVENT_MEMORY_TIERED``)。
+
+    ``realism_info_gradient_enabled`` 刻意**留在默认的关**:那条路是全知广播,每位
+    居民都收 —— 预算算的是上界,梯度开着只会让部分居民收不到、把占比做小。
+    """
+    monkeypatch.setattr(settings, "realism_event_memory_tiered", True)
 
 
 @pytest.fixture
@@ -557,6 +581,24 @@ async def _pool_share(db, resident_id: str) -> tuple[list, list]:
     return pool, [m for m in pool if m.source == MEMORY_SOURCE]
 
 
+async def _world_events(db, rounds: int) -> list[str]:
+    """连开 ``rounds`` 场**实质档**世界事件(一次性的叙事事件,不是天气/集市日)。
+
+    形状照 ``event_templates`` 真开出来的那类(有 id、有 description、payload 里没
+    ``market_day``);走的是与 ``event_cron`` 同一个入口
+    (``write_collective_memories``),不手搓 Memory 行 —— 手搓就绕过了 K14 的分位
+    归一,而那正是决定这些记忆进不进得了池子的那一步。
+    """
+    ids = []
+    for i in range(rounds):
+        event_id = f"we-{i}"
+        await world_event_service.write_collective_memories(
+            db, {"id": event_id, "type": "news", "payload_json": {},
+                 "description": f"镇上要修一座剧院（第 {i} 期工程）"})
+        ids.append(event_id)
+    return ids
+
+
 @pytest.mark.anyio
 async def test_one_election_leaves_the_candidate_pool_mostly_personal(
         db_session, broadcast_on, realism_on):
@@ -600,3 +642,44 @@ async def test_a_burst_of_civic_events_cannot_take_over_the_pool(
         assert len(pool) == _POOL_CAP
         assert len(civic) / len(pool) < _CIVIC_POOL_SHARE_LIMIT, \
             f"{r.slug} 连结 {_BURST_ROUNDS} 场后被镇务记忆占了 {len(civic)}/{len(pool)}"
+
+
+@pytest.mark.anyio
+async def test_civic_and_world_events_together_leave_the_pool_mostly_personal(
+        db_session, broadcast_on, realism_on, event_tier_on):
+    """**合并口径**:一轮镇务结票 + 一轮实质世界事件之后,任一居民 top-30 里两条
+    公共通道的合计占比 < 2/3 —— 个人记忆保住 1/3。
+
+    分档之前这条测不出东西:world_event 记忆恒卡在 0.5/0.6,连池子都进不去,合并
+    占比等于镇务占比。分档把实质事件抬进池子之后,两条通道才真的在抢同一批坑。
+
+    两侧都要咬,和镇务那条一个道理:世界事件**进得去**(否则这条占比断言是在为
+    「一条都没写进去」鼓掌),又**占不满**。
+
+    连打 ``_BURST_ROUNDS`` 轮而不是各来一轮:各一轮必然绿(总共两条记忆),量不出
+    任何东西。上界口径 —— 梯度关(全员广播)、镇务广播开、分档开,三样一起顶格。
+
+    实测(五轮 × 两条通道):非赢家 public 10/30(镇务结果 5 + 世界事件 5)= 33.3%,
+    个人记忆 20/30;赢家 5/30。五条世界事件归一后落 0.8776~0.9111,而池底(第 30
+    名)是 0.7 —— 直写那条路的 0.5/0.6 正好卡在池底之下,这就是「写了等于没写」。
+    征询档(0.6)照旧进不来,两笔账因此都还有一倍以上余量。
+    """
+    people = await _town(db_session)
+    for r in await _autonomous(db_session):
+        await _seed_history(db_session, r.id, _HISTORY)
+    for _ in range(_BURST_ROUNDS):
+        await _elect(db_session, people)
+    await _world_events(db_session, _BURST_ROUNDS)
+
+    for r in await _autonomous(db_session):
+        pool, _civic = await _pool_share(db_session, r.id)
+        public = [m for m in pool if m.source in _PUBLIC_SOURCES]
+        personal = [m for m in pool if m.source not in _PUBLIC_SOURCES]
+        assert len(pool) == _POOL_CAP, "池子没满,占比无从谈起"
+        assert any(m.source == "world_event" for m in public), \
+            f"{r.slug} 的候选池里一条世界事件都没有 —— 分档没生效,这条占比是白过的"
+        assert len(public) / len(pool) < _PUBLIC_POOL_SHARE_LIMIT, \
+            (f"{r.slug} 的候选池被两条公共通道占了 {len(public)}/{len(pool)}"
+             f"(镇务 {len(_civic)} + 世界事件 {len(public) - len(_civic)})")
+        assert len(personal) / len(pool) > 1 - _PUBLIC_POOL_SHARE_LIMIT, \
+            f"{r.slug} 的个人记忆只剩 {len(personal)}/{len(pool)}"
