@@ -15,6 +15,7 @@ def test_npc_trade_gates_default_off():
     assert s.npc_trade_enabled is False
     assert s.caravan_enabled is False
     assert s.tax_carry_enabled is False
+    assert s.item_stock_guard_enabled is False   # 加固闸:迁移 056 暗上后单独翻
 
 
 def test_npc_trade_tuning_defaults():

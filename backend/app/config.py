@@ -547,6 +547,9 @@ class Settings(BaseSettings):
     caravan_stall_fee_sc: int = 5                 # 摊位费→镇库,不依赖 tax_rate
     caravan_budget_sc: int = 30                   # 每次到访的作品收购预算
     tax_carry_enabled: bool = False               # C5 分数税账:尾数以整数 milli-SC 累入 town_tax_carry_milli(原子增量);关=旧 int() 截断
+    # M-A 加固闸:库存扣减走 items.stock 的 guarded UPDATE(迁移 056 必须先落库)。
+    # 关 = 旧 payload_json 读-改-写,与现状逐字节一致 —— 迁移暗上与开闸分车。
+    item_stock_guard_enabled: bool = False        # C6 库存守卫:cron 与玩家并发不再超卖
     # M2 story arcs: rule-triggered milestone engine (nightly, zero tick cost).
     arc_engine_enabled: bool = True
     # M3 civic governance: proposals → clerk bulletin → NPC+player vote → execute.
