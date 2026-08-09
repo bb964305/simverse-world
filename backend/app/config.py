@@ -546,7 +546,7 @@ class Settings(BaseSettings):
     caravan_enabled: bool = False                 # C4 外来商队(绑集市日,外生买方 + 第二税源)
     caravan_stall_fee_sc: int = 5                 # 摊位费→镇库,不依赖 tax_rate
     caravan_budget_sc: int = 30                   # 每次到访的作品收购预算
-    tax_carry_enabled: bool = False               # C5 分数税账:尾数累入 town_tax_carry;关=旧 int() 截断
+    tax_carry_enabled: bool = False               # C5 分数税账:尾数以整数 milli-SC 累入 town_tax_carry_milli(原子增量);关=旧 int() 截断
     # M2 story arcs: rule-triggered milestone engine (nightly, zero tick cost).
     arc_engine_enabled: bool = True
     # M3 civic governance: proposals → clerk bulletin → NPC+player vote → execute.

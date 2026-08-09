@@ -10,8 +10,9 @@ Plan: `docs/plans/2026-08-09-M-A-npc-economy.md` Step 11;spec §6「货币守恒
 
 1. **守恒**:`Δ(Σ居民余额 + 镇库) == 商队收购注入 + 摊位费 − 进口货 sink`(全整
    数,精确断言)。餐费/NPC 买作品/委托赏金全是内部转移,一分不增不减;唯二的外
-   生面是商队(注入)与进口货(sink)。`town_tax_carry` 是**递延税记账不是钱**,
-   不进货币总量,单独断言 `0 ≤ carry < 1` 且等于逐笔 `exact − cut` 的累计。
+   生面是商队(注入)与进口货(sink)。`town_tax_carry_milli` 是**递延税记账不是
+   钱**(整数 milli-SC),不进货币总量,单独断言 `0 ≤ carry < 1000` 且等于逐笔
+   `exact − cut` 的累计。
 2. **关闸口径分双轨**(spec §7-2):三新闸全关 → 三 pass + caravan 钩子 + carry
    **零 DB 写入**(整库快照逐表比对);`_charge_meal` 是例外——它现状本就写库,
    口径是"与现状基线一致"而不是零写入,所以单独断言、不进快照。再补一条 vm212
@@ -159,7 +160,7 @@ async def _seed(sessions, residents=(), items=(), commissions=(), **balances: in
 async def _supply(sessions) -> int:
     """货币总量 = Σ居民余额 + 镇库(新 session 重读,只认已落库的钱)。
 
-    `town_tax_carry` 是递延税记账**不是钱**,按 spec §6 不进这个和。
+    `town_tax_carry_milli` 是递延税记账**不是钱**,按 spec §6 不进这个和。
     """
     async with sessions() as db:
         residents = sum((await db.execute(
@@ -186,11 +187,12 @@ def _sold(before: dict, after: dict, kind: str) -> int:
     return total
 
 
-async def _carry(sessions) -> float:
+async def _carry(sessions) -> int:
+    """递延税账上剩余尾数,单位 **milli-SC**(整数;1 SC = 1000)。"""
     async with sessions() as db:
         row = (await db.execute(select(SystemConfig.value).where(
             SystemConfig.key == treasury_service.TAX_CARRY_KEY))).scalar_one_or_none()
-    return 0.0 if row is None else float(row)
+    return 0 if row is None else int(row)
 
 
 async def _town(sessions) -> int:
@@ -297,9 +299,11 @@ async def test_a_full_night_only_gains_the_caravan_and_loses_the_imports(
 
     # --- carry 是递延税记账不是钱:不进总量,单独对账 ------------------------ #
     exact = settings.town_tax_rate_sales * (work_sold + visit["spent"])
+    scale = treasury_service.CARRY_SCALE
     carry = await _carry(sessions)
-    assert 0 <= carry < 1, f"尾数账只该留不足 1 SC 的零头,实测 {carry}"
-    assert carry == pytest.approx(exact - (bought["tax"] + visit["tax"])), (
+    assert 0 <= carry < scale, f"尾数账只该留不足 1 SC 的零头,实测 {carry} milli"
+    assert carry == pytest.approx(
+        (exact - (bought["tax"] + visit["tax"])) * scale, abs=1), (
         "carry 必须逐笔等于 exact − cut 的累计——对不上就是有一笔税被吞了或多征了")
     assert await _town(sessions) == bought["tax"] + visit["tax"] + visit["fee"]
 
@@ -434,7 +438,7 @@ async def test_gate_off_player_resident_work_tax_is_the_legacy_truncation(
     assert out["sales_tax"] == 1 and out["earned"] == WORK_PRICE - 1
     assert await _town(sessions) == 1
     assert await _balance(sessions, "maker") == WORK_PRICE - 1
-    assert await _carry(sessions) == 0.0
+    assert await _carry(sessions) == 0
     async with sessions() as db:
         assert (await db.execute(select(SystemConfig).where(
             SystemConfig.key == treasury_service.TAX_CARRY_KEY))).scalar_one_or_none() is None
@@ -463,7 +467,7 @@ async def test_gate_off_player_gift_tax_is_the_legacy_truncation(sessions, new_g
     # share = int(50 × 0.2) = 10 → 税 int(10 × 0.11) = 1(尾数 0.1 蒸发)。
     assert out["gift_tax"] == 1 and out["creator_share"] == 9
     assert await _town(sessions) == 1
-    assert await _carry(sessions) == 0.0
+    assert await _carry(sessions) == 0
     async with sessions() as db:
         assert (await db.get(User, creator.id)).soul_coin_balance == 9
 
@@ -495,7 +499,7 @@ async def test_gate_off_player_tip_tax_is_the_legacy_truncation(sessions, new_ga
     # share = int(50 × 0.8) = 40 → 税 int(40 × 0.11) = 4(尾数 0.4 蒸发)。
     assert out["tip_tax"] == 4 and out["creator_share"] == 36
     assert await _town(sessions) == 4
-    assert await _carry(sessions) == 0.0
+    assert await _carry(sessions) == 0
     async with sessions() as db:
         assert (await db.get(User, creator.id)).soul_coin_balance == 36
 

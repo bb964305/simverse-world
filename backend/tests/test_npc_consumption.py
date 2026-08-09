@@ -192,13 +192,13 @@ async def test_trade_moves_money_taxes_stock_caches_and_narrates(sessions, trade
 
     summary = await _run(sessions)
 
-    # 15 × 0.1 = 1.5 → 税 1 入镇库、尾数 0.5 记在 carry 账上。
+    # 15 × 0.1 = 1.5 → 税 1 入镇库、尾数 0.5 SC = 500 milli 记在 carry 账上。
     assert summary == {"bought": 1, "spent": 15, "tax": 1}
     assert await _balance(sessions, "buyer") == 15
     assert await _balance(sessions, "liked") == 14
     assert await _balance(sessions, "other") == 0            # 好感低的没卖出去
     assert await _town(sessions) == 1
-    assert float((await _carry(sessions)).value) == pytest.approx(0.5)
+    assert int((await _carry(sessions)).value) == 500   # 单位是 milli-SC
 
     liked_item = await _item(sessions, "work_liked")
     assert liked_item.payload_json["stock"] == 2             # 重赋值模式生效

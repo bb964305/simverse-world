@@ -46,7 +46,7 @@ async def _skim_town_tax(db, gross: int, rate: float, reason: str) -> int:
 
     Thin delegate since M-A C5 — ``treasury_service.skim_tax`` owns the rule
     (``int(gross * rate)`` by default; the sub-SC remainder accrues into the
-    ``town_tax_carry`` ledger once ``tax_carry_enabled`` is on).
+    ``town_tax_carry_milli`` ledger once ``tax_carry_enabled`` is on).
 
     Pure rule — a multiplication and a truncation, zero LLM cost. Gated on
     ``town_treasury_enabled`` (off → byte-level status quo: the caller pays the

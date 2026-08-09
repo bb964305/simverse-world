@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, UTC
 
-from sqlalchemy import select, update
+from sqlalchemy import BigInteger, String, cast, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,7 +53,14 @@ LAST_SPEND_KEY = "town_last_spend_at"
 # M-A C5: the fractional tax ledger. Same "scalar state lives in system_config"
 # discipline as LAST_SPEND_KEY — the sub-1-SC remainder of every skim accrues
 # here instead of evaporating in an ``int()``, so no migration is needed.
-TAX_CARRY_KEY = "town_tax_carry"
+#
+# M-A 加固:值是**整数 milli-SC**(1 SC = 1000),不再是 "0.800000" 这样的浮点
+# 串——只有整数才能走 ``kv_add_int_pending`` 的数据库内原子增量。键名跟着换
+# (``town_tax_carry`` → ``town_tax_carry_milli``):单位藏在值里迟早出事,而且
+# 万一哪个 dev 库里还留着老键的浮点串,新版的 CAST 在真 PostgreSQL 上会直接抛
+# (sqlite 则静默截成 0)。老键从此无人读写,留着不动(删数据不进这次变更)。
+TAX_CARRY_KEY = "town_tax_carry_milli"
+CARRY_SCALE = 1000                              # 1 SC = 1000 milli
 
 
 async def balance(db: AsyncSession) -> int:
@@ -173,6 +180,90 @@ async def kv_upsert_pending(
     await db.flush()
 
 
+async def kv_read_int(db: AsyncSession, key: str) -> int:
+    """读一个整数 KV(缺行 / 值不是整数 → 0)。
+
+    绝不抛:这些键是**记账**不是钱,一个脏值不该把调用它的那笔买卖连坐掉。
+    """
+    raw = await kv_read(db, key)
+    try:
+        return int(raw)                     # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
+async def kv_add_int_pending(
+    db: AsyncSession,
+    key: str,
+    delta: int,
+    *,
+    group: str = "town",
+    updated_by: str,
+) -> None:
+    """原子增量 upsert:新值由**数据库**在写的那一刻从当前值算出来。
+
+    与 ``kv_upsert_pending`` 只差这一点,但那正是竞态的根:盲写版本写回的是调
+    用方几毫秒前读到的值,两个进程同时累尾数时后写的抹掉先写的
+    (last-writer-wins)。这里 ``value = CAST(value AS BIGINT) + delta`` 整条在
+    SQL 里,方言分派与 ``tax_pending`` 逐行同构。
+
+    值必须是纯整数串(milli-SC),不能是 ``"0.8"``:真 PostgreSQL 上
+    ``CAST('0.8' AS BIGINT)`` 直接抛,sqlite 则静默截成 0。
+    """
+    now = datetime.now(UTC)
+    delta = int(delta)
+    values = {
+        "key": key, "value": str(delta), "group": group,
+        "updated_at": now, "updated_by": updated_by,
+    }
+    bumped = cast(cast(SystemConfig.value, BigInteger) + delta, String)
+    dialect = db.get_bind().dialect.name
+    if dialect in ("postgresql", "sqlite"):
+        insert = postgresql_insert if dialect == "postgresql" else sqlite_insert
+        statement = insert(SystemConfig).values(**values)
+        statement = statement.on_conflict_do_update(
+            index_elements=[SystemConfig.key],
+            set_={"value": bumped, "updated_at": now, "updated_by": updated_by},
+        )
+        await db.execute(statement)
+    else:
+        result = await db.execute(
+            update(SystemConfig)
+            .where(SystemConfig.key == key)
+            .values(value=bumped, updated_at=now, updated_by=updated_by)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount == 0:
+            db.add(SystemConfig(**values))
+    await db.flush()
+
+
+async def kv_take_int_pending(
+    db: AsyncSession, key: str, amount: int, *, updated_by: str,
+) -> bool:
+    """守卫扣减:``... SET value = value - amount WHERE value >= amount``。
+
+    返回是否真扣到。零行 = 别人抢先扣走了,**不 rollback**(军规 2:什么都没写
+    就没有什么要撤,而 rollback 会 expire 调用方 session 里的所有 ORM 对象)。
+    """
+    if amount <= 0:
+        return False
+    amount = int(amount)
+    result = await db.execute(
+        update(SystemConfig)
+        .where(SystemConfig.key == key,
+               cast(SystemConfig.value, BigInteger) >= amount)
+        .values(
+            value=cast(cast(SystemConfig.value, BigInteger) - amount, String),
+            updated_at=datetime.now(UTC),
+            updated_by=updated_by,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await db.flush()
+    return (result.rowcount or 0) > 0
+
+
 async def _skim(
     db: AsyncSession, gross: int, fallback_rate: float, reason: str,
 ) -> tuple[int, bool]:
@@ -203,18 +294,32 @@ async def _skim(
         await tax_pending(db, cut, reason)
         return cut, True
 
-    carry = float(await kv_read(db, TAX_CARRY_KEY, "0") or "0")
-    total = exact + carry
-    cut = min(int(total), gross)
-    if cut <= 0 and exact <= 0:
+    # M-A 加固:两步都在数据库里做完,Python 侧不留读-改-写窗口。
+    # ① 尾数原子累加(谁也抹不掉谁);② 凑满整 SC 走守卫兑换(零行 = 别的进程
+    # 抢先兑走了,这一笔就只累不征——钱一分不少地留在账上,下一笔再兑)。
+    # 单线程下与旧算法逐笔等价:旧 `total = exact + carry; cut = min(int(total),
+    # gross); carry' = total - cut`,新 `carry' = carry + exact_milli;
+    # cut = min(carry'//1000, gross); carry'' = carry' - cut*1000` —— 同一个式子
+    # 换成整数(milli 粒度的四舍五入是唯一差别,见 CARRY_SCALE)。
+    exact_milli = int(round(exact * CARRY_SCALE))
+    wrote = False
+    if exact_milli > 0:
+        await kv_add_int_pending(
+            db, TAX_CARRY_KEY, exact_milli, updated_by=f"skim_tax:{reason}")
+        wrote = True
+
+    carry_milli = await kv_read_int(db, TAX_CARRY_KEY)   # 含自己刚 flush 的那笔
+    cut = min(carry_milli // CARRY_SCALE, gross)
+    if cut > 0 and await kv_take_int_pending(
+            db, TAX_CARRY_KEY, cut * CARRY_SCALE, updated_by=f"skim_tax:{reason}"):
+        await tax_pending(db, cut, reason)
+        wrote = True
+    else:
+        cut = 0
+    if not wrote:
         # Nothing accrued (zero rate / zero gross): leave the ledger alone so a
         # no-op skim stays a no-op write.
         return 0, False
-    await kv_upsert_pending(
-        db, TAX_CARRY_KEY, f"{total - cut:.6f}", updated_by=f"skim_tax:{reason}",
-    )
-    if cut > 0:
-        await tax_pending(db, cut, reason)
     return cut, True
 
 
@@ -225,8 +330,9 @@ async def skim_tax_pending(
 
     Returns the SC actually levied. ``town_treasury_enabled`` off → 0 and zero
     writes. With ``tax_carry_enabled`` on, the sub-SC remainder accrues into
-    ``town_tax_carry`` and is levied once it crosses 1 SC; with it off the result
-    is byte-identical to the legacy ``int(gross * rate)`` truncation.
+    ``town_tax_carry_milli``(整数 milli-SC,原子增量)and is levied once it
+    crosses 1 SC; with it off the result is byte-identical to the legacy
+    ``int(gross * rate)`` truncation.
     """
     cut, _ = await _skim(db, gross, fallback_rate, reason)
     return cut
