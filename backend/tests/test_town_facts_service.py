@@ -252,6 +252,71 @@ async def test_open_polls_fold_every_vote_tier_policy_key(db_session, facts_on):
         assert key not in blob, f"{key} 的英文键名经公投标题漏进了事实层"
 
 
+# ── 自由文本的量纲上限(UGC 无背压) ──────────────────────────────────────
+
+@pytest.mark.anyio
+async def test_open_polls_are_capped_by_count_and_length(db_session, facts_on):
+    """公投的**条数**与**单条长度**都要有上限。
+
+    ``POST /polls/propose`` 的 topic / options[].label 是玩家自由文本,而这层读出
+    来的东西直接进每位 NPC 的 system prompt 与 decide prompt。条数无上限意味着
+    「谁都能开公投」= 谁都能把整个 prompt 预算买断;单条无上限意味着一张公投就够。
+    S11 的「段落 < 1200 字符」量的是固定合成输入,不是运行时保证 —— 这条才是。
+
+    取最近截止的 ``OPEN_POLLS_LIMIT`` 张:马上要投的那几张才是「镇上正在议的事」。
+    """
+    now = datetime.now(UTC)
+    db_session.add_all([
+        # 顶满 Poll.question 的 String(300) 与 options_json 的「没有列宽」。
+        Poll(question="议" * 300,
+             options_json=[{"label": f"{i}号选项" + "项" * 80} for i in range(30)],
+             closes_at=now + timedelta(days=i), status="open")
+        for i in range(1, 51)
+    ])
+    await db_session.commit()
+
+    open_polls = (await tfs.get_town_facts_cached(db_session))["open_polls"]
+    assert len(open_polls) == tfs.OPEN_POLLS_LIMIT
+    assert open_polls[0]["closes_at"] < open_polls[-1]["closes_at"], "按最近截止取"
+    for p in open_polls:
+        assert len(p["question"]) <= tfs.POLL_QUESTION_MAX_CHARS
+        assert len(p["options"]) <= tfs.POLL_OPTIONS_LIMIT
+        for label in p["options"]:
+            assert len(label) <= tfs.POLL_OPTION_MAX_CHARS
+
+
+@pytest.mark.anyio
+async def test_duties_are_capped_by_count_and_length(db_session, facts_on):
+    """营生清单跟着居民数长,而 UGC 居民是玩家造的 —— 名字与 title 都不是我们写的。"""
+    db_session.add_all([
+        # 顶满 Resident.name 的 String(100);title 在 meta_json 里,压根没有列宽。
+        _resident(f"ugc-{i:03d}", "名" * 100, resident_type="resident",
+                  duty={"key": f"k{i}", "title": "衔" * 200})
+        for i in range(40)
+    ])
+    await db_session.commit()
+
+    duties = (await tfs.get_town_facts_cached(db_session))["duties"]
+    assert len(duties) == tfs.DUTIES_LIMIT
+    for d in duties:
+        assert len(d["name"]) <= tfs.DUTY_NAME_MAX_CHARS
+        assert len(d["title"]) <= tfs.DUTY_TITLE_MAX_CHARS
+
+
+@pytest.mark.anyio
+async def test_places_are_capped_by_count_and_length(db_session, facts_on):
+    """地点会被公投加(S8 的邮局/剧院就是这么来的),名字来自公投 effect 的 data。"""
+    db_session.add_all([_dynamic(f"hall-{i:03d}", f"{i:03d}号" + "楼" * 200)
+                        for i in range(40)])
+    await db_session.commit()
+
+    places = (await tfs.get_town_facts_cached(db_session))["places"]
+    assert len(places) == tfs.PLACES_LIMIT
+    for name in places:
+        assert len(name) <= tfs.PLACE_MAX_CHARS
+    assert "市政厅" in places, "静态公共设施排在前面,不该被动态地点挤掉"
+
+
 # ── 今天 ────────────────────────────────────────────────────────────────
 
 @pytest.mark.anyio

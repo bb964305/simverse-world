@@ -273,6 +273,7 @@ class Settings(BaseSettings):
     rest_rate_limit_register_per_minute: int = 5   # auth register/login (by IP)
     rest_rate_limit_forge_per_minute: int = 10     # forge start/quick (by IP)
     rest_rate_limit_llm_test_per_minute: int = 5   # settings/llm/test (by IP)
+    rest_rate_limit_propose_per_minute: int = 5    # polls/propose (by IP)
 
     # --- Observability (OPTIMIZATION_PLAN P1-3) ---
     # metrics_enabled / sentry_* live in the Observability block above (a

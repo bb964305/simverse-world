@@ -137,7 +137,7 @@ def _long_issue(topic: str) -> str:
     """顶满 ``IssueStance.issue_key`` 的 ``String(300)``。
 
     议题键是自由文本,原样折进 prompt 一条就能吃掉四分之一段落 —— 事实层的
-    ``_clip_issue`` 挡的就是这个,预算必须在**它挡过之后**算。
+    ``_clip`` 挡的就是这个,预算必须在**它挡过之后**算。
     """
     return (topic + "，" + "以及随之而来的一连串细节" * 30)[:300]
 
@@ -245,6 +245,50 @@ async def test_full_facts_stay_within_the_char_budget(db_session, all_facts_on):
     assert "npc_votes" not in text and "_npc_voters" not in text, "计票状态出网了"
 
     assert len(text) < _FACTS_CHAR_BUDGET, f"小镇现况段 {len(text)} 字符,超预算"
+
+
+#: 一次「公投轰炸」:50 张全是顶满列宽的自由文本。``POST /polls/propose`` 只要一个
+#: Bearer token,``topic`` 与 ``options[].label`` 直进这条链路。
+_FLOOD_POLLS = 50
+_FLOOD_PLACES = 30
+
+
+@pytest.mark.anyio
+async def test_ugc_flood_cannot_blow_the_char_budget(db_session, all_facts_on):
+    """**运行时**的预算保证 —— 上面那条量的是固定合成输入,这条量的是敌手输入。
+
+    满配小镇之上再灌 50 张顶满 ``Poll.question`` 列宽(300 字)、每张 30 个超长选项
+    的公投,外加 30 个超长名字的公共地点。这些字符串全部来自玩家:``/polls/propose``
+    只要求一个 Bearer token,而它们进每位 NPC 的 system prompt、decide prompt,还经
+    ``_clerk_announce`` 广播成全镇 14 人的持久记忆。
+
+    没有条数上限 = 谁都能把整段 prompt 预算买断;没有单条长度上限 = 一张就够。
+    「段落 < 1200 字符」必须是读侧的硬保证,不能是「我们喂进去的输入恰好不长」。
+    """
+    speaker = await _seed_full_town(db_session)
+    now = datetime.now(UTC)
+    db_session.add_all([
+        Poll(question="议" * 300,
+             options_json=[{"label": f"{i}号选项" + "项" * 80} for i in range(30)],
+             closes_at=now + timedelta(hours=i), status="open")
+        for i in range(1, _FLOOD_POLLS + 1)
+    ])
+    db_session.add_all([
+        DynamicLocation(slug=f"hall-{i:03d}", active=True,
+                        data_json={"name": f"{i:03d}号" + "楼" * 200,
+                                   "type": "public", "bounds": [0, 0, 1, 1]})
+        for i in range(_FLOOD_PLACES)
+    ])
+    await db_session.commit()
+
+    facts = await tfs.build_town_facts(db_session, speaker)
+    text = format_town_facts(facts)
+
+    # 各段仍在(截断不等于哑掉 —— 那样这条断言就成了一句表扬)。
+    for probe in ("现任镇长", "镇上的营生分工", "现行的规矩", "镇库余额",
+                  "镇上正在议的事", "今天是", "小镇的公共去处", "你自己的营生"):
+        assert probe in text, f"{probe} 这一段被截没了"
+    assert len(text) < _FACTS_CHAR_BUDGET, f"UGC 灌爆后 {len(text)} 字符,超预算"
 
 
 @pytest.mark.anyio

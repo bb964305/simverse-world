@@ -25,11 +25,17 @@
 ``"self"``(营生 + 议题立场),排在键序最后。那一段**绝不进缓存**,理由见下面第
 三条。
 
-三条设计约束
+四条设计约束
 ------------
 - **出网净化**:公投只出 question / options(仅 label) / closes_at。
   ``options_json`` 里并排躺着 ``npc_votes`` / ``_npc_voters`` / ``_proposer_slug``
   / ``effect``,那是内部计票状态,漏进 prompt 等于把票型和未生效的效果讲给 NPC 听。
+  自由文本还要多过两道:原始政策键折成中文标签(``scrub_policy_keys``),以及下面
+  这一条的量纲上限。
+- **量纲有上限**:每一类事实的条数与单条长度都卡死(见「量纲上限」那组常量)。
+  公投标题/选项、地点名、UGC 居民的名字与头衔都是玩家写的自由文本,而这一层的
+  输出直接进 prompt —— 没有上限就等于把 prompt 预算的写权限开放给了任何一个持
+  Bearer token 的人。
 - **有界 fail-open**:取数失败回落上一次快照,但只在
   ``civic_facts_max_stale_seconds`` 之内。宁可不注入,也不注入一个过期的镇长 ——
   错误的事实比没有事实伤害大。每次回落都打 ``CIVIC_FACTS_FAILOPEN`` 前缀的
@@ -80,6 +86,38 @@ SELF_STANCE_LIMIT = 3
 #: 段落预算(S11 的硬上限是 1200 字符)。
 _ISSUE_MAX_CHARS = 30
 
+# ── 量纲上限:每一类事实的条数与单条长度 ───────────────────────────────────
+#
+# 为什么必须在**读侧**设:这一层读出来的东西直接进每位 NPC 的 system prompt 与
+# decide prompt,而其中三类的内容是**玩家自由文本**——``POST /polls/propose`` 只
+# 要一个 Bearer token,topic 与 options[].label 就落进 ``polls`` 表;地点名来自
+# 公投 effect 的 data;UGC 居民的 name 与 duty title 是玩家造的。这些地方一处都
+# 没有天然背压:条数无上限 = 谁都能把整段 prompt 预算买断,单条无上限 = 一条就够。
+#
+# S11 的「段落 < 1200 字符」量的是固定合成输入,那是**我们喂进去的**;这几个常量
+# 才是运行时保证。数字按 1200 的分账取:营生 ~550 / 公投 ~560 / 地点 ~115,其余
+# (镇长/政策/镇库/今天/自身事实)是有界的固定形状,合计留出余量。
+# 由 tests/test_civic_prompt_budget.py::test_ugc_flood_cannot_blow_the_char_budget
+# 实测兜住,改这里的任何一个数都会被那条测试算总账。
+
+#: 最多带几张进行中公投。按 ``closes_at`` 取最近截止的几张——马上要投的那几张才
+#: 是「镇上正在议的事」。
+OPEN_POLLS_LIMIT = 5
+POLL_QUESTION_MAX_CHARS = 40
+#: 单张公投最多列几个选项 / 单个选项多长。选项是给 NPC 一个「在议什么」的概念,
+#: 不是选票——列全没有额外价值,列爆有。
+POLL_OPTIONS_LIMIT = 4
+POLL_OPTION_MAX_CHARS = 10
+
+#: 在任营生最多列几人。今天是 14 人(11 preset + 3 UGC),UGC 只增不减。
+DUTIES_LIMIT = 20
+DUTY_NAME_MAX_CHARS = 10
+DUTY_TITLE_MAX_CHARS = 14
+
+#: 公共去处最多列几处。今天是 10 处(8 静态 + 公投建的邮局/剧院),而公投能接着建。
+PLACES_LIMIT = 12
+PLACE_MAX_CHARS = 8
+
 #: ``stance ∈ [-1, 1]`` 的定性分档。**数值本身永不进 prompt** —— spec §2 的非目标
 #: 与 civic_service.py:644 的既有设计约束(探针数值不给 NPC 看)是同一条。
 _STANCE_SUPPORT = 0.2
@@ -113,6 +151,16 @@ def _reset_for_tests() -> None:  # pragma: no cover - test hook
     _cache["facts"] = {}
 
 
+def _clip(text: str, limit: int) -> str:
+    """出网前截断到 ``limit`` 个字符(含省略号,所以结果长度恒 ≤ limit)。
+
+    唯一的截断实现:议题键、公投标题与选项、营生名与头衔、地点名共用它。各处的
+    上限不同,截断姿势必须相同 —— 否则「≤ limit」这条在某一处会悄悄变成 limit+1。
+    """
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
 # ── 各类事实的读取 ──────────────────────────────────────────────────────
 
 async def _read_mayor(db: AsyncSession) -> dict | None:
@@ -136,6 +184,11 @@ async def _read_duties(db: AsyncSession) -> list[dict]:
     这是「按人读营生」方向,唯一入口是 ``duty_service.get_duty(resident)``;
     「按 key 反查持有人」是另一个方向,走 ``duty_service.find_duty_resident``。
     按 slug 排序:prompt 快照必须稳定,否则每次重取都可能换一个顺序。
+
+    ``DUTIES_LIMIT`` / 名字与头衔的截断:居民数今天有界,但 UGC 居民是玩家造的,
+    ``name`` 顶得到 ``String(100)``,``title`` 在 ``meta_json`` 里压根没有列宽。
+    上限卡在**输出条数**而不是 SQL ``LIMIT``:后者会让一串没有 title 的居民把有
+    title 的人挤出名单(先截断再过滤 = 截断决定了谁被看见)。
     """
     residents = (await db.execute(
         select(Resident)
@@ -146,7 +199,11 @@ async def _read_duties(db: AsyncSession) -> list[dict]:
     for r in residents:
         title = duty_service.get_duty(r).get("title")
         if title:
-            out.append({"slug": r.slug, "name": r.name, "title": title})
+            out.append({"slug": r.slug,
+                        "name": _clip(r.name, DUTY_NAME_MAX_CHARS),
+                        "title": _clip(title, DUTY_TITLE_MAX_CHARS)})
+            if len(out) >= DUTIES_LIMIT:
+                break
     return out
 
 
@@ -182,14 +239,22 @@ async def _read_open_polls(db: AsyncSession) -> list[dict]:
     (``将「tax_rate」调整为 0.05``,生产 08-11 截止的那张就是),而这条链路经
     ``DECIDE_FACT_KEYS`` 直通 decide prompt,撞 K4 的 ``"tax" not in blob.lower()``。
     写侧同一道折叠治新数据,**已落库的标题只有这里够得着**。
+
+    ``question`` 与每个选项 label 都是玩家自由文本(``POST /polls/propose`` 只要
+    一个 Bearer token),所以条数与单条长度都要卡:只取最近截止的
+    ``OPEN_POLLS_LIMIT`` 张(马上要投的那几张才是「镇上正在议的事」),标题截到
+    ``POLL_QUESTION_MAX_CHARS``,选项截条数也截长度。
     """
     polls = (await db.execute(
-        select(Poll).where(Poll.status == "open").order_by(Poll.closes_at)
+        select(Poll).where(Poll.status == "open")
+        .order_by(Poll.closes_at).limit(OPEN_POLLS_LIMIT)
     )).scalars().all()
     return [{
-        "question": scrub_policy_keys(p.question),
-        "options": [o["label"] for o in (p.options_json or [])
-                    if isinstance(o, dict) and o.get("label")],
+        "question": _clip(scrub_policy_keys(p.question), POLL_QUESTION_MAX_CHARS),
+        # 先过滤再截条数:反过来会让开头几个没有 label 的内部条目把真选项挤掉。
+        "options": [_clip(o["label"], POLL_OPTION_MAX_CHARS)
+                    for o in (p.options_json or [])
+                    if isinstance(o, dict) and o.get("label")][:POLL_OPTIONS_LIMIT],
         "closes_at": p.closes_at.isoformat() if p.closes_at else None,
     } for p in polls]
 
@@ -222,6 +287,11 @@ async def _read_places(db: AsyncSession) -> list[str]:
     晚(新落成的楼要等下一次 reload)也可能比世界早(停用的行还留在里面)。库里的
     ``active`` 才是当下的事实。已经并过的楼会被两边各数一次,所以按名字去重
     (``dict.fromkeys`` 保序,静态在前、动态按 slug 追加,快照顺序稳定)。
+
+    ``PLACES_LIMIT`` / ``PLACE_MAX_CHARS``:动态地点的名字来自公投 effect 的
+    ``data``,是自由文本;而公投能一直建楼,条数只增不减。**先截断再去重**——
+    去重后再截断会让两个只有尾巴不同的长名字在 prompt 里并排出现同一个词。
+    静态设施在前,所以被条数上限挤掉的总是新加的动态地点。
     """
     from app.agent.map_data import LOCATIONS
     from app.models.dynamic_location import DynamicLocation
@@ -235,7 +305,8 @@ async def _read_places(db: AsyncSession) -> list[str]:
     )).scalars().all()
     names += [data["name"] for data in (r or {} for r in rows)
               if data.get("type") == "public" and data.get("name")]
-    return list(dict.fromkeys(names))
+    clipped = (_clip(name, PLACE_MAX_CHARS) for name in names)
+    return list(dict.fromkeys(clipped))[:PLACES_LIMIT]
 
 
 #: (section 名, 读取函数) —— 顺序即返回字典的键序,也是 fail-open 的 reason 取值域。
@@ -262,12 +333,6 @@ def _stance_label(stance: float) -> str:
     return "中立"
 
 
-def _clip_issue(issue_key: str) -> str:
-    """议题键出网前截断(见 ``_ISSUE_MAX_CHARS``)。"""
-    text = (issue_key or "").strip()
-    return text if len(text) <= _ISSUE_MAX_CHARS else text[:_ISSUE_MAX_CHARS - 1] + "…"
-
-
 async def _collect_self(db: AsyncSession, resident) -> dict:
     """「关于你自己的事实」:营生 + 最近的议题立场。
 
@@ -284,7 +349,8 @@ async def _collect_self(db: AsyncSession, resident) -> dict:
     if settings.polis_opinion_enabled:
         rows = await OpinionService(db).list_stances(
             resident.slug, limit=SELF_STANCE_LIMIT)
-        stances = [{"issue": _clip_issue(key), "label": _stance_label(stance)}
+        stances = [{"issue": _clip(key, _ISSUE_MAX_CHARS),
+                    "label": _stance_label(stance)}
                    for key, stance in rows]
     return {
         "duty_title": duty.get("title"),
