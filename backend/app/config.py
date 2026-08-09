@@ -629,6 +629,17 @@ class Settings(BaseSettings):
     civic_min_electorate: int = 3
     civic_min_tenure_world_days: float = 12.0
     civic_promotion_cooldown_world_days: float = 12.0
+    # ── 世界公共记忆 (CIVIC_FACTS_* / CIVIC_MEMORY_*) ─────────────────────
+    # 两个总闸互相独立、默认全关 → 行为与现状逐字节一致:事实层关 =
+    # build_town_facts 返回 {},prompt 里不多一个字;广播层关 = 镇务事件不写
+    # 任何居民记忆。零新表零迁移,开闸是 deploy/.env 的两次独立变更
+    # (红线:行为开闸与代码变更不同车)。
+    civic_facts_enabled: bool = False             # 主开关 (env CIVIC_FACTS_ENABLED): 小镇现况事实层
+    civic_facts_cache_ttl_seconds: float = 60.0   # 公共事实快照 TTL(每 worker 进程内)
+    civic_facts_max_stale_seconds: float = 600.0  # 有界 fail-open: 旧快照超这么久宁可不注入,也不注入过期镇长
+    civic_memory_broadcast_enabled: bool = False  # 主开关 (env CIVIC_MEMORY_BROADCAST_ENABLED): 镇务记忆广播
+    civic_memory_importance: float = 0.9          # 结果类(选举/议案生效)的 raw importance
+    civic_memory_notice_importance: float = 0.6   # 征询/日常公告的 raw importance(低一档,不挤占候选池)
     # ── S1-3 议题立场与舆论动力学 (KICKOFF_S1-3_opinion.md §3) ─────────────
     # Independent gate, default False → byte-identical fallback to the status
     # quo (debate/chat/digest/nightly paths unchanged, zero stance writes).
