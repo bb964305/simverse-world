@@ -231,6 +231,39 @@ def test_retrievability_gate_criterion_is_a_count_not_a_strict_min():
         "严格「高于第 30 名」的旧判据还在,它会假红"
 
 
+# ── 部署 pre-flight:名册守卫 SQL 必须与实现的 or_() 同构 ────────────────
+
+def test_roster_guard_sql_covers_both_deletion_branches():
+    """守卫 SQL 的两支必须与 ``reset_builtin_residents.find_targets`` 完全同构。
+
+    删除判据是 ``resident_type≠'player' AND (slug ∈ LEGACY_BUILTIN_SLUGS OR
+    creator_id == SYSTEM_USER_ID) AND slug ∉ NEW_ROSTER_SLUGS``
+    (``seed/reset_builtin_residents.py:82-94``),而 pre-flight 守卫原先只查了
+    ``creator_id`` 那一支。
+
+    今天生产无人命中 legacy slug,所以这是**补网不是救火**。但那 19 个 slug 里有
+    ``isabella`` / ``klaus`` / ``adam`` / ``mei`` / ``tamara`` 这种老 demo NPC 的
+    通名 —— 玩家造一位重名的 UGC 居民完全不稀奇,而 ``docker compose up -d`` 每次
+    都重跑 bootstrap 的 ``reset_builtin_residents``,会跨 13 张表把他连同记忆一起
+    级联删掉,pre-flight 却安静地返回 0 行。
+    """
+    from seed.preset_characters import SYSTEM_USER_ID
+    from seed.reset_builtin_residents import LEGACY_BUILTIN_SLUGS, NEW_ROSTER_SLUGS
+
+    text = _deploy_env_text()
+    assert f"'{SYSTEM_USER_ID}'" in text, "守卫 SQL 里的 SYSTEM_USER_ID 与实现漂了"
+
+    missing_legacy = sorted(s for s in LEGACY_BUILTIN_SLUGS if f"'{s}'" not in text)
+    assert not missing_legacy, (
+        "守卫 SQL 漏了 legacy 分支的 slug（漏一个，那位同名居民就查不出来）: "
+        f"{missing_legacy}")
+
+    missing_roster = sorted(s for s in NEW_ROSTER_SLUGS if f"'{s}'" not in text)
+    assert not missing_roster, (
+        "守卫 SQL 的 NOT IN 名单漏了在册 preset（漏一个，他会被守卫误报成待删）: "
+        f"{missing_roster}")
+
+
 def test_governance_knobs_exist_in_deploy_env_example_too():
     """F1/F2/F3 的旋钮必须同时出现在两份 env 参考里。
 
