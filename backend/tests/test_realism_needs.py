@@ -164,3 +164,42 @@ def test_needs_daily_balance_not_locked_at_zero():
     needs = _simulate_days(2, chats_per_day=2, eats_per_day=1)
     assert needs["satiety"] >= 0.2
     assert needs["social"] >= 0.2
+
+
+@pytest.mark.anyio
+async def test_deadlock_at_home_resolves_through_sleep_then_eat(monkeypatch):
+    """0809 产线死锁的整条解开链:在自家门口 energy=satiety=0 的居民,
+    ①GO_HOME 重新可选 → ②decide 的 energy 分支给出 GO_HOME → ③execute 的
+    already-at-destination 分支置 sleeping → ④睡眠代谢把 energy 抬回阈值上 →
+    ⑤此时 most_critical 才轮到 satiety(平局时 min 按元组序恒取 energy,
+    这正是饿死的放大器)→ 吃饭分支终于可达。"""
+    from app.agent.actions import ActionType, get_available_actions
+    from app.agent.phases.decide.basic import BasicDecidePlugin
+    from app.agent.schemas import TickContext
+    monkeypatch.setattr(settings, "realism_enabled", True)
+
+    r = _res(meta={"needs": {"energy": 0.0, "satiety": 0.0, "social": 0.7}})
+    r.tile_x, r.tile_y = 76, 50
+    r.home_tile_x, r.home_tile_y = 76, 50
+    r.home_location_id = None
+    r.id, r.slug = "stuck", "stuck"
+
+    # ① 卡死态下 GO_HOME 必须重新出现
+    avail = get_available_actions(r, nearby_residents=[])
+    assert ActionType.GO_HOME in avail
+
+    # ② decide 给出 GO_HOME(修复前这里是 None —— 死锁点)
+    ctx = TickContext(db=AsyncMock(), resident=r, world_time="22:00", hour=22,
+                      schedule_phase="夜间")
+    ctx.available_actions = avail
+    res = BasicDecidePlugin()._maybe_needs_action(ctx)
+    assert res is not None and res.action == ActionType.GO_HOME
+
+    # ③④ 睡眠代谢把 energy 抬过临界
+    needs = N.get_needs(r)
+    while needs["energy"] < settings.realism_needs_critical:
+        needs = N.metabolize(needs, status="sleeping", sbti=None)
+    N.write_needs(r, needs)
+
+    # ⑤ 现在最危急的才是 satiety —— 饿死放大器解除
+    assert N.most_critical(N.get_needs(r)) == "satiety"

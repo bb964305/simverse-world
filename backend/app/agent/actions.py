@@ -75,21 +75,36 @@ def get_available_actions(resident, nearby_residents: list) -> list[ActionType]:
     if chatting_nearby or idle_nearby:
         available.extend(_SOCIAL_OBSERVER)
 
-    # GO_HOME: available when not already at home
+    # GO_HOME: available when not already at home — except when realism says the
+    # resident is running on empty. A resident that walked home *before* energy
+    # went critical parks on the entrance tile as `idle`; hiding GO_HOME there
+    # strands it (0809 production deadlock: 7/11 residents sat at their own door
+    # with energy=satiety=0). "Arriving home exhausted → sleep" lives in execute's
+    # already-at-destination branch, so offering GO_HOME is what unlocks sleep.
+    from app.config import settings as _needs_settings
+    _exhausted_at_home = False
+    if _needs_settings.realism_enabled:
+        from app.agent.needs import get_needs
+        _exhausted_at_home = (get_needs(resident).get("energy", 1.0)
+                              < _needs_settings.realism_needs_critical)
+
     home_loc_id = getattr(resident, 'home_location_id', None)
     if home_loc_id:
         from app.agent.map_data import get_location_by_id
         home_loc = get_location_by_id(home_loc_id)
         if home_loc:
             entrance = home_loc.get("entrance") or home_loc.get("center")
-            if entrance and not (resident.tile_x == entrance[0] and resident.tile_y == entrance[1]):
+            if entrance and (_exhausted_at_home
+                             or not (resident.tile_x == entrance[0]
+                                     and resident.tile_y == entrance[1])):
                 available.append(ActionType.GO_HOME)
     else:
         # Fallback to old home_tile_x/y
         home_x = resident.home_tile_x
         home_y = resident.home_tile_y
         if home_x is not None and home_y is not None:
-            if not (resident.tile_x == home_x and resident.tile_y == home_y):
+            if _exhausted_at_home or not (resident.tile_x == home_x
+                                          and resident.tile_y == home_y):
                 available.append(ActionType.GO_HOME)
 
     # RESEARCH (Lab): gated to authorized researchers standing inside the
