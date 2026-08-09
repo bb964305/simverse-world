@@ -122,3 +122,64 @@ async def test_polls_open_endpoint_is_anonymous_and_clean(client, db_session):
     assert "system_config" not in body
     polls = resp.json()["polls"]
     assert polls and set(polls[0]["options"][0]) == {"label", "npc_votes"}
+
+
+# ── /polls/propose:自由文本的入口闸 ────────────────────────────────────
+
+async def _token(db, email: str) -> str:
+    """一个普通(非 admin)登录用户的 Bearer token —— propose 只要求这一个条件。"""
+    from app.models.user import User
+    from app.services.auth_service import create_token
+
+    user = User(name="p", email=email, is_admin=False, is_banned=False)
+    db.add(user)
+    await db.commit()
+    return create_token(user.id)
+
+
+def _body(topic: str = "广场是否加装长椅", label: str = "支持") -> dict:
+    return {"topic": topic, "options": [{"label": label}, {"label": "反对"}]}
+
+
+@pytest.mark.anyio
+async def test_propose_rejects_oversized_free_text(client, db_session):
+    """topic / label 无长度上限 = 一个 Bearer token 就能把全镇 prompt 灌爆。
+
+    这些字符串不止落进 polls 表:它们进每位 NPC 的 system prompt 与 decide
+    prompt,还经 ``_clerk_announce`` 广播成 14 人的**持久记忆**——写进去就擦不掉。
+    读侧的截断是兜底,入口这道才是「不该收下」。topic 的上限对齐
+    ``Poll.question`` 的 ``String(300)``:再宽就是留给 PG 去报 DataError。
+    """
+    from app.routers.polls import TOPIC_MAX_CHARS, OPTION_LABEL_MAX_CHARS
+
+    auth = {"Authorization": f"Bearer {await _token(db_session, 'p1@t.co')}"}
+
+    assert (await client.post("/polls/propose", headers=auth,
+                              json=_body(topic="议" * (TOPIC_MAX_CHARS + 1))
+                              )).status_code == 422
+    assert (await client.post("/polls/propose", headers=auth,
+                              json=_body(label="项" * (OPTION_LABEL_MAX_CHARS + 1))
+                              )).status_code == 422
+    assert (await client.post("/polls/propose", headers=auth, json={
+        "topic": "选项灌爆", "options": [{"label": f"{i}"} for i in range(500)],
+    })).status_code == 422
+
+    ok = await client.post("/polls/propose", headers=auth, json=_body(
+        topic="议" * TOPIC_MAX_CHARS, label="项" * OPTION_LABEL_MAX_CHARS))
+    assert ok.status_code == 200, "顶格的合法输入必须收得下"
+
+
+@pytest.mark.anyio
+async def test_propose_is_rate_limited(client, db_session):
+    """限流:``app/rate_limit.py`` 的 ``default_limits=[]`` —— 没挂 ``@limiter.limit``
+    的路由就是**完全不限**。开公投是写操作 + 全镇广播,一个脚本能开到天亮。"""
+    from app.config import settings as app_settings
+
+    auth = {"Authorization": f"Bearer {await _token(db_session, 'p2@t.co')}"}
+    limit = app_settings.rest_rate_limit_propose_per_minute
+
+    codes = [(await client.post("/polls/propose", headers=auth,
+                                json=_body(topic=f"第 {i} 号议案"))).status_code
+             for i in range(limit + 1)]
+    assert codes[:limit] == [200] * limit, f"限额内不该被挡:{codes}"
+    assert codes[limit] == 429, f"超出限额必须 429:{codes}"

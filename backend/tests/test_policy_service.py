@@ -328,6 +328,40 @@ async def test_propose_amend_absolute_majority_sets_supermajority(db_session,
 
 
 @pytest.mark.anyio
+async def test_amend_poll_question_speaks_chinese_not_the_raw_policy_key(
+        db_session, policy_gate):
+    """公投标题里不许出现原始政策键。
+
+    这条标题不是只给前端看的:它经 ``town_facts_service._read_open_polls`` 进每位
+    NPC 的 decide prompt,而那条链路有「全文不得出现 ``tax``」的既有硬断言
+    (tests/test_treasury_service.py:851)。``将「tax_rate」调整为 …`` 一张就能撞穿。
+    顺带,``_clerk_announce`` 会把同一句话广播成全镇 14 人的持久记忆 —— 英文键漏进
+    去就再也擦不掉了。
+    """
+    from app.models.season import Poll
+    from app.services.policy_service import PolicyService
+
+    res = await PolicyService(db_session).propose_amend(
+        "tax_rate", 0.05, origin="resident", author="jiang-lin")
+    poll = await db_session.get(Poll, res.poll_id)
+
+    assert poll.question == "将「税率」调整为 0.05"
+    assert "tax" not in poll.question.lower()
+
+
+def test_every_catalog_key_has_a_spoken_label():
+    """标签表与政策目录同生共死:新增一条政策而忘了给标签,下一次公投标题就会把
+    英文键抬进 prompt。这条网就是为「以后又加了一条」准备的。"""
+    from app.services.policy_labels import POLICY_LABELS
+    from app.services.policy_service import CATALOG_BY_KEY
+
+    missing = sorted(set(CATALOG_BY_KEY) - set(POLICY_LABELS))
+    assert not missing, f"这些政策键没有中文标签:{missing}"
+    for key, label in POLICY_LABELS.items():
+        assert label.isascii() is False, f"{key} 的标签 {label!r} 还是英文"
+
+
+@pytest.mark.anyio
 async def test_propose_amend_constitutional_core_rejected(db_session, policy_gate):
     """§3.3:97 — core entries are immutable: raise, no poll, no write."""
     from sqlalchemy import func as _func

@@ -288,6 +288,28 @@ class BasicDecidePlugin:
             reason=plan.reason[:100],
         )
 
+    async def _town_facts(self, ctx: TickContext) -> dict | None:
+        """世界公共记忆(S5):「小镇现况」的裁剪子集,给决策 prompt 用。
+
+        只取 ``DECIDE_FACT_KEYS``(镇长 / 今天 / 进行中公投 / 地点)—— 政策与镇库
+        一律不进这条链路(K4:tests/test_treasury_service.py:849-851 钉死了全文不
+        得出现 tax / town_treasury / 镇财政 / 余额数字)。
+
+        取数点在这里而不是 ``execute``:上面那几条零 LLM 的规则分支(needs / 躲雨
+        / 凑热闹 / 照计划走)压根不拼 prompt,没必要为它们查一次库。闸关时
+        ``get_town_facts_cached`` 直接返 ``{}``,连 db 都不碰。fail-open:事实取不
+        到就不注入,决策照常跑。
+        """
+        try:
+            from app.services.town_facts_service import (
+                DECIDE_FACT_KEYS, get_town_facts_cached,
+            )
+            facts = await get_town_facts_cached(ctx.db)
+            return {k: facts[k] for k in DECIDE_FACT_KEYS if k in facts}
+        except Exception:
+            logger.warning("Town facts fetch failed for %s", ctx.resident.slug, exc_info=True)
+            return None
+
     async def _llm_decide(self, ctx: TickContext) -> ActionResult | None:
         # World time (agent-T): "today's actions" is a world-calendar concept.
         # Memories store created_at in real UTC, so each is mapped to world time
@@ -311,6 +333,7 @@ class BasicDecidePlugin:
             available_actions=ctx.available_actions,
             max_daily_actions=settings.agent_max_daily_actions,
             world_events=ctx.world_events,
+            town_facts=await self._town_facts(ctx),
         )
 
         if ctx.current_plan and self.plan_adherence_hint:

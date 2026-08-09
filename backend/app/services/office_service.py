@@ -25,6 +25,21 @@ stores — ``meta_json['mayor']`` (the wage-bonus multiplier, gotcha #1) and
 representations never diverge after a term expiry. Fail-open throughout.
 Neither legacy-store query filters by resident_type / is_autonomous: the row
 that must be cleaned is precisely the one that may have just left that set.
+
+S10 —— 与 ``meta_json['duty']`` 的边界(``app/services/duty_service.py`` 顶部有
+对向的同一段说明):
+
+官职(下面的 ``OFFICE_DEFS``,4 键)与营生(``duty_service``,11 键)是**两个概
+念**,不是同一概念的两套存储。重叠只有 ``{town_clerk, postman}``,来自迁移 046
+的一次性快照拷贝,之后零同步:生产那两行 ``holder_slug`` 恒为 NULL,而赵启文与
+骆小舟一直在做那两件营生。这不是待修的不一致,而是
+``duty_service.find_duty_resident`` 的 offices 索引优化对这两键永久失效(恒回落
+O(N) 扫描)——回填是数据变更,与开闸同车会触红线,所以本批不做。
+``tests/test_office_duty_boundary.py`` 张了一张双向漂移网:``holder_slug`` 非空
+且与营生持有人不一致 → 红;offices 空而营生有人 → warning(今天的生产态)。
+
+镇长是官职,从来不是营生;``mayor`` 的权威读法是
+``election_service.current_mayor``,不是裸读本表(见 ``_effective_holder``)。
 """
 from __future__ import annotations
 

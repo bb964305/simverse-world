@@ -57,8 +57,15 @@ def build_decision_prompt(
     available_actions: list[ActionType],
     max_daily_actions: int,
     world_events: list[dict] | None = None,
+    *,
+    town_facts: dict | None = None,
 ) -> tuple[str, str]:
-    """Build (system_prompt, user_prompt) for the resident decision step."""
+    """Build (system_prompt, user_prompt) for the resident decision step.
+
+    ``town_facts`` 是「小镇现况」的**裁剪子集**(S5):镇长 / 今天 / 进行中公投 /
+    地点。它必须是 keyword-only(K5)—— 既有测试按位置传满 8 个实参,尾部再加
+    位置参数就会串位。不传 = 与加它之前逐字节相同。
+    """
     from app.agent.map_data import get_location_at
 
     sbti = (resident.meta_json or {}).get("sbti", {})
@@ -143,6 +150,15 @@ def build_decision_prompt(
             user += "\n（暴风雨，尽量待在室内，别选室外行动）"
         elif kind == "snow":
             user += "\n（下雪了，出门会踩一脚雪，不过看雪景也不错）"
+    # 世界公共记忆(S5):「小镇现况」的裁剪子集,紧跟世界事件 —— 前者是「现在是
+    # 什么样」,后者是「正在发生什么」,一起构成 NPC 对镇上的公共认知。渲染函数与
+    # 玩家对话共用,标题在这里自己拼:决策 prompt 不用 markdown,沿用上面「当前
+    # 世界事件：」的裸冒号句式。
+    if town_facts:
+        from app.llm.prompt import format_town_facts
+        facts_text = format_town_facts(town_facts)
+        if facts_text:
+            user += f"\n\n小镇现况：\n{facts_text}"
     # 社交软提示（burn-in 发现：自然互聊为零；有邻居时轻推一把，不强制）
     if nearby_residents and ActionType.CHAT_RESIDENT in available_actions:
         names = "、".join(r.name for r in nearby_residents[:3])

@@ -73,6 +73,15 @@ def test_on_move_detects_secret_tile():
     lt._secret_seen.clear()
 
 
+def test_lore_covers_poll_built_locations():
+    """S8:邮局与剧院是公投建出来的两座楼(civic_service.CIVIC_AGENDA),但 LORE
+    里只有最初的 8 个地点 —— 图鉴翻到它们是空词条。补上之后首访通知才有话说。"""
+    from app.agent.location_lore import LORE, lore_for
+    assert {"post_office", "theater"} <= set(LORE)
+    assert lore_for("post_office") == LORE["post_office"]
+    assert lore_for("theater") == LORE["theater"]
+
+
 @pytest.mark.anyio
 async def test_codex_api(client, db_session):
     from app.services.auth_service import create_token

@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.policy import Policy
 from app.services.config_service import ConfigService
+from app.services.policy_labels import policy_label
 
 logger = logging.getLogger(__name__)
 
@@ -385,6 +386,16 @@ class PolicyService:
         )
         won = (result.rowcount or 0) == 1
         await self._db.commit()
+        # C1: 政策值变了 —— 作废本进程的「小镇现况」快照(``policies`` 白名单里
+        # 的 6 条直接进 prompt)。**无条件清**,不看 ``won``:CAS 输了说明有别人
+        # 刚改成功,本进程手上那份快照照样是旧的。跨进程仍受 TTL 约束(见
+        # ``invalidate_town_facts_cache`` 的 docstring)。局部 import:
+        # town_facts_service 模块级 import 本模块,反向模块级会成环。
+        try:
+            from app.services.town_facts_service import invalidate_town_facts_cache
+            invalidate_town_facts_cache()
+        except Exception:  # pragma: no cover - 缓存清理不该反过来打断写入
+            logger.warning("town facts cache invalidation failed", exc_info=True)
         return won
 
     async def propose_amend(
@@ -442,7 +453,10 @@ class PolicyService:
         from sqlalchemy.orm.attributes import flag_modified
         from app.services import civic_service
 
-        label = f"将「{key}」调整为 {json.dumps(new_value, ensure_ascii=False)}"
+        # 标题走中文标签,绝不用原始键:它经 town_facts_service 进每位 NPC 的
+        # decide prompt(K4 禁 ``tax``),又经 _clerk_announce 广播成全镇的持久记忆。
+        label = (f"将「{policy_label(key)}」调整为 "
+                 f"{json.dumps(new_value, ensure_ascii=False)}")
         poll = await civic_service.propose(
             self._db,
             label,

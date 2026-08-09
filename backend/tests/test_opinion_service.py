@@ -617,3 +617,23 @@ async def test_probe_seeded_variance_series_not_white_noise(opinion_on, db_sessi
     assert pol_clusters == [2] * 5, pol_clusters
     assert pol_series[-1] > 0.4, pol_series  # camps remain far apart
     assert all(a >= b for a, b in zip(pol_series, pol_series[1:])), pol_series
+
+
+# --------------------------------------------------------------------------- #
+# S4 (civic public memory) — list_stances: 按人读立场                          #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.anyio
+async def test_list_stances_recent_first_capped_and_resident_scoped(db_session):
+    """「小镇现况」的自身事实层要的是「这个人最近关心什么」——一条走
+    ix_issue_stance_resident 的 SQL,不是 top_active_issues() + 逐个 get_stance()
+    的 N+1。与本节其余读法一致**不看闸门**:闸门语义由调用方(事实层)定义。"""
+    now = datetime.now(UTC)
+    for i, (key, st) in enumerate((("旧议题", -0.5), ("次新议题", 0.0), ("最新议题", 0.9))):
+        await _seed_row(db_session, key, "luo-xiaozhou", st,
+                        last=now - timedelta(hours=10 - i * 5))
+    await _seed_row(db_session, "别人的议题", "a-lan", 0.8)
+
+    rows = await _svc(db_session).list_stances("luo-xiaozhou", limit=2)
+    assert rows == [("最新议题", pytest.approx(0.9)), ("次新议题", pytest.approx(0.0))]
+    assert await _svc(db_session).list_stances("nobody") == []

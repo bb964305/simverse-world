@@ -240,6 +240,19 @@ async def install_mayor(db, slug: str | None) -> bool:
             )
         except Exception:
             logger.warning("office dual-write failed for mayor", exc_info=True)
+
+    # C1: 镇长换人了 —— 作废本进程的「小镇现况」快照,否则同一个 worker 里的
+    # NPC 最长还要说 civic_facts_cache_ttl_seconds 那么久的旧镇长(本批修的正
+    # 是这类幻觉)。位置在两个表示都落库、offices 双写也做完之后:早于它们清等
+    # 于给下一次读留一个「刚清完又被旧值填回去」的窗口。跨进程仍受 TTL 约束
+    # (invalidate_town_facts_cache 的 docstring 写明了这条取舍)。
+    # 局部 import:town_facts_service 模块级 import 本模块,反向模块级会成环。
+    try:
+        from app.services.town_facts_service import invalidate_town_facts_cache
+        invalidate_town_facts_cache()
+    except Exception:  # pragma: no cover - 缓存清理不该掀翻一次选举结果
+        logger.warning("town facts cache invalidation failed", exc_info=True)
+
     try:
         from app.services.feed_service import push
         await push(slug, "goal_achieved", {"goal": "当选小镇镇长"})

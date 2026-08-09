@@ -73,6 +73,30 @@ class OpinionService:
             )
         )).scalar_one_or_none()
 
+    async def list_stances(
+        self, resident_slug: str, *, limit: int = 3,
+    ) -> list[tuple[str, float]]:
+        """这位居民最近表过态的几个议题 —— ``[(issue_key, stance), ...]``,最近
+        更新的在前。
+
+        「小镇现况」的自身事实层用它折出定性措辞(``town_facts_service._collect_self``)。
+        一条 SQL 走 ``ix_issue_stance_resident``,不做 ``top_active_issues()`` +
+        逐个 ``get_stance()`` 的 N+1。``nulls_last`` + issue_key 兜底排序是为了
+        PG/SQLite 拿到同一个顺序(两家对 ``DESC`` 下 NULL 的默认位置相反),prompt
+        快照不能因为换库就换个模样。
+
+        与本节其余读法一致**不看闸门**:``polis_opinion_enabled`` 只管三个写入
+        口;读侧的闸门语义由调用方定义(事实层在闸关时压根不调它)。
+        """
+        rows = (await self.db.execute(
+            select(IssueStance.issue_key, IssueStance.stance)
+            .where(IssueStance.resident_slug == resident_slug)
+            .order_by(IssueStance.last_update_at.desc().nulls_last(),
+                      IssueStance.issue_key)
+            .limit(limit)
+        )).all()
+        return [(key, stance) for key, stance in rows]
+
     async def issue_variance(self, issue_key: str) -> tuple[float, int]:
         """(population variance of stances, participant count) — probe + digest."""
         rows = (await self.db.execute(
