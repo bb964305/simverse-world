@@ -1,29 +1,39 @@
-"""S3/S4 —— 「小镇现况」段的渲染层 ``format_town_facts`` 与自身事实层。
+"""S3/S4/S5 —— 「小镇现况」段的渲染层、自身事实层与两处接线。
 
 ``format_town_facts`` 是纯函数,不查库不看闸门:S2 那层决定**有没有事实**(闸关
 返 ``{}``),这层只决定**怎么说**。所以本文件前半段一条 db 夹具都不用;后半段
-(S4 的 ``self`` 事实)必须落到真库,因为 B3 的串人风险只在「同一进程先后服务两
-位居民」时才现形。
+(S4 的 ``self`` 事实、S5 的两处接线)必须落到真库,因为 B3 的串人风险只在「同一
+进程先后服务两位居民」时才现形,而接线要证明的恰恰是「真跑一遍链路事实到得了
+prompt 里」。
 
-两条硬约束各有断言守着:
+三条硬约束各有断言守着:
 
 - **不传即逐字节旧行为**:``assemble_system_prompt`` 新参数是尾部可选参数,不传
   时输出与改动前一模一样(下面的 ``_GOLDEN`` 是改动前真跑出来的固化快照),且
   ``"记忆" not in prompt``(K3:tests/test_memory_prompt.py:79 的既有断言)。
 - **真 ``Resident`` 实例**:K10 —— ``MagicMock(spec=Resident)`` 的属性访问永远
   返回 mock,新段会静默渲染成 ``<MagicMock id=...>`` 串而测试照样绿。
+- **decide 侧只拿裁剪子集**:K4 —— 那条链路有「全文不得出现 tax /
+  town_treasury / 镇财政 / 镇库余额数字」的既有硬断言
+  (tests/test_treasury_service.py:849-851)。
 """
 import json
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
+from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.config import settings
 from app.llm.prompt import assemble_system_prompt, format_town_facts
+from app.models.conversation import Conversation
 from app.models.issue_stance import IssueStance
 from app.models.resident import Resident
-from app.models.user import User  # noqa: F401 —— residents.creator_id 的 FK 目标
+from app.models.season import Poll
+from app.models.town_treasury import TOWN_KEY, TownTreasury
+from app.models.user import User
 from app.services import town_facts_service as tfs, world_event_service
+from app.services.config_service import ConfigService
 from app.services.town_facts_service import DECIDE_FACT_KEYS
 
 #: 改动前(S3 之前)对下面这位居民真跑出来的输出,逐字固化。
@@ -306,3 +316,202 @@ async def test_self_facts_never_leak_between_residents(db_session, facts_on, opi
     assert _ISSUE not in json.dumps(fb, ensure_ascii=False)
     assert "你自己的营生" not in format_town_facts(fb)
     assert "self" not in tfs._cache["facts"], "自身事实绝不能进模块级共享快照"
+
+
+# ── S5:两处接线(玩家对话 / decide) ──────────────────────────────────────
+
+_MAYOR_SLUG, _MAYOR_NAME = "he-qiaoyun", "何巧云"
+_POLL_QUESTION = "是否在东岸花园兴建剧院"
+#: 镇库余额:decide 侧的 K4 反证 —— 事实层读到了它,但裁剪子集里没有镇库这一类。
+_TREASURY_SC = 4242
+
+
+async def _elect(db, slug: str) -> None:
+    """记一位现任镇长(走 ``current_mayor`` 的 system_config 兜底读法)。"""
+    await ConfigService(db).set("current_mayor", slug, group="civic", updated_by="test")
+
+
+async def _seed_town(db) -> None:
+    """一个「有镇长、有在议的事、有镇库」的世界。镇库是故意摆的:decide 那侧读
+    得到它,却必须一个数字都不往 prompt 里放。"""
+    db.add(TownTreasury(key=TOWN_KEY, balance_sc=_TREASURY_SC))
+    db.add(_db_resident(_MAYOR_SLUG, _MAYOR_NAME))
+    db.add(Poll(question=_POLL_QUESTION, options_json=[{"label": "赞成兴建"}],
+                closes_at=datetime.now(UTC) + timedelta(days=2), status="open"))
+    await db.commit()
+    await _elect(db, _MAYOR_SLUG)
+
+
+# ── decide 接线 ─────────────────────────────────────────────────────────
+
+def test_town_facts_is_keyword_only_on_build_decision_prompt():
+    """K5:既有测试按位置传满 8 个实参(test_treasury_service.py:845 等),新参数
+    只能是尾部 keyword-only,否则位置实参会串位。"""
+    import inspect
+
+    from app.agent.prompts import build_decision_prompt
+
+    params = inspect.signature(build_decision_prompt).parameters
+    assert list(params)[-1] == "town_facts", "新参数必须在参数表末尾"
+    assert params["town_facts"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params["town_facts"].default is None
+
+
+async def _decide_blob(db, resident, monkeypatch) -> str:
+    """真跑一遍 decide 的 LLM 分支,回它交给模型的全文(system + user)。
+
+    打桩只打到 ``llm_chat`` 这一层 —— 取数、裁剪、拼 prompt 全走真代码,否则测的
+    就不是「接线」而是测试自己搭的假接线。
+    """
+    from app.agent.actions import ActionType
+    from app.agent.phases.decide import basic as decide_basic
+    from app.agent.schemas import TickContext
+
+    seen: dict = {}
+
+    async def _capture(system, messages, **kwargs):
+        seen["blob"] = system + "\n" + messages[0]["content"]
+        return '{"action": "IDLE", "target_slug": null, "target_tile": null, "reason": "歇会儿"}'
+
+    monkeypatch.setattr(decide_basic, "llm_chat", _capture)
+    ctx = TickContext(db=db, resident=resident, world_time="10:00", hour=10,
+                      schedule_phase="工作时段", available_actions=[ActionType.IDLE])
+    await decide_basic.BasicDecidePlugin()._llm_decide(ctx)
+    return seen["blob"]
+
+
+@pytest.mark.anyio
+async def test_decide_prompt_carries_trimmed_subset(db_session, facts_on, monkeypatch):
+    """闸开:decide 拿到镇长 / 今天 / 在议的事 / 地点 —— 这四类(DECIDE_FACT_KEYS)。"""
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    await _seed_town(db_session)
+
+    blob = await _decide_blob(
+        db_session, _db_resident("chen-tiesheng", "陈铁生", duty=_DUTY), monkeypatch)
+
+    assert _MAYOR_NAME in blob, "NPC 得知道现在谁在管事"
+    assert _POLL_QUESTION in blob
+    assert "市政厅" in blob
+
+
+@pytest.mark.anyio
+async def test_decide_prompt_never_mentions_town_finance(db_session, facts_on, monkeypatch):
+    """K4 硬断言:tests/test_treasury_service.py:849-851 钉死的四类财政串,一个都
+    不许出现在决策 prompt 全文里 —— 所以政策与镇库整段不进这条链路。"""
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    await _seed_town(db_session)
+
+    blob = await _decide_blob(
+        db_session, _db_resident("chen-tiesheng", "陈铁生"), monkeypatch)
+
+    assert "tax" not in blob.lower()
+    assert "town_treasury" not in blob and "镇财政" not in blob
+    assert str(_TREASURY_SC) not in blob, "镇库余额数字漏进了决策 prompt"
+    assert "税率" not in blob and "镇库" not in blob
+    assert "你自己的营生" not in blob, "self 不在 DECIDE_FACT_KEYS 里"
+
+
+@pytest.mark.anyio
+async def test_decide_prompt_unchanged_when_gate_off(db_session, monkeypatch):
+    """闸关 = 决策 prompt 一个字都不多。"""
+    await _seed_town(db_session)
+
+    blob = await _decide_blob(
+        db_session, _db_resident("chen-tiesheng", "陈铁生"), monkeypatch)
+
+    assert "小镇现况" not in blob and _MAYOR_NAME not in blob
+    assert _POLL_QUESTION not in blob
+
+
+# ── 玩家对话接线 ────────────────────────────────────────────────────────
+
+_USER_ID, _CONV_ID, _RESIDENT_ID = "u1", "c-1", "r-1"
+_REPLY = "镇长是何巧云。"
+
+
+class _FakeManager:
+    def __init__(self):
+        self.sent: list[dict] = []
+
+    async def send(self, user_id, data):
+        self.sent.append(data)
+
+
+def _chat_resident() -> Resident:
+    """``ctx.resident`` 是 start_chat 那侧留下的 detached 快照。真实例(K10)。"""
+    r = _resident()
+    r.id, r.creator_id, r.token_cost_per_turn = _RESIDENT_ID, _USER_ID, 1
+    return r
+
+
+@pytest.fixture
+async def chat_world(db_engine):
+    """跑完整 ``handle_chat_msg`` 所需的最小世界:一个玩家、一场会话、一位镇长。"""
+    factory = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with factory() as s:
+        s.add(User(id=_USER_ID, name="U", email="u@t.co", soul_coin_balance=100))
+        s.add(Conversation(id=_CONV_ID, user_id=_USER_ID, resident_id=_RESIDENT_ID))
+        await _seed_town(s)
+    return factory
+
+
+async def _chat_turn(factory, resident) -> tuple[str, list[dict]]:
+    """真跑一轮玩家对话,回 (交给模型的 system prompt, 推给玩家的消息)。
+
+    ``assemble_system_prompt`` **不打桩** —— 打了就只剩「参数传没传」的形式验证,
+    而 K6 要证的是「session 关掉之前把事实取出来了」。
+    """
+    from app.ws.handlers import chat as chat_handler
+    from app.ws.handlers.context import ConnectionContext
+
+    captured: dict = {}
+
+    class _FakeRouter:
+        async def chat_with_media(self, *, system_prompt, messages,
+                                  media_url, media_type, meter=None):
+            captured["system"] = system_prompt
+            yield _REPLY
+
+    fake = _FakeManager()
+    with patch.object(chat_handler, "async_session", factory), \
+         patch.object(chat_handler, "manager", fake), \
+         patch.object(chat_handler, "ModelRouter", _FakeRouter), \
+         patch.object(chat_handler, "reward_creator_passive",
+                      new=AsyncMock(return_value=None)):
+        await chat_handler.ws_limiter.reset()
+        ctx = ConnectionContext(user_id=_USER_ID, user_name="U",
+                                conversation_id=_CONV_ID, resident=_chat_resident())
+        await chat_handler.handle_chat_msg(ctx, {"type": "chat_msg", "text": "现在镇长是谁"})
+    return captured.get("system", ""), fake.sent
+
+
+@pytest.mark.anyio
+async def test_player_chat_prompt_carries_town_facts(chat_world, facts_on):
+    """生产实测的那条缺陷:世界状态三处一致,NPC 却一个字读不到。这条断言是它的
+    反面 —— 玩家问「现在镇长是谁」时,答案已经在 prompt 里了。"""
+    system, _sent = await _chat_turn(chat_world, _chat_resident())
+
+    assert "## 小镇现况" in system
+    assert _MAYOR_NAME in system
+    assert _POLL_QUESTION in system, "玩家对话拿的是完整事实,不是 decide 的裁剪子集"
+
+
+@pytest.mark.anyio
+async def test_player_chat_prompt_unchanged_when_gate_off(chat_world):
+    system, _sent = await _chat_turn(chat_world, _chat_resident())
+
+    assert "小镇现况" not in system and _MAYOR_NAME not in system
+
+
+@pytest.mark.anyio
+async def test_player_chat_survives_town_facts_failure(chat_world, facts_on, monkeypatch):
+    """K7:取事实失败顶多少一段,绝不能让玩家聊不了天。"""
+    async def _boom(db, resident=None):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(tfs, "build_town_facts", _boom)
+    system, sent = await _chat_turn(chat_world, _chat_resident())
+
+    assert "小镇现况" not in system
+    assert any(m.get("type") == "chat_reply" and m.get("text") == _REPLY for m in sent), \
+        f"回复没发出去:{sent}"

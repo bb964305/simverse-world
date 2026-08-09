@@ -193,6 +193,18 @@ async def handle_chat_msg(ctx: ConnectionContext, data: dict) -> None:
         from app.services.world_event_service import get_active_events_cached
         active_events = await get_active_events_cached(db)
 
+        # 世界公共记忆 S5:「小镇现况」(公共事实 + 这位居民自己的营生与立场)。
+        # 必须在这个 session 里取 —— 下面装配 prompt 时 db 已经关了(K6)。事实层
+        # 自带 60s 进程内快照,``today`` 那段复用上面刚取过的活跃事件缓存,稳态下
+        # 零额外查询。与 active_events 同款 fail-open(K7):取不到顶多少一段,不能
+        # 让玩家聊不了天。
+        town_facts = None
+        try:
+            from app.services.town_facts_service import build_town_facts
+            town_facts = await build_town_facts(db, ctx.resident)
+        except Exception:
+            logger.warning("town facts fetch failed for %s", ctx.resident.slug, exc_info=True)
+
         # A1: the resident's current life goal, so players can chat about it.
         active_goal_dict = None
         try:
@@ -238,7 +250,7 @@ async def handle_chat_msg(ctx: ConnectionContext, data: dict) -> None:
     ctx.chat_messages.append({"role": "user", "content": text})
     system_prompt = assemble_system_prompt(
         ctx.resident, memory_context=ctx.memory_context, world_events=active_events,
-        life_goal=active_goal_dict, recent_dream=recent_dream,
+        life_goal=active_goal_dict, recent_dream=recent_dream, town_facts=town_facts,
     )
     # B2: if this chat started from an encounter, splice the scene in.
     if ctx.encounter_context:

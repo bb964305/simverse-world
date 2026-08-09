@@ -26,6 +26,11 @@ async def generate_auto_reply(resident: Resident, user_text: str) -> str:
     Standalone function (no DB session) so callers can invoke it after
     closing their session — the LLM call must not hold a connection (P0-2).
     Works with a detached Resident as long as persona fields are loaded.
+
+    世界公共记忆(S5)刻意**不接**这条路径:它是玩家↔玩家的代答分身,而且按 P0-2
+    的约定压根不持 db session —— 为了注入「小镇现况」再开一个 session,等于把
+    P0-2 拆掉换一段这条链路上没人问过的事实。真需要时由调用方在自己的 session
+    里取好、经参数传进来,而不是在这里偷开连接。
     """
     system_prompt = assemble_system_prompt(resident)
     messages = [{"role": "user", "content": user_text}]
