@@ -22,6 +22,7 @@ from prometheus_client import REGISTRY
 
 from app import world_clock
 from app.config import settings
+from app.models.dynamic_location import DynamicLocation
 from app.models.resident import Resident
 from app.models.season import Poll
 from app.models.town_treasury import TOWN_KEY, TownTreasury
@@ -53,6 +54,13 @@ def _resident(slug: str, name: str, *, resident_type: str = "npc",
               duty: dict | None = None) -> Resident:
     return Resident(slug=slug, name=name, resident_type=resident_type,
                     meta_json=({"duty": duty} if duty else None))
+
+
+def _dynamic(slug: str, name: str, *, loc_type: str = "public",
+             active: bool = True) -> DynamicLocation:
+    """公投/Lab 批出来的世界覆盖层地点(``data_json`` 与 LOCATIONS 条目同构)。"""
+    return DynamicLocation(slug=slug, active=active, data_json={
+        "name": name, "type": loc_type, "bounds": [0, 0, 1, 1]})
 
 
 def _sample(labels: dict) -> float:
@@ -232,6 +240,51 @@ async def test_places_are_public_locations(db_session, facts_on):
     places = (await tfs.get_town_facts_cached(db_session))["places"]
     assert "市政厅" in places and "酒馆" in places
     assert "住宅A" not in places and "星光公寓" not in places
+
+
+@pytest.mark.anyio
+async def test_places_include_active_dynamic_locations(db_session, facts_on):
+    """S8:公投建出来的楼也是「小镇有哪些地方」的一部分。
+
+    ``map_data.load_dynamic_locations`` 只在进程启动 / ``sv:world:reload`` 时把
+    active 行并进 LOCATIONS,事实层自己再查一次库 —— 新落成的楼不用等下一次
+    reload 就能进 prompt,被停用的楼也不会因为还留在内存里而继续挂在镇上。
+    """
+    db_session.add_all([
+        _dynamic("post_office", "邮局"),
+        _dynamic("theater", "剧院", active=False),
+    ])
+    await db_session.commit()
+
+    places = (await tfs.get_town_facts_cached(db_session))["places"]
+    assert "邮局" in places
+    assert "剧院" not in places, "撤销/停用的楼不该还算作小镇的公共去处"
+
+
+@pytest.mark.anyio
+async def test_places_do_not_double_count_merged_dynamic_locations(
+        db_session, facts_on, monkeypatch):
+    """已经 reload 过的进程里,同一座楼会被静态遍历和动态查询各数一次 —— 必须
+    去重,否则 prompt 里写着「小镇的公共去处:……剧院、剧院」。"""
+    from app.agent.map_data import LOCATIONS
+    monkeypatch.setitem(LOCATIONS, "theater", {
+        "name": "剧院", "type": "public", "bounds": (172, 40, 178, 50)})
+    db_session.add(_dynamic("theater", "剧院"))
+    await db_session.commit()
+
+    places = (await tfs.get_town_facts_cached(db_session))["places"]
+    assert places.count("剧院") == 1
+
+
+@pytest.mark.anyio
+async def test_places_skip_non_public_dynamic_locations(db_session, facts_on):
+    """动态地点沿用静态那条口径:只有 public 才是公共去处,Lab 批出来的私宅
+    与静态的住宅A 一样不进这份名单。"""
+    db_session.add(_dynamic("bai-xing-home", "白杏的小院", loc_type="private"))
+    await db_session.commit()
+
+    places = (await tfs.get_town_facts_cached(db_session))["places"]
+    assert "白杏的小院" not in places
 
 
 # ── 进程内快照 ──────────────────────────────────────────────────────────

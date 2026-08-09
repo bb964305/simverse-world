@@ -15,6 +15,10 @@ LORE: dict[str, str] = {
     "shop": "小店什么都卖，据说只要你真心想要，总能在某个货架找到它。",
     "town_hall": "市政厅的钟楼百年未响，居民们都在等它下一次敲响的理由。",
     "central_plaza": "广场中央的喷泉见证了小镇所有的相遇与告别。",
+    # Voted into existence by the civic agenda (civic_service.CIVIC_AGENDA);
+    # they are dynamic_locations rows, not static LOCATIONS entries.
+    "post_office": "邮局的木格柜里塞满了写好却没寄出的信，据说其中有几封的收信人还没出生。",
+    "theater": "剧院的座椅还带着新木头的气味，据说散场之后，台上的故事会在空座位间再演一遍。",
 }
 
 # location_id -> the single secret tile (x, y)

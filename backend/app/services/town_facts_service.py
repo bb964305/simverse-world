@@ -204,12 +204,30 @@ async def _read_today(db: AsyncSession) -> dict:
 
 
 async def _read_places(db: AsyncSession) -> list[str]:
-    """小镇有哪些地方。只列公共设施:私宅/公寓是住址不是地标,几十个名字还会把
-    prompt 预算吃光。``db`` 参数是为了与其它 section 同签名(本段纯内存)。"""
-    from app.agent.map_data import LOCATIONS
+    """小镇有哪些地方 = 静态公共设施 + 公投/Lab 建出来的 active 动态地点。
 
-    return [loc["name"] for loc in LOCATIONS.values()
-            if loc.get("type") == "public" and loc.get("name")]
+    只列公共设施:私宅/公寓是住址不是地标,几十个名字还会把 prompt 预算吃光。
+    动态地点沿用同一条口径(``data_json["type"] == "public"``)。
+
+    为什么还要再查一次库 —— ``map_data.load_dynamic_locations`` 只在进程启动和
+    ``sv:world:reload`` 信号时把 active 行并进 LOCATIONS:那份内存快照可能比世界
+    晚(新落成的楼要等下一次 reload)也可能比世界早(停用的行还留在里面)。库里的
+    ``active`` 才是当下的事实。已经并过的楼会被两边各数一次,所以按名字去重
+    (``dict.fromkeys`` 保序,静态在前、动态按 slug 追加,快照顺序稳定)。
+    """
+    from app.agent.map_data import LOCATIONS
+    from app.models.dynamic_location import DynamicLocation
+
+    names = [loc["name"] for loc in LOCATIONS.values()
+             if loc.get("type") == "public" and loc.get("name")]
+    rows = (await db.execute(
+        select(DynamicLocation.data_json)
+        .where(DynamicLocation.active.is_(True))
+        .order_by(DynamicLocation.slug)
+    )).scalars().all()
+    names += [data["name"] for data in (r or {} for r in rows)
+              if data.get("type") == "public" and data.get("name")]
+    return list(dict.fromkeys(names))
 
 
 #: (section 名, 读取函数) —— 顺序即返回字典的键序,也是 fail-open 的 reason 取值域。
