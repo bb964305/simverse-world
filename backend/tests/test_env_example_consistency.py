@@ -192,6 +192,45 @@ def _raw_keys(path) -> set[str]:
     return keys
 
 
+def _deploy_env_text() -> str:
+    return DEPLOY_ENV_EXAMPLE.read_text(encoding="utf-8")
+
+
+def test_retrievability_gate_states_the_real_pool_depth():
+    """可检索性硬门里那个「30」必须等于代码真正的候选池深度。
+
+    ``_retrieve_events`` 用的是 ``max(max_events * 3, 30)``
+    (app/memory/service.py:364),``max_events`` 是 ``retrieve_context`` 的默认值
+    (chat 那条链就是不带参数调它的)。运维照这份模板核对开闸效果,数字一漂就是
+    照着一个不存在的池深在判「进没进得去」。
+    """
+    import inspect
+
+    from app.memory.service import MemoryService
+
+    limit = inspect.signature(
+        MemoryService.retrieve_context).parameters["max_events"].default
+    depth = max(limit * 3, 30)
+    assert f"候选池深度 = {depth}" in _deploy_env_text(), \
+        f"deploy/backend/.env.example 里没写出真实池深 {depth}"
+
+
+def test_retrievability_gate_criterion_is_a_count_not_a_strict_min():
+    """判据必须是「排在它前面的不足 N 条」,不是「importance 高于第 N 名」。
+
+    候选池的排序是 ``ORDER BY importance DESC, created_at DESC LIMIT 30``
+    (``app/memory/service.py:308-320``)—— importance **并列**时新记忆靠
+    ``created_at`` 排在前面,所以「等于第 30 名」是进得去的。写成严格「高于」的
+    话,一个恰好与第 30 名同分、实际已经进池的结果档记忆会被判成不达标,运维照
+    着它把闸关回去 = 假红退闸。
+    """
+    text = _deploy_env_text()
+    assert "x.importance > m.importance" in text, "缺少「比它更高的有几条」这个 count 判据"
+    assert "ahead_of_it 必须 < 30" in text, "缺少「不足池深条」这句结论"
+    assert "必须高于该居民 top-30 候选池第 30 名" not in text, \
+        "严格「高于第 30 名」的旧判据还在,它会假红"
+
+
 def test_governance_knobs_exist_in_deploy_env_example_too():
     """F1/F2/F3 的旋钮必须同时出现在两份 env 参考里。
 
