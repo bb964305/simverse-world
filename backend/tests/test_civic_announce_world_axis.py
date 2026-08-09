@@ -11,7 +11,10 @@ prompt 里的「今天」走 ``world_clock``(k=4,今天两者相隔约两年)。
 ``town_facts_service._closes_in_world_days`` 的长注释),只是这一处落的是永久记忆,
 错得更久、也更难回收。
 
-换算(按哪根轴数)与措辞(怎么说)都复用那一批的两个函数,不在这里另起第三份口径。
+**换算**(按哪根轴数)复用那一批的 ``_closes_in_world_days``,不另起第二份口径;
+**措辞**(怎么说)另走 ``_announce_closes_text``。两者分家是因为时态语域不同:
+「小镇现况」段每次读取现算,说「还有 N 天」是对的;这一句写进永久记忆后没有日期戳
+去校正它,原点必须写进话里(「自本次公告起 N 天」)。见下面那组 deictic 断言。
 """
 import re
 from datetime import UTC, datetime
@@ -88,8 +91,31 @@ async def test_open_announcement_counts_down_on_the_world_axis(
 
     assert poll is not None
     assert announced, "开票必须出一条镇务公告"
-    assert "还有 12 天截止" in announced[0], \
+    assert "自本次公告起 12 天截止" in announced[0], \
         f"k=4,3 个真实日 = 12 个世界日,与居民的「今天」同轴;实际:{announced[0]}"
+
+
+#: 以**说话时刻**为原点的指示性措辞。它们在「小镇现况」段是对的(那一段每次读取
+#: 现算),在这里是错的:这句话写一次、被反复 retrieve,而记忆段不带日期戳。
+_DEICTIC = ("还有", "今天", "明天")
+
+
+@pytest.mark.anyio
+async def test_open_announcement_uses_no_read_time_deictic_wording(
+        db_session, frozen_clock, announced):
+    """倒计时的原点必须写进话里,不能是「读到这句话的那一刻」。
+
+    公告落成永久记忆后,``format_memory_context`` 把它渲染成不带日期戳的裸
+    ``- {content}`` —— 没有任何东西会告诉 NPC 这句话是什么时候说的。「还有 12 天
+    截止」于是永远自称「现在」:一个月后被检索回来,听着仍像眼下还剩 12 天。
+    「自本次公告起 12 天」不随读取时刻漂移,因为原点是公告本身。
+    """
+    await _propose(db_session)
+
+    body = announced[0]
+    for word in _DEICTIC:
+        assert word not in body, \
+            f"指示性措辞「{word}」会随时间腐坏,不能进永久记忆:{body}"
 
 
 @pytest.mark.anyio
@@ -106,3 +132,41 @@ async def test_open_announcement_carries_no_real_axis_date(
     assert not re.search(r"\d{4}-\d{2}-\d{2}", body), \
         f"绝对日期漏进了永久记忆:{body}"
     assert "2026" not in body, f"真实轴的年份漏进了永久记忆:{body}"
+
+
+#: (``_closes_in_world_days`` 的返回值, 折出来的那半句)。分档边界一个不漏。
+_ANNOUNCE_WORDING = (
+    (0, "于公告当天截止"),
+    (1, "于公告次日截止"),
+    (2, "自本次公告起 2 天截止"),
+    (12, "自本次公告起 12 天截止"),
+)
+
+
+@pytest.mark.parametrize("days,expected", _ANNOUNCE_WORDING)
+def test_announce_wording_by_bucket(days, expected):
+    assert civic_service._announce_closes_text(days) == expected
+
+
+def test_announce_wording_clamps_at_the_read_side_ceiling():
+    """顶格那一档说「以上」而不是一个确切数字。
+
+    ``_closes_in_world_days`` 把值夹在 ``POLL_CLOSES_IN_MAX_DAYS``,被夹住的真值
+    可能大得多 —— 报确切数字就是编。中文的「以上」含本数,恰好顶格时这句也为真。
+    """
+    from app.services.town_facts_service import POLL_CLOSES_IN_MAX_DAYS
+
+    want = f"自本次公告起 {POLL_CLOSES_IN_MAX_DAYS} 天以上截止"
+    assert civic_service._announce_closes_text(POLL_CLOSES_IN_MAX_DAYS) == want
+    assert civic_service._announce_closes_text(POLL_CLOSES_IN_MAX_DAYS + 5) == want
+
+
+@pytest.mark.parametrize("junk", [None, -1, -7, True, "12", {}, [1], 3.5])
+def test_announce_wording_degrades_to_silence(junk):
+    """认不出的形状 → 空串,整句就不提截止。
+
+    负数**刻意**也走这一支:开票公告不该宣称一张刚开出来的票已经过期。它是调用方
+    传了非法窗口的信号,少半句好过编一句自相矛盾的话(``propose`` 那侧据此整段
+    跳过截止从句)。``True`` 是 ``int`` 的子类,必须单独挡掉。
+    """
+    assert civic_service._announce_closes_text(junk) == ""

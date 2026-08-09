@@ -47,6 +47,48 @@ logger = logging.getLogger(__name__)
 META_ELIGIBLE_AT_OPEN = "_eligible_at_open"
 
 
+def _announce_closes_text(days) -> str:
+    """把「还剩几个世界日截止」折成一句**自锚定**的话。认不出的形状 → 空串。
+
+    与 prompt 层 ``_poll_closes_text`` 的分工:**换算**(按哪根轴数)两边共用
+    ``_closes_in_world_days``,只有**措辞**在这里另起一份 —— 因为两处的时态语域
+    不同,而这正是 ``_poll_closes_text`` 自己的 docstring 划下的那条线:
+
+    - ``_poll_closes_text`` 服务「小镇现况」段,那一段是**每次读取时现算**的,所以
+      「今天 / 明天 / 还有 N 天」这种以说话时刻为原点的指示性措辞恰好是对的。
+    - 这一句进的是 ``broadcast_civic_memory`` 的**永久记忆**:写一次,之后被反复
+      retrieve。而 ``format_memory_context`` 把记忆渲染成不带日期戳的裸
+      ``- {content}``(app/llm/prompt.py)—— 没有任何东西会告诉 NPC 这句话是什么
+      时候说的。指示性措辞在这里会一直自称「现在」:一个月后读到「还有 12 天截止」,
+      听着仍像眼下还剩 12 天。
+
+    所以这一份把原点**写进话里**:「自本次公告起 N 天」。它不随读取时刻漂移,因为
+    原点不再是「读到这句话的那一刻」,而是公告本身 —— 一句关于过去某个时点的陈述,
+    放多久都还是真的。
+
+    负数刻意也折成空串:开票公告不该宣称一张刚开出来的票已经过期。那是调用方传了
+    非法窗口的信号(入口闸见 ``routers/polls.py`` 的 ``POLL_DAYS_MIN``),少半句好过
+    编一句自相矛盾的话。
+    """
+    # town_facts_service 在模块层拉 policy_service / election_service,而那两个反过
+    # 来 import civic_service(只是也放在函数里)—— 模块层拉就会把这个环坐实。
+    from app.services.town_facts_service import POLL_CLOSES_IN_MAX_DAYS
+
+    # bool 是 int 的子类,得单独挡;其余异形(旧形状的 ISO 串、dict)少半句而不是
+    # 让整条开票链路崩在一句文案上。
+    if not isinstance(days, int) or isinstance(days, bool) or days < 0:
+        return ""
+    if days == 0:
+        return "于公告当天截止"
+    if days == 1:
+        return "于公告次日截止"
+    if days >= POLL_CLOSES_IN_MAX_DAYS:
+        # 读侧把值夹在上限,被夹住的真值可能大得多 —— 报确切数字就是编。中文的
+        # 「以上」含本数,恰好顶格时这句话也为真。
+        return f"自本次公告起 {POLL_CLOSES_IN_MAX_DAYS} 天以上截止"
+    return f"自本次公告起 {days} 天截止"
+
+
 async def propose(
     db,
     topic: str,
@@ -103,14 +145,15 @@ async def propose(
     # 议的票两年前就截止了。这与「小镇现况」段修掉的是同一类缺陷,只是落的是永久
     # 记忆,错得更久。
     #
-    # 换算(按哪根轴数)与措辞(怎么说)都复用那一批的两个函数,不另起第三份口径。
-    # 函数内 import 沿用本模块既有姿势(见 _clerk_announce):town_facts_service 在
-    # 模块层拉 policy_service / election_service,而那两个模块反过来 import
-    # civic_service —— 只是它们也把 import 放在函数里,模块层拉就会把这个环坐实。
-    from app.llm.prompt import _poll_closes_text
+    # 换算(按哪根轴数)复用「小镇现况」那一批的 _closes_in_world_days,不另起第二
+    # 份口径;措辞另走 _announce_closes_text —— 那一段是读取时现算的,可以说「还有
+    # N 天」,而这一句写进永久记忆后没有日期戳去校正它,原点必须写进话里。理由见
+    # _announce_closes_text 的 docstring。
+    #
+    # 函数内 import 沿用本模块既有姿势(见 _clerk_announce)以避开 import 环。
     from app.services.town_facts_service import _closes_in_world_days
     # 认不出的形状 → 空串,那就整句不提截止(少半句,不编一个日期)。
-    closes_text = _poll_closes_text(_closes_in_world_days(poll.closes_at))
+    closes_text = _announce_closes_text(_closes_in_world_days(poll.closes_at))
     closes_line = f"投票{closes_text}," if closes_text else ""
     await _clerk_announce(
         db,
