@@ -305,6 +305,72 @@ async def test_duties_are_capped_by_count_and_length(db_session, facts_on):
 
 
 @pytest.mark.anyio
+async def test_mayor_name_is_capped(db_session, facts_on):
+    """镇长名字读的是 ``Resident.name``——与营生清单同一列,就该有同一个上限。
+
+    原先这一行不过 ``_clip``:同一位居民出现在营生清单里被截到 10 字,坐上镇长位
+    反而原样出网 100 字 —— 同一列、同一段 prompt、两个长度。今天没有玩家写入路径
+    够得着它(``CIVIC_VOTER_TYPES`` 只收 npc),但「每一类事实都有量纲上限」是这
+    一层的不变量,不是「可利用面才设防」的清单。
+    """
+    db_session.add(_resident("he-qiaoyun", "名" * 100))
+    await db_session.commit()
+    await _elect(db_session, "he-qiaoyun")
+
+    mayor = (await tfs.get_town_facts_cached(db_session))["mayor"]
+    assert len(mayor["name"]) <= tfs.MAYOR_NAME_MAX_CHARS
+    assert mayor["slug"] == "he-qiaoyun", "slug 是 K12 的身份键,不参与截断"
+
+
+@pytest.mark.anyio
+async def test_self_duty_title_and_hint_are_capped(db_session, facts_on):
+    """自身事实那一段同样有量纲上限。
+
+    ``meta_json`` 里的 duty 压根没有列宽,而这一段直接进玩家可见的对话 prompt,
+    与公共快照共用同一份字符预算 —— 只要有一个字段例外,「段落有上界」这句话就
+    是空话(实测:不截时它一段就能吃掉 1623 字符,是整段预算的 1.3 倍)。
+    """
+    r = _resident("ugc-001", "白杏", resident_type="resident",
+                  duty={"key": "k", "title": "衔" * 200, "prompt_hint": "岗" * 500})
+    db_session.add(r)
+    await db_session.commit()
+
+    me = (await tfs.build_town_facts(db_session, r))["self"]
+    assert len(me["duty_title"]) <= tfs.DUTY_TITLE_MAX_CHARS
+    assert len(me["duty_hint"]) <= tfs.SELF_DUTY_HINT_MAX_CHARS
+
+
+@pytest.mark.anyio
+async def test_no_seed_duty_hint_is_truncated_by_the_cap(db_session, facts_on):
+    """上限是给敌手设的,不是拿来剪真实数据的:seed 的每一条营生 hint / title 都要
+    原样过得去。
+
+    这段 hint 是 NPC 讲得出口的营生正文(M5),截掉尾巴就是把话说半句 —— 而
+    ``…`` 结尾的中文正文在 prompt 里读起来就是个残句。实测最长 hint 69 字
+    (su-xiaoman)、最长 title 6 字,离上限还有余量;哪天有人写了条更长的 hint,
+    这条会先红,提醒他连上限一起抬,而不是让世界里安静地少半句话。
+    """
+    from seed.preset_characters import PRESET_CHARACTERS
+
+    duties = [(c["slug"], (c.get("meta_json") or {}).get("duty") or {})
+              for c in PRESET_CHARACTERS]
+    duties = [(slug, d) for slug, d in duties if d.get("prompt_hint")]
+    assert len(duties) >= 11, "seed 的营生 hint 少了,这条网就是空转的"
+
+    db_session.add_all([_resident(slug, "居民", duty=d) for slug, d in duties])
+    await db_session.commit()
+
+    for slug, duty in duties:
+        r = (await db_session.execute(
+            select(Resident).where(Resident.slug == slug))).scalar_one()
+        me = (await tfs.build_town_facts(db_session, r))["self"]
+        assert me["duty_hint"] == duty["prompt_hint"], \
+            f"{slug} 的 duty hint 被上限截了:{me['duty_hint']!r}"
+        assert me["duty_title"] == duty["title"], f"{slug} 的 title 被上限截了"
+        assert "…" not in me["duty_hint"], f"{slug} 的 hint 出现了截断省略号"
+
+
+@pytest.mark.anyio
 async def test_places_are_capped_by_count_and_length(db_session, facts_on):
     """地点会被公投加(S8 的邮局/剧院就是这么来的),名字来自公投 effect 的 data。"""
     db_session.add_all([_dynamic(f"hall-{i:03d}", f"{i:03d}号" + "楼" * 200)

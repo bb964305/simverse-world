@@ -35,7 +35,10 @@
 - **量纲有上限**:每一类事实的条数与单条长度都卡死(见「量纲上限」那组常量)。
   公投标题/选项、地点名、UGC 居民的名字与头衔都是玩家写的自由文本,而这一层的
   输出直接进 prompt —— 没有上限就等于把 prompt 预算的写权限开放给了任何一个持
-  Bearer token 的人。
+  Bearer token 的人。**一个字段都不例外**:镇长名字与 ``self`` 段的营生头衔 /
+  hint 今天没有玩家写入路径(前者只收 npc,后两者只有 seed 写),但它们照样过
+  ``_clip`` —— 「有上限」是这一层的不变量,不是「可利用面才设防」的清单。留一个
+  例外,整段的字符上界就不是上界,而只是一句没人验算过的自述。
 - **有界 fail-open**:取数失败回落上一次快照,但只在
   ``civic_facts_max_stale_seconds`` 之内。宁可不注入,也不注入一个过期的镇长 ——
   错误的事实比没有事实伤害大。每次回落都打 ``CIVIC_FACTS_FAILOPEN`` 前缀的
@@ -114,6 +117,17 @@ DUTIES_LIMIT = 20
 DUTY_NAME_MAX_CHARS = 10
 DUTY_TITLE_MAX_CHARS = 14
 
+#: 镇长名字的上限。与 ``DUTY_NAME_MAX_CHARS`` 同一个数不是巧合:两处读的是同一列
+#: (``Resident.name``,``String(100)``),而且同一位居民常常同时出现在这两行 ——
+#: 截出两个长度会让他在同一段 prompt 里有两个名字。
+MAYOR_NAME_MAX_CHARS = DUTY_NAME_MAX_CHARS
+
+#: 自身事实里 ``duty_hint`` 的上限。11 条 preset hint 实测最长 69 字(su-xiaoman),
+#: 80 是「真实数据一个字都不截 + 留一点余量」的最小整数档 —— 这一段是 NPC 讲得出
+#: 口的营生正文,截掉尾巴就是把话说半句。``duty_title`` 不另设常量:它和公共名单
+#: 里的 title 是同一个字段,共用 ``DUTY_TITLE_MAX_CHARS``。
+SELF_DUTY_HINT_MAX_CHARS = 80
+
 #: 公共去处最多列几处。今天是 10 处(8 静态 + 公投建的邮局/剧院),而公投能接着建。
 PLACES_LIMIT = 12
 PLACE_MAX_CHARS = 8
@@ -175,7 +189,10 @@ def _clip(text: str, limit: int) -> str:
 async def _read_mayor(db: AsyncSession) -> dict | None:
     """现任镇长。权威源只有 ``election_service.current_mayor``(它内部按
     ``polis_office_enabled`` 决定 offices / system_config 谁优先),绝不裸读
-    offices —— 那张表运行时只有 mayor 一行被写。返回 slug(K12),名字再解析。"""
+    offices —— 那张表运行时只有 mayor 一行被写。返回 slug(K12),名字再解析。
+
+    ``name`` 与 ``_read_duties`` 里那一列同源(``Resident.name``,``String(100)``),
+    所以同样要过 ``_clip``:渲染层拿的就是它(``现任镇长：{name}``)。"""
     slug = await election_service.current_mayor(db)
     if not slug:
         return None
@@ -183,7 +200,7 @@ async def _read_mayor(db: AsyncSession) -> dict | None:
         select(Resident.name).where(Resident.slug == slug)
     )).scalar_one_or_none()
     # 居民行被删而 current_mayor 还留着 slug:退回 slug 本身,别让整段 fail-open。
-    return {"slug": slug, "name": name or slug}
+    return {"slug": slug, "name": _clip(name or slug, MAYOR_NAME_MAX_CHARS)}
 
 
 async def _read_duties(db: AsyncSession) -> list[dict]:
@@ -352,6 +369,12 @@ async def _collect_self(db: AsyncSession, resident) -> dict:
     M6:立场读侧本身没有闸门,这里替它定义语义 —— ``polis_opinion_enabled`` 关
     的世界里舆论动力学压根没在跑,表里剩的是上一纪元的残值,不能拿去当「他现在
     的态度」。闸关顺带省掉这一次查询。
+
+    ``title`` / ``prompt_hint`` 一样过 ``_clip``。这两个字段今天没有玩家写入路径
+    (只有 seed 和 ``meta_json`` 的迁移脚本写),但「每一类事实都有量纲上限」是本
+    模块的不变量,不是「可利用面才设防」的清单 —— ``meta_json`` 压根没有列宽,一
+    个字段例外就够把整段预算算成一句空话。上限按真实数据取(实测最长 hint 69 字
+    / title 6 字),生产的每一条都原样过得去。
     """
     duty = duty_service.get_duty(resident)
     stances: list[dict] = []
@@ -361,9 +384,12 @@ async def _collect_self(db: AsyncSession, resident) -> dict:
         stances = [{"issue": _clip(key, _ISSUE_MAX_CHARS),
                     "label": _stance_label(stance)}
                    for key, stance in rows]
+    title, hint = duty.get("title"), duty.get("prompt_hint")
     return {
-        "duty_title": duty.get("title"),
-        "duty_hint": duty.get("prompt_hint"),
+        # 没有营生时保持 None(渲染层与 S4 的既有契约:``None`` = 这一行不写),
+        # 不要被 ``_clip`` 折成空串 —— 那是「有营生但名字是空的」。
+        "duty_title": _clip(title, DUTY_TITLE_MAX_CHARS) if title else title,
+        "duty_hint": _clip(hint, SELF_DUTY_HINT_MAX_CHARS) if hint else hint,
         "stances": stances,
     }
 
