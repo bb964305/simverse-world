@@ -3,6 +3,7 @@ import re
 from app.agent.actions import ActionType
 from app.models.resident import Resident
 from app.services.policy_labels import policy_label
+from app.services.town_facts_service import POLL_CLOSES_IN_MAX_DAYS
 
 
 def format_memory_context(ctx: dict) -> str:
@@ -116,6 +117,33 @@ def _strip_action_codes(text: str) -> str:
     return _SPACE_BEFORE_PUNCT.sub("", out).strip()
 
 
+def _poll_closes_text(days) -> str:
+    """把「还剩几个世界日截止」折成人话。不认识的形状 → 空串(少半句,不抛异常)。
+
+    分档的措辞与数值分家:数值是 S2 ``_closes_in_world_days`` 的事(它决定**按哪根
+    时间轴数**),这里只决定**怎么说**。段落里因此只剩 ``today.date`` 一个绝对日期
+    —— 「世界日期 + 真实日期并排」那个缺陷在形状上不可能再出现。
+
+    ``days`` 已在读侧夹到 ``POLL_CLOSES_IN_MAX_DAYS``,顶格那一档说「99 天以上」而
+    不是「99 天」:被夹住的真值可能是一百六十万,报一个确切数字就是编。中文的「以上」
+    含本数,所以恰好 99 天时这句话也为真。
+    """
+    # bool 是 int 的子类,但 ``closes_in_days`` 不可能是 bool;这里只挡真正的异形
+    # (旧形状的 ISO 串、dict),它们该少半句而不是让整段 prompt 崩掉。
+    if not isinstance(days, int) or isinstance(days, bool):
+        return ""
+    if days < 0:
+        # 已经到点、夜间任务还没结票的那段窗口:poll 仍是 open,但不能说「还有」。
+        return "已过截止，待结算"
+    if days == 0:
+        return "今天截止"
+    if days == 1:
+        return "明天截止"
+    if days >= POLL_CLOSES_IN_MAX_DAYS:
+        return f"还有 {POLL_CLOSES_IN_MAX_DAYS} 天以上截止"
+    return f"还有 {days} 天截止"
+
+
 def format_town_facts(facts: dict) -> str:
     """把「小镇现况」事实字典折成 prompt 段落**正文**(不含标题)。
 
@@ -162,9 +190,11 @@ def format_town_facts(facts: dict) -> str:
         lines.append("镇上正在议的事：")
         for p in polls:
             opts = " / ".join(p.get("options") or [])
-            closes = (p.get("closes_at") or "")[:10]
-            tail = "；".join(x for x in (f"选项 {opts}" if opts else "",
-                                        f"{closes} 截止" if closes else "") if x)
+            # 相对措辞而不是绝对日期:``today.date`` 是**世界**日期而 ``closes_at``
+            # 是**真实**时刻(k=4,今天两者相差两年),并排摆进一段话就是让 NPC 把
+            # 正在议的事当陈年旧事。换算与「按哪根轴数」在 S2,这里只负责说人话。
+            closes = _poll_closes_text(p.get("closes_in_days"))
+            tail = "；".join(x for x in (f"选项 {opts}" if opts else "", closes) if x)
             lines.append(f"- {p.get('question', '')}" + (f"（{tail}）" if tail else ""))
 
     today = facts.get("today") or {}

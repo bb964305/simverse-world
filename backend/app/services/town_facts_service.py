@@ -13,7 +13,8 @@
       "duties": [{"slug": str, "name": str, "title": str}, ...],
       "policies": {key: value, ...},          # 仅 POLICY_WHITELIST
       "treasury_sc": int | None,              # None = 镇财政闸关,这个世界没有镇库
-      "open_polls": [{"question": str, "options": [str, ...], "closes_at": str}, ...],
+      "open_polls": [{"question": str, "options": [str, ...],
+                      "closes_in_days": int | None}, ...],
       "today": {"date": str, "weekday": int, "is_market_day": bool},
       "places": [str, ...],
     }
@@ -27,11 +28,15 @@
 
 四条设计约束
 ------------
-- **出网净化**:公投只出 question / options(仅 label) / closes_at。
+- **出网净化**:公投只出 question / options(仅 label) / closes_in_days。
   ``options_json`` 里并排躺着 ``npc_votes`` / ``_npc_voters`` / ``_proposer_slug``
   / ``effect``,那是内部计票状态,漏进 prompt 等于把票型和未生效的效果讲给 NPC 听。
   自由文本还要多过两道:原始政策键折成中文标签(``scrub_policy_keys``),以及下面
-  这一条的量纲上限。
+  这一条的量纲上限。``closes_at`` 本身也不出网,理由见「一段话只有一根时间轴」。
+- **一段话只有一根时间轴**:``today.date`` 走世界时钟,而 ``Poll.closes_at`` 是
+  **真实**时间轴上的时刻 —— 两个绝对时间并排进同一段 prompt,NPC 只能读错。所以
+  截止时间在这一层就折成世界日的**相对倒计时**(``closes_in_days``),绝对时刻不
+  出这一层的门(见 :func:`_closes_in_world_days`)。
 - **量纲有上限**:每一类事实的条数与单条长度都卡死(见「量纲上限」那组常量)。
   公投标题/选项、地点名、UGC 居民的名字与头衔都是玩家写的自由文本,而这一层的
   输出直接进 prompt —— 没有上限就等于把 prompt 预算的写权限开放给了任何一个持
@@ -99,11 +104,14 @@ _ISSUE_MAX_CHARS = 30
 #
 # S11 的「满配 < 1200 字符」量的是**生产形状**的固定合成输入(实测 616),那是我们
 # 喂进去的;这几个常量才是运行时保证。把每个字段都顶到自己的上限,渲染后的算术上界
-# 实测 **1589** 字符,分账如下(tests/test_civic_prompt_budget.py 的
+# 实测 **1579** 字符,分账如下(tests/test_civic_prompt_budget.py 的
 # ``_FACTS_CHAR_CEILING`` 就是照这张账取的 1600):
 #
-#     公投 563 / 营生 547 / 自身事实 217 / 地点 115 / 政策 71 / 镇库 29 /
-#     今天 24 / 镇长 16   ——   合计 1589
+#     公投 553 / 营生 547 / 自身事实 217 / 地点 115 / 政策 71 / 镇库 29 /
+#     今天 24 / 镇长 16   ——   合计 1579
+#
+# (公投那一格从 563 降到 553:截止时间从绝对日期「2026-08-11 截止」13 字换成了
+# 相对倒计时,最长的一档是「还有 99 天以上截止」11 字,每张省 2 字 × 5 张。)
 #
 # 这张账原先写的是「营生 ~550 / 公投 ~560 / 地点 ~115,其余是有界的固定形状」:
 # 光前三项就已经 1225 > 1200,而「其余」还藏着 357。**分账本身算术上就不成立** ——
@@ -111,7 +119,7 @@ _ISSUE_MAX_CHARS = 30
 # 现在两个数分开:1200 守生产形状(不许因为上限变宽就跟着放松),1600 守敌手输入
 # (= 这几个常量之和,只留 11 字余量)。改这里的任何一个数都会被
 # ``test_facts_caps_sum_under_the_ceiling`` 算总账 —— ``DUTIES_LIMIT`` 加 1 位就是
-# 1616,当场红。走真链路的 flood 那条则证明读侧确实截了(实测 1532)。
+# 1606,当场红。走真链路的 flood 那条则证明读侧确实截了(实测 1487)。
 
 #: 最多带几张进行中公投。按 ``closes_at`` 取最近截止的几张——马上要投的那几张才
 #: 是「镇上正在议的事」。
@@ -121,6 +129,16 @@ POLL_QUESTION_MAX_CHARS = 40
 #: 不是选票——列全没有额外价值,列爆有。
 POLL_OPTIONS_LIMIT = 4
 POLL_OPTION_MAX_CHARS = 10
+
+#: 截止倒计时的上限(世界日)。这一格是个整数,它的量纲上限就是**位数**上限。
+#:
+#: 不是防御性洁癖:``POST /polls/propose`` 的 ``days`` 是玩家自由整数,写侧一个上界
+#: 都没有(``app/routers/polls.py:38-42`` 只卡了 topic 与 options 的长度,
+#: ``civic_service.propose:65`` 把它原样用作 ``timedelta(days=window)``)。一个
+#: Bearer token 就能开一张四十万天后截止的公投,折算到世界轴是一百六十万 —— 七位数
+#: 直接进每位 NPC 的 system prompt 与 decide prompt。顶到这个数以上一律渲染成
+#: 「还有 99 天以上截止」(「以上」含本数,所以恰好 99 天时这句话照样为真)。
+POLL_CLOSES_IN_MAX_DAYS = 99
 
 #: 在任营生最多列几人。今天是 14 人(11 preset + 3 UGC),UGC 只增不减。
 DUTIES_LIMIT = 20
@@ -266,8 +284,61 @@ async def _read_treasury(db: AsyncSession) -> int | None:
     return await treasury_service.balance(db)
 
 
+def _closes_in_world_days(closes_at) -> int | None:
+    """``Poll.closes_at``(真实时间轴) → 还剩几个**世界日**。``None`` 原样透传。
+
+    为什么必须换算,而不是把 ``closes_at`` 直接摆进去
+    ---------------------------------------------------
+    事实闸在 vm212 开启后真渲染出来的那一段里,同时有这两行::
+
+        - 将「税率」调整为 0.05(选项 赞成 / 反对;2026-08-11 截止)
+        今天是 2028-06-01(周四)。
+
+    ``today.date`` 走 ``world_clock``(世界时钟,``k=4``:一个真实日 = 四个世界日),
+    ``closes_at`` 却是真实时间轴上的时刻(``civic_service.propose`` 写
+    ``datetime.now(UTC) + window``,``close_due_polls`` 也拿真实 now 去判)。两个
+    绝对时间并排摆在一段话里,NPC 照字面读 = 这两张公决**两年前**就截止了 —— 它会
+    去劝人别投,把正在议的事当陈年旧事。这不是文案问题,是喂了一份自相矛盾的事实。
+
+    为什么是相对措辞(方案 B)而不是把 ``closes_at`` 折成世界日期(方案 A)
+    ------------------------------------------------------------------
+    两条都能让段落自洽,选 B 是因为它**不依赖锚点**:
+
+    - 相对量是 ``k × (closes_at − now_real)`` —— 展开
+      ``real_to_world`` 后 ``WORLD_EPOCH`` 直接约掉,只剩 ``k``。绝对世界日期是
+      ``EPOCH + k×(closes_at − EPOCH)``,epoch 一改就整体平移 ``(k−1)×Δepoch``。
+      ``world_epoch`` 是 ``settings`` 里的一个字符串,重锚一次(换服、补时间线)
+      就会让库里每一张旧公投的「截止日」跳到另一个年份,而且**没有任何断言会红**。
+      相对措辞在同一次重锚下最多差一天(只有日界线的取整会动)。
+    - 段落里从此只剩 ``today.date`` 一个绝对日期,「两根轴并存」这个缺陷类**在形状
+      上**就不可能再出现,不用靠「换算写对了没有」来保证。
+    - 「还有 N 天」对 LLM 也更稳:它不必先做两个日期的减法才知道这事急不急。
+
+    N 按哪根轴算:**世界日**
+    ------------------------
+    玩家的真实等待时间与 NPC 的主观时间在这里不是一个数(k=4,差四倍)。这一段是
+    **NPC 的**上下文,同一段里的 ``today.date`` 已经是世界日期 —— 它会拿「今天」加
+    「还有 N 天」去推截止那天。N 若是真实天数,推出来的日子对不上世界日历,等于把刚
+    修好的矛盾换了个写法留在原地。所以 N 与 ``today.date`` 同轴:世界日。
+    (代价是玩家问「还有几天」时听到的是世界日数——这是这个世界一贯的口径:作息、
+    星期节律、日报叙事、计划日期全部按世界时间讲,见 ``app/world_clock.py``。)
+
+    分档按**世界日历的日差**而不是「除以 24 小时」:「今天 / 明天」是日历概念,居民
+    也是这么说话的。已经到点但 cron 还没结票的那段窗口一律折成 ``-1`` —— 那时 poll
+    仍是 ``open``(``close_due_polls`` 是夜间任务),而「过期了多久」对一句对话没有
+    价值,渲染层照这个值说「已过截止，待结算」。
+    """
+    if closes_at is None:
+        return None
+    now_w = world_clock.now_world()
+    closes_w = world_clock.real_to_world(closes_at)
+    if closes_w <= now_w:
+        return -1
+    return min((closes_w.date() - now_w.date()).days, POLL_CLOSES_IN_MAX_DAYS)
+
+
 async def _read_open_polls(db: AsyncSession) -> list[dict]:
-    """进行中的公投。只出 question / options(仅 label) / closes_at —— 见模块
+    """进行中的公投。只出 question / options(仅 label) / closes_in_days —— 见模块
     docstring 的出网净化条款。按截止时间排序,最先截止的排前面。
 
     ``question`` 出网前折一道原始政策键(``scrub_policy_keys``)。
@@ -291,7 +362,8 @@ async def _read_open_polls(db: AsyncSession) -> list[dict]:
         "options": [_clip(o["label"], POLL_OPTION_MAX_CHARS)
                     for o in (p.options_json or [])
                     if isinstance(o, dict) and o.get("label")][:POLL_OPTIONS_LIMIT],
-        "closes_at": p.closes_at.isoformat() if p.closes_at else None,
+        # 真实轴的绝对时刻到此为止:换算成世界日的相对倒计时才出这一层的门。
+        "closes_in_days": _closes_in_world_days(p.closes_at),
     } for p in polls]
 
 

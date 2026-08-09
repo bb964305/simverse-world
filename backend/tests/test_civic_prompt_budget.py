@@ -41,37 +41,47 @@ from tests.test_civic_memory_broadcast import _HISTORY, _seed_history
 from tests.test_civic_memory_integration import _elect, _town
 
 #: 「小镇现况」段在**生产形状**下的上限(plan S11)。这条是硬的:增幅是相对量,基线
-#: 一换就漂,字符数不会。满配实测 616 字符(生产真实取数比这还短,上游复验报 459)
-#: —— 近 2 倍余量。这个数**不该因为下面那个上界变宽而跟着放松**:两条断言原本共用
-#: 一个常量,抬上界就等于顺手把「满配也就这么长」一起放了,所以这里把它们拆开。
+#: 一换就漂,字符数不会。满配实测 606 字符(截止时间改成相对倒计时前是 616;生产真实
+#: 取数比这还短,上游复验在那次改动前报 459)—— 近 2 倍余量。这个数**不该因为下面那
+#: 个上界变宽而跟着放松**:两条断言原本共用一个常量,抬上界就等于顺手把「满配也就这
+#: 么长」一起放了,所以这里把它们拆开。
 _FACTS_CHAR_BUDGET = 1200
 
 #: 「小镇现况」段在**敌手输入**下的绝对上界 = ``town_facts_service`` 那几个量纲常量
-#: 的算术和(实测 1589,见该模块顶部的分账),留 11 字余量。
+#: 的算术和(实测 1579,见该模块顶部的分账),留 21 字余量。
 #:
-#: 为什么不是继续用 1200:1200 是照生产形状标的,而代码自己允许的上限之和是 1589。
+#: 为什么不是继续用 1200:1200 是照生产形状标的,而代码自己允许的上限之和是 1579。
 #: 两个数原本合成了一个 —— 于是 flood 测试只能靠「灌到今天的 14 人」而不是灌到
 #: ``DUTIES_LIMIT = 20`` 才维持绿,它自称守着的那条不变量其实不成立。
 #:
 #: 为什么不反过来降 ``DUTIES_LIMIT`` 把上界压回 1200:压不回来。除营生外的七类顶格
-#: 就已经 1042 字符,``DUTIES_LIMIT`` 要降到 **5** 才够得着 1200(6 人 → 1211),而生产
+#: 就已经 1031 字符,``DUTIES_LIMIT`` 要降到 **5** 才够得着 1200(6 人 → 1201),而生产
 #: 今天有 14 位在岗自治居民 —— 那等于让 9 个人从名单上静默消失。降到 14(零增长余量,
-#: 再来一位 UGC 就有人被截掉)也只到 1427,依旧不成立。这个上界不是「今天会不会炸」,
+#: 再来一位 UGC 就有人被截掉)也只到 1417,依旧不成立。这个上界不是「今天会不会炸」,
 #: 是「上限之间怎么分账」:两条都还有 2.6 倍以上的余量。
 #:
-#: 1589 是**算术**上界,由 ``test_facts_caps_sum_under_the_ceiling`` 逐字段顶格算出来
-#: 并咬死(任一常量调宽都当场红)。走真链路的 flood 测试实测只到 1532 —— 差的 57 字
-#: 在地点那一段:8 个静态公共设施的名字都短于 ``PLACE_MAX_CHARS`` 且恒排在最前,库里
-#: 灌多少动态地点都顶不满那 12 个坑。所以 flood 那条是「读侧真的执行了上限」的证据,
-#: 算术那条才是「上限之和没有越界」的警戒线,两条缺一不可。
+#: 1579 是**算术**上界,由 ``test_facts_caps_sum_under_the_ceiling`` 逐字段顶格算出来
+#: 并咬死(任一常量调宽都当场红)。走真链路的 flood 测试实测只到 1487,差的 92 字分两处:
+#:
+#: - **地点 57 字**:8 个静态公共设施的名字都短于 ``PLACE_MAX_CHARS`` 且恒排在最前,
+#:   库里灌多少动态地点都顶不满那 12 个坑;
+#: - **截止倒计时 35 字**(5 张 × 7):顶格那一档是「还有 99 天以上截止」11 字,而
+#:   ``_read_open_polls`` 取的是**最近截止**的五张 —— 顶到 ``POLL_CLOSES_IN_MAX_DAYS``
+#:   的公投按定义截止得最晚,永远抢不到名额。「条数顶格」与「倒计时顶格」在同一份快照
+#:   里结构性互斥,后者由 test_town_facts_service.py::test_absurd_deadline_is_clamped
+#:   单独证。灌进来的这几张都在几小时内截止,渲染成「今天截止」4 字。
+#:
+#: 所以 flood 那条是「读侧真的执行了上限」的证据,算术那条才是「上限之和没有越界」的
+#: 警戒线,两条缺一不可。
 _FACTS_CHAR_CEILING = 1600
 
 #: 「小镇现况」段在装配后 prompt 里的占比上限。plan S11 写的是「相对闸关基线的
 #: **增幅** < 25%」——那个分母下满配当时实测 26.0%,够不着。与其把基线做大来迁就
 #: 它,不如保留阈值数字、把分母换成装配后的总长(等价于增幅 < 1/3,与下面候选池那
-#: 条同一个三分之一)。今天满配实测 2505 → 3131 字符 = 20.0%;换回原来那个分母是
-#: 24.99%,压着线过 —— 一段 hint 剥掉几个动作码就能让它翻面,正是「增幅是相对量、
-#: 分母一换就漂」的现场例子,分母的选择照旧作数。
+#: 条同一个三分之一)。今天满配实测 2505 → 3121 字符 = 19.7%;换回原来那个分母是
+#: 24.59%,压着线过 —— 一段 hint 剥掉几个动作码、一句截止措辞换个写法就能让它翻面
+#: (截止改相对倒计时前正是 24.99%),正是「增幅是相对量、分母一换就漂」的现场例子,
+#: 分母的选择照旧作数。
 _FACTS_PROMPT_SHARE_LIMIT = 0.25
 
 #: 候选池里镇务记忆的占比上限。
@@ -370,10 +380,12 @@ def _every_field_at_its_cap() -> dict:
         "policies": _POLICIES,
         # 镇库是 ``BigInteger``,顶格就是 64 位有符号上界(位数决定字数)。
         "treasury_sc": 2 ** 63 - 1,
+        # 倒计时顶格 = 位数顶格那一档:``POLL_CLOSES_IN_MAX_DAYS`` 及以上都渲染
+        # 成「还有 99 天以上截止」,那是这一格最长的半句。
         "open_polls": [{"question": "问" * tfs.POLL_QUESTION_MAX_CHARS,
                         "options": ["选" * tfs.POLL_OPTION_MAX_CHARS
                                     for _ in range(tfs.POLL_OPTIONS_LIMIT)],
-                        "closes_at": "2026-08-11T12:30:00+00:00"}
+                        "closes_in_days": tfs.POLL_CLOSES_IN_MAX_DAYS}
                        for _ in range(tfs.OPEN_POLLS_LIMIT)],
         "today": {"date": "2026-08-09", "weekday": 6, "is_market_day": True},
         "places": [chr(ord("一") + i) * tfs.PLACE_MAX_CHARS
@@ -431,6 +443,13 @@ async def test_ugc_flood_cannot_blow_the_char_budget(db_session, all_facts_on):
     assert all(len(p["question"]) <= tfs.POLL_QUESTION_MAX_CHARS
                and all(len(o) <= tfs.POLL_OPTION_MAX_CHARS for o in p["options"])
                for p in facts["open_polls"])
+    # 倒计时这一格只能查「有界」,查不到「顶格」——两件事在这份输入里互斥:
+    # ``_read_open_polls`` 取的是**最近截止**的五张,而顶到
+    # ``POLL_CLOSES_IN_MAX_DAYS`` 的那种公投按定义截止得最晚,永远排在后面被截掉。
+    # 顶格那一档由 tests/test_town_facts_service.py::test_absurd_deadline_is_clamped
+    # 单独证(它只开那一张,不跟条数上限抢名额)。
+    assert all(0 <= p["closes_in_days"] <= tfs.POLL_CLOSES_IN_MAX_DAYS
+               for p in facts["open_polls"])
     assert all(len(name) <= tfs.PLACE_MAX_CHARS for name in facts["places"])
     assert len(facts["self"]["duty_title"]) <= tfs.DUTY_TITLE_MAX_CHARS
     assert len(facts["self"]["duty_hint"]) <= tfs.SELF_DUTY_HINT_MAX_CHARS
@@ -473,13 +492,13 @@ async def test_flooded_facts_share_stays_under_the_ceiling_derived_bound(
         db_session, all_facts_on):
     """顶格输入下的装配占比 —— 上面那条量的是生产形状,这条量的是同一份敌手输入。
 
-    **这条不用 25%,而且 25% 在这个输入类下压根不成立**(实测 38.1%)。不是放水,是
+    **这条不用 25%,而且 25% 在这个输入类下压根不成立**(实测 37.4%)。不是放水,是
     两条不变量本来就管着两类输入,合成一个数会同时骗到两边:
 
     - 25% 是**产品配比**目标,分母是一份生产形状的 prompt(记忆撑满、人格三层),
-      量的是「事实这一段有没有喧宾夺主」。满配实测 20.0%。
+      量的是「事实这一段有没有喧宾夺主」。满配实测 19.7%。
     - 顶格输入下,要压回 25% 就得让整段塞进 ``base/3 ≈ 835`` 字符 —— 而除营生外的
-      七类顶格就已经占了 1042。做不到,除非把公投砍到 2 张、营生砍到 7 人,那是拿
+      七类顶格就已经占了 1031。做不到,除非把公投砍到 2 张、营生砍到 7 人,那是拿
       功能换一个好看的数字。
 
     所以这条守的是**由字符上界推导出来的**那个占比:段落既然 ≤
@@ -487,7 +506,7 @@ async def test_flooded_facts_share_stays_under_the_ceiling_derived_bound(
     阈值,是上一条断言的推论;哪天谁把某个量纲常量调宽,这里和字符上界会一起红。
 
     顺带钉住这次加固的收益:``self`` 段与镇长名字过 ``_clip`` 之前,同一份输入下这
-    个数是 54.8%(``self`` 一段就 1623 字符),现在 38.1%。
+    个数是 54.8%(``self`` 一段就 1623 字符),现在 37.4%。
     """
     speaker = await _seed_flooded_town(db_session)
     facts = await tfs.build_town_facts(db_session, speaker)

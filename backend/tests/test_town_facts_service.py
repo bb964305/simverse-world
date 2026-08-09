@@ -5,10 +5,12 @@
 
 三条硬约束在本文件里各有一条断言守着:
 
-- **出网净化**:公投只出 question / options(仅 label) / closes_at。
+- **出网净化**:公投只出 question / options(仅 label) / closes_in_days。
   ``options_json`` 里那些 ``npc_votes`` / ``_npc_voters`` / ``_proposer_slug`` /
   ``effect`` 是内部计票状态,漏进 prompt 等于把票型和未生效的效果告诉 NPC
-  (先例 tests/test_polls_api.py:63 对 API 层的同一条要求)。
+  (先例 tests/test_polls_api.py:63 对 API 层的同一条要求)。``closes_at`` 本身
+  也不出网 —— 它是**真实**时间轴上的绝对时刻,而同一段 prompt 里的 ``today.date``
+  走世界时钟,两根轴并排摆着就是让 NPC 去误读(见「截止倒计时」那一组)。
 - **有界 fail-open**:取数失败时回落上一次快照,但只在
   ``civic_facts_max_stale_seconds`` 之内 —— 宁可不注入,也不注入一个过期的镇长。
 - **进程内快照**:同一 worker 里 TTL 内只查一次库(K11 conftest 没有 autouse
@@ -16,6 +18,7 @@
 """
 import json
 from datetime import datetime, timedelta, UTC
+from zoneinfo import ZoneInfo
 
 import pytest
 from prometheus_client import REGISTRY
@@ -49,6 +52,32 @@ def _clean_caches():
 def facts_on(monkeypatch):
     """开事实层总闸(S1 的六个闸门默认全关)。"""
     monkeypatch.setattr(settings, "civic_facts_enabled", True)
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch):
+    """把真实时钟钉死,世界时钟随之完全确定。返回被钉住的真实 now。
+
+    ``world_clock_k`` / ``world_epoch`` 一并钉住(值就是今天生产的默认),下面每
+    一条的期望值才是**手算**出来的常数,而不是拿被测代码自己再算一遍。
+
+    这个时刻(= 2026-08-09 03:00+08)不是随手挑的:距 epoch 恰好 220 天 3 小时,
+    ×4 之后世界时间落在 **2028-05-30 12:00**(世界日正中)。日界线离得远,「今天
+    截止 / 明天截止」那几条量的才是分档本身,而不是量四舍五入。
+
+    **返回值刻意用 UTC 表示**:sqlite 存 ``DateTime(timezone=True)`` 时会把 offset
+    丢掉、只留墙上时间的数字(实测写 ``03:00+08`` 读回来是 naive ``03:00``),而
+    ``world_clock._as_zone`` 按「naive = UTC」解读 —— 拿 +08 的时刻造测试数据会在
+    读回时凭空多出 8 小时(=32 个世界小时,足够把日差顶偏一天)。生产的写入侧一律
+    是 ``datetime.now(UTC)``(``civic_service.propose:82``),UTC 才是与生产同形状
+    的输入。
+    """
+    monkeypatch.setattr(settings, "world_clock_k", 4)
+    monkeypatch.setattr(settings, "world_epoch", "2026-01-01T00:00:00+08:00")
+    now = datetime(2026, 8, 8, 19, 0, tzinfo=UTC)
+    assert now.astimezone(ZoneInfo("Asia/Shanghai")).hour == 3, "锚点认知自检"
+    monkeypatch.setattr(world_clock, "now_real", lambda: now)
+    return now
 
 
 def _resident(slug: str, name: str, *, resident_type: str = "npc",
@@ -179,8 +208,8 @@ async def test_treasury_reads_balance_when_gate_on(db_session, facts_on, monkeyp
 # ── 进行中公投 ──────────────────────────────────────────────────────────
 
 @pytest.mark.anyio
-async def test_open_polls_are_sanitized(db_session, facts_on):
-    now = datetime.now(UTC)
+async def test_open_polls_are_sanitized(db_session, facts_on, frozen_clock):
+    now = frozen_clock
     db_session.add(Poll(
         question="是否在东岸花园兴建剧院",
         options_json=[
@@ -199,11 +228,14 @@ async def test_open_polls_are_sanitized(db_session, facts_on):
     assert [p["question"] for p in open_polls] == ["是否在东岸花园兴建剧院"], \
         "已结票的公投不是「进行中」"
     assert open_polls[0]["options"] == ["赞成兴建", "暂缓,维持现状"]
-    assert open_polls[0]["closes_at"].startswith(str(now.year))
+    assert open_polls[0]["closes_in_days"] == 8, \
+        "2 个真实日 = 8 个世界日(k=4);出网的是世界轴的倒计时"
 
     blob = json.dumps(open_polls, ensure_ascii=False)
     for leaked in ("npc_votes", "_npc_voters", "_proposer_slug", "effect", "theater"):
         assert leaked not in blob, f"{leaked} 泄漏进了事实层"
+    assert "closes_at" not in open_polls[0], \
+        "真实轴的绝对时刻不出网 —— 留着它就是留着下一次被渲染进 prompt 的口子"
 
 
 @pytest.mark.anyio
@@ -253,6 +285,100 @@ async def test_open_polls_fold_every_vote_tier_policy_key(db_session, facts_on):
         assert key not in blob, f"{key} 的英文键名经公投标题漏进了事实层"
 
 
+# ── 截止倒计时:与 today.date 同一根时间轴 ────────────────────────────────
+#
+# 生产实测(事实闸开启后)渲染出来的那一段里同时有这两行:
+#
+#     - 将「税率」调整为 0.05(选项 赞成 / 反对;2026-08-11 截止)
+#     今天是 2028-06-01(周四)。
+#
+# ``today.date`` 走 world_clock 出的是**世界**日期,``closes_at`` 却是**真实**时
+# 间轴上的时刻(``civic_service.propose`` 写的是 ``datetime.now(UTC) + window``,
+# ``close_due_polls`` 也拿真实 now 去判)。两根轴并排摆在一段话里,NPC 照字面读
+# = 这两张公决两年前就截止了 —— 它会去劝人别投了,把正在议的事当陈年旧事。
+
+
+@pytest.mark.anyio
+async def test_poll_deadline_is_counted_on_the_world_axis(db_session, facts_on, frozen_clock):
+    """倒计时按**世界日**算,不是真实日。
+
+    形状取生产那张税率公决(08-11 12:30 UTC 截止)。真实轴上它还有 2.7 天,世界
+    轴上是 11 天 —— **两个数不相等**正是这条断言的全部意义:居民的日历一天走
+    k=4 天,拿真实天数去讲「还有几天」等于给了他一个自己算不平的账。
+    """
+    db_session.add(Poll(
+        question="将「tax_rate」调整为 0.05",
+        options_json=[{"label": "赞成"}, {"label": "反对"}],
+        closes_at=datetime(2026, 8, 11, 12, 30, tzinfo=UTC), status="open",
+    ))
+    await db_session.commit()
+
+    facts = await tfs.get_town_facts_cached(db_session)
+    assert facts["today"]["date"] == "2028-05-30", "今天走世界时钟(基线认知)"
+    assert facts["open_polls"][0]["closes_in_days"] == 11, \
+        "epoch+4×(closes−epoch) = 2028-06-10,与 2028-05-30 相隔 11 个世界日"
+
+    real_days_left = (datetime(2026, 8, 11, 12, 30, tzinfo=UTC) - frozen_clock).days
+    assert real_days_left == 2, "真实轴上只剩 2 天 —— 两根轴确实给出不同的数"
+
+
+#: (距今几个**真实**小时截止, 期望的世界日倒计时)。k=4 → 6 真实小时 = 1 个世界
+#: 日;世界时钟被 ``frozen_clock`` 钉在世界日的 12:00,所以 +3h 正好跨到下一个
+#: 世界日的 00:00。负数一律折成 -1:cron 还没结票的那段窗口里 poll 仍是 ``open``,
+#: 而「过期了多久」对一句对话毫无价值。
+_DEADLINE_CASES = (
+    (-1, -1),   # 已过截止
+    (0, -1),    # 正好到点 = 已过(投票侧同一条:closes <= now 就拒收)
+    (1, 0),     # 今天截止
+    (3, 1),     # 明天(正踩世界日界线)
+    (6, 1),     # 明天
+    (30, 5),    # N 天后
+)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("real_hours,expected", _DEADLINE_CASES)
+async def test_deadline_countdown_boundaries(db_session, facts_on, frozen_clock,
+                                             real_hours, expected):
+    """已过 / 今天 / 明天 / N 天后,四档各自的边界。"""
+    db_session.add(Poll(question="议案", options_json=[{"label": "赞成"}],
+                        closes_at=frozen_clock + timedelta(hours=real_hours),
+                        status="open"))
+    await db_session.commit()
+
+    assert (await tfs.get_town_facts_cached(db_session))["open_polls"][0][
+        "closes_in_days"] == expected
+
+
+def test_null_deadline_reads_as_no_deadline():
+    """``closes_at`` 为 NULL → 不猜也不写,这一格整段不出。
+
+    走纯函数而不是灌库:``Poll.closes_at`` 今天是 ``Mapped[datetime]``(NOT NULL),
+    塞 None 进去只会撞 IntegrityError。读侧那个 ``if`` 是防御性的 —— 列约束不是
+    代码约束,一次迁移就能把它放开,而那天不该由 prompt 层抛 AttributeError。
+    """
+    assert tfs._closes_in_world_days(None) is None
+
+
+@pytest.mark.anyio
+async def test_absurd_deadline_is_clamped(db_session, facts_on, frozen_clock):
+    """倒计时的**位数**也要有上限 —— 这一格的量纲上限就是位数。
+
+    ``POST /polls/propose`` 的 ``days`` 是玩家自由整数,写侧一个上界都没有
+    (``app/routers/polls.py:38-42`` 只卡了 topic 与 options 的长度,
+    ``civic_service.propose:65`` 原样用作 ``timedelta(days=window)``)。一个
+    Bearer token 就能开一张四十万天后截止的公投,折算到世界轴是一百六十万 ——
+    七位数直接进每位 NPC 的 system prompt 与 decide prompt。
+    """
+    db_session.add(Poll(question="议案", options_json=[{"label": "赞成"}],
+                        closes_at=frozen_clock + timedelta(days=400_000),
+                        status="open"))
+    await db_session.commit()
+
+    facts = await tfs.get_town_facts_cached(db_session)
+    assert facts["open_polls"][0]["closes_in_days"] == tfs.POLL_CLOSES_IN_MAX_DAYS
+
+
 # ── 自由文本的量纲上限(UGC 无背压) ──────────────────────────────────────
 
 @pytest.mark.anyio
@@ -278,7 +404,7 @@ async def test_open_polls_are_capped_by_count_and_length(db_session, facts_on):
 
     open_polls = (await tfs.get_town_facts_cached(db_session))["open_polls"]
     assert len(open_polls) == tfs.OPEN_POLLS_LIMIT
-    assert open_polls[0]["closes_at"] < open_polls[-1]["closes_at"], "按最近截止取"
+    assert open_polls[0]["closes_in_days"] < open_polls[-1]["closes_in_days"], "按最近截止取"
     for p in open_polls:
         assert len(p["question"]) <= tfs.POLL_QUESTION_MAX_CHARS
         assert len(p["options"]) <= tfs.POLL_OPTIONS_LIMIT

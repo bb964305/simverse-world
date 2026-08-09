@@ -18,6 +18,7 @@ prompt 里」。
   (tests/test_treasury_service.py:849-851)。
 """
 import json
+import re
 from datetime import datetime, timedelta, UTC
 from unittest.mock import AsyncMock, patch
 
@@ -34,7 +35,7 @@ from app.models.town_treasury import TOWN_KEY, TownTreasury
 from app.models.user import User
 from app.services import town_facts_service as tfs, world_event_service
 from app.services.config_service import ConfigService
-from app.services.town_facts_service import DECIDE_FACT_KEYS
+from app.services.town_facts_service import DECIDE_FACT_KEYS, POLL_CLOSES_IN_MAX_DAYS
 
 #: 改动前(S3 之前)对下面这位居民真跑出来的输出,逐字固化。
 _GOLDEN = (
@@ -71,7 +72,7 @@ _FULL_FACTS = {
     "open_polls": [{
         "question": "是否在东岸花园兴建剧院",
         "options": ["赞成兴建", "暂缓,维持现状"],
-        "closes_at": "2026-08-11T12:30:00+00:00",
+        "closes_in_days": 11,
     }],
     "today": {"date": "2026-08-09", "weekday": 6, "is_market_day": True},
     "places": ["市政厅", "酒馆", "诊所"],
@@ -168,6 +169,76 @@ def test_no_open_polls_renders_no_subsection():
     text = format_town_facts(_facts(open_polls=[]))
     assert "正在议" not in text
     assert "市政厅" in text, "其余各类照常渲染"
+
+
+# ── 一段话只能有一根时间轴 ──────────────────────────────────────────────
+#
+# 生产实测(事实闸开启后)真渲染出来的那两行:
+#
+#     - 将「税率」调整为 0.05(选项 赞成 / 反对;2026-08-11 截止)
+#     今天是 2028-06-01(周四)。
+#
+# ``today.date`` 是世界日期,``closes_at`` 是**真实**时间轴上的时刻(k=4,一个真实
+# 日 = 四个世界日)。NPC 照字面读 = 这两张公决两年前就截止了。倒计时改成相对措辞
+# 之后,段落里剩下的绝对日期只有 ``today.date`` 一个。
+
+#: 生产那两张公决的形状(08-11 12:30 UTC 截止),世界日期 2028-05-30 时倒计时 11 天。
+_PRODUCTION_FACTS = {
+    "open_polls": [
+        {"question": "将「税率」调整为 0.05",
+         "options": ["赞成", "反对"], "closes_in_days": 11},
+        {"question": "是否欢迎外来商队定期来镇采购居民作品?",
+         "options": ["欢迎", "不欢迎"], "closes_in_days": 11},
+    ],
+    "today": {"date": "2028-05-30", "weekday": 1, "is_market_day": False},
+}
+
+
+def test_only_the_world_date_survives_as_an_absolute_date():
+    """段落里的绝对日期有且只有 ``today.date`` 一个。
+
+    这条不是「检查文案好不好看」——它是那个缺陷的判据本身:只要 ``closes_at``
+    的绝对日期还在,段落里就并排躺着两根时间轴,而它们相差两年。
+    """
+    text = format_town_facts(_PRODUCTION_FACTS)
+
+    assert re.findall(r"\d{4}-\d{2}-\d{2}", text) == ["2028-05-30"], \
+        f"段落里出现了不止一根时间轴的绝对日期:\n{text}"
+    assert "2026" not in text, "真实时间轴的年份一个字都不该出现在世界的叙述里"
+    assert text.count("还有 11 天截止") == 2, "两张公决各带一句相对倒计时"
+
+
+#: (``closes_in_days``, 渲染出来的那半句)。分档的边界值一个不漏。
+_DEADLINE_WORDING = (
+    (-1, "已过截止，待结算"),
+    (0, "今天截止"),
+    (1, "明天截止"),
+    (2, "还有 2 天截止"),
+    (11, "还有 11 天截止"),
+    (POLL_CLOSES_IN_MAX_DAYS, f"还有 {POLL_CLOSES_IN_MAX_DAYS} 天以上截止"),
+)
+
+
+@pytest.mark.parametrize("days,expected", _DEADLINE_WORDING)
+def test_deadline_wording_by_bucket(days, expected):
+    text = format_town_facts({"open_polls": [
+        {"question": "议案", "options": ["赞成"], "closes_in_days": days}]})
+    assert text == f"镇上正在议的事：\n- 议案（选项 赞成；{expected}）"
+
+
+def test_null_deadline_renders_the_poll_without_a_deadline_clause():
+    """没有截止时间不等于没有这张公投 —— 少半句,不是少一条。"""
+    text = format_town_facts({"open_polls": [
+        {"question": "议案", "options": ["赞成"], "closes_in_days": None}]})
+    assert text == "镇上正在议的事：\n- 议案（选项 赞成）"
+
+
+def test_non_integer_deadline_degrades_to_silence():
+    """渲染层是纯函数,也是最后一道:形状不对时少半句,绝不整段抛异常。"""
+    for junk in ("2026-08-11T12:30:00+00:00", {}, [1]):
+        text = format_town_facts({"open_polls": [
+            {"question": "议案", "options": ["赞成"], "closes_in_days": junk}]})
+        assert text == "镇上正在议的事：\n- 议案（选项 赞成）", f"{junk!r} 没被挡住"
 
 
 def test_empty_curfew_reads_as_none_not_empty_list():
