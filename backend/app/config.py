@@ -537,6 +537,19 @@ class Settings(BaseSettings):
     npc_work_item_stock: int = 3                  # limited stock per listing
     market_day_weekday: int = 5                   # Saturday=5: weekly 集市日
     market_day_discount: float = 0.9              # shop price × this on market day
+    # M-A 经济内生化: NPC↔NPC 真实钱流。三个闸门互相独立、默认全关 → 行为与
+    # 现状逐字节一致；开闸是 deploy/.env 的单独变更（红线：迁移/暗上与开闸分车）。
+    npc_trade_enabled: bool = False               # C1 餐费入账 + C2 消费 pass + C3 委托接单/结算
+    npc_trade_buy_prob: float = 0.25              # 每个合格买方每晚掷骰的成交概率
+    npc_trade_reserve_sc: int = 5                 # 买方保留金,兼作贫困线(余额须 > 它 + 价)
+    npc_trade_max_buys_per_night: int = 2         # 全镇每晚成交上限(每人至多 1 笔)
+    caravan_enabled: bool = False                 # C4 外来商队(绑集市日,外生买方 + 第二税源)
+    caravan_stall_fee_sc: int = 5                 # 摊位费→镇库,不依赖 tax_rate
+    caravan_budget_sc: int = 30                   # 每次到访的作品收购预算
+    tax_carry_enabled: bool = False               # C5 分数税账:尾数以整数 milli-SC 累入 town_tax_carry_milli(原子增量);关=旧 int() 截断
+    # M-A 加固闸:库存扣减走 items.stock 的 guarded UPDATE(迁移 056 必须先落库)。
+    # 关 = 旧 payload_json 读-改-写,与现状逐字节一致 —— 迁移暗上与开闸分车。
+    item_stock_guard_enabled: bool = False        # C6 库存守卫:cron 与玩家并发不再超卖
     # M2 story arcs: rule-triggered milestone engine (nightly, zero tick cost).
     arc_engine_enabled: bool = True
     # M3 civic governance: proposals → clerk bulletin → NPC+player vote → execute.

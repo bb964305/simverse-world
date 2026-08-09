@@ -93,7 +93,12 @@ async def test_effect_dispatch_by_kind(db_session):
         await _item(db_session, kind="gift", price=10)
         result = await purchase(db_session, user.id, "flower", qty=1, context={"target": "klaus"})
         assert result["effect"] == {"boost": 0.1}
-        assert seen["called"][1] == "flower" and seen["called"][3] == {"target": "klaus"}
+        # M-A 加固:effect 拿到的 context 是调用方那份 + 一个 `charged_sc`(实付
+        # 额,含集市日折扣)。resident_work 的售罄退款要按实付额退,退牌价就是凭空
+        # 印钱;调用方自己的键必须原样透传。
+        assert seen["called"][1] == "flower"
+        assert seen["called"][3] == {"target": "klaus",
+                                     "charged_sc": result["total_sc"]}
     finally:
         shop_effects._effects.clear(); shop_effects._effects.update(saved_e)
         shop_effects._prechecks.clear(); shop_effects._prechecks.update(saved_p)

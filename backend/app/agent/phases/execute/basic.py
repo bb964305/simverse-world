@@ -35,26 +35,52 @@ def _is_market_day(world_events) -> bool:
 async def _charge_meal(db, resident) -> None:
     """M1 F1.2: debit the meal cost from the resident's treasury. On an empty
     wallet the resident eats on credit — recorded as a memory and a small tie to
-    the dining-location's shopkeeper. Fail-open."""
+    the dining-location's shopkeeper. Fail-open.
+
+    M-A C1: with npc_trade_enabled the cost is no longer burned — it moves to the
+    dining spot's proprietor (cafe_host / tavern_hub), the town's two zero-income
+    duties. Missing proprietor, or the diner *is* the proprietor → the legacy
+    sink debit. 赊账 is untouched: an empty wallet just means the transfer never
+    happens (收费 + 穷人保障, no new mechanism)."""
+    slug = resident.slug  # a rollback expires the ORM object — read it up front
     try:
         from app.services import coin_service
         from app.services.duty_service import set_wallet_cache, find_duty_resident
         from app.agent.map_data import get_location_id_at, location_category
 
         cost = settings.npc_meal_cost_sc
-        paid = await coin_service.treasury_debit(db, resident.slug, cost, reason="meal")
-        balance = await coin_service.treasury_balance(db, resident.slug)
-        set_wallet_cache(db, resident, balance)
-        if paid:
-            await db.commit()
-            return
-
-        # 赊账: locate the dining spot's proprietor (cafe_host / tavern_hub).
+        # 经营者解析提前一次,转账目标与赊账分支两用 (cafe_host / tavern_hub)。
         loc_id = get_location_id_at(resident.tile_x, resident.tile_y)
         host = None
         if location_category(loc_id) == "dining":
             key = "cafe_host" if loc_id == "cafe" else "tavern_hub"
             host = await find_duty_resident(db, key)
+
+        to_host = settings.npc_trade_enabled and host is not None and host.slug != slug
+        if to_host:
+            paid = await coin_service.treasury_transfer(db, slug, host.slug, cost,
+                                                        reason="meal")
+        else:
+            paid = await coin_service.treasury_debit(db, slug, cost, reason="meal")
+        balance = await coin_service.treasury_balance(db, slug)
+        set_wallet_cache(db, resident, balance)
+        if paid:
+            if to_host:
+                host_balance = await coin_service.treasury_balance(db, host.slug)
+                set_wallet_cache(db, host, host_balance)
+            await db.commit()
+            if to_host:
+                try:
+                    from app.services.feed_service import push
+                    await push(host.slug, "meal_income",
+                               {"from": slug, "name": resident.name,
+                                "amount": cost, "location": loc_id})
+                except Exception:
+                    logger.debug("meal income feed push failed for %s", host.slug,
+                                 exc_info=True)
+            return
+
+        # 赊账: the proprietor resolved above carries the tab.
         from app.memory.service import MemoryService
         where = f"在{loc_id}" if loc_id else "在店里"
         note = (f"{where}赊了一顿饭,{host.name}说下次一起算。" if host
@@ -68,7 +94,13 @@ async def _charge_meal(db, resident) -> None:
             await relation_service.bump(db, resident.id, host.id, d_familiarity=0.02)
         await db.commit()
     except Exception:
-        logger.warning("meal charge failed for %s", resident.slug, exc_info=True)
+        # M-A C1: 写了半截就必须就地回滚 —— 悬挂的 debit 会被后续无关 commit
+        # 落库烧钱(转账的 credit 段抛异常就是这个窗口)。
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        logger.warning("meal charge failed for %s", slug, exc_info=True)
 
 
 def _effective_speed(base: int, weather_kind: str | None, arousal: float | None) -> int:

@@ -24,6 +24,9 @@ class Commission(Base):
     reward_sc: Mapped[int] = mapped_column(Integer, default=20)
     status: Mapped[str] = mapped_column(String(20), default="open", index=True)  # open|accepted|completed|expired
     acceptor_user_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    # C3 NPC 接单：承接方是居民时记 Resident.id（与 issuer_resident_id 同形，无 FK）。
+    # 与 acceptor_user_id 互斥——玩家已接的单，NPC pass 一律不碰。
+    acceptor_resident_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_default_expiry)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

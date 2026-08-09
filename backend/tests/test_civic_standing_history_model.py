@@ -43,7 +43,12 @@ def test_migration_single_head_and_chains_onto_050():
     assert script.get_revision("053_add_lab_run_resource_profile").down_revision == (
         "052_add_lab_codex_model_tier"
     )
-    assert heads == ["054_freeze_lab_model_cost_rate"]
+    # 链尾随新迁移前移（M-A 的 055、加固的 056 …）：单头 + 本迁移仍在链上才是这
+    # 条测试的硬门，链尾具体是谁由最新一条迁移决定。原来这里硬断言
+    # `heads == ["055_..."]`，等于每加一条迁移就要来改一次，改的还是一条**与它
+    # 无关**的测试——判据换成"051 仍是链头的祖先"。
+    assert any(r.revision == "051_add_civic_standing_history"
+               for r in script.iterate_revisions(heads[0], "base"))
 
 
 def test_migration_is_additive_only():

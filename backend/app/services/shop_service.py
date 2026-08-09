@@ -12,6 +12,12 @@ class ShopError(Exception):
     """Raised for purchase failures (router maps to 400)."""
 
 
+# M-A C4: 商队进口货只供 NPC 消费 pass(npc_trade_service)取用——它没有
+# shop_effects handler,玩家买到手就是一口空气,而 purchase 对无 handler 的 kind
+# 照样扣款(apply_effect 返 None 不补偿)。目录里不出现、买也买不到。
+IMPORT_KIND = "import_good"
+
+
 # First items (D2). Seeded idempotently at startup so the catalog is populated.
 ITEM_DEFS: list[dict] = [
     {"code": "rename_card", "kind": "consumable", "name": "改名卡", "description": "给你的居民改个名字", "icon": "✏️", "price_sc": 50, "payload_json": {}},
@@ -51,7 +57,11 @@ def serialize_item(item: Item) -> dict:
 
 
 async def get_catalog(db: AsyncSession) -> list[dict]:
-    result = await db.execute(select(Item).where(Item.active.is_(True)).order_by(Item.price_sc))
+    result = await db.execute(
+        select(Item)
+        .where(Item.active.is_(True), Item.kind != IMPORT_KIND)
+        .order_by(Item.price_sc)
+    )
     return [serialize_item(i) for i in result.scalars().all()]
 
 
@@ -71,7 +81,7 @@ async def purchase(
         raise ShopError("qty must be >= 1")
 
     item = (await db.execute(select(Item).where(Item.code == item_code))).scalar_one_or_none()
-    if item is None or not item.active:
+    if item is None or not item.active or item.kind == IMPORT_KIND:
         raise ShopError("Item not available")
 
     # Pre-charge validation (e.g. rename sensitive-word check) — raises ShopError
@@ -94,7 +104,11 @@ async def purchase(
     ))
     await db.commit()
 
-    effect = await apply_effect(db, user_id, item, qty, context)
+    # M-A 加固:守卫扣库存零行(并发售罄)时 effect 要原路退款,退的必须是**实付
+    # 额** —— 集市日打过折,退牌价就是凭空印钱。这里传的是入参的浅拷贝,不动调用
+    # 方的 dict,也不动已经落库的 Purchase.context_json。
+    effect = await apply_effect(
+        db, user_id, item, qty, {**(context or {}), "charged_sc": total})
     return {"ok": True, "item_code": item_code, "qty": qty, "total_sc": total, "effect": effect}
 
 

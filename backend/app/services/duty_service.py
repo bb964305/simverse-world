@@ -246,7 +246,12 @@ async def _work_shop_keeper(db, resident) -> str | None:
     from app.models.shop import Item
     from app.services.bulletin_service import create_post
 
-    items = (await db.execute(select(Item).where(Item.active.is_(True)))).scalars().all()
+    # M-A C4:商队进口货不归杂货铺管——它对玩家目录不可见(shop_service.IMPORT_KIND),
+    # 补货公告会把玩家引向一件买不到的商品,调价也会漂移商队定价。
+    from app.services.shop_service import IMPORT_KIND
+    items = (await db.execute(
+        select(Item).where(Item.active.is_(True), Item.kind != IMPORT_KIND)
+    )).scalars().all()
     if not items:
         return None
     item = random.choice(items)
@@ -407,11 +412,13 @@ async def _maybe_list_resident_work(
         db.add(Item(
             code=code, kind="resident_work", name=name, description=description,
             icon=icon, price_sc=settings.npc_work_item_price_sc,
-            payload_json=payload, active=True,
+            payload_json=payload, stock=settings.npc_work_item_stock, active=True,
         ))
     else:
         existing.active = True
         existing.payload_json = payload
+        # M-A 加固:列是真相(payload 里那份退化成镜像),上架/复活都要写。
+        existing.stock = settings.npc_work_item_stock
         existing.price_sc = settings.npc_work_item_price_sc
     await db.commit()
     await _feed(resident.slug, "work_listed", {"item_code": code})

@@ -8,6 +8,7 @@ every API worker's sockets over Redis pub/sub.
 import asyncio
 import logging
 
+from app.config import settings
 from app.database import async_session
 from app.services.world_event_service import flip_active_events, write_collective_memories
 from app.tasks.loop_heartbeat import beat
@@ -40,6 +41,30 @@ async def event_cron_loop():
                             await write_collective_memories(db, event)
                         except Exception:
                             logger.warning("collective memory write failed", exc_info=True)
+                        # M-A C4: 集市日开场 = 外来商队进镇。判据(market_day,与
+                        # shop_service._market_discount 同源)留在调用点,服务只管
+                        # 到访本身;双闸关 = 连 import 都不做,零 DB 触碰。
+                        if (settings.npc_economy_enabled and settings.caravan_enabled
+                                and (event.get("payload_json") or {}).get("market_day")):
+                            try:
+                                from app.services.caravan_service import run_caravan_visit
+                                visit = await run_caravan_visit(db, event)
+                                if visit["bought"] or visit["fee"] or visit["imported"]:
+                                    logger.info(
+                                        "Event cron: caravan bought=%d spent=%d tax=%d "
+                                        "fee=%d imported=%d",
+                                        visit["bought"], visit["spent"], visit["tax"],
+                                        visit["fee"], visit["imported"])
+                            except Exception:
+                                logger.warning("C4 caravan visit step failed", exc_info=True)
+                                # 这一轮的 session 下面还要给 C3/E3 用：写了半截不
+                                # 回滚，PendingRollbackError 会顺着传染并被误算到
+                                # 那两段头上（同 :69-77 踩过的坑）。
+                                try:
+                                    await db.rollback()
+                                except Exception:
+                                    logger.warning("C4 step rollback itself failed",
+                                                   exc_info=True)
                     # M3 F3.3: a public lecture ending spawns a resident debate.
                     if phase == "end":
                         try:
