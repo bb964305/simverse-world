@@ -183,3 +183,39 @@ async def test_propose_is_rate_limited(client, db_session):
              for i in range(limit + 1)]
     assert codes[:limit] == [200] * limit, f"限额内不该被挡:{codes}"
     assert codes[limit] == 429, f"超出限额必须 429:{codes}"
+
+
+@pytest.mark.anyio
+async def test_propose_rejects_out_of_range_voting_window(client, db_session):
+    """``days`` 没有上下界 = 一个 Bearer token 就能把截止日推到几千年后。
+
+    与 topic / label 同一条理由,而且更硬:这个数不只落进 polls 表,它经
+    ``civic_service.propose`` 的开票公告变成一句写死的倒计时,再由
+    ``broadcast_civic_memory`` 落成全镇的**持久记忆**——写进去就擦不掉。
+
+    两个坏值形状不同,都要挡:
+
+    - 约 291.5 万天之后 ``datetime.now(UTC) + timedelta(days=...)`` 直接
+      ``OverflowError``(date value out of range),入口不拦就是一个 500。
+    - 40 万天**不抛异常**,更阴:悄悄开出一张 3121 年才截止的公投,``close_due_polls``
+      永远等不到它,那条记忆就永久挂在每位居民的「## 记忆」里。
+
+    下界同理:``days<=0`` 开出来的票当场就已经过期。
+    """
+    from app.routers.polls import POLL_DAYS_MAX
+
+    auth = {"Authorization": f"Bearer {await _token(db_session, 'p3@t.co')}"}
+
+    async def _post(days):
+        return (await client.post("/polls/propose", headers=auth,
+                                  json={**_body(), "days": days})).status_code
+
+    assert await _post(3_000_000) == 422, "会撞 OverflowError 的值必须挡在入口"
+    assert await _post(400_000) == 422, "不抛异常但永不结票的值同样要挡"
+    assert await _post(0) == 422, "当场就截止的公投不是公投"
+    assert await _post(-1) == 422, "开出来就已经过期"
+
+    assert await _post(POLL_DAYS_MAX) == 200, "顶格的合法窗口必须收得下"
+    assert (await client.post("/polls/propose", headers=auth,
+                              json=_body())).status_code == 200, \
+        "不传 days 仍走 settings.civic_poll_days 默认"
