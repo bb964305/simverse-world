@@ -1,4 +1,5 @@
 from app.models.resident import Resident
+from app.services.policy_labels import policy_label
 
 
 def format_memory_context(ctx: dict) -> str:
@@ -36,17 +37,6 @@ def format_memory_context(ctx: dict) -> str:
 
     return "\n".join(sections) if sections else ""
 
-
-#: 政策键 → 对话里说得出口的中文标签。政策目录本身只有英文键(那是 API / 前端
-#: 的口径),照搬进 prompt 会让 NPC 学着复读 ``tax_rate`` 这种词。
-_POLICY_LABELS = {
-    "tax_rate": "税率",
-    "business_hours": "营业时间",
-    "curfew_hours": "宵禁",
-    "npc_default_wage_sc": "基础工钱",
-    "market_day_discount": "集市日售价",
-    "medical_subsidy_sc": "医疗补贴",
-}
 
 #: world_clock.world_weekday() 是 Mon=0 .. Sun=6。
 _WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
@@ -104,7 +94,7 @@ def format_town_facts(facts: dict) -> str:
         lines.append("镇上的营生分工：" + "、".join(
             f"{d['name']}（{d['title']}）" for d in duties))
 
-    policies = [f"{_POLICY_LABELS.get(k, k)} {_policy_text(k, v)}"
+    policies = [f"{policy_label(k)} {_policy_text(k, v)}"
                 for k, v in (facts.get("policies") or {}).items() if v is not None]
     if policies:
         lines.append("现行的规矩：" + "；".join(policies))

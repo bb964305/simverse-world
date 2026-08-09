@@ -342,6 +342,24 @@ async def _seed_town(db) -> None:
     await _elect(db, _MAYOR_SLUG)
 
 
+async def _open_policy_amend_poll(db, key: str = "tax_rate", value=0.05) -> None:
+    """真开一张**政策修正**公投,question 由生产代码现造。
+
+    手写一张 ``Poll(question="是否…")`` 证明不了什么:生产的公投标题有两个来源,
+    另一个是 ``PolicyService._open_amend_poll`` —— 它把**原始政策键**拼进标题
+    (``将「tax_rate」调整为 0.05``),而那条标题经 ``DECIDE_FACT_KEYS`` 的
+    ``open_polls`` 直通 decide prompt,一头撞上 K4 的 ``"tax" not in blob.lower()``。
+    2026-08-09 生产正开着的就是这一张(税率 → 0.05,08-11 12:30 UTC 截止)。
+
+    所以这里必须**真走那条构造路径**,不能替它写一个「看起来差不多」的标题。
+    """
+    from app.services.policy_service import PolicyService, TIER_SIMPLE_MAJORITY
+
+    await PolicyService(db)._open_amend_poll(
+        key, value, tier=TIER_SIMPLE_MAJORITY, threshold=0.5, quorum=False,
+        author="admin:1", origin="admin")
+
+
 # ── decide 接线 ─────────────────────────────────────────────────────────
 
 def test_town_facts_is_keyword_only_on_build_decision_prompt():
@@ -397,17 +415,30 @@ async def test_decide_prompt_carries_trimmed_subset(db_session, facts_on, monkey
 @pytest.mark.anyio
 async def test_decide_prompt_never_mentions_town_finance(db_session, facts_on, monkeypatch):
     """K4 硬断言:tests/test_treasury_service.py:849-851 钉死的四类财政串,一个都
-    不许出现在决策 prompt 全文里 —— 所以政策与镇库整段不进这条链路。"""
+    不许出现在决策 prompt 全文里 —— 所以政策与镇库整段不进这条链路。
+
+    世界里**真开着一张政策修正公投**(见 ``_open_policy_amend_poll``)。这一条是
+    整条断言链的成立前提:``open_polls`` 在 ``DECIDE_FACT_KEYS`` 里,一张都没有的
+    世界能让下面每一行都空转着变绿 —— 生产 08-11 截止的那张税率公决恰好证明「一
+    张都没有」不是常态。
+    """
     monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "civic_polls_enabled", True)
     await _seed_town(db_session)
+    await _open_policy_amend_poll(db_session)
 
     blob = await _decide_blob(
         db_session, _db_resident("chen-tiesheng", "陈铁生"), monkeypatch)
 
+    assert "镇上正在议的事" in blob, "公投段没渲染出来,下面的断言全是空转的"
     assert "tax" not in blob.lower()
+    assert "tax_rate" not in blob, "原始政策键经公投标题直通了决策 prompt"
     assert "town_treasury" not in blob and "镇财政" not in blob
     assert str(_TREASURY_SC) not in blob, "镇库余额数字漏进了决策 prompt"
-    assert "税率" not in blob and "镇库" not in blob
+    # 政策段与镇库段整段不进这条链路。查渲染形状(段首 + 标签值)而不是「税率」二字:
+    # 「将「税率」调整为 …」是一张在议公投的标题,它进 decide 是设计如此。
+    assert "现行的规矩" not in blob and "税率 5%" not in blob
+    assert "镇库" not in blob
     assert "你自己的营生" not in blob, "self 不在 DECIDE_FACT_KEYS 里"
 
 

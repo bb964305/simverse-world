@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.policy import Policy
 from app.services.config_service import ConfigService
+from app.services.policy_labels import policy_label
 
 logger = logging.getLogger(__name__)
 
@@ -442,7 +443,10 @@ class PolicyService:
         from sqlalchemy.orm.attributes import flag_modified
         from app.services import civic_service
 
-        label = f"将「{key}」调整为 {json.dumps(new_value, ensure_ascii=False)}"
+        # 标题走中文标签,绝不用原始键:它经 town_facts_service 进每位 NPC 的
+        # decide prompt(K4 禁 ``tax``),又经 _clerk_announce 广播成全镇的持久记忆。
+        label = (f"将「{policy_label(key)}」调整为 "
+                 f"{json.dumps(new_value, ensure_ascii=False)}")
         poll = await civic_service.propose(
             self._db,
             label,

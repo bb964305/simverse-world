@@ -205,6 +205,53 @@ async def test_open_polls_are_sanitized(db_session, facts_on):
         assert leaked not in blob, f"{leaked} 泄漏进了事实层"
 
 
+@pytest.mark.anyio
+async def test_open_polls_fold_raw_policy_keys_into_spoken_labels(db_session, facts_on):
+    """存量公投标题里的**原始政策键**必须在出网前折成中文标签。
+
+    ``policy_service._open_amend_poll`` 造的标题形如 ``将「tax_rate」调整为 0.05``
+    —— 生产 2026-08-09 正开着这一张(08-11 12:30 UTC 截止)。写侧改口只治得了新
+    数据,**库里已经开着的那张改不了**,而它经 ``DECIDE_FACT_KEYS`` 的 ``open_polls``
+    直通 decide prompt,一头撞上 K4 的 ``"tax" not in blob.lower()``。所以这道折叠
+    的位置只能是读侧,写侧那道是顺带治本。
+    """
+    db_session.add(Poll(
+        question="将「tax_rate」调整为 0.05",
+        options_json=[{"label": "赞成"}, {"label": "反对"}],
+        closes_at=datetime.now(UTC) + timedelta(days=2), status="open",
+    ))
+    await db_session.commit()
+
+    open_polls = (await tfs.get_town_facts_cached(db_session))["open_polls"]
+    assert open_polls[0]["question"] == "将「税率」调整为 0.05"
+    assert "tax" not in json.dumps(open_polls, ensure_ascii=False).lower()
+
+
+#: 投票档的政策键(``propose_amend`` 会把它们逐字拼进公投标题)。取五个是因为
+#: ``OPEN_POLLS_LIMIT`` 只放五张进来 —— 造六张就会有一张因为被截掉而「不漏」。
+_VOTE_TIER_KEYS = ("business_hours", "curfew_hours", "npc_default_wage_sc",
+                   "election_interval_days", "housing_development_scale")
+
+
+@pytest.mark.anyio
+async def test_open_polls_fold_every_vote_tier_policy_key(db_session, facts_on):
+    """折叠表不能只认 ``tax_rate`` —— 任何投票档的政策键都能被 ``propose_amend``
+    拼进公投标题,漏一个就是漏一条英文键进 prompt。"""
+    now = datetime.now(UTC)
+    db_session.add_all([
+        Poll(question=f"将「{key}」调整为 1", options_json=[{"label": "赞成"}],
+             closes_at=now + timedelta(minutes=i), status="open")
+        for i, key in enumerate(_VOTE_TIER_KEYS)
+    ])
+    await db_session.commit()
+
+    open_polls = (await tfs.get_town_facts_cached(db_session))["open_polls"]
+    assert len(open_polls) == len(_VOTE_TIER_KEYS), "五张都要在,否则这条断言是空转的"
+    blob = json.dumps(open_polls, ensure_ascii=False)
+    for key in _VOTE_TIER_KEYS:
+        assert key not in blob, f"{key} 的英文键名经公投标题漏进了事实层"
+
+
 # ── 今天 ────────────────────────────────────────────────────────────────
 
 @pytest.mark.anyio

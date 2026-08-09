@@ -54,6 +54,7 @@ from app.models.season import Poll
 from app.observability import CIVIC_FACTS_FAILOPEN
 from app.services import duty_service, election_service, treasury_service
 from app.services.opinion_service import OpinionService
+from app.services.policy_labels import scrub_policy_keys
 from app.services.policy_service import PolicyService, catalog_default
 from app.services.world_event_service import get_active_events_cached
 
@@ -174,12 +175,19 @@ async def _read_treasury(db: AsyncSession) -> int | None:
 
 async def _read_open_polls(db: AsyncSession) -> list[dict]:
     """进行中的公投。只出 question / options(仅 label) / closes_at —— 见模块
-    docstring 的出网净化条款。按截止时间排序,最先截止的排前面。"""
+    docstring 的出网净化条款。按截止时间排序,最先截止的排前面。
+
+    ``question`` 出网前折一道原始政策键(``scrub_policy_keys``)。
+    ``policy_service._open_amend_poll`` 造的标题里嵌着英文键
+    (``将「tax_rate」调整为 0.05``,生产 08-11 截止的那张就是),而这条链路经
+    ``DECIDE_FACT_KEYS`` 直通 decide prompt,撞 K4 的 ``"tax" not in blob.lower()``。
+    写侧同一道折叠治新数据,**已落库的标题只有这里够得着**。
+    """
     polls = (await db.execute(
         select(Poll).where(Poll.status == "open").order_by(Poll.closes_at)
     )).scalars().all()
     return [{
-        "question": p.question,
+        "question": scrub_policy_keys(p.question),
         "options": [o["label"] for o in (p.options_json or [])
                     if isinstance(o, dict) and o.get("label")],
         "closes_at": p.closes_at.isoformat() if p.closes_at else None,
