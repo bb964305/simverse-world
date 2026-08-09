@@ -21,6 +21,13 @@ class Item(Base):
     icon: Mapped[str] = mapped_column(String(20), default="📦")
     price_sc: Mapped[int] = mapped_column(Integer, default=0)
     payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    # M-A 加固:库存从 payload_json 抬成真列,扣减才能走
+    # ``UPDATE ... WHERE stock >= qty`` 的守卫 —— payload_json 是 JSON 列,判据
+    # 写不进 WHERE,只能读-改-写,cron 与玩家撞上同一行就超卖(见
+    # app/services/item_stock.py)。
+    # nullable:绝大多数商品(consumable/gift/decor/tip)没有库存概念,
+    # NULL = 不计库存;只有 resident_work / import_good 有值。
+    stock: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
