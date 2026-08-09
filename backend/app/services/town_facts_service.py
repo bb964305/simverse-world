@@ -21,6 +21,10 @@
 ``civic_facts_enabled`` 关 → 返回 ``{}``(空字典是 falsy,下游一律「没有事实就
 不多写一个字」)。
 
+``build_town_facts(db, resident)`` 在这份公共快照之上再挂一段 per-resident 的
+``"self"``(营生 + 议题立场),排在键序最后。那一段**绝不进缓存**,理由见下面第
+三条。
+
 三条设计约束
 ------------
 - **出网净化**:公投只出 question / options(仅 label) / closes_at。
@@ -49,6 +53,7 @@ from app.models.resident import Resident
 from app.models.season import Poll
 from app.observability import CIVIC_FACTS_FAILOPEN
 from app.services import duty_service, election_service, treasury_service
+from app.services.opinion_service import OpinionService
 from app.services.policy_service import PolicyService, catalog_default
 from app.services.world_event_service import get_active_events_cached
 
@@ -65,6 +70,19 @@ POLICY_WHITELIST = (
 #: decide prompt 只拿这几类(K4:政策与镇库一律不进 decide —— 那条链路有
 #: 「全文不得出现 tax / town_treasury / 镇财政 / 余额数字」的既有硬断言)。
 DECIDE_FACT_KEYS = ("mayor", "today", "open_polls", "places")
+
+#: 自身事实里最多带几条议题立场。生产一个居民同时挂着的议题不多,3 条足够表达
+#: 「他最近在意什么」,再多就是拿 prompt 预算换边际信息。
+SELF_STANCE_LIMIT = 3
+
+#: ``issue_key`` 是自由文本 ``String(300)``,原样折进去一条就能吃掉四分之一的
+#: 段落预算(S11 的硬上限是 1200 字符)。
+_ISSUE_MAX_CHARS = 30
+
+#: ``stance ∈ [-1, 1]`` 的定性分档。**数值本身永不进 prompt** —— spec §2 的非目标
+#: 与 civic_service.py:644 的既有设计约束(探针数值不给 NPC 看)是同一条。
+_STANCE_SUPPORT = 0.2
+_STANCE_OPPOSE = -0.2
 
 #: ``ts`` 兼两职:TTL 计时起点,以及有界 fail-open 的陈旧度基准。只有**取数成功**
 #: 才会推进它 —— 失败时不推,否则一次故障就能把旧快照的寿命无限续下去。
@@ -206,6 +224,49 @@ _SECTIONS: tuple[tuple[str, Callable[[AsyncSession], Awaitable]], ...] = (
 )
 
 
+# ── 自身事实(per-resident,永不进共享快照) ───────────────────────────────
+
+def _stance_label(stance: float) -> str:
+    """立场数值 → 说得出口的态度。阈值两侧之间一律读作「中立」:0.05 与 -0.05 的
+    差别对一句对话毫无意义,却会让 NPC 每次微漂移都改口。"""
+    if stance > _STANCE_SUPPORT:
+        return "支持"
+    if stance < _STANCE_OPPOSE:
+        return "反对"
+    return "中立"
+
+
+def _clip_issue(issue_key: str) -> str:
+    """议题键出网前截断(见 ``_ISSUE_MAX_CHARS``)。"""
+    text = (issue_key or "").strip()
+    return text if len(text) <= _ISSUE_MAX_CHARS else text[:_ISSUE_MAX_CHARS - 1] + "…"
+
+
+async def _collect_self(db: AsyncSession, resident) -> dict:
+    """「关于你自己的事实」:营生 + 最近的议题立场。
+
+    M5:``duty_title`` 只是标签,真正可对话的事实在 ``duty_hint``。取
+    ``get_duty()`` 里的 ``prompt_hint`` **原文** —— 不走 ``duty_service.prompt_hint()``,
+    它带 ``\\n`` 前缀和 decide 口吻,那是给决策 prompt 拼的。
+
+    M6:立场读侧本身没有闸门,这里替它定义语义 —— ``polis_opinion_enabled`` 关
+    的世界里舆论动力学压根没在跑,表里剩的是上一纪元的残值,不能拿去当「他现在
+    的态度」。闸关顺带省掉这一次查询。
+    """
+    duty = duty_service.get_duty(resident)
+    stances: list[dict] = []
+    if settings.polis_opinion_enabled:
+        rows = await OpinionService(db).list_stances(
+            resident.slug, limit=SELF_STANCE_LIMIT)
+        stances = [{"issue": _clip_issue(key), "label": _stance_label(stance)}
+                   for key, stance in rows]
+    return {
+        "duty_title": duty.get("title"),
+        "duty_hint": duty.get("prompt_hint"),
+        "stances": stances,
+    }
+
+
 # ── 公开 API ────────────────────────────────────────────────────────────
 
 async def _collect_public_facts(db: AsyncSession) -> dict:
@@ -220,18 +281,23 @@ async def _collect_public_facts(db: AsyncSession) -> dict:
     return facts
 
 
-def _fail_open(now: float, reason: str) -> dict:
-    """有界 fail-open:陈旧上限内回落旧快照,超了就交白卷。"""
-    max_stale = settings.civic_facts_max_stale_seconds
-    fresh_enough = (_cache["ts"] > 0.0 and bool(_cache["facts"])
-                    and now - _cache["ts"] <= max_stale)
+def _note_failopen(reason: str, served: str) -> None:
+    """记一笔 fail-open。``reason`` 的取值域 = 各 section 名 + ``self`` + ``unknown``。"""
     try:
         CIVIC_FACTS_FAILOPEN.labels(reason=reason).inc()
     except Exception:  # pragma: no cover - 指标永远不该反过来打断调用方
         logger.debug("CIVIC_FACTS_FAILOPEN counter failed", exc_info=True)
     # 固定前缀便于 grep:agent-worker 侧没有 /metrics,日志是它唯一的可观测面。
-    logger.warning("CIVIC_FACTS_FAILOPEN reason=%s served=%s", reason,
-                   "stale" if fresh_enough else "empty", exc_info=True)
+    logger.warning("CIVIC_FACTS_FAILOPEN reason=%s served=%s", reason, served,
+                   exc_info=True)
+
+
+def _fail_open(now: float, reason: str) -> dict:
+    """有界 fail-open:陈旧上限内回落旧快照,超了就交白卷。"""
+    max_stale = settings.civic_facts_max_stale_seconds
+    fresh_enough = (_cache["ts"] > 0.0 and bool(_cache["facts"])
+                    and now - _cache["ts"] <= max_stale)
+    _note_failopen(reason, "stale" if fresh_enough else "empty")
     return _cache["facts"] if fresh_enough else {}
 
 
@@ -258,3 +324,25 @@ async def get_town_facts_cached(db: AsyncSession) -> dict:
     _cache["ts"] = now
     _cache["facts"] = facts
     return facts
+
+
+async def build_town_facts(db: AsyncSession, resident=None) -> dict:
+    """一位居民眼里的「小镇现况」= 公共快照 + 他自己那一段。**本层不进缓存**。
+
+    B3:两层 API 是硬要求,不是洁癖。公共快照是模块级的,一个 uvicorn worker 内
+    所有会话共用同一份 —— 把 per-resident 的 ``self`` 原地塞进去,下一个来聊天的
+    人就会拿着别人的营生和立场开口。所以这里只 ``{**public, ...}`` 出一份新字典,
+    共享那份始终只有公共的 7 类。
+
+    ``resident=None``(NPC↔NPC、或调用方压根不关心自身事实)与闸关(``public``
+    为空)都直接返回公共部分:闸门关着还硬贴一段自身事实,等于绕过闸门。
+    """
+    public = await get_town_facts_cached(db)
+    if resident is None or not public:
+        return public
+    try:
+        return {**public, "self": await _collect_self(db, resident)}
+    except Exception:
+        # 自身事实取不到不该连累公共事实:少一段,总好过整段哑掉。
+        _note_failopen("self", "public")
+        return public

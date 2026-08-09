@@ -85,6 +85,7 @@ def format_town_facts(facts: dict) -> str:
     **缺键必须整段跳过**:decide 侧只传 ``DECIDE_FACT_KEYS`` 的裁剪子集(没有
     policies / treasury_sc),这里不能 KeyError。而 ``mayor: None`` 与「压根没有
     mayor 这个键」语义不同 —— 前者要明说空缺,后者是这条链路不谈镇长。
+    ``self``(S4 的自身事实)同理:没有这个键 = 这次不谈「你自己」。
     """
     if not facts:
         return ""
@@ -133,6 +134,21 @@ def format_town_facts(facts: dict) -> str:
     places = facts.get("places") or []
     if places:
         lines.append("小镇的公共去处：" + "、".join(places))
+
+    # 自身事实(S4)排在最后:先把公共的说完,再说「关于你自己」。这一段只有
+    # build_town_facts(db, resident) 才会带上,公共快照与 decide 的裁剪子集都没有。
+    me = facts.get("self") or {}
+    duty_title, duty_hint = me.get("duty_title"), me.get("duty_hint")
+    if duty_title or duty_hint:
+        # hint 原文才是可对话的事实(M5),title 只是个能报得出口的名头。
+        lines.append((f"你自己的营生：{duty_title}。" if duty_title else "")
+                     + (duty_hint or ""))
+
+    stances = me.get("stances") or []
+    if stances:
+        # 只出定性措辞。立场数值是探针,永不进 prompt(spec §2 非目标)。
+        lines.append("你对镇上议题的态度：" + "；".join(
+            f"「{s.get('issue', '')}」{s.get('label', '')}" for s in stances))
 
     return "\n".join(lines)
 
