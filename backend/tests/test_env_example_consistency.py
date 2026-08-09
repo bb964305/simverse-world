@@ -264,6 +264,26 @@ def test_roster_guard_sql_covers_both_deletion_branches():
         f"{missing_roster}")
 
 
+#: world_event 记忆分档的旋钮前缀。**不挂到 `GOVERNANCE_PREFIXES` 上**——那个元组
+#: 的语义是「政治层三条线」,而这批是拟真层(`REALISM_INFO_*` 的同族);但「两份模板
+#: 别漂」这件事两边一样需要,所以这里单开一条同形状的断言。
+#:
+#: 没有它,本批就落进 07-27B 审计 H2 那个事故级问题类:`REALISM_` 不在
+#: `GOVERNANCE_PREFIXES` 里 → 下面那条 parity **扫不到**本批的键 → 运维照 deploy
+#: 模板起的环境读不到它们。
+EVENT_MEMORY_TIER_PREFIX = "REALISM_EVENT_MEMORY_"
+
+
+def test_event_memory_tier_knobs_exist_in_deploy_env_example_too():
+    """world_event 记忆分档的旋钮必须同时出现在两份 env 参考里。"""
+    backend_keys = {k for k in _raw_keys(ENV_EXAMPLE)
+                    if k.startswith(EVENT_MEMORY_TIER_PREFIX)}
+    assert backend_keys, "backend/.env.example 里没有任何分档旋钮?基线认知错误"
+    missing = sorted(backend_keys - _raw_keys(DEPLOY_ENV_EXAMPLE))
+    assert not missing, (
+        f"deploy/backend/.env.example 缺 world_event 记忆分档旋钮(补上并保持默认关): {missing}")
+
+
 def test_governance_knobs_exist_in_deploy_env_example_too():
     """F1/F2/F3 的旋钮必须同时出现在两份 env 参考里。
 
