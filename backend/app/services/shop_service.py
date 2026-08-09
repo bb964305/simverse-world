@@ -104,7 +104,11 @@ async def purchase(
     ))
     await db.commit()
 
-    effect = await apply_effect(db, user_id, item, qty, context)
+    # M-A 加固:守卫扣库存零行(并发售罄)时 effect 要原路退款,退的必须是**实付
+    # 额** —— 集市日打过折,退牌价就是凭空印钱。这里传的是入参的浅拷贝,不动调用
+    # 方的 dict,也不动已经落库的 Purchase.context_json。
+    effect = await apply_effect(
+        db, user_id, item, qty, {**(context or {}), "charged_sc": total})
     return {"ok": True, "item_code": item_code, "qty": qty, "total_sc": total, "effect": effect}
 
 

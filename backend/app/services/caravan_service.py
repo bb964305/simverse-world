@@ -140,21 +140,20 @@ async def _buy_one(db: AsyncSession, code: str, creator_slug: str | None,
         return 0
 
     price = item.price_sc
+    # M-A 加固:库存守卫先行 —— 抢不到货(玩家刚买走最后一件)就一分钱都不动。
+    # 这里**还什么都没写**,直接返回,不 rollback(rollback 会 expire 整个
+    # session,treasury_service 模块头军规 2)。
+    from app.services import item_stock
+    if await item_stock.take_stock(db, item, 1) is None:
+        logger.info("caravan lost the race for %s (sold out under the guard)", code)
+        return 0
+
     cut = await treasury_service.skim_tax_pending(
         db, price, settings.town_tax_rate_sales, f"caravan_tax:{code}")
     earned = price - cut
     if earned > 0:
         await coin_service.treasury_credit_pending(
             db, creator.slug, earned, reason=f"caravan_bought:{code}")
-
-    # 库存扣减:payload_json 没有 mutable 跟踪(app/models/shop.py:23),就地改会被
-    # 静默丢弃 —— 整段镜像 shop_effects.py:330-348 的"拷贝→改→整体重赋值"。
-    payload = dict(item.payload_json or {})
-    stock = int(payload.get("stock", 1)) - 1
-    payload["stock"] = max(0, stock)
-    item.payload_json = payload
-    if stock <= 0:
-        item.active = False
 
     # 钱包缓存(prompt 读的那份)——事务内 SELECT 看得到自己尚未 commit 的改动。
     set_wallet_cache(db, creator, await coin_service.treasury_balance(db, creator.slug))
@@ -194,10 +193,12 @@ async def _stock_import_goods(db: AsyncSession) -> int:
         existing = (await db.execute(
             select(Item).where(Item.code == d["code"]))).scalar_one_or_none()
         if existing is None:
-            db.add(Item(**d, kind=IMPORT_KIND, payload_json=dict(payload), active=True))
+            db.add(Item(**d, kind=IMPORT_KIND, payload_json=dict(payload),
+                        stock=IMPORT_STOCK, active=True))
         else:
             existing.active = True
             existing.payload_json = dict(payload)
+            existing.stock = IMPORT_STOCK   # M-A 加固:列是真相,payload 是镜像
             existing.price_sc = d["price_sc"]
     await db.commit()
     return len(IMPORT_DEFS)

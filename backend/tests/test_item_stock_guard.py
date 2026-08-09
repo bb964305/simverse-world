@@ -227,3 +227,137 @@ async def test_two_sessions_oversell_when_the_guard_is_off(sessions, guard_off):
         await db2.commit()
 
     assert (got1, got2) == (0, 0)         # 两边都"卖成了":一件货卖了两次
+
+
+# --------------------------------------------------------------------------- #
+# 4. 跨路径:cron(商队) vs 玩家购买                                              #
+# --------------------------------------------------------------------------- #
+
+def _player(uid="u-1", balance=0):
+    from app.models.user import User
+    return User(id=uid, name="玩家", email=f"{uid}@example.com",
+                hashed_password="x", soul_coin_balance=balance)
+
+
+def _maker():
+    from app.models.resident import Resident
+    return Resident(id="r-1", slug="maker", name="陶匠", district="free",
+                    status="idle", resident_type="npc")
+
+
+@pytest.fixture
+def caravan_on(monkeypatch):
+    """商队闸开、镇库关(销售税另有闸,这里只验库存与货款)。"""
+    from app.services import feed_service
+
+    monkeypatch.setattr(settings, "npc_economy_enabled", True)
+    monkeypatch.setattr(settings, "caravan_enabled", True)
+    monkeypatch.setattr(settings, "town_treasury_enabled", False)
+    monkeypatch.setattr(settings, "polis_policy_enabled", False)
+
+    async def _no_feed(*a, **kw):
+        return None
+
+    monkeypatch.setattr(feed_service, "push", _no_feed)
+    return settings
+
+
+async def test_caravan_and_player_cannot_oversell_the_last_copy(
+    sessions, guard_on, caravan_on,
+):
+    """商队(cron)与玩家(API)抢同一件 stock=1 的作品:只准成交一次。
+
+    玩家侧刻意在商队动手**之前**就把 item 读到手 —— 这不是测试造的场景,
+    `shop_service.purchase` 就是先 SELECT item、扣款、commit,再把那个对象交给
+    effect(shop_service.py:85/107)。
+
+    旧路径下两边都会成交:作者收两份货款、一件货卖两次。
+    """
+    from app.models.resident_treasury import ResidentTreasury
+    from app.models.user import User
+    from app.services import caravan_service, coin_service, shop_effects
+
+    await _seed(sessions, _work(stock=1), _maker(),
+                ResidentTreasury(resident_slug="maker", balance_sc=0), _player())
+
+    summary = {"bought": 0, "spent": 0, "tax": 0}
+    async with sessions() as db_player:
+        item_p = await _load(db_player)
+
+        async with sessions() as db_cron:          # 商队抢先买走最后一件
+            spent = await caravan_service._buy_one(db_cron, "work_a", "maker", summary)
+        assert spent == 15
+
+        effect = await shop_effects._resident_work_effect(
+            db_player, "u-1", item_p, 1, {"charged_sc": 15})
+
+    assert effect is not None
+    assert effect.get("sold_out") is True
+    assert effect["refunded_sc"] == 15             # 玩家原路拿回实付额
+
+    async with sessions() as db:
+        assert await coin_service.treasury_balance(db, "maker") == 15   # 只收一份
+        row = await _load(db)
+        player = (await db.execute(select(User).where(User.id == "u-1"))).scalar_one()
+    assert row.stock == 0
+    assert row.active is False
+    assert player.soul_coin_balance == 15          # 退款落库
+
+
+async def test_player_refund_returns_the_paid_price_not_the_list_price(
+    sessions, guard_on, monkeypatch,
+):
+    """集市日打过折的单子售罄退款只能退**实付额** —— 退牌价就是凭空印钱。"""
+    from app.models.user import User
+    from app.services import shop_effects
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", False)
+    await _seed(sessions, _work(stock=1), _player())
+
+    async with sessions() as db:                   # 先让它售罄
+        await item_stock.take_stock(db, await _load(db), 1)
+        await db.commit()
+
+    async with sessions() as db:
+        effect = await shop_effects._resident_work_effect(
+            db, "u-1", await _load(db), 1, {"charged_sc": 14})   # 15 × 0.9 → 14
+    assert effect["refunded_sc"] == 14
+
+    async with sessions() as db:
+        user = (await db.execute(select(User).where(User.id == "u-1"))).scalar_one()
+    assert user.soul_coin_balance == 14
+
+
+async def test_purchase_hands_the_charged_price_to_the_effect(sessions, guard_on,
+                                                              monkeypatch):
+    """shop_service.purchase 必须把**实付额**递进 effect 的 context ——
+    否则退款那一支只能退牌价,集市日就成了印钞机。"""
+    from app.models.user import User
+    from app.services import shop_service
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", False)
+    monkeypatch.setattr(settings, "npc_economy_enabled", True)
+    monkeypatch.setattr(settings, "market_day_discount", 0.9)
+    seen: dict = {}
+
+    async def _spy(db, user_id, item, qty, context):
+        seen.update(context or {})
+        return None
+
+    monkeypatch.setattr(shop_service, "apply_effect", _spy)
+
+    async def _market_day(db):
+        return 0.9
+
+    monkeypatch.setattr(shop_service, "_market_discount", _market_day)
+    await _seed(sessions, _work(stock=3, price=30), _player(balance=100))
+
+    async with sessions() as db:
+        out = await shop_service.purchase(db, "u-1", "work_a", 1)
+
+    assert out["total_sc"] == 27                   # 30 × 0.9
+    assert seen.get("charged_sc") == 27
+
+    async with sessions() as db:
+        user = (await db.execute(select(User).where(User.id == "u-1"))).scalar_one()
+    assert user.soul_coin_balance == 73

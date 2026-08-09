@@ -332,6 +332,20 @@ async def _resident_work_effect(db, user_id, item, qty, context):
         return None
 
     gross = item.price_sc * qty
+    # M-A 加固:库存守卫必须**先于**任何钱动作 —— 抢不到货就不能给作者付款。
+    # 玩家的钱已经在 shop_service.purchase 里扣过了(先 charge 后 effect),所以
+    # 这一支只能原路退款;退的是**实付额**(集市日打过折),退牌价等于凭空印钱。
+    from app.services import item_stock
+    remaining = await item_stock.take_stock(db, item, qty)
+    if remaining is None:
+        refund = int((context or {}).get("charged_sc") or gross)
+        await coin_service.reward(db, user_id, refund, f"sold_out_refund:{item.code}")
+        logger.info("resident_work %s sold out under the stock guard, refunded %d SC",
+                    item.code, refund)
+        return {"resident_work": item.code, "creator_slug": creator_slug,
+                "sold_out": True, "refunded_sc": refund, "earned": 0,
+                "sales_tax": 0, "stock": 0}
+
     # S1-5: the town's primary tax intake — a sales-tax skim off resident-made
     # goods. Gate off → cut == 0 → ``earned`` is the untouched gross (status quo).
     cut = await _skim_town_tax(
@@ -339,12 +353,6 @@ async def _resident_work_effect(db, user_id, item, qty, context):
     earned = gross - cut
     if earned > 0:
         await coin_service.treasury_credit(db, creator_slug, earned, reason=f"work_sold:{item.code}")
-
-    stock = int(payload.get("stock", 1)) - qty
-    payload["stock"] = max(0, stock)
-    item.payload_json = payload
-    if stock <= 0:
-        item.active = False
     await db.commit()
 
     creator = (await db.execute(
@@ -365,4 +373,4 @@ async def _resident_work_effect(db, user_id, item, qty, context):
             logger.warning("resident_work maker memory failed for %s", creator_slug, exc_info=True)
 
     return {"resident_work": item.code, "creator_slug": creator_slug,
-            "earned": earned, "sales_tax": cut, "stock": payload["stock"]}
+            "earned": earned, "sales_tax": cut, "stock": remaining}

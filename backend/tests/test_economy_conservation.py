@@ -73,9 +73,15 @@ async def sessions(tmp_path):
     await engine.dispose()
 
 
-@pytest.fixture
-def all_gates_on(monkeypatch):
-    """M-A 三闸全开 + 镇库在产开着(vm212 现状),政策存储关 → 走 fallback 税率。"""
+@pytest.fixture(params=[False, True], ids=["stock_guard_off", "stock_guard_on"])
+def all_gates_on(monkeypatch, request):
+    """M-A 三闸全开 + 镇库在产开着(vm212 现状),政策存储关 → 走 fallback 税率。
+
+    M-A 加固:整套守恒契约在 `ITEM_STOCK_GUARD_ENABLED` 开/关**两态**下各跑一
+    遍(fixture 参数化)。库存守卫只决定"这一件卖不卖得成",不该改变钱怎么流
+    ——守恒式两态同口径,才说明加固没在账上留下副作用。
+    """
+    monkeypatch.setattr(settings, "item_stock_guard_enabled", request.param)
     monkeypatch.setattr(settings, "npc_economy_enabled", True)
     monkeypatch.setattr(settings, "npc_trade_enabled", True)
     monkeypatch.setattr(settings, "caravan_enabled", True)

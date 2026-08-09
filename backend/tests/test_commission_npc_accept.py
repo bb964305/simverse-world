@@ -43,9 +43,13 @@ def test_migration_single_head_and_chains_onto_054():
     script = ScriptDirectory.from_config(Config(str(ini)))
     heads = script.get_heads()
     assert len(heads) == 1, f"alembic multi-head: {heads}"
-    assert heads == ["055_add_commission_acceptor"]
     rev = script.get_revision("055_add_commission_acceptor")
     assert rev.down_revision == "054_freeze_lab_model_cost_rate"
+    # 055 必须在链上(不是必须是链头)——原来这里断言的是 `heads == ["055..."]`,
+    # 那会让**任何**后续迁移都把这条弄红(M-A 加固的 056 就是第一个)。真正要守的
+    # 是"单头 + 055 挂在 054 上 + 055 仍是 head 的祖先"。
+    assert any(r.revision == "055_add_commission_acceptor"
+               for r in script.iterate_revisions(heads[0], "base"))
 
 
 def test_every_revision_id_fits_alembic_version_column():

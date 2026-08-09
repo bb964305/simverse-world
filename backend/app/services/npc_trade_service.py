@@ -183,6 +183,14 @@ async def _buy(db: AsyncSession, buyer_id: str, buyer_slug: str, offer: dict,
         # ——rollback 会 expire 整个 session(treasury_service 模块头军规 2)。
         return False
 
+    # M-A 加固:库存守卫。买方的钱已经 debit 了(半笔账),抢不到货必须就地
+    # rollback —— 悬挂的 debit 会被下一笔的 commit 带落库。
+    from app.services import item_stock
+    if await item_stock.take_stock(db, item, 1) is None:
+        await db.rollback()
+        logger.info("npc_trade lost the race for %s (sold out under the guard)", code)
+        return False
+
     cut = 0
     creator = None
     earned = 0
@@ -199,15 +207,6 @@ async def _buy(db: AsyncSession, buyer_id: str, buyer_slug: str, offer: dict,
         if earned > 0:
             await coin_service.treasury_credit_pending(
                 db, creator.slug, earned, reason=f"npc_work_sold:{code}")
-
-    # 库存扣减:payload_json 没有 mutable 跟踪(app/models/shop.py:23),就地改会被
-    # 静默丢弃 —— 整段镜像 shop_effects.py:330-348 的"拷贝→改→整体重赋值"。
-    payload = dict(item.payload_json or {})
-    stock = int(payload.get("stock", 1)) - 1
-    payload["stock"] = max(0, stock)
-    item.payload_json = payload
-    if stock <= 0:
-        item.active = False
 
     # 钱包缓存(prompt 读的那份)——事务内 SELECT 看得到自己尚未 commit 的改动。
     set_wallet_cache(db, buyer, await coin_service.treasury_balance(db, buyer_slug))

@@ -412,11 +412,13 @@ async def _maybe_list_resident_work(
         db.add(Item(
             code=code, kind="resident_work", name=name, description=description,
             icon=icon, price_sc=settings.npc_work_item_price_sc,
-            payload_json=payload, active=True,
+            payload_json=payload, stock=settings.npc_work_item_stock, active=True,
         ))
     else:
         existing.active = True
         existing.payload_json = payload
+        # M-A 加固:列是真相(payload 里那份退化成镜像),上架/复活都要写。
+        existing.stock = settings.npc_work_item_stock
         existing.price_sc = settings.npc_work_item_price_sc
     await db.commit()
     await _feed(resident.slug, "work_listed", {"item_code": code})
