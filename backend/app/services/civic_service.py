@@ -93,11 +93,30 @@ async def propose(
         )).scalar_one_or_none()
         if proposer is not None:
             proposer_line = f"本案由 {proposer.name} 提议。"
+    # 截止日说成**世界轴**的相对倒计时,不写真实轴的绝对日期。
+    #
+    # 这条公告经 _clerk_announce → broadcast_civic_memory 落成全体自治居民的一等
+    # 记忆,而记忆段是不带日期戳的裸 ``- {content}``
+    # (app/llm/prompt.py::format_memory_context)—— 写进去的日期会被原样 retrieve
+    # 回 NPC 的「## 记忆」里,永久有效。``closes_at`` 是真实轴上的时刻,与同一份
+    # prompt 里走 world_clock 的「今天」相隔约两年(k=4):NPC 照字面读 = 这张正在
+    # 议的票两年前就截止了。这与「小镇现况」段修掉的是同一类缺陷,只是落的是永久
+    # 记忆,错得更久。
+    #
+    # 换算(按哪根轴数)与措辞(怎么说)都复用那一批的两个函数,不另起第三份口径。
+    # 函数内 import 沿用本模块既有姿势(见 _clerk_announce):town_facts_service 在
+    # 模块层拉 policy_service / election_service,而那两个模块反过来 import
+    # civic_service —— 只是它们也把 import 放在函数里,模块层拉就会把这个环坐实。
+    from app.llm.prompt import _poll_closes_text
+    from app.services.town_facts_service import _closes_in_world_days
+    # 认不出的形状 → 空串,那就整句不提截止(少半句,不编一个日期)。
+    closes_text = _poll_closes_text(_closes_in_world_days(poll.closes_at))
+    closes_line = f"投票{closes_text}," if closes_text else ""
     await _clerk_announce(
         db,
         f"镇务征询:{topic}",
         f"现就「{topic}」公开征询全镇意见,选项:{'、'.join(o['label'] for o in opts)}。"
-        f"{proposer_line}投票于 {poll.closes_at.date()} 截止,请各位居民踊跃参与。",
+        f"{proposer_line}{closes_line}请各位居民踊跃参与。",
         civic_ref=f"poll_open:{poll.id}",
     )
     return poll
