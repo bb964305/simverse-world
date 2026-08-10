@@ -36,9 +36,21 @@ async def _embed_or_none(content: str, civic_event: str) -> list[float] | None:
     被 patch 的实现、事件循环相关的抛出)。少了它,一次 embedding 抖动会被外层
     那个 ``except`` 逮住并让整轮广播返回 0 —— 镇务记忆写不进去,比没 embedding
     严重得多。fail-open 后 ``embedding IS NULL``,就是改前的行为。
+
+    ``[]`` 与 ``None`` 一律归一成 ``None``。真 provider 到不了空向量那个态
+    (``embedding.py`` 的两条 ``_embed_*`` 都把 falsy 映成 None),但一旦到了后果
+    不对称:PG 下 ``[]`` 灌进 ``vector(1024)`` 会在第一条 ``add_memory`` 抛、被
+    调用方的 ``except`` 吞成**整轮零写入**;sqlite 下落成 ``'[]'`` 则两条兜底都
+    够不着 —— 它不满足 backfill 的 ``embedding.is_(None)``,也不满足零向量清理的
+    ``if mem.embedding``(``[]`` 是 falsy 直接跳过),而 ``_cosine`` 对它照样返回
+    0。等于永久卡死在一个既修不了也用不上的状态。
+
+    算的是**截断前**的 content,而 ``add_memory`` 会把 event 截到
+    ``EVENT_MEMORY_MAX_CHARS``。这是本仓既有口径(``extract_events`` /
+    ``_persist_wrapup_side`` 同样 embed 全文),刻意保持一致而不是各起一份。
     """
     try:
-        return await generate_embedding(content)
+        return (await generate_embedding(content)) or None
     except Exception:
         logger.warning("CIVIC_BROADCAST_EMBED_FAILED civic_event=%s", civic_event,
                        exc_info=True)

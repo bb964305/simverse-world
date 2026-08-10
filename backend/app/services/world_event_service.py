@@ -191,6 +191,19 @@ async def _write_substantive(db: AsyncSession, informed: dict[str, float],
         except Exception:
             logger.warning("WORLD_EVENT_EMBED_FAILED event_id=%s",
                            meta.get("event_id"), exc_info=True)
+        # 空向量归一成 None。真 provider 到不了这个态(embedding.py 的两条
+        # _embed_* 都把 falsy 映成 None),但一旦到了后果不对称:PG 下 [] 灌进
+        # vector(1024) 会在第一条 add_memory 抛、被上层 except 吞成整轮零写入;
+        # sqlite 下落成 '[]' 则**两条兜底都够不着** —— 它不满足 backfill 的
+        # embedding.is_(None),也不满足零向量清理的 `if mem.embedding`([] 是
+        # falsy 直接跳过),而 _cosine 对它照样返回 0。等于永久卡死。
+        if not emb:
+            emb = None
+    # 注:算的是**截断前**的 content(此处最长 200),而 add_memory 会把 event
+    # 截到 EVENT_MEMORY_MAX_CHARS=80。这是本仓既有口径(extract_events /
+    # _persist_wrapup_side 同样embed 全文),刻意保持一致而不是各起一份。
+    # 代价:backfill 用的是落库后的 content,两个生产者算出的向量会不同 ——
+    # 但补了这一行之后这些行永不为 NULL,backfill 根本不会碰它们,是潜在不是活的。
 
     svc = MemoryService(db)
     written = 0
