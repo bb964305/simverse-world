@@ -329,6 +329,49 @@ def test_pool_reserved_slot_defaults_to_zero_everywhere():
                 f"{path} 里 {env_key} 的默认不是 0"
 
 
+#: 计划阶段公共记忆的旋钮前缀。**必须单开一条**:上面那条 parity 钉的是
+#: ``REALISM_POOL_``(候选池里的两条道),而本批的键叫 ``REALISM_PLAN_PUBLIC_MEMORIES``
+#: —— 既不在 ``GOVERNANCE_PREFIXES`` 里,也不在 ``REALISM_POOL_`` 前缀内,
+#: 两条现成的 parity 都**扫不到**它。而「扫不到」的表现与「deploy 模板里根本没有
+#: 这个键」一模一样:全绿,运维照 deploy 模板起的环境里这个旋钮不存在
+#: (07-27B 审计 H2 把「多份 env 真值互相漂移」定为事故级问题类)。
+#:
+#: 前缀取 ``REALISM_PLAN_`` 而不是全名:计划阶段往后再加旋钮时自动被覆盖。
+PLAN_PROMPT_PREFIX = "REALISM_PLAN_"
+
+#: ``(Settings 字段, env 键)``。默认必须是 0 = 计划 prompt **逐字节**旧行为。
+PLAN_PROMPT_KNOBS = [
+    ("realism_plan_public_memories", "REALISM_PLAN_PUBLIC_MEMORIES"),
+]
+
+
+def test_plan_public_memory_knob_exists_in_deploy_env_example_too():
+    """计划阶段公共记忆的旋钮必须同时出现在两份 env 参考里。"""
+    backend_keys = {k for k in _raw_keys(ENV_EXAMPLE)
+                    if k.startswith(PLAN_PROMPT_PREFIX)}
+    assert backend_keys, "backend/.env.example 里没有计划阶段旋钮?基线认知错误"
+    assert backend_keys >= {env for _, env in PLAN_PROMPT_KNOBS}, (
+        f"backend/.env.example 缺计划阶段旋钮: "
+        f"{sorted({env for _, env in PLAN_PROMPT_KNOBS} - backend_keys)}")
+    missing = sorted(backend_keys - _raw_keys(DEPLOY_ENV_EXAMPLE))
+    assert not missing, (
+        f"deploy/backend/.env.example 缺计划阶段旋钮(补上并保持默认 0): {missing}")
+
+
+def test_plan_public_memory_defaults_to_zero_everywhere():
+    """``0 = 计划 prompt 逐字节旧行为``,所以三处默认必须都是 0。
+
+    这个旋钮一个数同时表达「开没开」与「几条」—— 任何一处模板写成非 0,
+    运维照它起的环境就是**默认开闸**,而开闸会改写每位居民每天的计划 prompt。
+    """
+    for field, env_key in PLAN_PROMPT_KNOBS:
+        assert Settings.model_fields[field].default == 0, \
+            f"Settings 里 {field} 的默认不是 0 —— 计划阶段公共记忆必须默认关"
+        for path in (ENV_EXAMPLE, DEPLOY_ENV_EXAMPLE):
+            assert f"{env_key}=0" in path.read_text(encoding="utf-8"), \
+                f"{path} 里 {env_key} 的默认不是 0"
+
+
 def test_governance_knobs_exist_in_deploy_env_example_too():
     """F1/F2/F3 的旋钮必须同时出现在两份 env 参考里。
 

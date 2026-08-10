@@ -436,6 +436,15 @@ class Settings(BaseSettings):
     # 与 civic 道同构：道内 created_at DESC，没填满的坑退还给个人臂，
     # cap < POOL_RESERVE_MIN_CAP 的 fail-open 路径上两条道都不生效。
     realism_pool_world_event_reserve: int = 0
+    # 计划阶段 prompt 里「镇上的事」的条数上限。0 = 计划 prompt 逐字节旧行为。
+    # 与上面两条候选池的道**无关**：那两条管的是 retrieve_context 的候选池，
+    # 计划阶段根本不走 retrieve_context（没有 query text，它要的是「最近发生了
+    # 什么」而不是「与某句话相关的是什么」）。计划阶段读的是同样那两条取数判据
+    # （civic:poll_result:% / world_event+tier=substantive）的最近 N 条。
+    # 为什么不是把 plan 的 limit=20 调大：每人每天写 480-545 条 event 记忆，
+    # 20 条只覆盖 20-30 分钟（生产实测 2026-08-10：六位居民 world_event 计数全
+    # 是 0），要覆盖一周得读 ~3500 条；而那 20 分钟窗口对「个人近况」是对的口径。
+    realism_plan_public_memories: int = 0
     # Task 2 eviction (soft-archive) thresholds.
     realism_evict_importance_floor: float = 0.35
     realism_evict_idle_days: int = 90
