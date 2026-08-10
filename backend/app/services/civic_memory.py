@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.memory.embedding import generate_embedding
 from app.memory.service import MemoryService
 from app.models.memory import Memory
 from app.models.resident import Resident
@@ -25,6 +26,23 @@ logger = logging.getLogger(__name__)
 #: 落库的 ``memories.source``。列宽是 ``String(20)``,别往长里改;运维按这个值
 #: 一句 SQL 就能把全部镇务记忆捞出来核对(S12 的可检索性硬门就这么查)。
 MEMORY_SOURCE = "civic"
+
+
+async def _embed_or_none(content: str, civic_event: str) -> list[float] | None:
+    """算一次 embedding,**任何失败都吞成 None**。
+
+    ``generate_embedding`` 自己已经把 provider 侧的异常吞成 None
+    (``memory/embedding.py:133-135``),这层 try 挡的是它之外的意外(配置读取、
+    被 patch 的实现、事件循环相关的抛出)。少了它,一次 embedding 抖动会被外层
+    那个 ``except`` 逮住并让整轮广播返回 0 —— 镇务记忆写不进去,比没 embedding
+    严重得多。fail-open 后 ``embedding IS NULL``,就是改前的行为。
+    """
+    try:
+        return await generate_embedding(content)
+    except Exception:
+        logger.warning("CIVIC_BROADCAST_EMBED_FAILED civic_event=%s", civic_event,
+                       exc_info=True)
+        return None
 
 
 async def broadcast_civic_memory(
@@ -57,6 +75,13 @@ async def broadcast_civic_memory(
     整段 fail-open:广播是镇务流程的副作用,写不进去只记 warning 并返回**已写
     条数**,绝不能把结票或公告本身带崩(下一次补跑会把缺的人补齐 —— 幂等键是
     按人查的,半截轮次能续上)。
+
+    E1 补 ``embedding``:检索打分是 ``0.45·rel + 0.30·recency + 0.25·importance``,
+    而 ``_cosine``(``memory/service.py:33``)对 NULL 向量直接返回 0.0 —— 不带
+    embedding 落库的记忆等于自弃 45% 的权重去和个人记忆抢那 30 个坑(生产实测
+    top-1 命中的 cosine 在 0.33-0.37,破平只需 0.0968)。``add_memory`` 的
+    ``embedding`` 参数一直都在,只是没人传;算的次数是**每事件一次**,不是每收件
+    人一次。
     """
     if not settings.civic_memory_broadcast_enabled:
         return 0
@@ -78,14 +103,20 @@ async def broadcast_civic_memory(
             select(Resident.id).where(Resident.is_autonomous).order_by(Resident.slug)
         )).scalars().all()
 
+        pending = [rid for rid in recipients
+                   if rid not in already and rid != exclude_resident_id]
+        # E1:embedding **每个事件算一次**,跨收件人复用 —— 14 位收件人收的是同
+        # 一段 content,每人一算就是每条公告 14 次 ollama 往返,还全挂在结票的同步
+        # 路径上。整轮被幂等键挡掉(nightly 补跑的常态)时一次都不算。
+        emb = await _embed_or_none(content, civic_event) if pending else None
+
         svc = MemoryService(db)
-        for resident_id in recipients:
-            if resident_id in already or resident_id == exclude_resident_id:
-                continue
+        for resident_id in pending:
             # add_memory 自带 commit(K16),所以这里逐条落地 —— 本函数因此绝不
             # 能被塞进别人的复合事务中段(S9 的广播点就为这条挪到 commit 之后)。
             await svc.add_memory(
                 resident_id, "event", content, raw_importance, MEMORY_SOURCE,
+                embedding=emb,
                 metadata_json={"civic_event": civic_event, "civic_kind": kind},
             )
             written += 1

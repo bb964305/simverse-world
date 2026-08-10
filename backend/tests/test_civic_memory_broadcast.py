@@ -25,12 +25,16 @@ from app.config import settings
 from app.memory.service import MemoryService
 from app.models.memory import Memory
 from app.models.resident import Resident
+from app.services import civic_memory
 from app.services.civic_memory import broadcast_civic_memory
 
 #: 一位居民的历史事件分布(35 条,压过 ``_fetch_event_candidates`` 的 cap=30)。
 #: 30 条在 0.7 以上意味着:广播若按 write_collective_memories 那样直写 0.5,
 #: 或按低一档的 notice 分位落下去,都会被挤出候选池 —— 那两条断言才咬得动。
 _HISTORY = [0.9] * 3 + [0.8] * 4 + [0.7] * 28
+
+#: 桩向量。宽度对齐 ``vector(1024)`` 列(sqlite 下落 JSON,但形状照生产写)。
+_FAKE_EMB = [0.1] * 1024
 
 
 @pytest.fixture
@@ -192,6 +196,99 @@ async def test_broadcast_survives_the_top30_candidate_pool(db_session, broadcast
     pool = await MemoryService(db_session)._fetch_event_candidates(rid, cap=30)
     assert len(pool) == 30                                            # 池子确实满了
     assert mem.id in {m.id for m in pool}
+
+
+# ── 写入侧 embedding(E1) ───────────────────────────────────────────────
+
+@pytest.fixture
+def embed_calls(monkeypatch):
+    """把写入侧的 ``generate_embedding`` 换成计数桩,返回「被拿去算的文本」列表。
+
+    测试环境没有 ollama:真调用会连接失败,而 ``generate_embeddings_batch`` 自己
+    把异常吞成 ``None``(``memory/embedding.py:133-135``)—— 那恰好是 fail-open
+    的形状。所以「落库非空」与「只算一次」这两条都只能靠桩来钉,不能靠真调用。
+    """
+    calls: list[str] = []
+
+    async def _fake(text: str):
+        calls.append(text)
+        return list(_FAKE_EMB)
+
+    monkeypatch.setattr(civic_memory, "generate_embedding", _fake)
+    return calls
+
+
+@pytest.mark.anyio
+async def test_broadcast_embeds_the_content_for_every_recipient(
+        db_session, broadcast_on, embed_calls):
+    """相关度那 0.45 分的前提:落库行的 ``embedding`` 不能是 NULL。
+
+    ``_cosine``(``memory/service.py:33-34``)第一行就 ``if not a or not b:
+    return 0.0`` —— NULL 等于这条记忆恒定放弃打分里 45% 的权重,拿 0.55 去打
+    别人 1.0 的仗。
+    """
+    await _town(db_session)
+    assert await broadcast_civic_memory(
+        db_session, "何巧云当选了小镇镇长。", kind="civic", ref="poll_result:p-1") == 2
+
+    rows = await _civic_rows(db_session)
+    assert len(rows) == 2
+    assert all(m.embedding == _FAKE_EMB for m in rows)
+
+
+@pytest.mark.anyio
+async def test_embedding_is_computed_once_per_event_not_once_per_recipient(
+        db_session, broadcast_on, embed_calls):
+    """生产 14 位收件人收的是**同一段 content** —— embedding 只该算一次。
+
+    每人一次 = 每条镇务公告 14 次 ollama 往返,而且全挂在结票/公告的同步路径上。
+    这条断言的数字是 **1,不是收件人数**。
+    """
+    await _town(db_session)
+    assert await broadcast_civic_memory(
+        db_session, "何巧云当选了小镇镇长。", kind="civic", ref="poll_result:p-1") == 2
+
+    assert embed_calls == ["何巧云当选了小镇镇长。"]
+    # 同一个向量跨收件人复用,不是各算各的。
+    assert len({tuple(m.embedding) for m in await _civic_rows(db_session)}) == 1
+
+
+@pytest.mark.anyio
+async def test_idempotent_rerun_does_not_recompute_the_embedding(
+        db_session, broadcast_on, embed_calls):
+    """整轮被幂等键挡掉时一次都不该算 —— ``nightly: catching up`` 是天天跑的。"""
+    await _town(db_session)
+    assert await broadcast_civic_memory(
+        db_session, "何巧云当选了小镇镇长。", kind="civic", ref="poll_result:p-1") == 2
+    assert len(embed_calls) == 1
+
+    assert await broadcast_civic_memory(
+        db_session, "何巧云当选了小镇镇长。", kind="civic", ref="poll_result:p-1") == 0
+    assert len(embed_calls) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", ["raises", "returns_none"])
+async def test_embedding_failure_is_fail_open(
+        db_session, broadcast_on, monkeypatch, failure):
+    """embedding 服务抖动绝不能挡住镇务记忆落库:照旧写、``embedding is None``、
+    返回条数不变(= 改前的行为)。``returns_none`` 就是本仓测试环境的真实形状。"""
+    async def _boom(text: str):
+        raise RuntimeError("ollama went away")
+
+    async def _none(text: str):
+        return None
+
+    monkeypatch.setattr(civic_memory, "generate_embedding",
+                        _boom if failure == "raises" else _none)
+
+    await _town(db_session)
+    assert await broadcast_civic_memory(
+        db_session, "何巧云当选了小镇镇长。", kind="civic", ref="poll_result:p-1") == 2
+
+    rows = await _civic_rows(db_session)
+    assert len(rows) == 2
+    assert all(m.embedding is None for m in rows)
 
 
 # ── fail-open ───────────────────────────────────────────────────────────
