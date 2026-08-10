@@ -425,6 +425,10 @@ class Settings(BaseSettings):
     realism_retrieval_recency_weight: float = 0.30
     realism_retrieval_importance_weight: float = 0.25
     realism_recency_tau_hours: float = 72.0   # τ base; τ = this × (1 + importance)
+    # 候选池内的镇务保留位。0 = 逐字节旧行为（一个数同时表达「开没开」与「几个坑」）。
+    # 不扩池：pool(cap) = 专用道(最多 N 条 civic:poll_result) ∪ 个人臂(cap - 实拿条数)，
+    # 没填满的坑退还给个人臂，所以 len(pool) 与改前逐字相同。
+    realism_pool_civic_reserve: int = 0
     # Task 2 eviction (soft-archive) thresholds.
     realism_evict_importance_floor: float = 0.35
     realism_evict_idle_days: int = 90
