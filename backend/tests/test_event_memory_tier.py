@@ -136,6 +136,10 @@ async def test_gate_off_broadcast_path_is_byte_identical(db_session, realism_on)
     四项一个都不能少 —— 它们各自能抓到一种「顺手改了天气路」的走样:
     importance 抓档位、``metadata_json`` 全等抓 ``raw_importance``(走 add_memory
     才有的那个键)、content 长度抓 E-28 的 80 字截断、返回值抓收件人条数。
+
+    W1 起 metadata 里多了一个 ``tier`` —— 它**与本文件这个闸门无关**(闸开闸关都写、
+    值相同),快照因此照它的新形状重标,而不是放松成「包含」。tier 自己的不变量由
+    ``tests/test_event_tier_marker.py`` 单独证。
     """
     ids = await _residents(db_session, 20, (0, 0))
     content = _long_description("天气：")
@@ -150,7 +154,8 @@ async def test_gate_off_broadcast_path_is_byte_identical(db_session, realism_on)
     for m in rows:
         assert m.type == "event" and m.source == "world_event"
         assert m.importance == pytest.approx(0.5)
-        assert m.metadata_json == {"first_hand": True, "event_id": "w-1"}
+        assert m.metadata_json == {"first_hand": True, "event_id": "w-1",
+                                   "tier": "trivia"}
         assert m.content == content[:_DIRECT_CONTENT_CAP]
 
 
@@ -181,7 +186,8 @@ async def test_gate_off_gradient_path_is_byte_identical(
     assert all(m.importance == pytest.approx(0.5)            # 随机样本档
                for rid, m in landed.items() if rid != "near")
     for m in rows:
-        assert m.metadata_json == {"first_hand": True, "event_id": "ev-1"}
+        assert m.metadata_json == {"first_hand": True, "event_id": "ev-1",
+                                   "tier": "substantive"}
         assert m.content == content[:_DIRECT_CONTENT_CAP]
 
 
@@ -191,7 +197,7 @@ async def test_gate_off_event_without_id_carries_only_first_hand(db_session, rea
     await _residents(db_session, 2, (0, 0))
     assert await wes.write_collective_memories(
         db_session, {"title": "丰收节", "description": "田里的作物成熟了"}) == 2
-    assert all(m.metadata_json == {"first_hand": True}
+    assert all(m.metadata_json == {"first_hand": True, "tier": "substantive"}
                for m in await _rows(db_session))
 
 
@@ -236,7 +242,8 @@ async def test_weather_stays_a_direct_write_when_tiered(
     assert n == 20
     for m in await _rows(db_session):
         assert m.importance == pytest.approx(0.5)
-        assert m.metadata_json == {"first_hand": True, "event_id": "w-2"}
+        assert m.metadata_json == {"first_hand": True, "event_id": "w-2",
+                                   "tier": "trivia"}
         assert m.content == content[:_DIRECT_CONTENT_CAP]
 
 
@@ -258,7 +265,8 @@ async def test_market_day_festival_stays_trivial_when_tiered(
 
     mem = (await _rows(db_session, "m-1"))[0]
     assert mem.importance == pytest.approx(0.6)
-    assert mem.metadata_json == {"first_hand": True, "event_id": "m-1"}
+    assert mem.metadata_json == {"first_hand": True, "event_id": "m-1",
+                                 "tier": "trivia"}
     assert mem.content == content[:_DIRECT_CONTENT_CAP]
 
 

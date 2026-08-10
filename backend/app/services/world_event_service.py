@@ -119,6 +119,21 @@ async def flip_active_events(db: AsyncSession) -> list[tuple[dict, str]]:
 #: 「写了等于没写」更糟。琐事档**刻意**不参与候选池的竞争。
 TRIVIAL_EVENT_TYPES = ("weather",)
 
+#: 落进 ``metadata_json["tier"]`` 的显式档位标记。
+#:
+#: 为什么要显式写:生产实测(2026-08-10)``source='world_event'`` 且带
+#: ``raw_importance`` 的记忆 **0 / 1380** —— 记忆行里没有任何可靠判据能把「镇上要
+#: 修一座剧院」与「今天多云」分开(``source`` 两者相同、``importance`` 直写一律
+#: 0.5/0.6、``raw_importance`` 只在分档闸开着时才有)。按 ``source`` 开检索专用道
+#: 就是 94% 抓到天气。
+#:
+#: **这个标记与 ``REALISM_EVENT_MEMORY_TIERED`` 无关**:无论那个闸开关,两条写入
+#: 路径都写,且同一事件在两种闸态下取值相同 —— 它描述的是「这条记忆是什么」,不是
+#: 「走了哪条写入路径」。检索侧的 world_event 专用道认的就是它
+#: (``memory/service.py`` 的 ``SUBSTANTIVE_TIER``)。
+TIER_TRIVIA = "trivia"
+TIER_SUBSTANTIVE = "substantive"
+
 
 def _is_trivial_event(event: dict) -> bool:
     """琐事档判据:天气,或**集市日**那一档节庆。
@@ -282,8 +297,12 @@ async def write_collective_memories(db: AsyncSession, event: dict, rng=None) -> 
     event_id = event.get("id")
     is_weather = event.get("type") == "weather"
 
+    # 档位标记(W1)。在闸门分岔**之前**算,两条写入路径共用 —— 标记描述的是记忆
+    # 本身,不是走了哪条路,所以它不能跟着 ``realism_event_memory_tiered`` 漂。
+    tier = TIER_TRIVIA if _is_trivial_event(event) else TIER_SUBSTANTIVE
+
     def _meta():
-        m = {"first_hand": True}
+        m = {"first_hand": True, "tier": tier}
         if event_id:
             m["event_id"] = event_id
         return m
