@@ -161,6 +161,19 @@ def pool_reserve(monkeypatch):
 
 
 @pytest.fixture
+def world_event_reserve(monkeypatch):
+    """候选池内的 world_event 专用道(``REALISM_POOL_WORLD_EVENT_RESERVE``,默认 0)。
+
+    第二条道抢的是**同一个** 30 个坑的池子,所以它必须出现在这两笔账里,而不是各自
+    守着自己那一条。凡是对「池里有没有 world_event」下断言的用例都要**显式**把它
+    钉住 —— 靠默认值 0 过关的断言,在开闸那天会以一种没人看得见的方式换掉含义。
+    """
+    def _set(n: int):
+        monkeypatch.setattr(settings, "realism_pool_world_event_reserve", n)
+    return _set
+
+
+@pytest.fixture
 def realism_on(monkeypatch):
     """生产 ``REALISM_ENABLED=true``:importance 落库前要过 per-resident 分位归一
     (K14)。关着测候选池排名等于测了个假世界 —— 那条路径下 0.9 原样落库,永远排在
@@ -731,7 +744,8 @@ async def test_civic_and_world_events_together_leave_the_pool_mostly_personal(
 @pytest.mark.anyio
 @pytest.mark.parametrize("reserve", [0, 2])
 async def test_the_reserved_lane_costs_exactly_its_own_size_on_a_saturated_pool(
-        db_session, broadcast_on, realism_on, event_tier_on, pool_reserve, reserve):
+        db_session, broadcast_on, realism_on, event_tier_on, pool_reserve, reserve,
+        world_event_reserve):
     """**饱和史下的合并口径** —— 保留位对 ``public/pool`` 的贡献上界恰好是
     ``reserve/cap``。
 
@@ -749,12 +763,16 @@ async def test_the_reserved_lane_costs_exactly_its_own_size_on_a_saturated_pool(
     - ``reserve=2``:``public = 2/30``(6.7%),且这 2 条**全是** ``poll_result``。
       个人记忆 28/30 —— 离 1/3 那条线还有 2.8 倍余量。
 
-    ⚠️ 这条同时钉住本批**没有**修的那一半:``world_event`` 在饱和史下照旧全丢
-    (专用道只收结果档)。S3 已证公共臂 top-41 全是 ``importance=0.5`` 的天气,
-    给 world_event 开道等于把 10 个公共坑 100% 让给「今天多云」。要不要给它另开
-    一条道是下一个议题,不是这条断言可以顺手放宽的东西。
+    ⚠️ 这条钉住的是**镇务那一条道单独存在时**的账,所以 world_event 道在这里
+    **显式钉在 0**:饱和史下 ``world_event`` 照旧全丢(镇务道只收结果档)。S3 已证
+    公共臂 top-41 全是 ``importance=0.5`` 的天气,按 source 给 world_event 开道等于
+    把公共坑 100% 让给「今天多云」—— 这条断言不是可以顺手放宽的东西。
+
+    第二条道(认显式档位标记 ``tier='substantive'``,不认 source)的账另立一条,
+    见下面 ``test_both_lanes_together_cost_exactly_their_own_seats...``。
     """
     pool_reserve(reserve)
+    world_event_reserve(0)
     people = await _town(db_session)
     for r in await _autonomous(db_session):
         await _seed_history(db_session, r.id, _SATURATED_HISTORY)
@@ -786,3 +804,83 @@ async def test_the_reserved_lane_costs_exactly_its_own_size_on_a_saturated_pool(
             f"{r.slug} 的个人记忆只剩 {len(personal)}/{len(pool)}"
         assert len(personal) == _POOL_CAP - expected_civic, \
             "没填满的坑没有退还给个人臂"
+
+
+#: 拍板预算:``civic_reserve=2`` + ``we_reserve=1`` → 两条道各拿自己那几个坑。
+#: 这两个数是**开闸建议值**,不是随手写的上界:镇务 2 = 一次选举闭环里非赢家能看到
+#: 的结果档条数;world_event 1 = 实质事件约 1.6 条/人/周,一个坑约等于「记得最近那
+#: 件事」(2 个坑会让两周前的节庆压住这周的)。
+_CIVIC_RESERVE_AT_LAUNCH = 2
+_WE_RESERVE_AT_LAUNCH = 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("we_reserve", [0, 1])
+async def test_both_lanes_together_cost_exactly_their_own_seats_on_a_saturated_pool(
+        db_session, broadcast_on, realism_on, pool_reserve, world_event_reserve,
+        we_reserve):
+    """**两条道合起来**在饱和史下的账 —— 本段那笔预算的实测读数。
+
+    与上面那条的三处不同,每一处都是有意的:
+
+    1. **不开** ``REALISM_EVENT_MEMORY_TIERED``。设计反转:有了保留位之后,「分档抬
+       importance」既不必要也不该用 —— 抬到 0.99 的实质事件会**同时**挤占个人臂
+       (那个闸的 handoff 自己记着 12 周饱和:day28 7/30 → day84 21/30)**又**吃专
+       用道坑位,双重占坑。所以实质世界事件在这里落的是**直写档 0.5**,与天气同档;
+    2. 于是「它进池了」这句话**只可能**由专用道说出来:池底是 1.0(``_SATURATED_
+       HISTORY``,生产 jiang-lin 8355 event / zhao-qiwen 8042 的形状),0.5 靠排序
+       连边都摸不到。``we_reserve=0`` 那一格就是这句话的对照;
+    3. 两条道的坑一起算 —— 它们抢的是同一个 30 个坑的池子。
+
+    实测(五轮镇务 + 五条实质世界事件,非赢家):
+
+        we_reserve=0 → public **2/30**(6.7%),个人 28/30 —— 第 2 段的读数
+        we_reserve=1 → public **3/30**(10.0%),个人 27/30 —— 本段的读数
+
+    赢家五轮都被 ``exclude_resident_id`` 排除,她一条第三人称结果记忆都没有,所以
+    她那两格是 1/30 与 2/30。
+
+    两条硬门(``public/pool < 2/3``、``personal > 1/3``)一个字没动,余量分别是 6.7
+    倍与 2.7 倍。真正的守卫是**逐条计数**那几行:占比断言在 30 个坑里松得能过一整
+    条道,而计数对不上时它照样绿。
+    """
+    pool_reserve(_CIVIC_RESERVE_AT_LAUNCH)
+    world_event_reserve(we_reserve)
+    people = await _town(db_session)
+    for r in await _autonomous(db_session):
+        await _seed_history(db_session, r.id, _SATURATED_HISTORY)
+    for _ in range(_BURST_ROUNDS):
+        await _elect(db_session, people)
+    await _world_events(db_session, _BURST_ROUNDS)
+
+    for r in await _autonomous(db_session):
+        pool, civic = await _pool_share(db_session, r.id)
+        public = [m for m in pool if m.source in _PUBLIC_SOURCES]
+        world = [m for m in pool if m.source == "world_event"]
+        personal = [m for m in pool if m.source not in _PUBLIC_SOURCES]
+        expected_civic = (0 if r.id == people["cand_a"].id
+                          else min(_CIVIC_RESERVE_AT_LAUNCH, _BURST_ROUNDS))
+        expected_we = min(we_reserve, _BURST_ROUNDS)
+
+        assert len(pool) == _POOL_CAP, "池子没满,占比无从谈起"
+        assert len({m.id for m in pool}) == _POOL_CAP, "池里有重复 —— 双份占坑"
+        assert len(civic) == expected_civic, \
+            f"{r.slug} 池里镇务记忆 {len(civic)} 条,应为 {expected_civic}"
+        assert len(world) == expected_we, \
+            (f"{r.slug} we_reserve={we_reserve} 时池里世界事件 {len(world)} 条,"
+             f"应为 {expected_we} —— 第二条道的增量不等于它自己的坑数")
+        # 进池的必须是**实质档**,而且它靠的不是 importance:0.5 低于池底 1.0
+        assert all((m.metadata_json or {}).get("tier") == "substantive"
+                   for m in world), f"{r.slug} 的 world_event 道里混进了琐事档"
+        assert all(m.importance == pytest.approx(0.5) for m in world), \
+            (f"{r.slug} 的世界事件被抬过 importance —— 设计反转要求它们与天气同档,"
+             "靠专用道进池而不是靠排序挤")
+        assert len(public) == expected_civic + expected_we
+        assert len(personal) == _POOL_CAP - len(public), \
+            "两条道没填满的坑没有退还给个人臂"
+        # 两条硬门(阈值一个字没动)
+        assert len(public) / len(pool) < _PUBLIC_POOL_SHARE_LIMIT, \
+            (f"{r.slug} 的候选池被两条公共通道占了 {len(public)}/{len(pool)}"
+             f"(镇务 {len(civic)} + 世界事件 {len(world)})")
+        assert len(personal) / len(pool) > 1 - _PUBLIC_POOL_SHARE_LIMIT, \
+            f"{r.slug} 的个人记忆只剩 {len(personal)}/{len(pool)}"
