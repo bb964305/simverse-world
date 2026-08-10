@@ -13,6 +13,7 @@ from datetime import datetime, UTC
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.memory.embedding import generate_embedding
 from app.models.world_event import WorldEvent
 
 logger = logging.getLogger(__name__)
@@ -172,9 +173,37 @@ async def _write_substantive(db: AsyncSession, informed: dict[str, float],
     (``event_cron.py:40-43``),而 commit 点从 1 个变成了 N 个,不收干净的话
     ``PendingRollbackError`` 会顺着传染并被误算到 C4/C3/E3 头上(``event_cron.py:60-62``
     记着同一个坑)。
+
+    E1 的 ``embedding``:``_cosine``(``memory/service.py:33``)对 NULL 向量返回
+    0.0,不带向量落库 = 这条记忆在 ``0.45·rel + 0.30·recency + 0.25·importance``
+    里自弃 45% 的权重。**每事件算一次**(同一事件同一描述,收件人共用),不是每
+    收件人一次 —— 本函数在 ``event_cron`` 的同步一轮里,每人一次会把一次 flip 拖
+    成 N 次 ollama 往返。算 embedding 这一步单独 fail-open:它失败只该退回
+    ``embedding IS NULL``(改前的行为),不该把已经写好的行 rollback 掉。
     """
     from app.config import settings
     from app.memory.service import MemoryService
+
+    emb = None
+    if informed:   # 梯度筛完一个人都没有时不白算一次
+        try:
+            emb = await generate_embedding(content)
+        except Exception:
+            logger.warning("WORLD_EVENT_EMBED_FAILED event_id=%s",
+                           meta.get("event_id"), exc_info=True)
+        # 空向量归一成 None。真 provider 到不了这个态(embedding.py 的两条
+        # _embed_* 都把 falsy 映成 None),但一旦到了后果不对称:PG 下 [] 灌进
+        # vector(1024) 会在第一条 add_memory 抛、被上层 except 吞成整轮零写入;
+        # sqlite 下落成 '[]' 则**两条兜底都够不着** —— 它不满足 backfill 的
+        # embedding.is_(None),也不满足零向量清理的 `if mem.embedding`([] 是
+        # falsy 直接跳过),而 _cosine 对它照样返回 0。等于永久卡死。
+        if not emb:
+            emb = None
+    # 注:算的是**截断前**的 content(此处最长 200),而 add_memory 会把 event
+    # 截到 EVENT_MEMORY_MAX_CHARS=80。这是本仓既有口径(extract_events /
+    # _persist_wrapup_side 同样embed 全文),刻意保持一致而不是各起一份。
+    # 代价:backfill 用的是落库后的 content,两个生产者算出的向量会不同 ——
+    # 但补了这一行之后这些行永不为 NULL,backfill 根本不会碰它们,是潜在不是活的。
 
     svc = MemoryService(db)
     written = 0
@@ -182,7 +211,8 @@ async def _write_substantive(db: AsyncSession, informed: dict[str, float],
         for rid in informed:
             await svc.add_memory(rid, "event", content,
                                  settings.realism_event_memory_importance,
-                                 "world_event", metadata_json=dict(meta))
+                                 "world_event", embedding=emb,
+                                 metadata_json=dict(meta))
             written += 1
     except Exception:
         logger.warning("WORLD_EVENT_MEMORY_FAILED event_id=%s written=%d",

@@ -37,7 +37,7 @@ from app.memory.service import EVENT_MEMORY_MAX_CHARS, MemoryService
 from app.models.memory import Memory
 from app.models.resident import Resident
 from app.services import world_event_service as wes
-from tests.test_civic_memory_broadcast import _HISTORY, _seed_history
+from tests.test_civic_memory_broadcast import _FAKE_EMB, _HISTORY, _seed_history
 
 #: (字段名, 保守默认值)。默认必须是「关 + 与现状逐字节一致」——开闸是另一次
 #: 独立的部署变更(红线:行为开闸与代码变更不同车)。
@@ -331,6 +331,112 @@ async def test_tier_gate_does_not_move_the_recipient_set(
     assert n_off == n_on == round(settings.realism_info_sample_frac * 20)
     assert ({m.resident_id for m in await _rows(db_session, "cmp-off")}
             == {m.resident_id for m in await _rows(db_session, "cmp-on")})
+
+
+# ── 实质档的写入侧 embedding(E1) ───────────────────────────────────────
+
+@pytest.fixture
+def embed_calls(monkeypatch):
+    """写入侧 ``generate_embedding`` 的计数桩(与 civic 那份同构)。"""
+    calls: list[str] = []
+
+    async def _fake(text: str):
+        calls.append(text)
+        return list(_FAKE_EMB)
+
+    monkeypatch.setattr(wes, "generate_embedding", _fake)
+    return calls
+
+
+@pytest.mark.anyio
+async def test_substantive_write_embeds_once_per_event_not_per_recipient(
+        db_session, realism_on, tiered_on, embed_calls):
+    """梯度关 → 20 人全知情,``_write_substantive`` 写 20 条、embedding 只算 1 次。
+
+    调用点是 ``tasks/event_cron.py:41`` 的同步一轮:每收件人一次 = 一次 flip 拖成
+    20 次 ollama 往返,人口涨一倍就翻一倍。同一事件同一描述,本来就该复用。
+    """
+    await _residents(db_session, 20, (0, 0))
+
+    n = await wes.write_collective_memories(
+        db_session, {"id": "sub-emb", "type": "news",
+                     "description": "镇上要修一座剧院", "payload_json": {}})
+
+    assert n == 20
+    rows = await _rows(db_session, "sub-emb")
+    assert len(rows) == 20
+    assert all(m.embedding == _FAKE_EMB for m in rows)
+    assert embed_calls == ["镇上要修一座剧院"]   # 收件人 20 位,调用 1 次
+
+
+@pytest.mark.anyio
+async def test_trivial_direct_write_never_calls_the_embedding_service(
+        db_session, realism_on, tiered_on, embed_calls):
+    """琐事档不进候选池(96% 的量是天气),给它算 embedding 是纯开销。
+
+    这条同时钉住实现位置:算 embedding 的那行必须在 ``_write_substantive`` 里,
+    不能提到 ``write_collective_memories`` 的公共段 —— 提上去天气就跟着算了。
+    """
+    await _residents(db_session, 20, (0, 0))
+
+    n = await wes.write_collective_memories(
+        db_session, {"id": "w-emb", "type": "weather",
+                     "description": "今天多云", "payload_json": {}})
+
+    assert n == 20
+    assert embed_calls == []
+    assert all(m.embedding is None for m in await _rows(db_session, "w-emb"))
+
+
+@pytest.mark.anyio
+async def test_no_recipient_means_no_embedding_call(
+        db_session, realism_on, gradient_on, tiered_on, embed_calls):
+    """梯度筛完一个人都没有时,不该白算一次。
+
+    1 位居民 + 事件没有 ``location_id`` → geo 支为空,随机样本
+    ``round(0.2 × 1) = 0`` → 收件人集合是空的,一条都不会写。与 civic 侧「整轮被
+    幂等键挡掉就不算」同一条口径:外部依赖只在真要落库时才碰。
+    """
+    await _residents(db_session, 1, (0, 0))
+
+    n = await wes.write_collective_memories(
+        db_session, {"id": "none-emb", "type": "news",
+                     "description": "镇上要修一座剧院", "payload_json": {}},
+        rng=random.Random(0))
+
+    assert n == 0
+    assert await _rows(db_session, "none-emb") == []
+    assert embed_calls == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", ["raises", "returns_none"])
+async def test_substantive_write_embedding_failure_is_fail_open(
+        db_session, realism_on, tiered_on, monkeypatch, failure):
+    """embedding 炸了照旧写满 20 条、``embedding is None``、返回值不变。
+
+    ``returns_none`` 是本仓测试环境(无 ollama)的真实形状;``raises`` 守的是
+    「别把异常漏进 ``_write_substantive`` 那个带 rollback 的 except」—— 漏进去
+    会把已写的行 rollback 掉,返回值从 20 掉成 0。
+    """
+    async def _boom(text: str):
+        raise RuntimeError("ollama went away")
+
+    async def _none(text: str):
+        return None
+
+    monkeypatch.setattr(wes, "generate_embedding",
+                        _boom if failure == "raises" else _none)
+    await _residents(db_session, 20, (0, 0))
+
+    n = await wes.write_collective_memories(
+        db_session, {"id": "boom-emb", "type": "news",
+                     "description": "镇上要修一座剧院", "payload_json": {}})
+
+    assert n == 20
+    rows = await _rows(db_session, "boom-emb")
+    assert len(rows) == 20
+    assert all(m.embedding is None for m in rows)
 
 
 @pytest.mark.anyio
