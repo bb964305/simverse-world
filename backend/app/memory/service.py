@@ -1,6 +1,7 @@
 import logging
 import math
 from datetime import datetime, timedelta, UTC
+from itertools import zip_longest
 from sqlalchemy import select, func, delete, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.memory import Memory
@@ -400,7 +401,20 @@ class MemoryService:
         # 10 条**且没有相关度可言**,在里面塞 2 条盲选公告 = 20% 的输出被污染。
         effective_reserve = 0 if cap < POOL_RESERVE_MIN_CAP else max(reserve, 0)
         effective_reserve = min(effective_reserve, cap)
-        if effective_reserve <= 0:
+        return await self._query_recent_civic_results(resident_id, effective_reserve)
+
+    async def _query_recent_civic_results(
+        self, resident_id: str, limit: int,
+    ) -> list[Memory]:
+        """镇务结果档的**取数判据**:最近 ``limit`` 条,``created_at DESC``。
+
+        判据(``civic:poll_result:%``)与排序的理由见调用方
+        ``_fetch_reserved_civic_candidates``。单独抽出来是因为它有**第二个**调用方:
+        计划阶段(``agent/phases/plan/basic.py``)也要「镇上最近出了什么事」,而它
+        的条数由另一个闸(``realism_plan_public_memories``)定,与候选池的保留位无关。
+        两处共用同一份 SQL,判据就不会各自漂。
+        """
+        if limit <= 0:
             return []
         stmt = (
             select(Memory)
@@ -412,7 +426,7 @@ class MemoryService:
                     f"{CIVIC_RESULT_EVENT_PREFIX}%"),
             )
             .order_by(Memory.created_at.desc())
-            .limit(effective_reserve)
+            .limit(limit)
         )
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
@@ -454,7 +468,19 @@ class MemoryService:
         # 不生效:那时池只有 10 条且没有相关度可言。
         effective_reserve = 0 if cap < POOL_RESERVE_MIN_CAP else max(reserve, 0)
         effective_reserve = min(effective_reserve, cap)
-        if effective_reserve <= 0:
+        return await self._query_recent_substantive_world_events(
+            resident_id, effective_reserve)
+
+    async def _query_recent_substantive_world_events(
+        self, resident_id: str, limit: int,
+    ) -> list[Memory]:
+        """实质世界事件的**取数判据**:最近 ``limit`` 条,``created_at DESC``。
+
+        两个条件(``source='world_event'`` **且** ``tier='substantive'``)缺一不可,
+        理由见调用方 ``_fetch_reserved_world_event_candidates``:只判 source 会 94%
+        抓到天气。抽出来的理由与镇务那条同构 —— 计划阶段共用这份判据。
+        """
+        if limit <= 0:
             return []
         stmt = (
             select(Memory)
@@ -466,10 +492,45 @@ class MemoryService:
                 Memory.metadata_json["tier"].as_string() == SUBSTANTIVE_TIER,
             )
             .order_by(Memory.created_at.desc())
-            .limit(effective_reserve)
+            .limit(limit)
         )
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
+
+    async def get_public_memories(self, resident_id: str, limit: int) -> list[Memory]:
+        """「镇上最近出了什么事」:两条道各取最近的,**轮流**并到 ``limit`` 条。
+
+        给**计划阶段**用(``agent/phases/plan/basic.py``)。它与
+        ``retrieve_context`` 是两条路,不该互相借用:
+
+        - 计划阶段没有 query text —— 它要的是「最近发生了什么」,不是「与某句话相关
+          的是什么」,相关度那 0.45 分在这里无意义;
+        - 也不是「把个人近况的 ``limit=20`` 调大」:每人每天写 480-545 条 event 记忆,
+          要覆盖一周就是 ~3500 条一次全表读,而那 20 分钟窗口对**个人近况**本来就是
+          对的口径。两件事口径不同,不该用同一个 limit 表达。
+
+        **轮流**而不是把两条道合起来按 ``created_at DESC`` 排:结票那天镇务道会连出
+        好几条,纯按时间排会把世界事件整个挤掉,而计划阶段要的正是「镇上出了什么事」
+        的两个方面。``limit=2`` 且两条道都有货时,恰好一边一条。
+
+        条数上限由调用方给(``settings.realism_plan_public_memories``),**不吃**
+        ``REALISM_POOL_*`` 那两个闸 —— 那两个管的是检索候选池。
+        """
+        if limit <= 0:
+            return []
+        civic = await self._query_recent_civic_results(resident_id, limit)
+        world = await self._query_recent_substantive_world_events(resident_id, limit)
+        out: list[Memory] = []
+        seen: set[str] = set()
+        for pair in zip_longest(civic, world):
+            for m in pair:
+                if m is None or m.id in seen:
+                    continue
+                seen.add(m.id)
+                out.append(m)
+                if len(out) >= limit:
+                    return out
+        return out
 
     async def _fetch_event_candidates(self, resident_id: str, cap: int) -> list[Memory]:
         """候选池 = 镇务专用道 ∪ world_event 专用道 ∪ 个人臂,共 `cap` 个坑。

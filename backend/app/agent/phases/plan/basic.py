@@ -53,13 +53,20 @@ PLAN_SYSTEM_PROMPT = """\
 }}
 """
 
+#: 「镇上的事」那一段的标题。整段（标题 + 条目）只在真的取到公共记忆时才渲染 ——
+#: 一个光秃秃的标题会让 LLM 去编一件根本没发生的事。
+PUBLIC_MEMORY_HEADING = "镇上最近发生的事："
+
+#: ``{public_memories}`` 空串时，本模板与改前（``69f07a7``）**逐字节**相同：
+#: ``{recent_memories}\n`` + ``""`` + ``\n最近的关系：`` = ``…\n\n最近的关系：``。
+#: 逐字节这件事由 backend/tests/test_plan_public_memories.py 的冻结快照对拍钉住。
 PLAN_USER_PROMPT = """\
 昨天做了什么：
 {yesterday_summary}
 
 最近的重要记忆：
 {recent_memories}
-
+{public_memories}
 最近的关系：
 {relationships}
 
@@ -128,6 +135,37 @@ class BasicPlanPlugin:
 
         return ctx
 
+    @staticmethod
+    async def _public_memories_block(
+        memory_svc: MemoryService, resident_id: str, *, rendered_ids: set[str],
+    ) -> str:
+        """计划 prompt 里「镇上的事」那一段；闸关或取不到时返回**空串**。
+
+        空串是本函数的默认答案，也是它唯一的旧行为：模板里 ``{public_memories}``
+        为空时渲染出的字节与改前（``69f07a7``）一模一样。所以下面三条路径全都返回
+        空串 —— 闸关（``<= 0``）、库里一条都没有、取数抛异常。
+
+        **fail-open**：``_generate_plan`` 的异常会被 ``execute`` 吞成一行 warning，
+        代价是这位居民**整天没有计划**（无目标、无时段计划）。一段锦上添花的 prompt
+        不该有这个权力，所以这里自己兜住。
+
+        ``rendered_ids`` 是已经渲染进 prompt 的记忆 id（个人近况 + 昨天那两段）：
+        镇务结果档 importance=0.99，结票后的几分钟里它必然也在最近 20 条里 ——
+        不去重的话同一句话在 prompt 里出现两次。
+        """
+        limit = settings.realism_plan_public_memories
+        if limit <= 0:
+            return ""
+        try:
+            public = await memory_svc.get_public_memories(resident_id, limit)
+        except Exception:
+            logger.debug("public memories fetch failed (fail-open)", exc_info=True)
+            return ""
+        lines = [f"- {m.content}" for m in public if m.id not in rendered_ids]
+        if not lines:
+            return ""
+        return "\n" + PUBLIC_MEMORY_HEADING + "\n" + "\n".join(lines) + "\n"
+
     async def _generate_plan(self, ctx: TickContext, today: str) -> None:
         resident = ctx.resident
         sbti = (resident.meta_json or {}).get("sbti", {})
@@ -166,6 +204,20 @@ class BasicPlanPlugin:
             if m.created_at and real_to_world(m.created_at).date() < world_today
         ][:5]
         yesterday_text = "\n".join(f"- {m.content}" for m in yesterday_events) if yesterday_events else "（无）"
+
+        # 「镇上的事」（REALISM_PLAN_PUBLIC_MEMORIES，默认 0 = 逐字节旧行为）。
+        #
+        # 上面那两条口径都**不动**：`limit=20` 是「个人近况」的口径（生产实测它只
+        # 覆盖 20-30 分钟，因为每人每天写 480-545 条 event 记忆），`importance>0.5`
+        # 筛掉的是天气（恒 0.5）与低价值 agent_action —— 两者都在做该做的事。
+        # 缺的是另一件事：镇上出了什么（实质世界事件约 1.6 条/人/周，镇务结果更
+        # 稀疏），落进那 20 分钟窗口的概率约等于 0 —— 生产实测六位居民的
+        # world_event 计数**全是 0**。所以这里另开一段，用另一个口径去取。
+        public_text = await self._public_memories_block(
+            memory_svc, resident.id,
+            # 已经渲染过的那些行（个人近况 + 昨天）不再出现第二次
+            rendered_ids={m.id for m in recent} | {m.id for m in yesterday_events},
+        )
 
         action_types = ", ".join(a.value for a in ActionType)
 
@@ -207,6 +259,7 @@ class BasicPlanPlugin:
         user_prompt = PLAN_USER_PROMPT.format(
             yesterday_summary=yesterday_text,
             recent_memories=recent_text,
+            public_memories=public_text,
             relationships=rels_text,
             slot_count=len(slots_info),
         )
