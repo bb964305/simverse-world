@@ -119,6 +119,21 @@ async def flip_active_events(db: AsyncSession) -> list[tuple[dict, str]]:
 #: 「写了等于没写」更糟。琐事档**刻意**不参与候选池的竞争。
 TRIVIAL_EVENT_TYPES = ("weather",)
 
+#: 落进 ``metadata_json["tier"]`` 的显式档位标记。
+#:
+#: 为什么要显式写:生产实测(2026-08-10)``source='world_event'`` 且带
+#: ``raw_importance`` 的记忆 **0 / 1380** —— 记忆行里没有任何可靠判据能把「镇上要
+#: 修一座剧院」与「今天多云」分开(``source`` 两者相同、``importance`` 直写一律
+#: 0.5/0.6、``raw_importance`` 只在分档闸开着时才有)。按 ``source`` 开检索专用道
+#: 就是 94% 抓到天气。
+#:
+#: **这个标记与 ``REALISM_EVENT_MEMORY_TIERED`` 无关**:无论那个闸开关,两条写入
+#: 路径都写,且同一事件在两种闸态下取值相同 —— 它描述的是「这条记忆是什么」,不是
+#: 「走了哪条写入路径」。检索侧的 world_event 专用道认的就是它
+#: (``memory/service.py`` 的 ``SUBSTANTIVE_TIER``)。
+TIER_TRIVIA = "trivia"
+TIER_SUBSTANTIVE = "substantive"
+
 
 def _is_trivial_event(event: dict) -> bool:
     """琐事档判据:天气,或**集市日**那一档节庆。
@@ -139,6 +154,53 @@ def _is_trivial_event(event: dict) -> bool:
         return True
     return (event.get("type") == "festival"
             and bool((event.get("payload_json") or {}).get("market_day")))
+
+
+async def _embed_or_none(content: str, event_id) -> list[float] | None:
+    """**每事件算一次**的 embedding,任何失败都吞成 ``None``。
+
+    ``_cosine``(``memory/service.py`` 的 ``_cosine``)对 NULL 向量返回 **0.0**,
+    所以不带向量落库不是「少一点相关度」,而是这条记忆在
+    ``0.45·rel + 0.30·recency + 0.25·importance`` 里**自弃 45% 的权重**:得分上界
+    只剩 ``0.30×1 + 0.25×0.5 = 0.425``,而饱和居民第 10 名个人记忆实测 0.4562 ——
+    world_event 专用道把它送进 30 条候选池,打分层再把它从 top-10 里扔掉。写了,
+    进了池,还是读不到。
+
+    **两条写入路径共用这一个口径**(直写循环 + ``_write_substantive``)。E1 那批只
+    给后者补了 embedding,而那条路只在 ``REALISM_EVENT_MEMORY_TIERED`` 开着时才走
+    —— 那个闸按设计反转**永久关闭**,于是生产实际走的全是直写。一份口径两处调用,
+    是为了不再出现「补了一条路,另一条路还漏着」。
+
+    **一次算、收件人共用**:调用点 ``tasks/event_cron.py`` 是同步的一轮,每收件人
+    算一次会把一次 flip 拖成 N 次 ollama 往返,人口涨一倍就翻一倍。同一事件同一
+    描述,向量本来就相同。
+
+    fail-open 单独一层:``generate_embedding`` 自己已经把 provider 侧的异常吞成
+    None(``memory/embedding.py``),这层 try 挡的是它之外的意外(配置读取、被
+    patch 的实现、事件循环相关的抛出)。少了它,一次 embedding 抖动会被外层那个
+    ``except`` 逮住 —— 直写路会被 ``event_cron`` 那个**没有 rollback** 的 except
+    吞成整轮零写入,``_write_substantive`` 则会把已经写好的行 rollback 掉。
+    fail-open 之后 ``embedding IS NULL``,就是改前的行为。
+
+    ``[]`` 与 ``None`` 一律归一成 ``None``。真 provider 到不了空向量那个态
+    (``embedding.py`` 的两条 ``_embed_*`` 都把 falsy 映成 None),但一旦到了后果
+    不对称:PG 下 ``[]`` 灌进 ``vector(1024)`` 会在 INSERT 当场抛;sqlite 下落成
+    ``'[]'`` 则**两条兜底都够不着** —— 它不满足 backfill 的 ``embedding.is_(None)``,
+    也不满足零向量清理的 ``if mem.embedding``(``[]`` 是 falsy 直接跳过),而
+    ``_cosine`` 对它照样返回 0。等于永久卡死在一个既修不了也用不上的状态。
+
+    算的是**截断前**的 content(此处最长 200),而 ``add_memory`` 会把 event 截到
+    ``EVENT_MEMORY_MAX_CHARS=80``。这是本仓既有口径(``extract_events`` /
+    ``_persist_wrapup_side`` / civic 广播同样 embed 全文),刻意保持一致而不是各起
+    一份。代价:backfill 用的是落库后的 content,两个生产者算出的向量会不同 ——
+    但补了这一步之后这些行永不为 NULL,backfill 根本不会碰它们,是潜在不是活的。
+    """
+    try:
+        return (await generate_embedding(content)) or None
+    except Exception:
+        logger.warning("WORLD_EVENT_EMBED_FAILED event_id=%s", event_id,
+                       exc_info=True)
+        return None
 
 
 async def _write_substantive(db: AsyncSession, informed: dict[str, float],
@@ -174,36 +236,14 @@ async def _write_substantive(db: AsyncSession, informed: dict[str, float],
     ``PendingRollbackError`` 会顺着传染并被误算到 C4/C3/E3 头上(``event_cron.py:60-62``
     记着同一个坑)。
 
-    E1 的 ``embedding``:``_cosine``(``memory/service.py:33``)对 NULL 向量返回
-    0.0,不带向量落库 = 这条记忆在 ``0.45·rel + 0.30·recency + 0.25·importance``
-    里自弃 45% 的权重。**每事件算一次**(同一事件同一描述,收件人共用),不是每
-    收件人一次 —— 本函数在 ``event_cron`` 的同步一轮里,每人一次会把一次 flip 拖
-    成 N 次 ollama 往返。算 embedding 这一步单独 fail-open:它失败只该退回
-    ``embedding IS NULL``(改前的行为),不该把已经写好的行 rollback 掉。
+    ``embedding`` 的口径见 ``_embed_or_none``(两条写入路径共用一份)。这里只多一条
+    判据:``informed`` 为空(梯度筛完一个人都没有)时**不白算一次** —— 外部依赖只在
+    真要落库时才碰。
     """
     from app.config import settings
     from app.memory.service import MemoryService
 
-    emb = None
-    if informed:   # 梯度筛完一个人都没有时不白算一次
-        try:
-            emb = await generate_embedding(content)
-        except Exception:
-            logger.warning("WORLD_EVENT_EMBED_FAILED event_id=%s",
-                           meta.get("event_id"), exc_info=True)
-        # 空向量归一成 None。真 provider 到不了这个态(embedding.py 的两条
-        # _embed_* 都把 falsy 映成 None),但一旦到了后果不对称:PG 下 [] 灌进
-        # vector(1024) 会在第一条 add_memory 抛、被上层 except 吞成整轮零写入;
-        # sqlite 下落成 '[]' 则**两条兜底都够不着** —— 它不满足 backfill 的
-        # embedding.is_(None),也不满足零向量清理的 `if mem.embedding`([] 是
-        # falsy 直接跳过),而 _cosine 对它照样返回 0。等于永久卡死。
-        if not emb:
-            emb = None
-    # 注:算的是**截断前**的 content(此处最长 200),而 add_memory 会把 event
-    # 截到 EVENT_MEMORY_MAX_CHARS=80。这是本仓既有口径(extract_events /
-    # _persist_wrapup_side 同样embed 全文),刻意保持一致而不是各起一份。
-    # 代价:backfill 用的是落库后的 content,两个生产者算出的向量会不同 ——
-    # 但补了这一行之后这些行永不为 NULL,backfill 根本不会碰它们,是潜在不是活的。
+    emb = await _embed_or_none(content, meta.get("event_id")) if informed else None
 
     svc = MemoryService(db)
     written = 0
@@ -266,7 +306,25 @@ async def write_collective_memories(db: AsyncSession, event: dict, rng=None) -> 
     ``REALISM_EVENT_MEMORY_TIERED`` 再叠一层**分档**,与上面那条梯度正交:梯度决定
     「谁知道」(收件人集合,本批不动),分档决定「多重要」(琐事直写 / 实质走
     ``add_memory`` 的分位归一,见 ``_is_trivial_event`` 与 ``_write_substantive``)。
-    闸关 = 全部直写,与改前逐字节一致。"""
+    闸关 = 全部直写,与改前逐字节一致。
+
+    ⚠️ ``REALISM_EVENT_MEMORY_TIERED`` **已被检索侧的 world_event 专用道
+    (``REALISM_POOL_WORLD_EVENT_RESERVE``)取代,应保持永久关闭**(代码本批不动)。
+    抬 importance 会让实质事件**同时**挤占个人臂(12 周饱和实测 day28 7/30 →
+    day84 21/30)**又**吃专用道坑位 —— 双重占坑;而专用道本身就保证**进候选池**。
+    现在的方向是反过来的:实质事件**保持低 importance**(与琐事同档,永不挤占个人
+    臂),完全靠专用道拿到候选池里的保证坑位。
+
+    ⚠️ 「保证进候选池」≠「保证被检索到」。池是 30 条,prompt 拿的是打分后的
+    **top-10**,进池只是参赛资格。所以实质事件必须带 embedding 落库
+    (``_embed_or_none``)—— 没有向量时 ``_cosine`` 返回 0.0,得分上界只剩
+    ``0.30×1 + 0.25×0.5 = 0.425``,而饱和居民第 10 名个人记忆是 0.4562:进了池,
+    必被截断。补上向量之后它仍需 ``cos`` 打赢第 10 名才进 prompt(切题的问句过得
+    去、不切题的过不去),这**是想要的行为**。
+
+    ``metadata_json["tier"]`` 是那条专用道的判据,它**与上面那个闸门无关**:闸开闸
+    关都写,同一事件取值相同 —— 它描述「这条记忆是什么」,不是「走了哪条写入路径」。
+    """
     import random as _random
     from app.config import settings
     from app.models.resident import Resident
@@ -282,8 +340,12 @@ async def write_collective_memories(db: AsyncSession, event: dict, rng=None) -> 
     event_id = event.get("id")
     is_weather = event.get("type") == "weather"
 
+    # 档位标记(W1)。在闸门分岔**之前**算,两条写入路径共用 —— 标记描述的是记忆
+    # 本身,不是走了哪条路,所以它不能跟着 ``realism_event_memory_tiered`` 漂。
+    tier = TIER_TRIVIA if _is_trivial_event(event) else TIER_SUBSTANTIVE
+
     def _meta():
-        m = {"first_hand": True}
+        m = {"first_hand": True, "tier": tier}
         if event_id:
             m["event_id"] = event_id
         return m
@@ -306,8 +368,19 @@ async def write_collective_memories(db: AsyncSession, event: dict, rng=None) -> 
     if settings.realism_event_memory_tiered and not _is_trivial_event(event):
         return await _write_substantive(db, informed, content, _meta())
 
+    # 直写路的实质事件也要带向量落库。这条路是**生产唯一实际走的路**(上面那个闸
+    # 按设计反转永久关闭),不补的话 world_event 专用道送进候选池的是一条 rel 恒为
+    # 0 的记忆 —— 得分上界 0.425,被 scored top-10 原样截掉。口径见 _embed_or_none。
+    #
+    # 判据是 ``tier``,不是「走到了这里」:走到这里的还有琐事档(闸开时天气 / 集市
+    # 日也落到这个循环)。琐事是 96% 的量且**刻意**不进候选池(见 TRIVIAL_EVENT_
+    # TYPES),给它算 embedding 是每天 5-6 次零收益的 ollama 往返。
+    emb = (await _embed_or_none(content, event_id)
+           if tier == TIER_SUBSTANTIVE and informed else None)
+
     for rid, imp in informed.items():
         db.add(Memory(resident_id=rid, type="event", content=content,
-                      importance=imp, source="world_event", metadata_json=_meta()))
+                      importance=imp, source="world_event", embedding=emb,
+                      metadata_json=_meta()))
     await db.commit()
     return len(informed)

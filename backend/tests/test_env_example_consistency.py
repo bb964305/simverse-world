@@ -288,7 +288,18 @@ def test_event_memory_tier_knobs_exist_in_deploy_env_example_too():
 #: **不在** ``GOVERNANCE_PREFIXES`` 里,下面那条 parity 扫不到本批的键 —— 没有这
 #: 条断言,运维照 deploy 模板起的环境里根本不存在这个旋钮(07-27B 审计 H2 把「多份
 #: env 真值互相漂移」定为事故级问题类)。
-POOL_RESERVE_PREFIX = "REALISM_POOL_CIVIC_"
+#:
+#: 前缀取到 ``REALISM_POOL_`` 而不是某一条道的全名:候选池里现在有两条道
+#: (``_CIVIC_RESERVE`` / ``_WORLD_EVENT_RESERVE``),前缀钉死其中一条的话,第二条道
+#: 落地时这条 parity 会静默地扫不到它 —— 而「扫不到」的表现和「没有这个键」一模
+#: 一样,全绿。往后再开第三条道也自动被覆盖。
+POOL_RESERVE_PREFIX = "REALISM_POOL_"
+
+#: 两条道的 ``(Settings 字段, env 键)``。默认必须都是 0 = 逐字节旧行为。
+POOL_RESERVE_KNOBS = [
+    ("realism_pool_civic_reserve", "REALISM_POOL_CIVIC_RESERVE"),
+    ("realism_pool_world_event_reserve", "REALISM_POOL_WORLD_EVENT_RESERVE"),
+]
 
 
 def test_pool_reserved_slot_knob_exists_in_deploy_env_example_too():
@@ -296,22 +307,26 @@ def test_pool_reserved_slot_knob_exists_in_deploy_env_example_too():
     backend_keys = {k for k in _raw_keys(ENV_EXAMPLE)
                     if k.startswith(POOL_RESERVE_PREFIX)}
     assert backend_keys, "backend/.env.example 里没有候选池保留位旋钮?基线认知错误"
+    assert backend_keys >= {env for _, env in POOL_RESERVE_KNOBS}, (
+        f"backend/.env.example 缺某条道的旋钮: "
+        f"{sorted({env for _, env in POOL_RESERVE_KNOBS} - backend_keys)}")
     missing = sorted(backend_keys - _raw_keys(DEPLOY_ENV_EXAMPLE))
     assert not missing, (
         f"deploy/backend/.env.example 缺候选池保留位旋钮(补上并保持默认 0): {missing}")
 
 
 def test_pool_reserved_slot_defaults_to_zero_everywhere():
-    """``0 = 逐字节旧行为``,所以三处默认必须都是 0。
+    """``0 = 逐字节旧行为``,所以每条道的三处默认必须都是 0。
 
-    这个旋钮一个数同时表达「开没开」与「几个坑」—— 任何一处模板写成非 0,
+    这种旋钮一个数同时表达「开没开」与「几个坑」—— 任何一处模板写成非 0,
     运维照它起的环境就是**默认开闸**,而开闸会改写每位居民的候选池组成。
     """
-    assert Settings.model_fields["realism_pool_civic_reserve"].default == 0, \
-        "Settings 里的默认不是 0 —— 保留位必须默认关"
-    for path in (ENV_EXAMPLE, DEPLOY_ENV_EXAMPLE):
-        assert "REALISM_POOL_CIVIC_RESERVE=0" in path.read_text(encoding="utf-8"), \
-            f"{path} 里的保留位默认不是 0"
+    for field, env_key in POOL_RESERVE_KNOBS:
+        assert Settings.model_fields[field].default == 0, \
+            f"Settings 里 {field} 的默认不是 0 —— 保留位必须默认关"
+        for path in (ENV_EXAMPLE, DEPLOY_ENV_EXAMPLE):
+            assert f"{env_key}=0" in path.read_text(encoding="utf-8"), \
+                f"{path} 里 {env_key} 的默认不是 0"
 
 
 def test_governance_knobs_exist_in_deploy_env_example_too():
