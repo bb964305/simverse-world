@@ -54,6 +54,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy import select
 
 from app.agent.actions import ActionType
 from app.agent.phases.plan import basic
@@ -220,7 +221,8 @@ def gate(monkeypatch):
 
 
 async def _capture_plan_prompt(db, resident: Resident, *,
-                               template: str | None = None) -> str:
+                               template: str | None = None,
+                               plugin: "basic.BasicPlanPlugin | None" = None) -> str:
     """跑一次**真** ``BasicPlanPlugin.execute``,把交给 LLM 的 user prompt 抓回来。
 
     只替换两样东西:``llm_chat``(不打真模型)与 ``manager``(不开 websocket)。
@@ -237,7 +239,7 @@ async def _capture_plan_prompt(db, resident: Resident, *,
         schedule_phase="上午",
         available_actions=[ActionType.WORK, ActionType.IDLE])
     mock_llm = AsyncMock(return_value=_LLM_JSON)
-    plugin = basic.BasicPlanPlugin(params={"hourly_slots": 3})
+    plugin = plugin or basic.BasicPlanPlugin(params={"hourly_slots": 3})
     with patch.object(basic, "llm_chat", mock_llm), \
             patch.object(basic, "manager") as mock_mgr:
         mock_mgr.broadcast = AsyncMock()
@@ -599,3 +601,140 @@ async def test_other_residents_public_memories_never_leak(db_session, gate):
     prompt = await _capture_plan_prompt(db_session, me)
     assert "别人的公投结果" not in prompt
     assert _HEADING not in prompt
+
+
+# ── P3 端到端:真写入路 + 生产 YAML 里那个 PlanPhase + 最终 prompt 文本 ────
+#
+# 第 3 段的教训:那次专用道把记忆送进了**候选池**,却因为没有 embedding 被打分层
+# 的 top-10 截掉 —— 单元测试全绿,「NPC 还是不知道」照旧。「进了容器」不等于
+# 「进了 prompt」。所以本段的验收必须是端到端的:
+#
+#   真 world_event_service.write_collective_memories(盖 tier 的那条生产写入路)
+#     → 真 registry 按 configs/default.yaml 造出来的 plan phase(生产 params)
+#       → 真 BasicPlanPlugin.execute
+#         → 断言那条事件的**原文**在交给 LLM 的 user prompt 文本里
+#
+# 上面 P2 那批用例是手工 INSERT 出来的记忆行 + 手工 new 的插件;这一条把两端都换成
+# 生产件,量的是同一件事的另一半:tier 标记真的盖上了吗、生产配置里那个 phase 真的
+# 走这段代码吗、最终那串字符里真的有它吗。
+
+#: 一次性的叙事事件(``type='news'``)—— ``_is_trivial_event`` 归实质档。
+_E2E_EVENT_TEXT = "镇上要修一座剧院，下个月开工"
+
+#: 天气 —— 同一条写入路,``_is_trivial_event`` 归琐事档。它比剧院那条**新**,
+#: 盲取 world_event 的实现会先抓到它。
+_E2E_WEATHER_TEXT = "今天多云转晴，傍晚可能有阵雨"
+
+
+@pytest.fixture
+def e2e_world(monkeypatch):
+    """端到端那条链上的闸,全部**显式**设成生产形状,不吃机器上的 ``.env``。
+
+    - ``realism_info_gradient_enabled=False``:单人世界里梯度会把收件人筛空
+      (``round(0.2 × 1) = 0``),事件一条都写不出来。全知广播档 importance=0.5,
+      正是生产随机样本档的那个值;
+    - ``realism_event_memory_tiered=False``:设计反转钦定它**永久关闭**,所以实质
+      事件走的是 ``write_collective_memories`` 末尾那个直写循环 —— 生产唯一实际
+      走的那条路;
+    - ``embedding_enabled=False``:计划阶段这条路**根本不打分**,没有 query text
+      也就没有相关度 —— 一条 ``embedding IS NULL`` 的记忆照样该进 plan prompt。
+      这正是它与 ``retrieve_context`` 那条路的分水岭(那边 NULL 向量 = 自弃 45%
+      权重 = 被 top-10 截掉),下面有断言把这件事钉住。关掉它同时让这条用例不打
+      任何网络。
+    """
+    monkeypatch.setattr(settings, "realism_info_gradient_enabled", False)
+    monkeypatch.setattr(settings, "realism_event_memory_tiered", False)
+    monkeypatch.setattr(settings, "embedding_enabled", False)
+
+
+async def _broadcast(db, event_id: str, text: str, *, etype: str) -> Memory:
+    """走**真** ``write_collective_memories`` 落一条世界事件记忆,返回那一行。"""
+    n = await wes.write_collective_memories(
+        db, {"id": event_id, "type": etype, "description": text, "payload_json": {}})
+    assert n == 1, f"事件没广播出去(n={n}),后面的断言无从谈起"
+    rows = [m for m in (await db.execute(
+        select(Memory).where(Memory.source == "world_event")
+    )).scalars().all() if (m.metadata_json or {}).get("event_id") == event_id]
+    assert len(rows) == 1
+    return rows[0]
+
+
+def _production_plan_phase(resident: Resident):
+    """从**生产 YAML**(``app/agent/configs/*.yaml``)里造出这位居民的 plan phase。
+
+    不 ``BasicPlanPlugin(params={...})`` 手工 new:那样测的是「这个类」,而生产跑
+    的是「registry 按 resolve_config_name 选出的 config 里那个 plugin 路径 + 那份
+    params」。接线漏在 YAML 那一侧的话,手工 new 的用例一片绿。
+    """
+    from app.agent.registry import registry, resolve_config_name
+    assert resolve_config_name(resident) == "default", (
+        "这位居民解析到的不是 default config —— 断言的就不是生产默认那条路了")
+    registry.load_all()
+    phases = [p for p in registry.get_phases(resident)
+              if type(p).__name__ == "BasicPlanPlugin"]
+    assert len(phases) == 1, f"生产 config 里的 plan phase 不是一个:{phases}"
+    return phases[0]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("n,expected", [
+    pytest.param(0, False, id="gate=0(对照:记忆在库里、取得到,就是不进 prompt)"),
+    pytest.param(2, True, id="gate=2(开闸)"),
+])
+async def test_a_real_world_event_reaches_the_real_plan_prompt(
+        db_session, gate, e2e_world, n, expected):
+    """**端到端**:一条真的实质世界事件,要出现在真 PlanPhase 交给 LLM 的 prompt 里。
+
+    ``gate=0`` 那半格不是走过场:它证明这条记忆**在库里、而且专用道那份判据取得到
+    它**,却照旧进不了 prompt —— 缺陷本身就长这样(生产六位居民的 world_event 计数
+    全是 0,不是因为没有记忆,是因为那 20 条只覆盖 20-30 分钟)。没有这半格,
+    「gate=2 时它在 prompt 里」这句话可以由一个恒真的 prompt 说出来。
+    """
+    r = await _resident(db_session)
+    # 24 条个人琐事 = 最近 24 分钟。事件写在这之后(created_at=now),所以它其实
+    # **在**最近 20 条里 —— 但 importance=0.5 过不了 `> 0.5` 那条个人筛,于是
+    # 闸关时它照旧进不了 prompt。这正是生产的形状:记忆有,窗口也够,就是没人渲染它。
+    await _seed_personal(db_session, r.id, 24)
+    mem = await _broadcast(db_session, "theatre", _E2E_EVENT_TEXT, etype="news")
+
+    # 写入侧:真代码盖上了档位标记,专用道认的就是它
+    assert (mem.metadata_json or {}).get("tier") == wes.TIER_SUBSTANTIVE
+    assert mem.importance == _WE_IMPORTANCE, "实质事件不该被抬 importance(设计反转)"
+    assert mem.embedding is None, (
+        "这条用例要的正是「没有向量也照样进 plan prompt」—— 有向量就测不出这件事了")
+    # 取数侧:两条道那份判据确实取得到它(与 prompt 里有没有它是两件事)
+    assert [m.id for m in await MemoryService(db_session)
+            ._query_recent_substantive_world_events(r.id, 5)] == [mem.id]
+
+    gate(n)
+    prompt = await _capture_plan_prompt(
+        db_session, r, plugin=_production_plan_phase(r))
+
+    assert (_E2E_EVENT_TEXT in prompt) is expected, (
+        f"realism_plan_public_memories={n}:那条实质世界事件"
+        f"{'没进' if expected else '进了'}最终 plan prompt")
+    assert (_HEADING in prompt) is expected
+    assert r.daily_plans_json is not None, "计划没落库 —— 这条链没跑完"
+
+
+@pytest.mark.anyio
+async def test_the_real_weather_event_stays_out_of_the_real_plan_prompt(
+        db_session, gate, e2e_world):
+    """同一条真写入路落下的**天气**,开着闸也不进 plan prompt。
+
+    天气是那条路上 96% 的量(生产近 3 天 weather 261 / festival 17),且它比剧院那条
+    新 —— 按 ``created_at DESC`` 盲取 ``source='world_event'`` 的实现会先抓到它。
+    """
+    r = await _resident(db_session)
+    await _seed_personal(db_session, r.id, 24)
+    theatre = await _broadcast(db_session, "theatre", _E2E_EVENT_TEXT, etype="news")
+    weather = await _broadcast(db_session, "sunny", _E2E_WEATHER_TEXT, etype="weather")
+    assert (weather.metadata_json or {}).get("tier") == wes.TIER_TRIVIA
+    assert weather.created_at >= theatre.created_at
+
+    gate(2)
+    prompt = await _capture_plan_prompt(
+        db_session, r, plugin=_production_plan_phase(r))
+
+    assert _E2E_EVENT_TEXT in prompt, "实质事件都没进去,这条用例证明不了天气被挡住"
+    assert _E2E_WEATHER_TEXT not in prompt, "天气进了 plan prompt"
