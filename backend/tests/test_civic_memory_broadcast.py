@@ -3,7 +3,7 @@
 事实层(S2-S5)管「小镇现在是什么样」,这一层管「刚才镇上发生了什么」。生产
 实测:何巧云当选那天全镇只有她自己留下一条记忆,其余 13 人零条。
 
-四条硬约束在本文件里各有断言守着:
+五条硬约束在本文件里各有断言守着:
 
 - **收件人 = ``is_autonomous``**(K15):npc 与 UGC ``resident`` 都收,只有玩家
   分身不收。镇务公告是公共信息,把知情面绑在投票权(``is_civic_voter``,只有
@@ -13,8 +13,13 @@
 - **落档可检索(M3/K14)**:``_fetch_event_candidates`` 静态截前 30 条,进不了
   这个池子的记忆等于没写。而 ``_normalize_importance`` 是**分位数** —— 只
   spy 传入的 raw 会假绿(全窗口同为 0.9 时 raw=0.9 落 0.5),必须断言**落库值**。
+  这条断言本身还有一层假绿:测试镇的 ``_HISTORY`` 池底才 0.7,而生产跑够久的
+  居民池底顶到 1.0 —— 见 ``_SATURATED_HISTORY`` 与那条 ``xfail(strict=True)``。
+- **写入侧带 embedding(E1)**:``_cosine`` 对 NULL 向量返回 0.0,不带向量落库
+  的记忆在检索打分里恒定丢掉 45% 的权重。且必须**每事件算一次**跨收件人复用,
+  不是每人一次。
 - **fail-open**:广播是镇务流程的副作用,写不进去只能记 warning,绝不能把结票
-  或公告本身带崩。
+  或公告本身带崩。embedding 失败同理 —— 退回 NULL,不挡落库。
 """
 from datetime import datetime, timedelta, UTC
 
@@ -32,6 +37,27 @@ from app.services.civic_memory import broadcast_civic_memory
 #: 30 条在 0.7 以上意味着:广播若按 write_collective_memories 那样直写 0.5,
 #: 或按低一档的 notice 分位落下去,都会被挤出候选池 —— 那两条断言才咬得动。
 _HISTORY = [0.9] * 3 + [0.8] * 4 + [0.7] * 28
+
+#: **饱和史** —— 生产 jiang-lin / zhao-qiwen 的形状(8355 活跃 event、36 条落库
+#: 1.0、S0 候选池第 30 名恰好 **1.0**)。``_HISTORY`` 那种 0.7 池底是**测试镇独有
+#: 的稀薄史**,真镇子跑够久之后池底就顶到 1.0,而那正是「进得了池」这条断言开始
+#: 说谎的地方。
+#:
+#: ``_seed_history`` 按下标定序(下标 0 最新),所以这份列表分两段:
+#:
+#: - **前 100 条 = 归一化窗口**(``realism_importance_window=100``)。一条 0.95 +
+#:   99 条 0.5 → 结果档 raw 0.9 落 ``(99 + 0.5×0)/100 = 0.99``,复刻生产实测的
+#:   0.99-1.00。窗口里放的是普通 ``agent_action`` 的 raw(0.5 一档),因为居民的近
+#:   期记忆本来就是琐事,不是高档记忆;
+#: - **后 30 条 = 池底**,落库 1.0 且早于窗口 —— 它们只参与 ``importance DESC``
+#:   的候选池排序,不参与归一化(超出窗口)。这两件事在生产里本来就是解耦的:
+#:   落库 1.0 的那 36 条是**当年**打赢了各自窗口的老记忆,今天的窗口里全是 0.5。
+#:
+#: 于是 0.99 < 1.0,新镇务记忆差 **0.01** 永远排在第 31 位。
+_SATURATED_HISTORY = [0.95] + [0.5] * 99 + [1.0] * 30
+
+#: 上面那份饱和史下,结果档 raw 0.9 的归一落点。写死是为了「窗口口径一动当场红」。
+_NORMALIZED_UNDER_SATURATION = 0.99
 
 #: 桩向量。宽度对齐 ``vector(1024)`` 列(sqlite 下落 JSON,但形状照生产写)。
 _FAKE_EMB = [0.1] * 1024
@@ -179,13 +205,39 @@ async def test_importance_defaults_to_gate_value_and_is_overridable(db_session, 
 # ── 落档可检索(M3/K14) ─────────────────────────────────────────────────
 
 @pytest.mark.anyio
-async def test_broadcast_survives_the_top30_candidate_pool(db_session, broadcast_on, monkeypatch):
+@pytest.mark.parametrize("history,normalized,pool_floor", [
+    # 稀薄史:窗口就是那 35 条,raw 0.9 的 below=32 / equal=3 → (32+1.5)/35 = 0.9571,
+    # 池底 0.7(第 30 名)。0.9571 > 0.7,进得去。
+    pytest.param(_HISTORY, 0.9571, 0.7, id="thin"),
+    # 饱和史:窗口 below=99 / equal=0 → 0.99,池底 1.0。**只差 0.01**。
+    pytest.param(
+        _SATURATED_HISTORY, _NORMALIZED_UNDER_SATURATION, 1.0, id="saturated",
+        marks=pytest.mark.xfail(
+            strict=True, raises=AssertionError,
+            reason="已知缺陷:池底顶到 1.0 时结果档只归一到 0.99,差 0.01 进不去。"
+                   "生产 4 位居民里 jiang-lin / zhao-qiwen 两位已经是这个形状。"
+                   "修法属于候选池组成(专用道/配额/保留位),不在本批范围;"
+                   "strict=True 保证那一批落地后这条意外变绿会当场提醒。")),
+])
+async def test_broadcast_survives_the_top30_candidate_pool(
+        db_session, broadcast_on, monkeypatch, history, normalized, pool_floor):
     """生产 ``REALISM_ENABLED=true``,写进去的 0.9 会被分位数改写。断言**落库值**
-    仍在最高档,且该行确实出现在 cap=30 的候选池里 —— 进不了池子等于没写。"""
+    仍在最高档,且该行确实出现在 cap=30 的候选池里 —— 进不了池子等于没写。
+
+    两份历史的分工:
+
+    - ``thin``(``_HISTORY``,池底 0.7)是**测试镇**的形状 —— 这条一直是绿的;
+    - ``saturated``(``_SATURATED_HISTORY``,池底 1.0)是**真镇子跑够久之后**的形状。
+      生产实测 4 位居民里 jiang-lin(8355 event)与 zhao-qiwen(8042)的 S0 池第 30
+      名恰好是 1.0,而结果档 raw 0.9 只归一到 0.99 —— 差 0.01,永远排在第 31 位。
+
+    换句话说:只有 ``thin`` 那一份时,「镇务记忆进得了池」这条断言**在测试里恒绿、
+    在生产对 2/4 人是假的**。任何池方案的验收不先补这条饱和分支都是假绿。
+    """
     monkeypatch.setattr(settings, "realism_enabled", True)
     people = await _town(db_session)
     rid = people["npc"].id
-    await _seed_history(db_session, rid, _HISTORY)
+    await _seed_history(db_session, rid, history)
 
     assert await broadcast_civic_memory(
         db_session, "何巧云当选了小镇镇长。", kind="civic", ref="poll_result:p-1") == 2
@@ -193,8 +245,12 @@ async def test_broadcast_survives_the_top30_candidate_pool(db_session, broadcast
     mem = next(m for m in await _civic_rows(db_session) if m.resident_id == rid)
     assert mem.metadata_json["raw_importance"] == pytest.approx(0.9)  # raw 留痕
     assert mem.importance >= 0.8                                      # 落库值才算数
+    assert mem.importance == pytest.approx(normalized)                # 归一落点写死
     pool = await MemoryService(db_session)._fetch_event_candidates(rid, cap=30)
     assert len(pool) == 30                                            # 池子确实满了
+    # 前四条在两份历史下都绿。饱和分支唯一红在下面这一条 —— xfail 钉的是「差 0.01
+    # 进不去」,不是「归一化算错了」,所以池底也一并咬死。
+    assert pool[-1].importance == pytest.approx(pool_floor)
     assert mem.id in {m.id for m in pool}
 
 
