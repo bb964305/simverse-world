@@ -429,6 +429,13 @@ class Settings(BaseSettings):
     # 不扩池：pool(cap) = 专用道(最多 N 条 civic:poll_result) ∪ 个人臂(cap - 实拿条数)，
     # 没填满的坑退还给个人臂，所以 len(pool) 与改前逐字相同。
     realism_pool_civic_reserve: int = 0
+    # 候选池内的 world_event 保留位。0 = 逐字节旧行为（只有 civic 道那一版）。
+    # 只收 metadata_json->>'tier' = 'substantive' 的 world_event 记忆（写入侧的显式
+    # 档位标记，见 services/world_event_service.py）—— **不按 source 开道**：生产
+    # 实测公共臂 top-41 全是 importance=0.5 的天气，按 source 开 94% 抓到天气。
+    # 与 civic 道同构：道内 created_at DESC，没填满的坑退还给个人臂，
+    # cap < POOL_RESERVE_MIN_CAP 的 fail-open 路径上两条道都不生效。
+    realism_pool_world_event_reserve: int = 0
     # Task 2 eviction (soft-archive) thresholds.
     realism_evict_importance_floor: float = 0.35
     realism_evict_idle_days: int = 90

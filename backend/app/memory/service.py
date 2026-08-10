@@ -33,6 +33,20 @@ EVENT_MEMORY_MAX_CHARS = 80
 #: 都不进,理由见 ``_fetch_reserved_civic_candidates``。
 CIVIC_RESULT_EVENT_PREFIX = "civic:poll_result:"
 
+#: world_event 专用道认的两个判据(写入侧见 ``app/services/world_event_service.py``
+#: 的 ``TIER_SUBSTANTIVE``,两侧同一个字面量由
+#: ``tests/test_pool_world_event_lane.py`` 钉住)。
+#:
+#: **不按 ``source`` 单独开道**:生产实测(2026-08-10)公共臂 top-41 全是
+#: ``importance=0.5`` 的天气,近 3 天的 world_event 记忆是 weather 261 / festival 17
+#: —— 按 source + ``created_at DESC`` 开道等于 94% 抓到天气。所以必须再叠上 W1 落下
+#: 的显式档位标记 ``metadata_json["tier"]``。
+#:
+#: 存量 1380 条没有这个键 → 专用道对它们查不到,这是预期的(**不回填**:数据变更与
+#: 开闸不同车)。
+WORLD_EVENT_SOURCE = "world_event"
+SUBSTANTIVE_TIER = "substantive"
+
 #: 保留位生效的最小候选池深度 = **真实池深**(``_search_events_scored`` 的
 #: ``max(limit*3, 30)``,``limit`` 取 ``retrieve_context`` 的默认 10)。
 #:
@@ -403,8 +417,53 @@ class MemoryService:
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
 
+    async def _fetch_reserved_world_event_candidates(
+        self, resident_id: str, cap: int,
+    ) -> list[Memory]:
+        """world_event 专用道:最近 N 条**实质档**世界事件记忆,``N = effective_reserve``。
+
+        与镇务道同构,只有判据不同:这里认 ``source='world_event'`` **且**
+        ``metadata_json->>'tier' = 'substantive'``。只判 source 会 94% 抓到天气
+        (理由见 ``WORLD_EVENT_SOURCE`` 的注释);只判 tier 则会把将来任何别的写入侧
+        盖的同名标记也收进来 —— 两个条件一起才是「这条道要的东西」。
+
+        **设计反转**:有了专用道之后,实质世界事件**保持低 importance**(与琐事同档,
+        永不挤占个人臂),完全靠这条道拿到保证坑位。抬 importance 的老办法
+        (``REALISM_EVENT_MEMORY_TIERED``)会让实质事件**同时**挤占个人臂(12 周饱和
+        实测 day28 7/30 → day84 21/30)**又**吃专用道坑位 —— 双重占坑,已被本道取代,
+        那个闸门应当保持永久关闭。
+
+        道内按 ``created_at DESC``:世界事件要的是「最近发生了什么」。按 importance
+        排在这条道上等于随机 —— 反转之后道内的 importance 本来就全等。
+
+        JSON 路径用 ``metadata_json["tier"].as_string()`` —— PG 的 ``->>`` 与 sqlite
+        的 ``JSON_EXTRACT`` 都编得出来(K17)。
+        """
+        from app.config import settings
+        reserve = settings.realism_pool_world_event_reserve
+        # fail-open 路径(``_search_events`` 把 limit=10 当 cap 传下来)上两条道都
+        # 不生效:那时池只有 10 条且没有相关度可言。
+        effective_reserve = 0 if cap < POOL_RESERVE_MIN_CAP else max(reserve, 0)
+        effective_reserve = min(effective_reserve, cap)
+        if effective_reserve <= 0:
+            return []
+        stmt = (
+            select(Memory)
+            .where(
+                Memory.resident_id == resident_id,
+                Memory.type == "event",
+                Memory.archived_at.is_(None),
+                Memory.source == WORLD_EVENT_SOURCE,
+                Memory.metadata_json["tier"].as_string() == SUBSTANTIVE_TIER,
+            )
+            .order_by(Memory.created_at.desc())
+            .limit(effective_reserve)
+        )
+        result = await self.db.execute(stmt)
+        return list(result.scalars().all())
+
     async def _fetch_event_candidates(self, resident_id: str, cap: int) -> list[Memory]:
-        """候选池 = 镇务专用道 ∪ 个人臂,共 `cap` 个坑。
+        """候选池 = 镇务专用道 ∪ world_event 专用道 ∪ 个人臂,共 `cap` 个坑。
 
         候选池是 ``ORDER BY importance DESC, created_at DESC LIMIT cap`` ——
         打分公式里那 0.45 的相关度权重是**截断之后**才参与的,于是它根本不参与
@@ -412,21 +471,38 @@ class MemoryService:
         8042)永远收不到归一 0.99 的镇务结果记忆,**差 0.01,病症逐人**。
 
         **不扩池**(扩池会稀释 ``public/pool < 2/3`` 那条硬门的分母),而是在池内
-        留位。三条不变量:
+        留位。四条不变量,**对两条道同时成立**:
 
-        1. ``len(pool)`` 恒等于 ``min(cap, 活跃 event 总数)`` —— 专用道**没填满
-           的坑退还给个人臂**(``cap - len(reserved)`` 用的是实拿条数,不是
-           ``cap - reserve``)。否则还没结过票的世界会拿到一个 28 条的池;
-        2. 专用道成员从个人臂**排除**,不双份占坑;
+        1. ``len(pool)`` 恒等于 ``min(cap, 活跃 event 总数)`` —— 两条道**各自没填
+           满的坑都退还给个人臂**:个人臂的 limit 是
+           ``cap - (civic实拿 + world_event实拿)``,用的是**实拿条数**,不是两个
+           reserve 配置值之和。否则还没结过票、还没出过实质事件的世界会拿到一个
+           27 条的池;
+        2. 两条道的成员都从个人臂**排除**,不双份占坑;两条道**之间**也不重叠 ——
+           判据互斥(``civic_event`` 前缀 vs ``source='world_event'`` + tier),由
+           ``tests/test_pool_world_event_lane.py`` 直接量两条道的交集钉住,而不是在
+           这里加一行去重把它掩盖过去;
         3. 合并后仍按 ``importance DESC, created_at DESC`` 交给打分层,打分公式
-           一字不动 —— 保留位改的是「谁进池」,不是「怎么排」。
+           一字不动 —— 保留位改的是「谁进池」,不是「怎么排」;
+        4. ``cap < POOL_RESERVE_MIN_CAP`` 的 fail-open 路径上**两条道都不生效**。
+
+        预算:``civic_reserve=2`` + ``we_reserve=1`` → public 3/30 = 10%,个人臂 27,
+        离 ``public/pool < 2/3`` 与 ``personal > 1/3`` 两条硬门仍有大余量
+        (``tests/test_civic_prompt_budget.py`` 在饱和史下实测)。
         """
-        reserved = await self._fetch_reserved_civic_candidates(resident_id, cap)
+        civic = await self._fetch_reserved_civic_candidates(resident_id, cap)
+        # world_event 道拿 civic 道之后剩下的坑。传 ``cap`` 而不是 ``cap - len(civic)``
+        # 是有意的:那个参数同时决定 fail-open 判据(``cap < POOL_RESERVE_MIN_CAP``),
+        # 减完再传会让 cap=30 的正路被误判成 fail-open,两条道一起哑掉。
+        world = await self._fetch_reserved_world_event_candidates(resident_id, cap)
+        world = world[:max(cap - len(civic), 0)]
+        reserved = civic + world
         personal = await self._fetch_personal_candidates(
             resident_id, cap - len(reserved),
             exclude_ids=[m.id for m in reserved])
         if not reserved:
-            # reserve=0 的逐字节旧路径:一次查询,一个未经重排的结果集。
+            # 两条道都空(闸关,或闸开但一条都查不到)的逐字节旧路径:
+            # 一次查询,一个未经重排的结果集。
             return personal
         return sorted(reserved + personal, key=_pool_order_key, reverse=True)
 

@@ -281,7 +281,18 @@ async def write_collective_memories(db: AsyncSession, event: dict, rng=None) -> 
     ``REALISM_EVENT_MEMORY_TIERED`` 再叠一层**分档**,与上面那条梯度正交:梯度决定
     「谁知道」(收件人集合,本批不动),分档决定「多重要」(琐事直写 / 实质走
     ``add_memory`` 的分位归一,见 ``_is_trivial_event`` 与 ``_write_substantive``)。
-    闸关 = 全部直写,与改前逐字节一致。"""
+    闸关 = 全部直写,与改前逐字节一致。
+
+    ⚠️ ``REALISM_EVENT_MEMORY_TIERED`` **已被检索侧的 world_event 专用道
+    (``REALISM_POOL_WORLD_EVENT_RESERVE``)取代,应保持永久关闭**(代码本批不动)。
+    抬 importance 会让实质事件**同时**挤占个人臂(12 周饱和实测 day28 7/30 →
+    day84 21/30)**又**吃专用道坑位 —— 双重占坑;而专用道本身就保证检索得到。
+    现在的方向是反过来的:实质事件**保持低 importance**(与琐事同档,永不挤占个人
+    臂),完全靠专用道拿到保证坑位。
+
+    ``metadata_json["tier"]`` 是那条专用道的判据,它**与上面那个闸门无关**:闸开闸
+    关都写,同一事件取值相同 —— 它描述「这条记忆是什么」,不是「走了哪条写入路径」。
+    """
     import random as _random
     from app.config import settings
     from app.models.resident import Resident
