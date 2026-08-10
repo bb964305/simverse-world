@@ -28,6 +28,34 @@ logger = logging.getLogger(__name__)
 # later retrieval; an unbounded entry is paid for repeatedly).
 EVENT_MEMORY_MAX_CHARS = 80
 
+#: 镇务专用道认的幂等键前缀(``metadata_json["civic_event"]``,写入侧见
+#: ``app/services/civic_memory.py``)。**只收结果档** —— 征询档与 world_event
+#: 都不进,理由见 ``_fetch_reserved_civic_candidates``。
+CIVIC_RESULT_EVENT_PREFIX = "civic:poll_result:"
+
+#: 保留位生效的最小候选池深度 = **真实池深**(``_search_events_scored`` 的
+#: ``max(limit*3, 30)``,``limit`` 取 ``retrieve_context`` 的默认 10)。
+#:
+#: 比它小的 cap 只有一个来路:``_search_events`` 那条 fail-open 路径 —— embedding
+#: 拿不到时它把 ``limit``(=10)当 cap 传下来。那条路上池只有 10 条**且没有相关度
+#: 可言**,在 10 个坑里塞 2 条按 ``created_at DESC`` 盲选的公告 = 20% 的输出被盲
+#: 选污染。所以 ``effective_reserve = 0 if cap < POOL_RESERVE_MIN_CAP else reserve``。
+POOL_RESERVE_MIN_CAP = 30
+
+
+def _pool_order_key(m: Memory):
+    """候选池定序键:``importance DESC, created_at DESC``(与 SQL 的 ORDER BY 同构)。
+
+    ``created_at`` 归一到 aware:同一个 session 里刚播种的行带 tzinfo,从库里新
+    读出来的行(sqlite)可能是 naive,混排会直接 TypeError。
+    """
+    created = m.created_at
+    if created is None:
+        return (m.importance or 0.0, datetime.min.replace(tzinfo=UTC))
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=UTC)
+    return (m.importance or 0.0, created)
+
 
 def _cosine(a: list[float] | None, b: list[float] | None) -> float:
     """Cosine similarity of two equal-length vectors; 0.0 if either is missing."""
@@ -305,8 +333,19 @@ class MemoryService:
             "events": events,
         }
 
-    async def _fetch_event_candidates(self, resident_id: str, cap: int) -> list[Memory]:
-        """Top-`cap` non-archived event memories by static importance/recency."""
+    async def _fetch_personal_candidates(
+        self,
+        resident_id: str,
+        cap: int,
+        exclude_ids: list[str] | None = None,
+    ) -> list[Memory]:
+        """Top-`cap` non-archived event memories by static importance/recency.
+
+        `exclude_ids` 为空时这条语句与保留位落地**之前**逐字相同 —— 这是
+        ``REALISM_POOL_CIVIC_RESERVE=0`` 那条回滚路径的实现依据
+        (``tests/test_pool_reserved_slots.py`` 拿 ``git show master:`` 装出改前
+        的实现,对拍返回的 **id 序列**)。
+        """
         stmt = (
             select(Memory)
             .where(
@@ -314,11 +353,82 @@ class MemoryService:
                 Memory.type == "event",
                 Memory.archived_at.is_(None),
             )
+        )
+        if exclude_ids:
+            stmt = stmt.where(Memory.id.notin_(exclude_ids))
+        stmt = (
+            stmt
             .order_by(Memory.importance.desc(), Memory.created_at.desc())
             .limit(cap)
         )
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
+
+    async def _fetch_reserved_civic_candidates(
+        self, resident_id: str, cap: int,
+    ) -> list[Memory]:
+        """镇务专用道:最近 N 条**结果档**镇务记忆,``N = effective_reserve``。
+
+        只收结果档(``civic:poll_result:%``)。征询档(raw 0.6)不进 —— 保持 M3
+        分档,且「镇上正在议什么」已由事实层的 ``town_facts.open_polls`` 提供;
+        ``world_event`` 也不进 —— 生产实测公共臂 top-41 全是 ``importance=0.5``
+        的天气,10 个公共坑会 100% 被天气占满。
+
+        道内按 ``created_at DESC``:镇务要的是「刚发生什么」。按 importance 排会
+        让上周的选举压住今天的结果(结果档 raw 全是 0.9,归一落点相近)。
+
+        JSON 路径用 ``metadata_json["civic_event"].as_string().like(...)`` ——
+        PG 的 ``->>`` 与 sqlite 的 ``JSON_EXTRACT`` 都编得出来(K17)。
+        """
+        from app.config import settings
+        reserve = settings.realism_pool_civic_reserve
+        # fail-open 路径(``_search_events`` 把 limit=10 当 cap 传下来)上池只有
+        # 10 条**且没有相关度可言**,在里面塞 2 条盲选公告 = 20% 的输出被污染。
+        effective_reserve = 0 if cap < POOL_RESERVE_MIN_CAP else max(reserve, 0)
+        effective_reserve = min(effective_reserve, cap)
+        if effective_reserve <= 0:
+            return []
+        stmt = (
+            select(Memory)
+            .where(
+                Memory.resident_id == resident_id,
+                Memory.type == "event",
+                Memory.archived_at.is_(None),
+                Memory.metadata_json["civic_event"].as_string().like(
+                    f"{CIVIC_RESULT_EVENT_PREFIX}%"),
+            )
+            .order_by(Memory.created_at.desc())
+            .limit(effective_reserve)
+        )
+        result = await self.db.execute(stmt)
+        return list(result.scalars().all())
+
+    async def _fetch_event_candidates(self, resident_id: str, cap: int) -> list[Memory]:
+        """候选池 = 镇务专用道 ∪ 个人臂,共 `cap` 个坑。
+
+        候选池是 ``ORDER BY importance DESC, created_at DESC LIMIT cap`` ——
+        打分公式里那 0.45 的相关度权重是**截断之后**才参与的,于是它根本不参与
+        入池。生产实测:池底顶到 1.0 的居民(jiang-lin 8355 event / zhao-qiwen
+        8042)永远收不到归一 0.99 的镇务结果记忆,**差 0.01,病症逐人**。
+
+        **不扩池**(扩池会稀释 ``public/pool < 2/3`` 那条硬门的分母),而是在池内
+        留位。三条不变量:
+
+        1. ``len(pool)`` 恒等于 ``min(cap, 活跃 event 总数)`` —— 专用道**没填满
+           的坑退还给个人臂**(``cap - len(reserved)`` 用的是实拿条数,不是
+           ``cap - reserve``)。否则还没结过票的世界会拿到一个 28 条的池;
+        2. 专用道成员从个人臂**排除**,不双份占坑;
+        3. 合并后仍按 ``importance DESC, created_at DESC`` 交给打分层,打分公式
+           一字不动 —— 保留位改的是「谁进池」,不是「怎么排」。
+        """
+        reserved = await self._fetch_reserved_civic_candidates(resident_id, cap)
+        personal = await self._fetch_personal_candidates(
+            resident_id, cap - len(reserved),
+            exclude_ids=[m.id for m in reserved])
+        if not reserved:
+            # reserve=0 的逐字节旧路径:一次查询,一个未经重排的结果集。
+            return personal
+        return sorted(reserved + personal, key=_pool_order_key, reverse=True)
 
     async def _search_events(
         self,
