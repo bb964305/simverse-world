@@ -149,19 +149,30 @@ class BasicPlanPlugin:
         代价是这位居民**整天没有计划**（无目标、无时段计划）。一段锦上添花的 prompt
         不该有这个权力，所以这里自己兜住。
 
+        兜住的是**非 DB 异常**。PG 下一次 SELECT 失败会把事务打成 aborted，后面
+        ``_generate_plan`` 收尾那次 ``commit()`` 照样抛 —— 那条链本来就走不下去，
+        不是这层能救的（而且那时 LLM 的钱已经花过了）。别把这句读成「DB 挂了也保计划」。
+
         ``rendered_ids`` 是已经渲染进 prompt 的记忆 id（个人近况 + 昨天那两段）：
         镇务结果档 importance=0.99，结票后的几分钟里它必然也在最近 20 条里 ——
         不去重的话同一句话在 prompt 里出现两次。
+
+        **多取再去重再截断**，顺序不能反。只取 ``limit`` 条再去重的话，结票当天
+        那条新鲜镇务记忆（必然也在最近 20 条里）会把唯一的名额占掉又被去重删掉，
+        整段渲染成空 —— 恰好在这段最该起作用的那天静默失效。``rendered_ids``
+        最多 10 条（5 条个人近况 + 5 条昨天），所以多读的上界是 10 行/道。
         """
         limit = settings.realism_plan_public_memories
         if limit <= 0:
             return ""
         try:
-            public = await memory_svc.get_public_memories(resident_id, limit)
+            public = await memory_svc.get_public_memories(
+                resident_id, limit + len(rendered_ids))
         except Exception:
             logger.debug("public memories fetch failed (fail-open)", exc_info=True)
             return ""
-        lines = [f"- {m.content}" for m in public if m.id not in rendered_ids]
+        lines = [f"- {m.content}" for m in public
+                 if m.id not in rendered_ids][:limit]
         if not lines:
             return ""
         return "\n" + PUBLIC_MEMORY_HEADING + "\n" + "\n".join(lines) + "\n"

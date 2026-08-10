@@ -464,6 +464,31 @@ async def test_dedup_does_not_swallow_the_other_lane(db_session, gate):
     assert _WE_TEXT in prompt, "重复的那条被去掉之后,另一条道也跟着消失了"
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("n", [1, 2])
+async def test_dedup_never_eats_the_last_seat(db_session, gate, n):
+    """被去重掉的那条**不许占名额** —— 否则结票当天整段会静默渲染成空。
+
+    形状就是结票后的那几分钟：镇务结果档 importance=0.99、created_at 最新,
+    它必然也在最近 20 条里 → 被去重。若实现是「先取 limit 条再去重」,N=1 时
+    那唯一的名额恰好被它吃掉又被删掉,剧院那条永远出不来 —— 而这段最该起作用的
+    日子正是结票日。正确顺序是**多取(limit + len(rendered_ids))→ 去重 → 截断**。
+    """
+    r = await _resident(db_session)
+    await _seed_personal(db_session, r.id, 6)
+    # 镇务最新 → 必进最近 20 条 → 必被去重；世界事件更早 → 只可能由公共段说出来
+    await _seed_civic_result(db_session, r.id, _CIVIC_TEXT, minutes_ago=0)
+    await _seed_world_event(db_session, r.id, _WE_TEXT,
+                            tier=wes.TIER_SUBSTANTIVE, minutes_ago=200)
+
+    gate(n)
+    prompt = await _capture_plan_prompt(db_session, r)
+
+    assert _WE_TEXT in prompt, (
+        f"N={n}:被去重掉的镇务记忆吃光了名额,世界事件没进 prompt")
+    assert prompt.count(_CIVIC_TEXT) == 1, "去重本身仍要生效"
+
+
 # ── ⑤一条都没有时不渲染空标题 ────────────────────────────────────────────
 
 @pytest.mark.anyio
