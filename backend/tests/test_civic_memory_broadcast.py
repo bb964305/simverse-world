@@ -14,7 +14,8 @@
   这个池子的记忆等于没写。而 ``_normalize_importance`` 是**分位数** —— 只
   spy 传入的 raw 会假绿(全窗口同为 0.9 时 raw=0.9 落 0.5),必须断言**落库值**。
   这条断言本身还有一层假绿:测试镇的 ``_HISTORY`` 池底才 0.7,而生产跑够久的
-  居民池底顶到 1.0 —— 见 ``_SATURATED_HISTORY`` 与那条 ``xfail(strict=True)``。
+  居民池底顶到 1.0 —— 见 ``_SATURATED_HISTORY``,以及那条按
+  ``REALISM_POOL_CIVIC_RESERVE`` 闸位分叉的参数化。
 - **写入侧带 embedding(E1)**:``_cosine`` 对 NULL 向量返回 0.0,不带向量落库
   的记忆在检索打分里恒定丢掉 45% 的权重。且必须**每事件算一次**跨收件人复用,
   不是每人一次。
@@ -53,7 +54,8 @@ _HISTORY = [0.9] * 3 + [0.8] * 4 + [0.7] * 28
 #:   的候选池排序,不参与归一化(超出窗口)。这两件事在生产里本来就是解耦的:
 #:   落库 1.0 的那 36 条是**当年**打赢了各自窗口的老记忆,今天的窗口里全是 0.5。
 #:
-#: 于是 0.99 < 1.0,新镇务记忆差 **0.01** 永远排在第 31 位。
+#: 于是 0.99 < 1.0,新镇务记忆差 **0.01** 永远排在第 31 位 —— 直到
+#: ``REALISM_POOL_CIVIC_RESERVE`` 开闸,专用道绕开 importance 排序把它放进去。
 _SATURATED_HISTORY = [0.95] + [0.5] * 99 + [1.0] * 30
 
 #: 上面那份饱和史下,结果档 raw 0.9 的归一落点。写死是为了「窗口口径一动当场红」。
@@ -205,36 +207,49 @@ async def test_importance_defaults_to_gate_value_and_is_overridable(db_session, 
 # ── 落档可检索(M3/K14) ─────────────────────────────────────────────────
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("history,normalized,pool_floor", [
+@pytest.mark.parametrize("history,normalized,reserve,pool_floor,seated", [
     # 稀薄史:窗口就是那 35 条,raw 0.9 的 below=32 / equal=3 → (32+1.5)/35 = 0.9571,
-    # 池底 0.7(第 30 名)。0.9571 > 0.7,进得去。
-    pytest.param(_HISTORY, 0.9571, 0.7, id="thin"),
-    # 饱和史:窗口 below=99 / equal=0 → 0.99,池底 1.0。**只差 0.01**。
-    pytest.param(
-        _SATURATED_HISTORY, _NORMALIZED_UNDER_SATURATION, 1.0, id="saturated",
-        marks=pytest.mark.xfail(
-            strict=True, raises=AssertionError,
-            reason="已知缺陷:池底顶到 1.0 时结果档只归一到 0.99,差 0.01 进不去。"
-                   "生产 4 位居民里 jiang-lin / zhao-qiwen 两位已经是这个形状。"
-                   "修法属于候选池组成(专用道/配额/保留位),不在本批范围;"
-                   "strict=True 保证那一批落地后这条意外变绿会当场提醒。")),
+    # 池底 0.7(第 30 名)。0.9571 > 0.7,靠 importance 就进得去 —— 闸开闸关都一样。
+    pytest.param(_HISTORY, 0.9571, 0, 0.7, True, id="thin-closed"),
+    pytest.param(_HISTORY, 0.9571, 2, 0.7, True, id="thin-open"),
+    # 饱和史 + 闸关:窗口 below=99 / equal=0 → 0.99,池底 1.0。**差 0.01 进不去**。
+    # 这一格就是被修缺陷本身的复现,现在是正向断言(seated=False)而不再是 xfail。
+    pytest.param(_SATURATED_HISTORY, _NORMALIZED_UNDER_SATURATION, 0, 1.0, False,
+                 id="saturated-closed"),
+    # 饱和史 + 闸开:专用道绕开 importance 排序把它放进来。**这一格是本批的核心
+    # 验收** —— 它证明的正是 jiang-lin / zhao-qiwen 那 0.01。池底随之变成 0.99,
+    # 也就是这条镇务记忆自己:它坐在池尾,说明它是被留位放进来的,不是靠压过谁。
+    pytest.param(_SATURATED_HISTORY, _NORMALIZED_UNDER_SATURATION, 2,
+                 _NORMALIZED_UNDER_SATURATION, True, id="saturated-open"),
 ])
 async def test_broadcast_survives_the_top30_candidate_pool(
-        db_session, broadcast_on, monkeypatch, history, normalized, pool_floor):
+        db_session, broadcast_on, monkeypatch, history, normalized, reserve,
+        pool_floor, seated):
     """生产 ``REALISM_ENABLED=true``,写进去的 0.9 会被分位数改写。断言**落库值**
-    仍在最高档,且该行确实出现在 cap=30 的候选池里 —— 进不了池子等于没写。
+    仍在最高档,且该行**是否**出现在 cap=30 的候选池里逐格写死 —— 进不了池子
+    等于没写。
 
-    两份历史的分工:
+    两份历史 × 两个闸位:
 
-    - ``thin``(``_HISTORY``,池底 0.7)是**测试镇**的形状 —— 这条一直是绿的;
+    - ``thin``(``_HISTORY``,池底 0.7)是**测试镇**的形状 —— 两个闸位都绿,这正是
+      保留位「对已经进得去的人不改变任何东西」的兑现;
     - ``saturated``(``_SATURATED_HISTORY``,池底 1.0)是**真镇子跑够久之后**的形状。
       生产实测 4 位居民里 jiang-lin(8355 event)与 zhao-qiwen(8042)的 S0 池第 30
       名恰好是 1.0,而结果档 raw 0.9 只归一到 0.99 —— 差 0.01,永远排在第 31 位。
 
     换句话说:只有 ``thin`` 那一份时,「镇务记忆进得了池」这条断言**在测试里恒绿、
     在生产对 2/4 人是假的**。任何池方案的验收不先补这条饱和分支都是假绿。
+
+    **为什么摘掉了 ``xfail(strict=True)``**(而不是删用例):那个 mark 钉的是「差
+    0.01 进不去」,``REALISM_POOL_CIVIC_RESERVE`` 落地后 ``saturated`` 该转绿,
+    strict 会让它以 XPASS 失败 —— 这正是它当初存在的目的。但它还有一层更隐蔽的
+    毛病:开闸后这一格其实是**红在池底断言上**(0.99 != 1.0)而不是红在「进不去」
+    上,xfail 照样把它算作预期失败 —— 缺陷已经被修好了,哨兵却还在安静地报「符合
+    预期」。所以正确的收尾是把闸位提成参数:闸关那格继续用正向断言复现缺陷,闸开
+    那格断言转绿,两格都不再有任何 mark 兜底。
     """
     monkeypatch.setattr(settings, "realism_enabled", True)
+    monkeypatch.setattr(settings, "realism_pool_civic_reserve", reserve)
     people = await _town(db_session)
     rid = people["npc"].id
     await _seed_history(db_session, rid, history)
@@ -247,11 +262,15 @@ async def test_broadcast_survives_the_top30_candidate_pool(
     assert mem.importance >= 0.8                                      # 落库值才算数
     assert mem.importance == pytest.approx(normalized)                # 归一落点写死
     pool = await MemoryService(db_session)._fetch_event_candidates(rid, cap=30)
-    assert len(pool) == 30                                            # 池子确实满了
-    # 前四条在两份历史下都绿。饱和分支唯一红在下面这一条 —— xfail 钉的是「差 0.01
-    # 进不去」,不是「归一化算错了」,所以池底也一并咬死。
+    # 保留位**不扩池**:四格都必须是 30 条,没填满的坑退还给个人臂。
+    assert len(pool) == 30
+    assert len({m.id for m in pool}) == 30                            # 且零重复
+    # 池底一并咬死 —— 少了它,「进得去」可能是归一化算错(把它抬过了池底)换来的,
+    # 那是另一个 bug 冒充修好了这个。
     assert pool[-1].importance == pytest.approx(pool_floor)
-    assert mem.id in {m.id for m in pool}
+    assert (mem.id in {m.id for m in pool}) is seated, (
+        f"reserve={reserve} 时镇务记忆{'没能' if seated else '竟然'}进池"
+        f"(归一 {mem.importance} / 池底 {pool[-1].importance})")
 
 
 # ── 写入侧 embedding(E1) ───────────────────────────────────────────────
