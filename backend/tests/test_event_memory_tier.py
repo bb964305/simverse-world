@@ -389,6 +389,27 @@ async def test_trivial_direct_write_never_calls_the_embedding_service(
 
 
 @pytest.mark.anyio
+async def test_no_recipient_means_no_embedding_call(
+        db_session, realism_on, gradient_on, tiered_on, embed_calls):
+    """梯度筛完一个人都没有时,不该白算一次。
+
+    1 位居民 + 事件没有 ``location_id`` → geo 支为空,随机样本
+    ``round(0.2 × 1) = 0`` → 收件人集合是空的,一条都不会写。与 civic 侧「整轮被
+    幂等键挡掉就不算」同一条口径:外部依赖只在真要落库时才碰。
+    """
+    await _residents(db_session, 1, (0, 0))
+
+    n = await wes.write_collective_memories(
+        db_session, {"id": "none-emb", "type": "news",
+                     "description": "镇上要修一座剧院", "payload_json": {}},
+        rng=random.Random(0))
+
+    assert n == 0
+    assert await _rows(db_session, "none-emb") == []
+    assert embed_calls == []
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("failure", ["raises", "returns_none"])
 async def test_substantive_write_embedding_failure_is_fail_open(
         db_session, realism_on, tiered_on, monkeypatch, failure):

@@ -184,12 +184,13 @@ async def _write_substantive(db: AsyncSession, informed: dict[str, float],
     from app.config import settings
     from app.memory.service import MemoryService
 
-    try:
-        emb = await generate_embedding(content)
-    except Exception:
-        logger.warning("WORLD_EVENT_EMBED_FAILED event_id=%s", meta.get("event_id"),
-                       exc_info=True)
-        emb = None
+    emb = None
+    if informed:   # 梯度筛完一个人都没有时不白算一次
+        try:
+            emb = await generate_embedding(content)
+        except Exception:
+            logger.warning("WORLD_EVENT_EMBED_FAILED event_id=%s",
+                           meta.get("event_id"), exc_info=True)
 
     svc = MemoryService(db)
     written = 0
