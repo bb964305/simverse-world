@@ -418,14 +418,17 @@ async def test_no_recipient_means_no_embedding_call(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("failure", ["raises", "returns_none"])
+@pytest.mark.parametrize("failure", ["raises", "returns_none", "returns_empty"])
 async def test_substantive_write_embedding_failure_is_fail_open(
         db_session, realism_on, tiered_on, monkeypatch, failure):
     """embedding 炸了照旧写满 20 条、``embedding is None``、返回值不变。
 
     ``returns_none`` 是本仓测试环境(无 ollama)的真实形状;``raises`` 守的是
     「别把异常漏进 ``_write_substantive`` 那个带 rollback 的 except」—— 漏进去
-    会把已写的行 rollback 掉,返回值从 20 掉成 0。
+    会把已写的行 rollback 掉,返回值从 20 掉成 0。``returns_empty`` 守的是空向量
+    归一:``[]`` 落库以后**两条兜底都够不着**(不满足 backfill 的
+    ``embedding.is_(None)``,也不满足零向量清理的 ``if mem.embedding``),而
+    ``_cosine`` 对它照样返回 0 —— 永久卡死在一个既修不了也用不上的状态。
     """
     async def _boom(text: str):
         raise RuntimeError("ollama went away")
@@ -433,8 +436,12 @@ async def test_substantive_write_embedding_failure_is_fail_open(
     async def _none(text: str):
         return None
 
+    async def _empty(text: str):
+        return []
+
     monkeypatch.setattr(wes, "generate_embedding",
-                        _boom if failure == "raises" else _none)
+                        {"raises": _boom, "returns_none": _none,
+                         "returns_empty": _empty}[failure])
     await _residents(db_session, 20, (0, 0))
 
     n = await wes.write_collective_memories(
@@ -477,3 +484,145 @@ async def test_substantive_write_is_fail_open_and_returns_partial_count(
     assert len(await _rows(db_session, "boom")) == 1
     # session 还能用 —— 否则 C4/C3/E3 会替本函数背锅
     assert (await db_session.execute(select(Memory.id))).scalars().first() is not None
+
+
+# ── 直写路径的实质事件也算 embedding(E1 补漏) ─────────────────────────
+
+@pytest.fixture
+def tiered_off(monkeypatch):
+    """``REALISM_EVENT_MEMORY_TIERED=false`` —— **生产的永久形状**。
+
+    设计反转(2026-08-10)钦定这个闸永久关闭:抬 importance 会让实质事件同时挤占
+    个人臂又吃专用道坑位,双重占坑。所以「实质事件走哪条写入路径」这个问题在生产
+    只有一个答案 —— ``write_collective_memories`` 末尾那个直写循环。
+
+    显式 monkeypatch 而不是靠 ``Settings`` 默认值:这几条测的就是「闸关那条路」,
+    机器上的 ``backend/.env`` 若哪天写了 true,它们会在闸开那条路上恒绿。
+    """
+    monkeypatch.setattr(settings, "realism_event_memory_tiered", False)
+
+
+@pytest.mark.anyio
+async def test_direct_write_substantive_embeds_once_per_event_not_per_recipient(
+        db_session, realism_on, tiered_off, embed_calls):
+    """闸关(生产形状)下的实质事件也要带 embedding 落库。
+
+    E1 那批只把 embedding 加在 ``_write_substantive``
+    (``world_event_service.py:205``),而那条路**只在 ``REALISM_EVENT_MEMORY_TIERED``
+    开着时才走**。闸永久关闭 → 实质事件实际走的是直写循环,落库
+    ``embedding IS NULL``。
+
+    后果不是「少一点相关度」而是**必被截断**:``_cosine`` 对 NULL 返回 0.0
+    (``memory/service.py:33``),这条记忆在 ``0.45·rel + 0.30·recency +
+    0.25·importance`` 里自弃 45% 的权重,得分上界 ``0.30×1 + 0.25×0.5 = 0.425``
+    —— 而饱和居民第 10 名个人记忆是 0.4562。专用道把它送进候选池,scored top-10
+    再把它扔掉。
+
+    「一次算、收件人共用」与 ``_write_substantive`` 同口径:调用点
+    ``tasks/event_cron.py:41`` 是同步一轮,每收件人一次 = 一次 flip 拖成 N 次
+    ollama 往返,人口涨一倍就翻一倍。
+    """
+    await _residents(db_session, 20, (0, 0))
+
+    n = await wes.write_collective_memories(
+        db_session, {"id": "direct-emb", "type": "news",
+                     "description": "镇上要修一座剧院", "payload_json": {}})
+
+    assert n == 20
+    rows = await _rows(db_session, "direct-emb")
+    assert len(rows) == 20
+    # 直写路 = 不走 add_memory,所以 metadata 里**没有** raw_importance、content
+    # 不吃 E-28 的 80 字截断 —— 这两条钉住「补的是 embedding,没顺手换条路」
+    assert all(m.importance == pytest.approx(0.5) for m in rows)
+    assert all(m.metadata_json == {"first_hand": True, "event_id": "direct-emb",
+                                   "tier": "substantive"} for m in rows)
+    assert all(m.embedding == _FAKE_EMB for m in rows)
+    assert embed_calls == ["镇上要修一座剧院"]   # 收件人 20 位,调用 1 次
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("event_id,event_type,payload,description", [
+    ("w-direct", "weather", {}, "今天多云"),
+    ("m-direct", "festival", {"market_day": True}, "今天是集市日"),
+])
+async def test_direct_write_trivia_never_calls_the_embedding_service(
+        db_session, realism_on, tiered_off, embed_calls,
+        event_id, event_type, payload, description):
+    """琐事档一次都不许算 —— 96% 的量,白算是纯浪费。
+
+    生产 1311 条 world_event 记忆里 1253 条是天气,而琐事档**刻意**不进候选池
+    (``TRIVIAL_EVENT_TYPES`` 的注释),给它算 embedding 就是每天给 ollama 加 5-6
+    次零收益的往返。这条同时钉住实现位置:算 embedding 的那行必须在
+    ``tier == TIER_SUBSTANTIVE`` 的判据后面,不能提到收件人算完之后的公共段 ——
+    提上去天气就跟着算了。
+    """
+    await _residents(db_session, 20, (0, 0))
+
+    n = await wes.write_collective_memories(
+        db_session, {"id": event_id, "type": event_type,
+                     "description": description, "payload_json": payload})
+
+    assert n == 20
+    rows = await _rows(db_session, event_id)
+    assert len(rows) == 20
+    assert all((m.metadata_json or {}).get("tier") == wes.TIER_TRIVIA for m in rows)
+    assert all(m.embedding is None for m in rows)
+    assert embed_calls == []
+
+
+@pytest.mark.anyio
+async def test_direct_write_with_no_recipient_never_calls_the_embedding_service(
+        db_session, realism_on, gradient_on, tiered_off, embed_calls):
+    """梯度筛完一个人都没有时不白算一次(与闸开那条路同口径)。
+
+    1 位居民 + 事件没有 ``location_id`` → geo 支为空,随机样本 ``round(0.2×1) = 0``
+    → 收件人集合是空的,一条都不会写。外部依赖只在真要落库时才碰。
+    """
+    await _residents(db_session, 1, (0, 0))
+
+    n = await wes.write_collective_memories(
+        db_session, {"id": "none-direct", "type": "news",
+                     "description": "镇上要修一座剧院", "payload_json": {}},
+        rng=random.Random(0))
+
+    assert n == 0
+    assert await _rows(db_session, "none-direct") == []
+    assert embed_calls == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", ["raises", "returns_none", "returns_empty"])
+async def test_direct_write_embedding_failure_is_fail_open(
+        db_session, realism_on, tiered_off, monkeypatch, failure):
+    """embedding 三种失败态都照旧写满 20 条、``embedding is None``、返回值不变。
+
+    ``returns_none`` 是本仓测试环境(无 ollama)的真实形状;``raises`` 守的是
+    「别让一次 embedding 抖动把整轮广播吞成 0」——直写循环外面就是
+    ``event_cron.py:40-43`` 那个**没有 rollback** 的 except;``returns_empty``
+    守的是空向量归一:``[]`` 灌进 PG 的 ``vector(1024)`` 会在 INSERT 当场抛,
+    sqlite 下落成 ``'[]'`` 则 backfill 与零向量清理**两条兜底都够不着**,而
+    ``_cosine`` 对它照样返回 0 —— 永久卡死。
+    """
+    async def _boom(text: str):
+        raise RuntimeError("ollama went away")
+
+    async def _none(text: str):
+        return None
+
+    async def _empty(text: str):
+        return []
+
+    monkeypatch.setattr(wes, "generate_embedding",
+                        {"raises": _boom, "returns_none": _none,
+                         "returns_empty": _empty}[failure])
+    await _residents(db_session, 20, (0, 0))
+
+    n = await wes.write_collective_memories(
+        db_session, {"id": "direct-boom", "type": "news",
+                     "description": "镇上要修一座剧院", "payload_json": {}})
+
+    assert n == 20
+    rows = await _rows(db_session, "direct-boom")
+    assert len(rows) == 20
+    assert all(m.embedding is None for m in rows), \
+        "空向量没有归一成 None —— backfill 与零向量清理两条兜底都够不着它"

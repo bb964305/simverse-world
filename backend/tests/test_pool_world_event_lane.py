@@ -49,6 +49,7 @@ import importlib.util
 import subprocess
 import sys
 import tempfile
+import zlib
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
 
@@ -705,3 +706,177 @@ async def test_two_oversized_reserves_cannot_push_the_pool_past_the_cap(
     assert len(_civic_of(pool)) == 20
     assert len(_we_of(pool)) == _POOL_CAP - 20
     assert _personal_of(pool) == []
+
+
+# ── ⑧端到端:走真 ``retrieve_context``,不是私有取数函数 ─────────────────
+
+#: 检索侧的问句 —— NPC 被问「镇上最近要修剧院的事你听说了吗」时,``retrieve_context``
+#: 拿它算 query embedding。
+_E2E_QUERY = "镇上最近要修剧院的事你听说了吗"
+
+#: 切题的实质事件(公开课 / 新政那一档)。
+_E2E_ON_TOPIC = "镇上要修一座剧院"
+
+#: **不**切题的实质事件。它同样走专用道进候选池,但打不过前 10 名个人记忆 ——
+#: 这正是「专用道保证**进候选池**」与「保证被检索到」之间的差别。
+_E2E_OFF_TOPIC = "河堤那边的老槐树昨夜被雷劈了"
+
+#: 确定性嵌入的维度。crc32 分桶到 256 维:同字符落同一桶,汉字的 crc32 散得开,
+#: 于是「切题 / 不切题」在余弦上真的分得开(实测 0.548 vs 0.138)。
+_E2E_EMB_DIM = 256
+
+
+def _bucket_embedding(text: str) -> list[float] | None:
+    """确定性的字符分桶嵌入 —— 测试环境没有 ollama,而这条用例要的是**真的相关度**。
+
+    常量向量(``[0.1] * 1024`` 那种)在这里不行:所有记忆的 ``cos`` 全等于 1,
+    相关度那 0.45 分对谁都一样,「切题的进得去、不切题的进不去」这句话就无从谈起,
+    整条端到端会退化成「按 recency+importance 排」的假绿。
+
+    进程内确定:``zlib.crc32`` 而不是 ``hash()`` —— 后者对 str 每个进程都换盐,
+    ``-p xdist`` 或换机器跑就是另一组分数。
+    """
+    if not text or not text.strip():
+        return None
+    v = [0.0] * _E2E_EMB_DIM
+    for ch in text:
+        v[zlib.crc32(ch.encode("utf-8")) % _E2E_EMB_DIM] += 1.0
+    return v
+
+
+@pytest.fixture
+def e2e_world(monkeypatch):
+    """端到端那条链上的四个闸,全部**显式**设成生产形状,不吃机器上的 ``.env``。
+
+    - ``realism_enabled=True``:关着的话 ``_retrieve_events`` 根本不进打分路径,
+      拿到的是静态 importance 排序 —— 那条路上没有相关度,也就测不出 embedding;
+    - ``realism_event_memory_tiered=False``:**设计反转钦定它永久关闭**,所以实质
+      事件走的是 ``write_collective_memories`` 末尾那个直写循环。开着测的是另一条路;
+    - ``realism_info_gradient_enabled=False``:单人世界里梯度会把收件人筛空
+      (``round(0.2 × 1) = 0``),事件一条都写不出来。全知广播档 importance=0.5,
+      正是生产随机样本档的那个值;
+    - ``civic_reserve=0``:本段量的是 world_event 那一条道。
+    """
+    monkeypatch.setattr(settings, "realism_enabled", True)
+    monkeypatch.setattr(settings, "realism_event_memory_tiered", False)
+    monkeypatch.setattr(settings, "realism_info_gradient_enabled", False)
+    monkeypatch.setattr(settings, "realism_pool_civic_reserve", 0)
+
+
+@pytest.fixture
+def embedding_everywhere(monkeypatch):
+    """写入侧与检索侧换成**同一个**确定性嵌入。
+
+    两侧都要换:写入侧(``world_event_service``)决定这条记忆落库带不带向量,
+    检索侧(``memory/service``)决定 query 算不算得出向量。少换一侧,``_cosine``
+    的一边恒为 None → 恒返回 0.0,这条用例就永远红。
+    """
+    async def _fake(text: str):
+        return _bucket_embedding(text)
+
+    monkeypatch.setattr(wes, "generate_embedding", _fake)
+    monkeypatch.setattr(service_mod, "generate_embedding", _fake)
+
+
+async def _seed_saturated_with_embeddings(db, rid: str) -> list[Memory]:
+    """饱和个人史 + **真向量**,一小时一条。
+
+    两处与 ``_seed_personal`` 不同,都是这条端到端必需的:
+
+    1. **带 embedding**。个人记忆没有向量的话它们也自弃 45% 权重,世界事件靠
+       0.425 就能排进前 10 —— 缺陷会自己「消失」,测试恒绿;
+    2. **一小时一条**而不是一天一条。生产的饱和居民(jiang-lin 8355 条 event)
+       top-30 全是近两天的,recency 项都在 0.94 以上;拉成 40 天的话第 10 名的
+       recency 衰减到 0.22,分数掉到 0.39 < 0.425,世界事件不带向量也能挤进前 10。
+
+    实测分数(``0.45·rel + 0.30·recency + 0.25·importance``):
+
+        第 10 名个人记忆                0.6061
+        世界事件 embedding=NULL         0.4250   ← 改前:进了池,被 top-10 截断
+        世界事件 + 切题 embedding       0.6715   ← 改后:排进前 10
+        世界事件 + 不切题 embedding     0.4871   ← 改后仍进不去,**这是想要的行为**
+    """
+    now = datetime.now(UTC)
+    out = []
+    for i, imp in enumerate(_SATURATED):
+        content = f"在咖啡馆和老张聊了会儿天，喝了杯拿铁 {i}"
+        mem = Memory(resident_id=rid, type="event", content=content,
+                     importance=imp, source="agent_action",
+                     embedding=_bucket_embedding(content),
+                     metadata_json={"raw_importance": imp})
+        mem.created_at = now - timedelta(hours=i)
+        db.add(mem)
+        out.append(mem)
+    await db.commit()
+    return out
+
+
+async def _broadcast(db, event_id: str, description: str) -> Memory:
+    """走真 ``write_collective_memories``(直写路径)落一条实质世界事件。"""
+    n = await wes.write_collective_memories(
+        db, {"id": event_id, "type": "news", "description": description,
+             "payload_json": {}})
+    assert n == 1, f"事件没广播出去(n={n}),后面的断言无从谈起"
+    rows = [m for m in (await db.execute(
+        select(Memory).where(Memory.source == "world_event")
+    )).scalars().all() if (m.metadata_json or {}).get("event_id") == event_id]
+    assert len(rows) == 1
+    assert (rows[0].metadata_json or {}).get("tier") == wes.TIER_SUBSTANTIVE
+    return rows[0]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("we_reserve,expected", [(0, False), (1, True)])
+async def test_a_substantive_world_event_reaches_the_final_ten_of_retrieve_context(
+        db_session, reserves, e2e_world, embedding_everywhere, we_reserve, expected):
+    """**端到端**:问 NPC「镇上最近要修剧院的事你听说了吗」,那条实质世界事件要
+    出现在 ``retrieve_context`` 最终交出的 10 条里。
+
+    为什么必须走 ``retrieve_context`` 而不是 ``_fetch_event_candidates``:候选池是
+    **30 条**,prompt 拿的是打分后的 **top-10**。只查「进没进 top-30」会拿到假阳性
+    —— 这条道确实把记忆送进了池子,而它在池子里被截掉这件事,只有走完整条链才看得见。
+
+    ``we_reserve=0`` 那一格是对照:0.5 的世界事件在饱和史(池底 1.0)下靠排序连
+    候选池都进不去,自然也不在最终 10 条里。没有它,「进去了」这句话可以由一个
+    恒真的池子说出来。
+    """
+    rid = await _resident(db_session)
+    await _seed_saturated_with_embeddings(db_session, rid)
+    mem = await _broadcast(db_session, "theatre", _E2E_ON_TOPIC)
+
+    reserves(0, we_reserve)
+    ctx = await MemoryService(db_session).retrieve_context(
+        rid, query_text=_E2E_QUERY)
+
+    events = ctx["events"]
+    assert len(events) == 10, "最终交给 prompt 的不是 10 条,下面的判据就不是那条判据"
+    got = mem.id in {m.id for m in events}
+    assert got is expected, (
+        f"we_reserve={we_reserve}:那条实质世界事件"
+        f"{'没进' if expected else '进了'}最终 10 条")
+
+
+@pytest.mark.anyio
+async def test_the_lane_only_guarantees_the_candidate_pool_not_the_final_ten(
+        db_session, reserves, e2e_world, embedding_everywhere):
+    """措辞校正的兑现:专用道保证的是**进候选池**,不是「保证被检索到」。
+
+    补上 embedding 之后,一条**不切题**的实质世界事件照旧被专用道送进 30 条候选池,
+    但在打分层输给前 10 名个人记忆(0.4871 < 0.6061),进不了最终 prompt。这**是
+    想要的行为** —— 切题的问句能把它捞出来(上一条),不切题的捞不出来。若哪天这条
+    变红成「不切题的也进去了」,说明世界事件在拿保证席位而不是拿参赛资格。
+    """
+    rid = await _resident(db_session)
+    await _seed_saturated_with_embeddings(db_session, rid)
+    mem = await _broadcast(db_session, "willow", _E2E_OFF_TOPIC)
+    assert mem.embedding is not None, \
+        "直写路径没给实质事件算 embedding —— 这条道送进池的是一条自弃 45% 权重的记忆"
+
+    reserves(0, 1)
+    svc = MemoryService(db_session)
+    pool = await svc._fetch_event_candidates(rid, cap=_POOL_CAP)
+    ctx = await svc.retrieve_context(rid, query_text=_E2E_QUERY)
+
+    assert mem.id in {m.id for m in pool}, "专用道连候选池都没送进去"
+    assert mem.id not in {m.id for m in ctx["events"]}, \
+        "不切题的世界事件也进了最终 10 条 —— 那是保证席位,不是参赛资格"
