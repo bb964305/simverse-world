@@ -521,6 +521,12 @@ class Settings(BaseSettings):
     realism_info_sample_frac: float = 0.2        # random "well-informed" first-hand sample of the rest
     realism_info_geo_importance: float = 0.6     # first-hand importance for geo-related residents
     realism_info_sample_importance: float = 0.5  # first-hand importance for the random sample
+    # world_event 记忆分档:琐事(天气/集市日)照旧直写,实质事件改走 add_memory 的
+    # 分位归一,否则永远进不了 _fetch_event_candidates 那 30 个坑(生产 1311 条
+    # world_event 记忆全卡在 0.5-0.6,而 top-30 第 30 名都在 0.95-1.0)。关 =
+    # write_collective_memories 与改前逐字节一致;开闸是另一次独立的部署变更。
+    realism_event_memory_tiered: bool = False
+    realism_event_memory_importance: float = 0.9  # 实质档的 raw(落库前过分位归一)
     # P2 Task 7 — crowd / 人流聚集 (festival draw + herd micro-rule).
     realism_festival_location: str = "central_plaza"  # default gathering place for a location-less festival
     realism_crowd_threshold: int = 5             # a location with ≥ this many residents reads as "lively"
