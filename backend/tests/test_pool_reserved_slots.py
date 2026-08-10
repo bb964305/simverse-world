@@ -27,9 +27,18 @@ LIMIT cap`` —— 打分公式里那 0.45 的相关度权重是**截断之后**
 3. 零重复 + 稳定定序:合并后仍按 ``importance DESC, created_at DESC`` 交给打分层,
    打分公式一字不动。
 
-另有两条边界各自成测:``reserve=0`` **逐字节**等于改前(拿 ``git show master:``
-装成独立模块对拍返回的 id 序列,不是只对长度),以及 fail-open 路径(``cap<30``)
-上专用道必须自动失效。
+另有两条边界各自成测:``reserve=0`` **逐字节**等于改前(对拍的是返回的 id 序列,
+不是只对长度),以及 fail-open 路径(``cap<30``)上专用道必须自动失效。
+
+「等于改前」用**双轨**证:
+
+- **轨 1(常驻)**:改前那段候选池查询在本文件里冻结成 ``_frozen_pre_reserve_
+  candidates``。它是纯 SQLAlchemy,不碰 git,**与克隆深度无关、永远会跑** ——
+  CI 的 ``actions/checkout@v4`` 默认 ``fetch-depth: 1``,任何依赖历史 ref 的对拍
+  在那里都取不到对象;
+- **轨 2(加强,拿得到才跑)**:把 ``ca66ad1``(本分支与 master 的 merge-base)那份
+  真实 ``service.py`` 装成独立模块,三方对拍 —— 顺带钉住轨 1 的快照没漂。ref 用
+  **固定 SHA** 而不是会随合并漂移的 ``master``;浅克隆里取不到就 skip。
 """
 import functools
 import importlib.util
@@ -40,6 +49,7 @@ from datetime import datetime, timedelta, UTC
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 
 from app.config import settings
 from app.memory import service as service_mod
@@ -66,24 +76,92 @@ _SATURATED = [1.0] * 28 + [0.995] * 2 + [0.9] * 10
 _CIVIC_NORMALIZED = 0.99
 
 
-# ── master 对拍:把改前的实现装成独立模块 ────────────────────────────────
+# ── 轨 1:改前实现的冻结快照(常驻,不依赖 git 历史)────────────────────
+
+async def _frozen_pre_reserve_candidates(db, resident_id: str, cap: int) -> list[Memory]:
+    """``ca66ad1:backend/app/memory/service.py`` 里 ``_fetch_event_candidates``
+    的**冻结快照**(逐字抄写,当时的全部函数体就是这一段)::
+
+        stmt = (select(Memory)
+                .where(resident_id, type == "event", archived_at.is_(None))
+                .order_by(importance.desc(), created_at.desc())
+                .limit(cap))
+
+    为什么要冻结:CI 的 ``actions/checkout@v4`` 默认 ``fetch-depth: 1``,浅克隆
+    里既没有 ``master`` 这个 ref,也没有 ``ca66ad1`` 这个对象 —— 任何 ``git show``
+    对拍在 CI 上要么整片红(``check=True`` 抛异常),要么只能 skip 成假绿。这份
+    快照是纯 SQLAlchemy,**与克隆深度无关,永远会跑**,是「``reserve=0`` 逐字节
+    等于改前」这句承诺唯一的常驻保险。
+
+    它有没有抄漂?轨 2(``_pinned_ref_memory_service``)在能拿到 ``ca66ad1`` 的
+    环境里三方对拍钉住这一点。
+    """
+    stmt = (
+        select(Memory)
+        .where(
+            Memory.resident_id == resident_id,
+            Memory.type == "event",
+            Memory.archived_at.is_(None),
+        )
+        .order_by(Memory.importance.desc(), Memory.created_at.desc())
+        .limit(cap)
+    )
+    result = await db.execute(stmt)
+    return list(result.scalars().all())
+
+
+# ── 轨 2:钉死 SHA 的 git 对拍(拿得到就跑,拿不到就 skip)────────────────
+
+#: 本分支与 master 的 merge-base —— **保留位落地之前**的那棵树。
+#:
+#: 钉 SHA 不钉 ``master``:``master`` 会随本批合入而漂,漂完之后「对拍改前」对的
+#: 就是它自己,那条防恒绿的守卫会当场红(合入后 9 格红,基线 54→63)。
+_PRE_RESERVE_SHA = "ca66ad12f11ff5c4f361724534cbff0edab024a4"
+
+_TRACK1_IS_THE_REAL_GUARD = (
+    "轨 2(git 对拍 {sha})只是**加强**:{why}。"
+    "真正的保险是轨 1 —— 本文件里的 ``_frozen_pre_reserve_candidates`` 冻结快照,"
+    "它不碰 git、与克隆深度无关、每一次都真的跑,同样 8 组入参逐条对 id 序列。"
+    "所以这里 skip 不代表「改前行为没人守」。"
+)
+
 
 @functools.lru_cache(maxsize=1)
-def _master_memory_service():
-    """``git show master:`` 出改前的 ``service.py``,装成一个独立模块。
+def _pinned_ref_source() -> str | None:
+    """取 ``_PRE_RESERVE_SHA`` 那份 ``service.py``;取不到返回 ``None``。
+
+    取不到的正当情形:CI 的 ``fetch-depth: 1`` 浅克隆(对象根本没下载)、导出成
+    tarball 的源码树、没有 git 的机器。这些都不该让整片测试红。
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "show", f"{_PRE_RESERVE_SHA}:backend/app/memory/service.py"],
+            cwd=_REPO_ROOT, capture_output=True, text=True)
+    except OSError:
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _pinned_ref_memory_service():
+    """把改前的 ``service.py`` 装成独立模块;拿不到就 skip(文案见上)。
 
     对拍**返回的 id 序列**而不是长度:长度相等的两个池完全可能装着不同的记忆,
     而 ``reserve=0`` 承诺的是「逐字节旧行为」,不是「同样多」。
     """
-    src = subprocess.run(
-        ["git", "show", "master:backend/app/memory/service.py"],
-        cwd=_REPO_ROOT, capture_output=True, text=True, check=True).stdout
+    src = _pinned_ref_source()
+    if src is None:
+        pytest.skip(_TRACK1_IS_THE_REAL_GUARD.format(
+            sha=_PRE_RESERVE_SHA[:7],
+            why="这个仓里取不到那个对象(浅克隆 / 无 git / 源码 tarball)"))
     assert "realism_pool_civic_reserve" not in src, (
-        "从 master 取到的 service.py 里已经有保留位了 —— 对拍对的是它自己,"
-        "这条断言恒绿。master 已经合入本批时应改用合入前的 ref。")
-    path = Path(tempfile.gettempdir()) / "_pool_master_service_ref.py"
+        f"从 {_PRE_RESERVE_SHA[:7]} 取到的 service.py 里已经有保留位了 —— 对拍对的"
+        "是它自己,这条断言恒绿。SHA 钉错了(应为保留位落地**之前**的 merge-base)。")
+    name = f"_pool_ref_service_{_PRE_RESERVE_SHA[:7]}"
+    if name in sys.modules:
+        return sys.modules[name].MemoryService
+    path = Path(tempfile.gettempdir()) / f"{name}.py"
     path.write_text(src, encoding="utf-8")
-    spec = importlib.util.spec_from_file_location("_pool_master_service_ref", path)
+    spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
@@ -192,8 +270,9 @@ def _personal_of(pool: list[Memory]) -> list[Memory]:
 
 # ── ①reserve=0:逐字节等于改前 ────────────────────────────────────────
 
-@pytest.mark.anyio
-@pytest.mark.parametrize("history,civic_refs,we,cap", [
+#: 两轨共用的 8 组入参 —— 轨 1(冻结快照,常驻)与轨 2(SHA 对拍,加强)对的是
+#: **同一批形状**,所以轨 2 在浅克隆里 skip 掉时覆盖面一格不少。
+_PARITY_CASES = [
     # 生产饱和形状 × 有两条结果记忆 —— 开闸后差别最大的那组
     pytest.param(_SATURATED, ["poll_result:p-1", "poll_result:p-2"], 0, 30, id="saturated-2results"),
     # 一条都没结过票的世界(绝大多数时刻的形状)
@@ -208,30 +287,44 @@ def _personal_of(pool: list[Memory]) -> list[Memory]:
     pytest.param(_SATURATED, ["poll_result:p-1", "poll_result:p-2"], 3, 10, id="cap-10"),
     pytest.param(_SATURATED, ["poll_result:p-1", "poll_result:p-2"], 3, 50, id="cap-50"),
     pytest.param(_SATURATED, ["poll_result:p-1"], 0, 1, id="cap-1"),
-])
-async def test_reserve_zero_returns_the_exact_master_sequence(
+]
+
+
+async def _seed_parity_case(db, history, civic_refs, we) -> str:
+    rid = await _resident(db)
+    await _seed_personal(db, rid, history)
+    await _seed_civic(db, rid, civic_refs)
+    await _seed_world_events(db, rid, we)
+    return rid
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("history,civic_refs,we,cap", _PARITY_CASES)
+async def test_reserve_zero_returns_the_exact_pre_reserve_sequence(
         db_session, reserve, history, civic_refs, we, cap):
-    """``0 = 逐字节旧行为``。对拍的是 **id 序列全等**,不是长度相等。
+    """**轨 1(常驻)**:``0 = 逐字节旧行为``,对拍冻结快照。
+
+    对拍的是 **id 序列全等**,不是长度相等 —— 长度相等的两个池完全可能装着不同
+    的记忆。
 
     这条是本批的回滚保险:部署先以 ``reserve=0`` 上线(零迁移),开闸是**单独一次
-    变更**。若 0 这个值本身已经改变了行为,那次「安全部署」就不安全了。
+    变更**。若 0 这个值本身已经改变了行为,那次「安全部署」就不安全了。而这条
+    保险必须在 CI 的浅克隆里也真的跑得起来,所以参照物是本文件里的冻结快照,不是
+    某个 git ref。
     """
     reserve(0)
-    rid = await _resident(db_session)
-    await _seed_personal(db_session, rid, history)
-    await _seed_civic(db_session, rid, civic_refs)
-    await _seed_world_events(db_session, rid, we)
+    rid = await _seed_parity_case(db_session, history, civic_refs, we)
 
     mine = await MemoryService(db_session)._fetch_event_candidates(rid, cap=cap)
-    theirs = await _master_memory_service()(db_session)._fetch_event_candidates(rid, cap=cap)
+    frozen = await _frozen_pre_reserve_candidates(db_session, rid, cap)
 
-    assert [m.id for m in mine] == [m.id for m in theirs]
+    assert [m.id for m in mine] == [m.id for m in frozen]
 
 
 @pytest.mark.anyio
 async def test_reserve_zero_is_still_identical_with_a_full_civic_history(
         db_session, reserve):
-    """连结五场的世界里 ``reserve=0`` 照样逐字节相同 —— 闸关就是闸关。"""
+    """轨 1:连结五场的世界里 ``reserve=0`` 照样逐字节相同 —— 闸关就是闸关。"""
     reserve(0)
     rid = await _resident(db_session)
     await _seed_personal(db_session, rid, _SATURATED)
@@ -239,8 +332,55 @@ async def test_reserve_zero_is_still_identical_with_a_full_civic_history(
 
     for cap in (10, 30, 31):
         mine = await MemoryService(db_session)._fetch_event_candidates(rid, cap=cap)
-        theirs = await _master_memory_service()(db_session)._fetch_event_candidates(rid, cap=cap)
+        frozen = await _frozen_pre_reserve_candidates(db_session, rid, cap)
+        assert [m.id for m in mine] == [m.id for m in frozen], f"cap={cap} 漂了"
+
+
+# ── ①′轨 2:与 ca66ad1 那份真实实现三方对拍(加强)───────────────────
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("history,civic_refs,we,cap", _PARITY_CASES)
+async def test_reserve_zero_matches_the_pinned_pre_reserve_implementation(
+        db_session, reserve, history, civic_refs, we, cap):
+    """**轨 2(加强)**:同样 8 组入参,参照物换成 ``ca66ad1`` 那份**真实**
+    ``service.py``(装成独立模块跑真 SQL)。
+
+    它比轨 1 多证一件事:轨 1 的冻结快照**没有抄漂**。所以这里三方对拍 ——
+    新实现 == 真实改前实现,且冻结快照 == 真实改前实现。
+
+    拿不到那个对象时(浅克隆)整条 skip;skip 不留缺口,因为轨 1 覆盖同一批入参、
+    永远会跑。
+    """
+    ref_cls = _pinned_ref_memory_service()  # 拿不到就在这里 skip
+    reserve(0)
+    rid = await _seed_parity_case(db_session, history, civic_refs, we)
+
+    mine = await MemoryService(db_session)._fetch_event_candidates(rid, cap=cap)
+    theirs = await ref_cls(db_session)._fetch_event_candidates(rid, cap=cap)
+    frozen = await _frozen_pre_reserve_candidates(db_session, rid, cap)
+
+    assert [m.id for m in mine] == [m.id for m in theirs]
+    assert [m.id for m in frozen] == [m.id for m in theirs], \
+        f"轨 1 的冻结快照与 {_PRE_RESERVE_SHA[:7]} 的真实实现漂了 —— 快照要重抄"
+
+
+@pytest.mark.anyio
+async def test_the_pinned_implementation_agrees_on_a_full_civic_history(
+        db_session, reserve):
+    """轨 2 的另一半:连结五场的世界里也三方对拍。"""
+    ref_cls = _pinned_ref_memory_service()  # 拿不到就在这里 skip
+    reserve(0)
+    rid = await _resident(db_session)
+    await _seed_personal(db_session, rid, _SATURATED)
+    await _seed_civic(db_session, rid, [f"poll_result:p-{i}" for i in range(5)])
+
+    for cap in (10, 30, 31):
+        mine = await MemoryService(db_session)._fetch_event_candidates(rid, cap=cap)
+        theirs = await ref_cls(db_session)._fetch_event_candidates(rid, cap=cap)
+        frozen = await _frozen_pre_reserve_candidates(db_session, rid, cap)
         assert [m.id for m in mine] == [m.id for m in theirs], f"cap={cap} 漂了"
+        assert [m.id for m in frozen] == [m.id for m in theirs], \
+            f"cap={cap}:冻结快照与 {_PRE_RESERVE_SHA[:7]} 的真实实现漂了"
 
 
 # ── ②reserve=2 且有 ≥2 条结果档 ──────────────────────────────────────
