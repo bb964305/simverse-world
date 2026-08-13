@@ -295,6 +295,10 @@ class Settings(BaseSettings):
     # 无锁视为陈旧状态 → 自愈复位 idle 并照常 tick)。关 = master 行为逐字节一致:
     # 主 tick 仅跳 sleeping(夜间归巢路径本就是三态检查,不受此闸影响)。
     chat_engaged_tick_skip_enabled: bool = False
+    # write_collective_memories 收件人过滤:开 = 只写给 sim 居民(is_autonomous,
+    # npc/resident),玩家化身不收 world_event 记忆。关 = master 谓词逐字节一致
+    # (仅排 sleeping,玩家化身照收——profile creator stats 的记忆计数口径不变)。
+    collective_memory_sim_only: bool = False
 
     # --- Observability (OPTIMIZATION_PLAN P1-3) ---
     # metrics_enabled / sentry_* live in the Observability block above (a

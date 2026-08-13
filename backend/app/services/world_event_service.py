@@ -332,12 +332,12 @@ async def write_collective_memories(db: AsyncSession, event: dict, rng=None) -> 
     from app.models.memory import Memory
 
     rng = rng or _random
-    rows = (await db.execute(
-        select(Resident.id, Resident.tile_x, Resident.tile_y).where(
-            Resident.is_autonomous,
-            Resident.status != "sleeping",
-        )
-    )).all()
+    # 收件人谓词:默认与 master 逐字节一致(仅排 sleeping,玩家化身照收);
+    # COLLECTIVE_MEMORY_SIM_ONLY 开时才收紧到 sim 居民(is_autonomous)。
+    recipients_q = select(Resident.id, Resident.tile_x, Resident.tile_y).where(Resident.status != "sleeping")
+    if settings.collective_memory_sim_only:
+        recipients_q = recipients_q.where(Resident.is_autonomous)
+    rows = (await db.execute(recipients_q)).all()
     content = (event.get("description") or event.get("title") or "")[:200]
     if not content or not rows:
         return 0
