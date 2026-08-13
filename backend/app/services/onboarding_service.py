@@ -43,6 +43,7 @@ async def create_player_resident(
     persona_md: str = "",
     soul_md: str = "",
     portrait_url: str | None = None,
+    commit: bool = True,
 ) -> Resident:
     """Create a Resident(type='player') and bind it to the User."""
     # Check user exists and doesn't already have a player resident
@@ -100,9 +101,15 @@ async def create_player_resident(
     user.last_x = spawn_x * TILE_SIZE + TILE_SIZE // 2
     user.last_y = spawn_y * TILE_SIZE + TILE_SIZE // 2
 
-    await db.commit()
-    await db.refresh(resident)
-    await db.refresh(user)
+    if commit:
+        await db.commit()
+        await db.refresh(resident)
+        await db.refresh(user)
+    else:
+        # External Agent registration composes user + resident + scoped
+        # credentials in one transaction; the ordinary onboarding callers keep
+        # the historical commit-on-success behaviour above.
+        await db.flush()
     return resident
 
 

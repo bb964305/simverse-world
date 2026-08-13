@@ -39,7 +39,7 @@ PLAN_SYSTEM_PROMPT = """\
 - 社交行动（CHAT_RESIDENT/GOSSIP）最多 {max_social_slots} 个时段
 - 以第一人称自然表达目标，不要生硬的开头
 - location 字段必须从上面的地点列表中选择地点名称
-- target 字段：WANDER/VISIT_DISTRICT 使用目标地点的入口坐标 [x, y]，其余为 null
+- target 字段：WANDER/VISIT_DISTRICT 使用地点列表中的 id，其余为 null
 - GO_HOME 的 target 为 null（自动导航）
 {preferred_actions_hint}
 
@@ -119,7 +119,7 @@ class BasicPlanPlugin:
             for p in plans_data["plans"]:
                 hr = p.get("hour_range", [0, 0])
                 if hr[0] <= ctx.hour < hr[1]:
-                    ctx.current_plan = HourlyPlan(
+                    current = HourlyPlan(
                         slot=p["slot"],
                         hour_range=tuple(hr),
                         action=p["action"],
@@ -131,6 +131,17 @@ class BasicPlanPlugin:
                         reason=p.get("reason", ""),
                         status=p.get("status", "pending"),
                     )
+                    ctx.current_plan = current
+                    # Keep an immutable-enough reference to what was scheduled.
+                    # Spontaneous decide may clear current_plan, but telemetry
+                    # must still be able to explain the deviation.
+                    ctx.scheduled_plan = HourlyPlan(
+                        slot=current.slot, hour_range=current.hour_range,
+                        action=current.action, target=current.target,
+                        location=current.location, importance=current.importance,
+                        reason=current.reason, status=current.status,
+                    )
+                    ctx.plan_date = plans_data.get("generated_date")
                     break
 
         return ctx
@@ -311,8 +322,19 @@ class BasicPlanPlugin:
 
         # Store plans with status field
         plans = data.get("plans", [])
+        from app.agent.plan_target import resolve_location_id
         for p in plans:
             p["status"] = "pending"
+            try:
+                action = ActionType(p.get("action", ""))
+            except ValueError:
+                continue
+            if action in (ActionType.WANDER, ActionType.VISIT_DISTRICT):
+                # Never persist model-reported coordinates.  The location name
+                # keeps old responses usable while new prompts return the id.
+                p["target"] = resolve_location_id(p.get("target"), p.get("location"))
+            elif action == ActionType.GO_HOME:
+                p["target"] = None
 
         resident.daily_plans_json = {
             "generated_date": today,

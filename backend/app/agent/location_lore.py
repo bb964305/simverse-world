@@ -14,6 +14,7 @@ LORE: dict[str, str] = {
     "workshop": "工坊的角落堆着无数半成品，每一件都曾是某个人未完成的梦想。",
     "shop": "小店什么都卖，据说只要你真心想要，总能在某个货架找到它。",
     "town_hall": "市政厅的钟楼百年未响，居民们都在等它下一次敲响的理由。",
+    "market_hall": "集市大厅的梁柱留着各地商队的刻记，每一道符号都指向一条遥远商路。",
     "central_plaza": "广场中央的喷泉见证了小镇所有的相遇与告别。",
     # Voted into existence by the civic agenda (civic_service.CIVIC_AGENDA);
     # they are dynamic_locations rows, not static LOCATIONS entries.

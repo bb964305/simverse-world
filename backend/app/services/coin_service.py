@@ -54,6 +54,25 @@ async def charge(db: AsyncSession, user_id: str, amount: int, reason: str) -> bo
     return True
 
 
+async def charge_pending(
+    db: AsyncSession, user_id: str, amount: int, reason: str
+) -> bool:
+    """Flush-only debit primitive. It never commits or rolls back."""
+    if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+        return False
+    result = await db.execute(
+        update(User)
+        .where(User.id == user_id, User.soul_coin_balance >= amount)
+        .values(soul_coin_balance=User.soul_coin_balance - amount)
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount == 0:
+        return False
+    db.add(Transaction(user_id=user_id, amount=-amount, reason=reason))
+    await db.flush()
+    return True
+
+
 def _sqlstate(exc: BaseException) -> str | None:
     pending: list[BaseException] = [exc]
     seen: set[int] = set()
@@ -503,6 +522,39 @@ async def treasury_debit_pending(db: AsyncSession, slug: str, amount: int) -> bo
     result = await db.execute(
         update(ResidentTreasury)
         .where(ResidentTreasury.resident_slug == slug, ResidentTreasury.balance_sc >= amount)
+        .values(balance_sc=ResidentTreasury.balance_sc - amount)
+        .execution_options(synchronize_session=False)
+    )
+    return (result.rowcount or 0) > 0
+
+
+async def treasury_debit_with_reserve_pending(
+    db: AsyncSession,
+    slug: str,
+    amount: int,
+    *,
+    minimum_remaining: int,
+) -> bool:
+    """Guarded resident debit that atomically preserves a wallet floor.
+
+    Like :func:`treasury_debit_pending`, this never commits or rolls back.  The
+    extra predicate closes the race between an affordability SELECT and a
+    concurrent spend, which is required for market visitors' poverty reserve.
+    """
+    if not isinstance(slug, str) or not slug or len(slug) > 100:
+        raise CoinError("treasury slug is invalid")
+    if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+        raise CoinError("treasury amount must be a positive integer")
+    if (isinstance(minimum_remaining, bool)
+            or not isinstance(minimum_remaining, int)
+            or minimum_remaining < 0):
+        raise CoinError("minimum remaining balance must be a nonnegative integer")
+    result = await db.execute(
+        update(ResidentTreasury)
+        .where(
+            ResidentTreasury.resident_slug == slug,
+            ResidentTreasury.balance_sc >= amount + minimum_remaining,
+        )
         .values(balance_sc=ResidentTreasury.balance_sc - amount)
         .execution_options(synchronize_session=False)
     )

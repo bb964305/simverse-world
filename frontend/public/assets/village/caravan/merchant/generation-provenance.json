@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-12",
+  "generator": "Codex built-in ImageGen",
+  "mode": "reference-guided raster generation",
+  "rights_basis": "first_party_generated",
+  "prompt_contract": "One friendly adult male travelling merchant in polished 16-bit farming-RPG pixel art: brown wide-brim hat with teal feather, short beard, dark teal coat, ochre scarf and satchel; no weapon, wagon, text or scenery. Generate one identity anchor and three-panel down/left/up walk strips on flat #FF00FF; keep identity and proportions fixed; derive right by mirroring left.",
+  "generated_sources": [
+    "exec-4b2a5a96-c88b-4cbe-80da-9e217d382bfb.png",
+    "exec-eec9403c-b9cf-4ba0-a681-3df4646490a3.png",
+    "exec-85bdeb82-3a47-43ac-8de8-11bacb8558d6.png",
+    "exec-0d05cc6c-d6e4-47c4-8779-068b680bf695.png"
+  ],
+  "postprocess": {
+    "chroma_key": "remove_chroma_key.py --auto-key border --soft-matte --transparent-threshold 12 --opaque-threshold 220 --despill",
+    "atlas": "resident-atlas-v2, nearest-neighbor, 32x32 frames, 3x4 directions, right mirrors left, 31 opaque colors plus transparent",
+    "portrait": "down-facing idle frame, nearest-neighbor 256x256"
+  },
+  "files": [
+    {"file":"texture.png","width":96,"height":128,"mode":"RGBA","bytes":9564,"sha256":"a46620d1be6d2498444d669f6806ba66d6bb9852bd1fe04ab5601d416d0f89e6"},
+    {"file":"portrait.png","width":256,"height":256,"mode":"RGBA","bytes":2458,"sha256":"0f24a061d432f1551719033a1ab50747deac5eda2ca700269c10fbe1ca4a1caf"}
+  ]
+}

@@ -62,8 +62,9 @@ async def list_all(
     db: AsyncSession = Depends(get_db),
     limit: int | None = Query(None, ge=1, le=500, description="page size; omit for the full roster"),
     offset: int = Query(0, ge=0),
+    exclude_players: bool = Query(False, description="opt-in: filter out player avatars (NPC layer)"),
 ):
-    residents = await list_residents(db, limit=limit, offset=offset)
+    residents = await list_residents(db, limit=limit, offset=offset, exclude_players=exclude_players)
     return [ResidentListItem.model_validate(r, from_attributes=True) for r in residents]
 
 

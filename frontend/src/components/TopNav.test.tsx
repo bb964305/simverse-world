@@ -1,10 +1,14 @@
 import '@testing-library/jest-dom/vitest'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { TopNav } from './TopNav'
 import { useGameStore } from '../stores/gameStore'
 import { bridge } from '../game/phaserBridge'
+
+const caravanHarness = vi.hoisted(() => ({
+  listener: null as ((projection: { snapshot: unknown }) => void) | null,
+}))
 
 vi.mock('../services/ws', () => ({
   disconnectWS: vi.fn(),
@@ -16,6 +20,21 @@ vi.mock('../services/api', () => ({
   getDailyQuest: vi.fn().mockResolvedValue({ login_streak: 1, quest: null }),
   getActiveEvents: vi.fn().mockResolvedValue({ events: [] }),
   getMe: vi.fn().mockResolvedValue({ soul_coin_balance: 110, lab_enabled: true }),
+}))
+
+vi.mock('../services/caravanProjection', () => ({
+  refreshCaravanProjection: vi.fn().mockResolvedValue({ snapshot: null }),
+  subscribeCaravanProjection: (listener: (projection: { snapshot: unknown }) => void) => {
+    caravanHarness.listener = listener
+    listener({ snapshot: null })
+    return () => {
+      if (caravanHarness.listener === listener) caravanHarness.listener = null
+    }
+  },
+  caravanBannerText: (state: { visible?: boolean; phase?: string } | null) => {
+    if (!state?.visible) return null
+    return state.phase === 'trading' ? '商队已在集市大厅开摊' : null
+  },
 }))
 
 vi.mock('./SearchDropdown', () => ({ SearchDropdown: () => <div data-testid="resident-search" /> }))
@@ -54,13 +73,25 @@ beforeEach(() => {
   useGameStore.setState({ user, token: 'token', unreadCount: 2, digestUnread: true })
 })
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  caravanHarness.listener = null
+})
 
 function renderNav() {
   return render(<MemoryRouter><TopNav /></MemoryRouter>)
 }
 
 describe('TopNav overlay ownership', () => {
+  it('shows the live caravan banner and removes it on a terminal snapshot', () => {
+    renderNav()
+    act(() => caravanHarness.listener?.({ snapshot: { visible: true, phase: 'trading' } }))
+    expect(screen.getByRole('status')).toHaveTextContent('靛篷商队 · 商队已在集市大厅开摊')
+
+    act(() => caravanHarness.listener?.({ snapshot: { visible: false, phase: 'departed' } }))
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
   it('keeps account and notification popovers mutually exclusive', async () => {
     renderNav()
     fireEvent.click(screen.getByTitle('通知'))

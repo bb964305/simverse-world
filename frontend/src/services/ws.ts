@@ -3,13 +3,22 @@ import { bridge } from '../game/phaserBridge'
 import {
   INITIAL_CONVERGENCE, isNewerRevision, advanceConvergence, type WorldConvergence,
 } from './worldRevision'
+import {
+  convergeCaravanState, refreshCaravanProjection, resetCaravanProjection,
+} from './caravanProjection'
 
 let socket: WebSocket | null = null
+// Token the current module socket was built (and will authenticate) with.
+// connectWS compares it against the store token so switching accounts in the
+// same tab (setAuth) tears the old identity's socket down instead of silently
+// riding it (F9 cross-account socket reuse).
+let socketToken: string | null = null
 // Highest applied world source_cursor, so a re-delivered world_changed cannot
 // fire a duplicate convergence effect (Phase 9). A reconnect refetches world
 // state through the normal 'world:changed' consumers, which converge forward.
 let worldConvergence: WorldConvergence = INITIAL_CONVERGENCE
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let caravanStaleTimer: ReturnType<typeof setTimeout> | null = null
 // Consecutive failed-connection counter driving the exponential backoff.
 // Reset to 0 when the server confirms auth (auth_ok) — that is the only
 // point where we know the connection is genuinely usable (a socket that
@@ -18,6 +27,14 @@ let reconnectAttempt = 0
 
 const RECONNECT_BASE_MS = 3000
 const RECONNECT_MAX_MS = 30000
+export const CARAVAN_DISCONNECT_STALE_MS = 30000
+
+function clearCaravanStaleTimer(): void {
+  if (caravanStaleTimer !== null) {
+    clearTimeout(caravanStaleTimer)
+    caravanStaleTimer = null
+  }
+}
 
 /**
  * Exponential backoff delay for reconnect attempt N (0-based):
@@ -38,15 +55,24 @@ const QUEUED_TYPES = new Set(['daily_reward', 'coin_earned'])
 
 export function connectWS(): void {
   const token = useGameStore.getState().token
+  if (!token) return
   // Bail if a socket is already OPEN *or* still CONNECTING — opening a second
   // socket during a race (e.g. React StrictMode double-mount / reconnect) makes
   // the module `socket` point at the still-connecting one, so the first
   // socket's onopen `send()` throws "Still in CONNECTING state" (verify-before-done).
   if (
-    !token ||
     socket?.readyState === WebSocket.OPEN ||
     socket?.readyState === WebSocket.CONNECTING
-  ) return
+  ) {
+    if (socketToken === token) return
+    // The live socket authenticated as a DIFFERENT identity (setAuth switched
+    // accounts in this tab). Null the module `socket` before closing so its
+    // onclose sees `socket !== ws` and skips the reconnect + banner, then fall
+    // through to build a fresh socket with the current token.
+    const stale = socket
+    socket = null
+    stale.close()
+  }
 
   const API_WS = (import.meta.env.VITE_API_URL ?? 'http://localhost:8000').replace(/^http/, 'ws')
   // Token goes in the first message, not the URL, so it never lands in access logs (P0-4c)
@@ -54,6 +80,7 @@ export function connectWS(): void {
   // whatever the module `socket` variable happens to point at when it fires.
   const ws = new WebSocket(`${API_WS}/ws`)
   socket = ws
+  socketToken = token
 
   ws.onopen = () => {
     ws.send(JSON.stringify({ type: 'auth', token }))
@@ -65,9 +92,15 @@ export function connectWS(): void {
       // Server accepted our token — the connection is fully usable. Reset the
       // reconnect backoff and clear the "reconnecting" banner.
       if (data.type === 'auth_ok') {
+        clearCaravanStaleTimer()
         reconnectAttempt = 0
         useGameStore.getState().setWsStatus('connected')
+        // Initial connect and every reconnect converge through the durable REST
+        // snapshot. The shared reducer prevents a slow, older GET from replacing
+        // a newer caravan_state frame that arrived while it was in flight.
+        void refreshCaravanProjection().catch(() => { /* optional projection */ })
       }
+      if (data.type === 'caravan_state') convergeCaravanState(data)
       if (data.type === 'coin_update' && typeof data.balance === 'number') {
         useGameStore.getState().updateBalance(data.balance)
       }
@@ -249,6 +282,15 @@ export function connectWS(): void {
     useGameStore.getState().clearOnlinePlayers()
     // Passive drop: tell the UI and schedule a reconnect with exponential backoff.
     useGameStore.getState().setWsStatus('reconnecting')
+    // Preserve short-drop continuity, but never leave an inbound/outbound or
+    // trading projection visible forever while the client is offline. The
+    // successful reconnect GET will restore the authoritative state.
+    if (caravanStaleTimer === null) {
+      caravanStaleTimer = setTimeout(() => {
+        caravanStaleTimer = null
+        resetCaravanProjection()
+      }, CARAVAN_DISCONNECT_STALE_MS)
+    }
     const delay = computeBackoffDelay(reconnectAttempt)
     reconnectAttempt += 1
     reconnectTimer = setTimeout(() => {
@@ -285,12 +327,15 @@ export function disconnectWS(): void {
     reconnectTimer = null
   }
   reconnectAttempt = 0
+  clearCaravanStaleTimer()
   // Deliberate disconnect (logout / page unmount): null the module `socket`
   // BEFORE closing so the socket's onclose sees `socket !== ws` and skips both
   // the reconnect and the 'reconnecting' status.
   const ws = socket
   socket = null
+  socketToken = null
   ws?.close()
+  resetCaravanProjection()
   // Hide the banner if a reconnect cycle was in flight when the user left.
   useGameStore.getState().setWsStatus('connected')
 }

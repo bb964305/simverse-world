@@ -29,10 +29,9 @@ S10 —— 与 ``offices`` 的边界,以及两个读法方向(``app/services/off
 
 - 营生(本模块,11 键)不是官职(``OFFICE_DEFS``,4 键)。营生带 ``prompt_hint``
   与 ``perks``,决定 WORK 产出、prompt 口吻与各类系数;官职带任期 / 机构 /
-  权限,运行时只有 ``mayor`` 被写。重叠只有 ``{town_clerk, postman}``,是迁移
-  046 的一次性快照拷贝,之后**零同步**——生产那两行 ``holder_slug`` 恒为 NULL,
-  下面 ``find_duty_resident`` 的 offices 索引优化对这两键永久失效(恒回落 O(N)
-  扫描)。
+  权限。重叠只有 ``{town_clerk, postman}``，由 roster reset 末尾的安全对账
+  补齐；非空冲突绝不覆盖。office 索引命中后仍复核 holder 的 duty key，
+  不一致就告警并回落 O(N) 扫描。
 - **按 key 反查持有人** = :func:`find_duty_resident`(吃 key 吐人,要 db)。
 - **按人读营生** = :func:`get_duty` / :func:`duty_key`(吃 resident 吐值,纯
   函数)。
@@ -55,6 +54,24 @@ logger = logging.getLogger(__name__)
 
 DUTY_WORK_COOLDOWN_HOURS = 20  # ≈ once per game day, tolerant of schedule drift
 
+# Funding is deliberately independent from the duty registry itself: it is a
+# fiscal classification, not an action/permission classification.  Existing
+# resident JSON may predate ``funding_source``; these defaults make opening the
+# dark gate deterministic without requiring an in-place resident rewrite.
+DUTY_FUNDING_DEFAULTS: dict[str, str] = {
+    "cafe_host": "private",
+    "tavern_hub": "private",
+    "workshop_fixer": "private",
+    "chronicle_editor": "public",
+    "lecturer": "public",
+    "explorer": "none",
+    "shop_keeper": "private",
+    "town_clerk": "public",
+    "researcher": "none",
+    "street_artist": "private",
+    "postman": "public",
+}
+
 
 # ── meta_json accessors ────────────────────────────────────────────────
 
@@ -64,6 +81,14 @@ def get_duty(resident) -> dict:
 
 def duty_key(resident) -> str | None:
     return get_duty(resident).get("key")
+
+
+def funding_source(resident) -> str:
+    duty = get_duty(resident)
+    explicit = duty.get("funding_source")
+    if explicit in {"public", "private", "none"}:
+        return explicit
+    return DUTY_FUNDING_DEFAULTS.get(duty.get("key") or "", "none")
 
 
 def perk(resident, key: str, default: float = 0.0) -> float:
@@ -111,8 +136,13 @@ async def find_duty_resident(db, key: str) -> Resident | None:
                 r = (await db.execute(
                     select(Resident).where(Resident.slug == holder)
                 )).scalar_one_or_none()
-                if r is not None:
+                if r is not None and r.is_autonomous and duty_key(r) == key:
                     return r
+                logger.error(
+                    "office/duty mismatch for %s: office holder=%s duty=%s; "
+                    "falling back to the legacy duty scan",
+                    key, holder, duty_key(r) if r is not None else None,
+                )
         except Exception:
             logger.warning("offices-backed duty lookup failed for %s", key,
                            exc_info=True)
@@ -142,6 +172,9 @@ async def on_work(db, resident, *, market_day: bool = False) -> str | None:
     handler = _WORK_HANDLERS.get(key or "")
     if handler is None:
         return None
+    # F8: 进 try 前取好——异常路径上游的 rollback 会 expire session 里的 ORM
+    # 对象,except 里再摸 resident 属性就是 MissingGreenlet。
+    slug = resident.slug
     try:
         r = get_redis()
         cd_key = f"sv:duty_work:{resident.id}"
@@ -156,7 +189,7 @@ async def on_work(db, resident, *, market_day: bool = False) -> str | None:
             await _pay_wage(db, resident)
         return result
     except Exception:
-        logger.warning("duty on_work failed for %s", resident.slug, exc_info=True)
+        logger.warning("duty on_work failed for %s", slug, exc_info=True)
         return None
 
 
@@ -173,48 +206,83 @@ async def _pay_wage(db, resident) -> None:
     from app.config import settings
     if not settings.npc_economy_enabled:
         return
-    base_wage = settings.npc_default_wage_sc
-    if settings.polis_policy_enabled:
-        try:
-            from app.services import fiscal_policy_service
-            base_wage = await fiscal_policy_service.default_wage_sc(
-                db, fallback=base_wage,
+    sustainable = bool(settings.town_duty_funding_enabled)
+    if sustainable:
+        # Private production is paid by its sale/commission path; research is
+        # paid by Lab; an explorer has no payroll.  Only public output reaches
+        # the town budget once this independent gate is opened.
+        if funding_source(resident) != "public":
+            return
+        if not settings.town_treasury_enabled:
+            # F7 组合守卫: funding 闸开而 treasury 闸关时没有任何资金来源,
+            # 落到下面 `if not funded` 的 treasury_credit 就是凭空铸币——
+            # sustainable 是硬 no-mint 边界, 这里直接欠薪并告警配置错序。
+            logger.warning(
+                "town_duty_funding_enabled without town_treasury_enabled: "
+                "public wage for %s skipped (no funding source, refusing to mint)",
+                resident.slug,
             )
-        except Exception:
-            logger.warning("policy-backed duty wage lookup failed", exc_info=True)
-    wage = int(perk(resident, "wage_sc", base_wage))
-    # M6: the sitting mayor earns a town-wide wage bonus (flag on meta_json —
-    # zero extra query, it's already loaded).
-    if settings.election_enabled and (getattr(resident, "meta_json", None) or {}).get("mayor"):
-        wage = int(round(wage * settings.election_mayor_wage_bonus))
+            return
+        wage = int(settings.town_public_duty_wage_sc or 0)
+    else:
+        base_wage = settings.npc_default_wage_sc
+        if settings.polis_policy_enabled:
+            try:
+                from app.services import fiscal_policy_service
+                base_wage = await fiscal_policy_service.default_wage_sc(
+                    db, fallback=base_wage,
+                )
+            except Exception:
+                logger.warning("policy-backed duty wage lookup failed", exc_info=True)
+        wage = int(perk(resident, "wage_sc", base_wage))
+        # Legacy bonus stays behind the old funding mode.  Once sustainable
+        # payroll is enabled, mayor compensation must be a separately-budgeted
+        # stipend rather than a multiplier on an unrelated private duty.
+        if (settings.election_enabled
+                and (getattr(resident, "meta_json", None) or {}).get("mayor")):
+            wage = int(round(wage * settings.election_mayor_wage_bonus))
     if wage <= 0:
         return
+    # F8: 进 try 前取好——town_to_resident 做死锁牺牲者被 abort 时会 rollback 后
+    # raise,rollback 已 expire 本 session 的 ORM 对象,except 里再摸
+    # resident.slug 就是 MissingGreenlet。
+    slug = resident.slug
     try:
         from app.services import coin_service
-        # S1-5 funded wage: mirror coin_service.transfer's debit→credit ordering —
-        # take the money out of the town account FIRST, and only credit the
-        # resident once that guarded decrement actually won. The mayor bonus is
-        # already folded into `wage` above (S2-1 semantics untouched), so the town
-        # funds the bonus too. Zero extra per-resident SELECT: one more UPDATE on
-        # the single town row inside the same transaction.
+        funded = False
         if settings.town_treasury_enabled:
             from app.services import treasury_service
-            funded = await treasury_service.disburse(
-                db, wage, reason=f"wage:{resident.slug}")
+            funded = await treasury_service.town_to_resident(
+                db,
+                resident.slug,
+                wage,
+                reason=f"wage:{resident.slug}",
+                wage_budget_ratio=(settings.town_wage_budget_ratio
+                                   if sustainable else None),
+                wage_window_days=settings.town_wage_income_window_days,
+            )
             if not funded:
-                if (settings.town_wage_unfunded_policy or "skip") != "mint":
-                    # 'skip' = 欠薪: nothing credited, and crucially nothing minted.
-                    # No rollback here — disburse's guard wrote nothing.
-                    logger.info("town treasury short: wage skipped for %s", resident.slug)
+                # The sustainable gate is also a hard no-mint boundary.  A
+                # stale production escape-hatch value must not silently turn
+                # a rejected budget payment back into currency creation.
+                if (sustainable or
+                        (settings.town_wage_unfunded_policy or "skip") != "mint"):
+                    logger.info(
+                        "town wage skipped for %s (funds/budget unavailable)",
+                        resident.slug,
+                    )
                     return
                 # 'mint' = explicit escape hatch back to the pre-S1-5 behavior.
                 logger.info("town treasury short: minting wage for %s", resident.slug)
-        await coin_service.treasury_credit(db, resident.slug, wage, reason="duty_wage")
+        if not funded:
+            await coin_service.treasury_credit(
+                db, resident.slug, wage, reason="duty_wage",
+            )
         balance = await coin_service.treasury_balance(db, resident.slug)
         set_wallet_cache(db, resident, balance)
         await _feed(resident.slug, "wage", {"amount": wage, "duty": duty_key(resident)})
     except Exception:
-        logger.warning("duty wage credit failed for %s", resident.slug, exc_info=True)
+        logger.warning("duty wage credit failed for %s", slug, exc_info=True)
 
 
 def set_wallet_cache(db, resident, balance: int) -> None:
@@ -248,6 +316,10 @@ async def _work_workshop_fixer(db, resident) -> str | None:
     )
     if c is None:
         return None  # global cap reached — retry next window
+    if isinstance(c, str):
+        # v2 dedup:上一单还挂着。返回叙事行(非 None)以满足 on_work 契约——
+        # 这班照常算干了活:发薪+设 cooldown,只是不再贴新委托/上架新品。
+        return f"{resident.name}看了看委托栏,上一单还挂着,先去干活。"
     await _maybe_list_resident_work(
         db, resident, "handcraft",
         f"{resident.name}的手工件", "🔧",

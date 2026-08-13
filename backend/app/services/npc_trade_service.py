@@ -7,10 +7,10 @@
 → 零 DB 写入)。
 
 事务纪律(本里程碑的头号故障面):
-- 一笔成交 = **一个事务**:`treasury_debit_pending` + `skim_tax_pending` +
-  `treasury_credit_pending` + 库存扣减 + 双方钱包缓存 → 单次 `commit`。中途任何一
-  步炸掉都必须 `rollback` 后再进下一个买方,否则悬挂的半笔 debit 会被后续无关
-  commit 落库烧钱。
+- 一笔成交 = **一个事务**:`skim_tax_pending`(town 行,F8 锁序军规:先于一切
+  resident 行)+ `treasury_debit_pending` + `treasury_credit_pending` + 库存扣减 +
+  双方钱包缓存 → 单次 `commit`。中途任何一步炸掉都必须 `rollback` 后再进下一个
+  买方,否则悬挂的半笔写会被后续无关 commit 落库烧钱/凭空征税。
 - memory / feed 一律放 commit **之后**并 fail-open(`MemoryService.add_memory` 自带
   commit,放进事务里会把单事务撕成两半)。
 - rollback 会 expire 整个 session 的 ORM 对象(异步下再读属性就是 MissingGreenlet),
@@ -178,9 +178,29 @@ async def _buy(db: AsyncSession, buyer_id: str, buyer_slug: str, offer: dict,
     if buyer is None:
         return False
 
+    cut = 0
+    creator = None
+    earned = 0
+    if kind == "resident_work":
+        creator = (await db.execute(
+            select(Resident).where(Resident.slug == offer["creator_slug"])
+        )).scalar_one_or_none()
+        if creator is None:  # 扫描后作者被清号:此刻一字未写,直接放弃
+            return False
+        # F8 锁序军规(treasury_service 模块头):同事务触碰两表时 town 行先于
+        # resident 行——与 town_to_resident(FOR UPDATE town 行 → credit resident
+        # 行)同序,真 PG 下工资×消费两路并发才不会 AB-BA 成环死锁。skim 金额只
+        # 依赖 price,不依赖 debit 结果。
+        cut = await treasury_service.skim_tax_pending(
+            db, price, settings.town_tax_rate_sales, f"npc_sales_tax:{code}")
+        earned = price - cut
+
     if not await coin_service.treasury_debit_pending(db, buyer_slug, price):
-        # 零行守卫(扫描到成交之间余额被别的段落动过):什么都没写,不 rollback
-        # ——rollback 会 expire 整个 session(treasury_service 模块头军规 2)。
+        # 零行守卫(扫描到成交之间余额被别的段落动过):此时镇税+carry 已是
+        # pending 写,必须就地 rollback——悬挂写会被下一买家的 commit 带落库
+        # =无成交凭空征税。rollback 会 expire session 的 ORM 对象,但调用方
+        # (run_consumption_pass)只持标量元组,安全。
+        await db.rollback()
         return False
 
     # M-A 加固:库存守卫。买方的钱已经 debit 了(半笔账),抢不到货必须就地
@@ -191,22 +211,9 @@ async def _buy(db: AsyncSession, buyer_id: str, buyer_slug: str, offer: dict,
         logger.info("npc_trade lost the race for %s (sold out under the guard)", code)
         return False
 
-    cut = 0
-    creator = None
-    earned = 0
-    if kind == "resident_work":
-        cut = await treasury_service.skim_tax_pending(
-            db, price, settings.town_tax_rate_sales, f"npc_sales_tax:{code}")
-        earned = price - cut
-        creator = (await db.execute(
-            select(Resident).where(Resident.slug == offer["creator_slug"])
-        )).scalar_one_or_none()
-        if creator is None:  # 扫描后作者被清号:半笔 debit 必须就地回滚
-            await db.rollback()
-            return False
-        if earned > 0:
-            await coin_service.treasury_credit_pending(
-                db, creator.slug, earned, reason=f"npc_work_sold:{code}")
+    if earned > 0:
+        await coin_service.treasury_credit_pending(
+            db, creator.slug, earned, reason=f"npc_work_sold:{code}")
 
     # 钱包缓存(prompt 读的那份)——事务内 SELECT 看得到自己尚未 commit 的改动。
     set_wallet_cache(db, buyer, await coin_service.treasury_balance(db, buyer_slug))
@@ -445,7 +452,8 @@ async def run_commission_accept_pass(db: AsyncSession, rng=None) -> dict:
     """让居民接下 open 的委托。返回 `{"accepted"}` 摘要。
 
     只接**发单人当下付得起**的单(NPC 路径的赏金是真实出资,不是铸币),挑人用
-    `_stable_unit(承接人 slug, 委托 id)` 的稳定口味哈希 + `npc_trade_buy_prob`
+    `_stable_unit(承接人 slug, 委托 id)` 的稳定口味哈希 + 独立的
+    `npc_commission_accept_prob`
     掷骰;占坑是 guarded UPDATE(`status='open' AND acceptor_user_id IS NULL AND
     expires_at>now`,与 `commission_service.accept:69` 同款),抢输了就放弃。
     同一个人一晚只接一单(与 C2 的"每人一笔"同口径)。钱在结算那一段才动。
@@ -466,7 +474,7 @@ async def run_commission_accept_pass(db: AsyncSession, rng=None) -> dict:
     taken: set[str] = set()
     for cid, issuer_id, reward, title in rows:
         try:
-            if rng.random() >= settings.npc_trade_buy_prob:
+            if rng.random() >= settings.npc_commission_accept_prob:
                 continue
             issuer = await _resident_by_id(db, issuer_id)
             if issuer is None:

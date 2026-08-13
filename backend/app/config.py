@@ -189,6 +189,12 @@ class Settings(BaseSettings):
     embedding_api_key: str = ""
     embedding_model: str = "text-embedding-v4"
     embedding_dimensions: int = 1024  # must match vector(1024) column
+    # Compensation queue rollout knobs.  Start conservatively in production;
+    # after one hour of provider/DB observation, ops may raise the DB batch to
+    # 400 without rebuilding the image.
+    embedding_backfill_batch_size: int = Field(default=100, ge=1, le=10_000)
+    embedding_backfill_interval_seconds: int = Field(default=600, ge=1)
+    embedding_backfill_request_size: int = Field(default=50, ge=1, le=1_000)
 
     # --- Ollama (local embedding fallback) ---
     ollama_base_url: str = "http://localhost:11434"
@@ -274,6 +280,25 @@ class Settings(BaseSettings):
     rest_rate_limit_forge_per_minute: int = 10     # forge start/quick (by IP)
     rest_rate_limit_llm_test_per_minute: int = 5   # settings/llm/test (by IP)
     rest_rate_limit_propose_per_minute: int = 5    # polls/propose (by IP)
+    # External Agent players. Self-registration remains local/debug-only unless
+    # an operator explicitly enables it.
+    agent_self_registration_enabled: bool = False
+    agent_player_session_minutes: int = 15
+    agent_viewer_session_minutes: int = 60
+    agent_pairing_minutes: int = 10
+    agent_move_max_tiles: int = 4
+    agent_observation_radius_tiles: int = 12
+    agent_observation_event_limit: int = 20
+    agent_message_max_chars: int = 280
+    agent_presence_ttl_seconds: int = 90
+    # 主 tick 跳过 chatting/socializing:开 = 跳过(chatting 先查 Redis 聊天锁,
+    # 无锁视为陈旧状态 → 自愈复位 idle 并照常 tick)。关 = master 行为逐字节一致:
+    # 主 tick 仅跳 sleeping(夜间归巢路径本就是三态检查,不受此闸影响)。
+    chat_engaged_tick_skip_enabled: bool = False
+    # write_collective_memories 收件人过滤:开 = 只写给 sim 居民(is_autonomous,
+    # npc/resident),玩家化身不收 world_event 记忆。关 = master 谓词逐字节一致
+    # (仅排 sleeping,玩家化身照收——profile creator stats 的记忆计数口径不变)。
+    collective_memory_sim_only: bool = False
 
     # --- Observability (OPTIMIZATION_PLAN P1-3) ---
     # metrics_enabled / sentry_* live in the Observability block above (a
@@ -418,6 +443,14 @@ class Settings(BaseSettings):
     # Master switch. Default False → behavior identical to pre-realism. Deploys
     # opt in via REALISM_ENABLED=true for burn-in A/B and easy rollback.
     realism_enabled: bool = False
+    # V2 plan continuity is independently reversible: edge-triggered plan
+    # interruptions, sticky planned travel and per-trip (not per-step) action
+    # accounting.  Canonical target parsing/telemetry remain additive without it.
+    realism_plan_continuity_enabled: bool = False
+    realism_social_interrupt_need_max: float = 0.35
+    realism_social_interrupt_max_importance: int = 4
+    realism_notable_event_max_world_minutes: int = 60
+    realism_plan_continuation_max_steps: int = 32
     # P1 movement (defined now so REALISM_MOVE_SPEED env parses; used in P1).
     realism_move_speed: int = 8
     # Task 2 retrieval scoring (Generative-Agents weights; must sum to 1.0).
@@ -512,15 +545,19 @@ class Settings(BaseSettings):
     realism_importance_window: int = 100
     realism_shift_percentile: float = 0.95       # shift gate: normalized ≥ P95 ...
     realism_shift_valence_gate: float = 0.5      # ... AND |valence| > this
+    # Personality pacing is a separate rollback plane from the rest of realism.
+    realism_personality_pacing_enabled: bool = False
+    realism_drift_min_world_hours: int = 72
 
 
-    # --- Realism P2 (social structure; three INDEPENDENT switches, all False) ---
+    # --- Realism P2 (social structure; independent switches, all False) ---
     # Each gate is independent of realism_enabled and of each other, so relations,
     # information gradient and crowd can be A/B'd separately during burn-in. Any
     # one False → the corresponding path behaves exactly as pre-P2.
     realism_relations_enabled: bool = False
     realism_info_gradient_enabled: bool = False
     realism_crowd_enabled: bool = False
+    realism_gossip_event_lane_enabled: bool = False
     # P2 Task 1 — relation write deltas (reused, zero new LLM calls) + decay.
     realism_rel_familiarity_chat: float = 0.05
     realism_rel_affinity_chat: float = 0.03      # ± by wrapup mood (positive/negative)
@@ -564,15 +601,33 @@ class Settings(BaseSettings):
     npc_work_item_stock: int = 3                  # limited stock per listing
     market_day_weekday: int = 5                   # Saturday=5: weekly 集市日
     market_day_discount: float = 0.9              # shop price × this on market day
+    # 集市日场地: central_plaza = master 原行为(payload/文案逐字节一致,读端不投影);
+    # market_hall = 集市大厅(新文案 + 读端把历史 central_plaza 行投影到 market_hall)。
+    # 开 CARAVAN_ENABLED/CARAVAN_LIFECYCLE_ENABLED 前必须先切 market_hall。
+    market_day_venue: str = "central_plaza"
     # M-A 经济内生化: NPC↔NPC 真实钱流。三个闸门互相独立、默认全关 → 行为与
     # 现状逐字节一致；开闸是 deploy/.env 的单独变更（红线：迁移/暗上与开闸分车）。
     npc_trade_enabled: bool = False               # C1 餐费入账 + C2 消费 pass + C3 委托接单/结算
     npc_trade_buy_prob: float = 0.25              # 每个合格买方每晚掷骰的成交概率
+    npc_commission_accept_prob: float = 0.25      # C3 独立接单概率（不再借用商品购买口味）
+    commission_ttl_hours: int = 72                # 新委托生命周期；跨过至少两次 nightly（仅 v2 开时生效）
+    # Commission lifecycle v2:开 = issuer+kind 去重(未过期 open/accepted 挡新单,
+    # create 返回哨兵 "deduped") + expires_at 显式取 commission_ttl_hours。
+    # 关 = master 行为逐字节一致:无去重、TTL 走 model 默认 48h。
+    commission_lifecycle_v2_enabled: bool = False
     npc_trade_reserve_sc: int = 5                 # 买方保留金,兼作贫困线(余额须 > 它 + 价)
     npc_trade_max_buys_per_night: int = 2         # 全镇每晚成交上限(每人至多 1 笔)
     caravan_enabled: bool = False                 # C4 外来商队(绑集市日,外生买方 + 第二税源)
     caravan_stall_fee_sc: int = 5                 # 摊位费→镇库,不依赖 tax_rate
     caravan_budget_sc: int = 30                   # 每次到访的作品收购预算
+    # Durable lifecycle is a separate dark-launch gate.  Keep it false while
+    # migration/API/worker ship; enabling it makes event_cron enqueue visits
+    # instead of invoking the legacy one-shot settlement.
+    caravan_lifecycle_enabled: bool = False
+    caravan_lifecycle_interval_seconds: int = Field(default=5, ge=1, le=300)
+    caravan_wait_lead_seconds: int = Field(default=600, ge=0, le=86400)
+    caravan_route_tile_ms: int = Field(default=150, ge=10, le=5000)
+    caravan_lease_seconds: int = Field(default=30, ge=5, le=600)
     tax_carry_enabled: bool = False               # C5 分数税账:尾数以整数 milli-SC 累入 town_tax_carry_milli(原子增量);关=旧 int() 截断
     # M-A 加固闸:库存扣减走 items.stock 的 guarded UPDATE(迁移 056 必须先落库)。
     # 关 = 旧 payload_json 读-改-写,与现状逐字节一致 —— 迁移暗上与开闸分车。
@@ -703,11 +758,22 @@ class Settings(BaseSettings):
     # nightly public-spending job is skipped whole, and no treasury_changed WS
     # event is emitted. Pure rules, zero new LLM calls.
     town_treasury_enabled: bool = False         # 主开关 (env TOWN_TREASURY_ENABLED)
+    # town ledger 镜像写独立闸(058 迁移落库后的**第二次变更**再开, 迁移与行为
+    # 变更不同车)。闸关期间镇财政流水不入 town_treasury_entries——开闸前需重新
+    # 锚定(重跑 opening_balance 锚点), 否则窗口期的流水在账面上是缺口。
+    town_ledger_enabled: bool = False           # (env TOWN_LEDGER_ENABLED)
     town_tax_rate_sales: float = 0.1            # 居民售货销售税率(skim 进镇财政)
     town_tax_rate_gift: float = 0.0             # 送礼/打赏分成税率,默认 0(留旋钮)
     town_wage_unfunded_policy: str = "skip"     # 镇财政见底: skip=欠薪 / mint=回落凭空铸造
     town_public_works_daily_sc: int = 0         # nightly 公共支出预算,0=只做对账不拨款
     town_ws_min_delta_sc: int = 0               # treasury_changed 广播阈值,0=不广播
+    # 财政可持续工资闸：默认关，暗上后仍保持原有“所有有产出的 duty 按 perk
+    # 发薪”语义。开闸后仅 public funding_source 由镇库支付统一低额工钱，并受
+    # 近 7 日真实收入 × 70% 的硬预算约束；其余 30% 留作公共储备。
+    town_duty_funding_enabled: bool = False
+    town_public_duty_wage_sc: int = 1
+    town_wage_income_window_days: int = 7
+    town_wage_budget_ratio: float = 0.70
 
     # ── S2-5 policies + 四级分级审批 (POLIS_POLICY_*) ────────────────────
     # 两个独立门, 都默认 False → 行为与现状字节级一致 (KICKOFF_S2-5 §3):

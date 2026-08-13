@@ -22,16 +22,30 @@
 from __future__ import annotations
 
 import logging
+import uuid
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models.resident import Resident
+from app.models.caravan_visit import CaravanVisit, CaravanVisitPurchase
 from app.models.shop import Item
 from app.services import coin_service, treasury_service
 
 logger = logging.getLogger(__name__)
+
+
+def _wall_now() -> datetime:
+    """Injectable lease clock; financial tests can advance it deterministically."""
+    return datetime.now(UTC)
+
+
+def _aware_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 # 幂等键:上一次已经跑完到访动作的世界事件 id(裸 upsert,不走会内部 commit 的
 # ConfigService.set)。
@@ -50,6 +64,27 @@ IMPORT_DEFS: list[dict] = [
      "description": "商队带来的外乡花布", "price_sc": 8},
 ]
 IMPORT_STOCK = 2
+
+
+async def is_caravan_enabled(db: AsyncSession) -> bool:
+    """Resolve the binding policy, with the env switch as rollback fallback."""
+    fallback = bool(settings.caravan_enabled)
+    if not settings.polis_policy_enabled:
+        return fallback
+    try:
+        from app.services.policy_service import PolicyService
+        value = await PolicyService(db).get("caravan_enabled", default=fallback)
+        if isinstance(value, bool):
+            return value
+        logger.warning(
+            "invalid caravan_enabled policy value %r; using env fallback=%s",
+            value, fallback,
+        )
+    except Exception:
+        logger.warning(
+            "caravan policy lookup failed; using env fallback", exc_info=True,
+        )
+    return fallback
 
 
 def _event_id(event) -> str | None:
@@ -208,15 +243,24 @@ async def run_caravan_visit(db: AsyncSession, event) -> dict:
     """一次商队到访。返回 `{"bought", "spent", "tax", "fee", "imported"}` 摘要。
 
     由 `event_cron` 在集市日事件 `phase=="start"` 时调用(判据在调用点,这里只管
-    到访本身)。`npc_economy_enabled` + `caravan_enabled` 双闸,关 → 零 DB 写入。
+    到访本身)。`npc_economy_enabled` + policy-backed `caravan_enabled` 双闸,
+    关 → 零 DB 写入。
     """
     summary = {"bought": 0, "spent": 0, "tax": 0, "fee": 0, "imported": 0}
-    if not (settings.npc_economy_enabled and settings.caravan_enabled):
+    if not (settings.npc_economy_enabled and await is_caravan_enabled(db)):
         return summary
 
     event_id = _event_id(event)
     if not event_id:
         logger.warning("caravan visit skipped: event has no id")
+        return summary
+    # A lifecycle row is a durable ownership fence even if ops subsequently
+    # turns its dark gate off.  Falling back to the legacy one-shot path for the
+    # same event would mint/pay/stock a second time when the lifecycle resumes.
+    durable_visit = (await db.execute(
+        select(CaravanVisit.id).where(CaravanVisit.world_event_id == event_id)
+    )).scalar_one_or_none()
+    if durable_visit is not None:
         return summary
     if await treasury_service.kv_read(db, LAST_VISIT_KEY) == event_id:
         return summary      # 这一场集市已经来过了
@@ -234,3 +278,289 @@ async def run_caravan_visit(db: AsyncSession, event) -> dict:
                 event_id, summary["bought"], summary["spent"], summary["tax"],
                 summary["fee"], summary["imported"])
     return summary
+
+
+# --------------------------------------------------------------------------- #
+# Durable lifecycle settlement (CARAVAN_LIFECYCLE_ENABLED)                    #
+# --------------------------------------------------------------------------- #
+
+
+class CaravanLeaseLost(RuntimeError):
+    """The caller no longer owns the visit; its whole current txn must abort."""
+
+
+async def _renew_owned_visit(
+    db: AsyncSession, visit_id: str, owner: str, *, now: datetime,
+) -> CaravanVisit:
+    """Lock and renew an owned row before a financial transaction.
+
+    The CAS uses both owner and version.  A restarted worker can reclaim an
+    expired lease, bump ``version`` and make an old worker's next step a no-op.
+    """
+    visit = await db.get(CaravanVisit, visit_id, populate_existing=True)
+    if visit is None or visit.lease_owner != owner:
+        raise CaravanLeaseLost(visit_id)
+    lease_base = max(_aware_utc(now), _aware_utc(_wall_now()))
+    lease_target = lease_base + timedelta(seconds=settings.caravan_lease_seconds)
+    if visit.lease_expires_at is not None:
+        lease_target = max(lease_target, _aware_utc(visit.lease_expires_at))
+    result = await db.execute(
+        update(CaravanVisit)
+        .where(
+            CaravanVisit.id == visit_id,
+            CaravanVisit.version == visit.version,
+            CaravanVisit.lease_owner == owner,
+        )
+        .values(lease_expires_at=lease_target)
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount != 1:
+        await db.rollback()
+        raise CaravanLeaseLost(visit_id)
+    return visit
+
+
+async def _claim_purchase_row(
+    db: AsyncSession, *, visit_id: str, item: Item, creator_slug: str,
+) -> str | None:
+    """Insert the per-item idempotency record before touching stock or money."""
+    purchase_id = str(uuid.uuid4())
+    values = {
+        "id": purchase_id,
+        "visit_id": visit_id,
+        "item_code": item.code,
+        "creator_slug": creator_slug,
+        "qty": 1,
+        "gross_sc": int(item.price_sc),
+        "tax_sc": 0,
+        "net_sc": int(item.price_sc),
+        "created_at": datetime.now(UTC),
+    }
+    dialect = db.get_bind().dialect.name
+    if dialect in ("postgresql", "sqlite"):
+        insert = postgresql_insert if dialect == "postgresql" else sqlite_insert
+        result = await db.execute(
+            insert(CaravanVisitPurchase)
+            .values(**values)
+            .on_conflict_do_nothing(
+                index_elements=[
+                    CaravanVisitPurchase.visit_id,
+                    CaravanVisitPurchase.item_code,
+                ]
+            )
+        )
+        return purchase_id if result.rowcount == 1 else None
+    existing = (await db.execute(
+        select(CaravanVisitPurchase.id).where(
+            CaravanVisitPurchase.visit_id == visit_id,
+            CaravanVisitPurchase.item_code == item.code,
+        )
+    )).scalar_one_or_none()
+    if existing:
+        return None
+    db.add(CaravanVisitPurchase(**values))
+    await db.flush()
+    return purchase_id
+
+
+async def _take_lifecycle_stock(db: AsyncSession, item: Item) -> int | None:
+    """Always use the real ``items.stock`` CAS, independent of the legacy gate."""
+    if item.stock is None:
+        seed_stock = int((item.payload_json or {}).get("stock") or 0)
+        await db.execute(
+            update(Item)
+            .where(Item.id == item.id, Item.stock.is_(None))
+            .values(stock=seed_stock)
+            .execution_options(synchronize_session=False)
+        )
+    result = await db.execute(
+        update(Item)
+        .where(Item.id == item.id, Item.active.is_(True), Item.stock >= 1)
+        .values(stock=Item.stock - 1)
+        .returning(Item.stock)
+        .execution_options(synchronize_session=False)
+    )
+    remaining = result.scalar_one_or_none()
+    if remaining is None:
+        return None
+    payload = dict(item.payload_json or {})
+    payload["stock"] = int(remaining)
+    item.payload_json = payload
+    item.active = remaining > 0
+    return int(remaining)
+
+
+async def _buy_one_for_visit(
+    db: AsyncSession, visit_id: str, owner: str, code: str, *, now: datetime,
+) -> bool:
+    """Commit one purchase atomically, guarded by visit/item uniqueness and stock."""
+    from app.services.duty_service import set_wallet_cache
+
+    await _renew_owned_visit(db, visit_id, owner, now=now)
+    item = (await db.execute(select(Item).where(Item.code == code))).scalar_one_or_none()
+    if item is None or not item.active:
+        await db.rollback()
+        return False
+    creator_slug = (item.payload_json or {}).get("creator_slug")
+    creator = None
+    if creator_slug:
+        creator = (await db.execute(
+            select(Resident).where(Resident.slug == creator_slug)
+        )).scalar_one_or_none()
+    if creator is None:
+        item.active = False
+        await db.commit()
+        logger.info("caravan delisted orphan work %s", code)
+        return False
+
+    purchase_id = await _claim_purchase_row(
+        db, visit_id=visit_id, item=item, creator_slug=creator.slug,
+    )
+    if purchase_id is None:
+        await db.rollback()
+        return False
+    if await _take_lifecycle_stock(db, item) is None:
+        await db.rollback()  # also removes the pending purchase claim
+        return False
+
+    price = int(item.price_sc)
+    cut = await treasury_service.skim_tax_pending(
+        db, price, settings.town_tax_rate_sales,
+        f"caravan_tax:{visit_id}:{code}",
+    )
+    earned = price - cut
+    if earned:
+        await coin_service.treasury_credit_pending(
+            db, creator.slug, earned, reason=f"caravan_bought:{visit_id}:{code}"
+        )
+    set_wallet_cache(db, creator, await coin_service.treasury_balance(db, creator.slug))
+    await db.execute(
+        update(CaravanVisitPurchase)
+        .where(CaravanVisitPurchase.id == purchase_id)
+        .values(tax_sc=cut, net_sc=earned)
+        .execution_options(synchronize_session=False)
+    )
+    # Renew again at transaction end: if stock/tax/wallet work was slow, the
+    # committed lease must still extend from the actual commit-side wall clock.
+    await _renew_owned_visit(db, visit_id, owner, now=now)
+    await db.commit()
+    await _narrate(db, creator, code=code, name=item.name, earned=earned)
+    return True
+
+
+async def _stock_import_goods_pending(db: AsyncSession, visit_id: str) -> int:
+    payload = {"caravan": True, "caravan_visit_id": visit_id, "stock": IMPORT_STOCK}
+    for definition in IMPORT_DEFS:
+        existing = (await db.execute(
+            select(Item).where(Item.code == definition["code"])
+        )).scalar_one_or_none()
+        if existing is None:
+            db.add(Item(
+                **definition, kind=IMPORT_KIND, payload_json=dict(payload),
+                stock=IMPORT_STOCK, active=True,
+            ))
+        else:
+            existing.active = True
+            existing.payload_json = dict(payload)
+            existing.stock = IMPORT_STOCK
+            existing.price_sc = definition["price_sc"]
+    await db.flush()
+    return len(IMPORT_DEFS)
+
+
+async def settle_caravan_visit(
+    db: AsyncSession, visit_id: str, owner: str, *, now: datetime | None = None,
+) -> dict:
+    """Resume the visit settlement; every material item is independently idempotent."""
+    now = now or datetime.now(UTC)
+    visit = await _renew_owned_visit(db, visit_id, owner, now=now)
+    if visit.phase != "trading":
+        await db.rollback()
+        raise ValueError(f"visit {visit_id} is not trading")
+
+    if visit.fee_settled_at is None:
+        fee = int(settings.caravan_stall_fee_sc or 0)
+        if fee > 0 and settings.town_treasury_enabled:
+            await treasury_service.tax_pending(
+                db, fee, "caravan_stall_fee",
+                ref_key=f"caravan:{visit_id}:stall_fee",
+            )
+            visit.fee_sc = fee
+        visit.fee_settled_at = now
+        await _renew_owned_visit(db, visit_id, owner, now=now)
+        await db.commit()
+
+    spent = int((await db.execute(
+        select(func.coalesce(func.sum(CaravanVisitPurchase.gross_sc), 0)).where(
+            CaravanVisitPurchase.visit_id == visit_id
+        )
+    )).scalar_one())
+    for code, price, _ in await _on_sale(db):
+        if spent + int(price) > int(settings.caravan_budget_sc or 0):
+            continue
+        try:
+            if await _buy_one_for_visit(db, visit_id, owner, code, now=now):
+                spent += int(price)
+        except CaravanLeaseLost:
+            raise
+        except Exception:
+            await db.rollback()
+            logger.warning("durable caravan purchase failed for %s", code, exc_info=True)
+
+    visit = await _renew_owned_visit(db, visit_id, owner, now=now)
+    if visit.imports_stocked_at is None:
+        await _stock_import_goods_pending(db, visit_id)
+        visit.imports_stocked_at = now
+        await _renew_owned_visit(db, visit_id, owner, now=now)
+        await db.commit()
+
+    visit = await _renew_owned_visit(db, visit_id, owner, now=now)
+    rows = (await db.execute(
+        select(CaravanVisitPurchase).where(CaravanVisitPurchase.visit_id == visit_id)
+    )).scalars().all()
+    summary = {
+        "fee_sc": int(visit.fee_sc or 0),
+        "bought": len(rows),
+        "spent_sc": sum(int(row.gross_sc) for row in rows),
+        "tax_sc": sum(int(row.tax_sc) for row in rows),
+        "imports_stocked": len(IMPORT_DEFS) if visit.imports_stocked_at else 0,
+    }
+    visit.summary_json = summary
+    visit.settled_at = visit.settled_at or now
+    await _renew_owned_visit(db, visit_id, owner, now=now)
+    await db.commit()
+    return summary
+
+
+async def withdraw_visit_imports(
+    db: AsyncSession, visit_id: str, owner: str, *, now: datetime | None = None,
+) -> int:
+    """Close only this visit's remaining import shelves; sold stock stays audited."""
+    now = now or datetime.now(UTC)
+    visit = await _renew_owned_visit(db, visit_id, owner, now=now)
+    if visit.imports_withdrawn_at is not None:
+        await db.commit()  # persist the lease renewal; this replay is a no-op
+        return 0
+    withdrawn = 0
+    for code in (definition["code"] for definition in IMPORT_DEFS):
+        item = (await db.execute(select(Item).where(Item.code == code))).scalar_one_or_none()
+        if item is None:
+            continue
+        payload = item.payload_json or {}
+        if payload.get("caravan_visit_id") == visit_id and item.active:
+            item.active = False
+            withdrawn += 1
+    rows = (await db.execute(
+        select(CaravanVisitPurchase).where(CaravanVisitPurchase.visit_id == visit_id)
+    )).scalars().all()
+    visit.summary_json = {
+        "fee_sc": int(visit.fee_sc or 0),
+        "bought": len(rows),
+        "spent_sc": sum(int(row.gross_sc) for row in rows),
+        "tax_sc": sum(int(row.tax_sc) for row in rows),
+        "imports_stocked": len(IMPORT_DEFS) if visit.imports_stocked_at else 0,
+    }
+    visit.imports_withdrawn_at = now
+    await _renew_owned_visit(db, visit_id, owner, now=now)
+    await db.commit()
+    return withdrawn

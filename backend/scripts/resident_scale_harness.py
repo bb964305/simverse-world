@@ -325,6 +325,7 @@ async def run_scale_scenario(
         harness_settings = SimpleNamespace(
             agent_max_concurrent=concurrency,
             realism_enabled=False,
+            chat_engaged_tick_skip_enabled=False,
         )
         with ExitStack() as stack:
             stack.enter_context(patch("app.agent.loop.async_session", session_factory))

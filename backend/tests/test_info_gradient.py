@@ -41,6 +41,25 @@ async def test_gate_off_broadcasts_to_all(db_session, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_collective_memory_excludes_player_avatars(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "realism_info_gradient_enabled", False)
+    monkeypatch.setattr(settings, "collective_memory_sim_only", True)
+    await _residents(db_session, 2)
+    db_session.add(Resident(
+        id="avatar", slug="avatar", name="Avatar", creator_id="player",
+        resident_type="player", district="cafe", status="idle",
+        tile_x=0, tile_y=0,
+    ))
+    await db_session.commit()
+
+    n = await wes.write_collective_memories(
+        db_session, {"id": "ev", "type": "news", "description": "news",
+                     "payload_json": {}})
+    assert n == 2
+    assert {row[0] for row in await _first_hand(db_session)} == {"r0", "r1"}
+
+
+@pytest.mark.anyio
 async def test_weather_stays_all_broadcast(db_session, monkeypatch):
     monkeypatch.setattr(settings, "realism_info_gradient_enabled", True)
     await _residents(db_session, 20)
@@ -70,11 +89,12 @@ async def test_non_weather_informs_minority_with_event_id(db_session, monkeypatc
 @pytest.mark.anyio
 async def test_geo_related_get_higher_importance(db_session, monkeypatch):
     monkeypatch.setattr(settings, "realism_info_gradient_enabled", True)
+    monkeypatch.setattr(settings, "market_day_venue", "market_hall")
     from app.agent.map_data import get_location_by_id
-    loc = get_location_by_id("central_plaza")
+    loc = get_location_by_id("market_hall")
     center = loc.get("center") or (
         (loc["bounds"][0] + loc["bounds"][2]) // 2, (loc["bounds"][1] + loc["bounds"][3]) // 2)
-    # Two residents at the plaza center (geo-relevant), plus far-away others.
+    # Two residents at the market-hall center (geo-relevant), plus far-away others.
     db_session.add(Resident(id="near1", slug="near1", name="N1", creator_id="sys",
                             district="cafe", status="idle", tile_x=center[0], tile_y=center[1]))
     db_session.add(Resident(id="near2", slug="near2", name="N2", creator_id="sys",
@@ -86,8 +106,9 @@ async def test_geo_related_get_higher_importance(db_session, monkeypatch):
 
     await wes.write_collective_memories(
         db_session,
-        {"id": "plaza", "type": "festival", "description": "集市日",
-         "payload_json": {"location_id": "central_plaza"}},
+        {"id": "market", "type": "festival", "description": "集市日",
+         # Compatibility path: an already-scheduled legacy row still names the plaza.
+         "payload_json": {"market_day": True, "location_id": "central_plaza"}},
         rng=random.Random(0))
 
     rows = {rid: imp for rid, imp, _ in await _first_hand(db_session)}

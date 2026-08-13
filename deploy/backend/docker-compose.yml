@@ -1,7 +1,14 @@
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 services:
   db:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
+    logging: *default-logging
     environment:
       POSTGRES_DB: skills_world
       POSTGRES_USER: postgres
@@ -27,6 +34,7 @@ services:
   redis:
     image: redis:8-alpine
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "127.0.0.1:6379:6379"
     healthcheck:
@@ -35,18 +43,40 @@ services:
       timeout: 3s
       retries: 5
 
-  # One-shot production bootstrap.  Built-in residents are data, not schema,
-  # so Alembic alone cannot replace a legacy roster.  Run the idempotent
-  # roster reset before either long-lived process can observe the world.
+  # The sole production migration owner.  This service is intentionally schema-
+  # only: a routine deploy must never run the roster reset, whose explicit ops
+  # path can DELETE residents and their dependent history.
   bootstrap:
     build:
       context: ../backend
       dockerfile: ../deploy/Dockerfile
-    command: sh -c "alembic upgrade head && python -m seed.reset_builtin_residents"
+    command: alembic upgrade head
     restart: "no"
+    logging: *default-logging
     depends_on:
       db:
         condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-changeme}@db:5432/skills_world
+
+  # Destructive roster maintenance is isolated behind an explicit ops profile.
+  # Its default command is a read-only preview.  Before overriding it with
+  # `--apply --expect-targets N`: inspect the preview, take and verify a pg_dump,
+  # and keep api/agent-worker stopped.  Normal deploys never enable this profile.
+  roster-reset:
+    profiles: ["ops-roster-reset"]
+    build:
+      context: ../backend
+      dockerfile: ../deploy/Dockerfile
+    command: python -m seed.reset_builtin_residents
+    restart: "no"
+    logging: *default-logging
+    depends_on:
+      db:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-changeme}@db:5432/skills_world
@@ -56,6 +86,7 @@ services:
       context: ../backend
       dockerfile: ../deploy/Dockerfile
     restart: unless-stopped
+    logging: *default-logging
     ports:
       # loopback only — cloudflared runs on the host and reaches the API here.
       # Publishing on 0.0.0.0 exposed all 68 /admin endpoints and /metrics
@@ -106,11 +137,11 @@ services:
         source: ${LAB_ARTIFACT_RECEIPT_TRUST_HOST_DIR:-/dev/null}
         target: /run/secrets/lab-artifact-receipt-trust
         read_only: true
-    # E2E-06: the API was the only service here without a healthcheck, so
+    # E2E-06: the API once had no healthcheck, so
     # `docker compose up -d` returned as soon as the container was *created* —
-    # not when it could actually serve. The container's CMD runs
-    # `alembic upgrade head` before uvicorn binds, so there is a real window
-    # where the port is published but every request is refused. cloudflared
+    # not when it could actually serve. The schema-only bootstrap now completes
+    # before this container starts, but uvicorn still has a real startup window
+    # where the port is published and every request is refused. cloudflared
     # reaches the origin at 127.0.0.1:8100, and a refused connection produces a
     # response with no CORS headers — which browsers report to the user as a
     # CORS error, not as "backend down". That is why the symptom was originally
@@ -118,8 +149,7 @@ services:
     # are stable and correct on every code path that reaches FastAPI).
     #
     # Probing with python because the image (python:3.12-slim + gcc/libpq-dev)
-    # ships neither curl nor wget. start_period covers the migration step so a
-    # slow `alembic upgrade` is not counted as a failure.
+    # ships neither curl nor wget. start_period covers application startup.
     #
     # ProxyHandler({}) is not optional: urllib honours http_proxy/https_proxy
     # from the environment, so if this container ever inherits a proxy var the
@@ -152,6 +182,7 @@ services:
       dockerfile: ../deploy/Dockerfile
     command: python -m app.agent.main
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       db:
         condition: service_healthy
@@ -176,6 +207,15 @@ services:
         source: ${RESIDENT_SPRITE_CAPABILITY_RECEIPT_HOST_PATH:-/dev/null}
         target: /run/secrets/resident-sprite-capability.json
         read_only: true
+    # Container liveness is insufficient: --wait must also prove that the two
+    # cadence-critical loops have written fresh shared heartbeats. Other loops
+    # may legitimately still be never_seen during this startup window.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import asyncio,sys; from app.tasks.loop_heartbeat import snapshot; s=asyncio.run(snapshot()); sys.exit(0 if all(s[n]['state'] == 'ok' for n in ('agent','event')) else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 180s
 
   # Standalone Lab Runner (recovery plan Phase 8 / status report gap #7): consumes
   # the Redis run queue and executes sandbox adapters in a process SEPARATE from
@@ -196,6 +236,7 @@ services:
       dockerfile: ../deploy/Dockerfile
     command: python -m app.lab.main
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       db:
         condition: service_healthy
@@ -259,6 +300,7 @@ services:
       dockerfile: ../deploy/Dockerfile
     command: python -m app.lab.runtime_ref.main
     restart: unless-stopped
+    logging: *default-logging
     depends_on:
       artifact-ingest:
         condition: service_healthy
@@ -311,6 +353,7 @@ services:
       dockerfile: ../deploy/Dockerfile
     command: python -m app.lab.egress_service.main
     restart: unless-stopped
+    logging: *default-logging
     environment:
       LAB_EGRESS_ENABLED: "${LAB_EGRESS_ENABLED:-false}"
       LAB_EGRESS_LISTEN_HOST: 0.0.0.0
@@ -353,6 +396,7 @@ services:
       dockerfile: ../deploy/Dockerfile
     command: python -m app.lab.executor_service.main
     restart: unless-stopped
+    logging: *default-logging
     environment:
       LAB_EXECUTOR_BIND_HOST: 0.0.0.0
       LAB_EXECUTOR_BIND_PORT: "8910"
@@ -393,6 +437,7 @@ services:
       dockerfile: ../deploy/Dockerfile
     command: python -m app.lab.artifact_services.ingest.main
     restart: unless-stopped
+    logging: *default-logging
     environment:
       LAB_ARTIFACT_INGEST_BIND_HOST: 0.0.0.0
       LAB_ARTIFACT_INGEST_BIND_PORT: "8920"
@@ -449,6 +494,7 @@ services:
       dockerfile: ../deploy/Dockerfile
     command: python -m app.lab.artifact_services.scanner.main
     restart: unless-stopped
+    logging: *default-logging
     environment:
       LAB_ARTIFACT_SCANNER_BIND_HOST: 0.0.0.0
       LAB_ARTIFACT_SCANNER_BIND_PORT: "8930"
@@ -517,6 +563,7 @@ services:
       dockerfile: ../deploy/Dockerfile
     command: python -m app.lab.artifact_services.cleanup.main
     restart: unless-stopped
+    logging: *default-logging
     environment:
       LAB_ARTIFACT_CLEANUP_BIND_HOST: 0.0.0.0
       LAB_ARTIFACT_CLEANUP_BIND_PORT: "8940"

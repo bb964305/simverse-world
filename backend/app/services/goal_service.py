@@ -41,7 +41,15 @@ def serialize(g: ResidentGoal) -> dict:
     }
 
 
-async def create_goal(db, resident_id, title, motivation="", kind="life") -> ResidentGoal:
+async def create_goal(
+    db,
+    resident_id,
+    title,
+    motivation="",
+    kind="life",
+    *,
+    template_key: str | None = None,
+) -> ResidentGoal:
     """Create a goal; if a life goal, deactivate any existing active life goal."""
     if kind == "life":
         existing = (await db.execute(
@@ -52,7 +60,14 @@ async def create_goal(db, resident_id, title, motivation="", kind="life") -> Res
         )).scalars().all()
         for g in existing:
             g.status = "abandoned"
-    goal = ResidentGoal(resident_id=resident_id, kind=kind, title=title, motivation=motivation, status="active")
+    goal = ResidentGoal(
+        resident_id=resident_id,
+        kind=kind,
+        template_key=template_key,
+        title=title,
+        motivation=motivation,
+        status="active",
+    )
     db.add(goal)
     await db.commit()
     await db.refresh(goal)

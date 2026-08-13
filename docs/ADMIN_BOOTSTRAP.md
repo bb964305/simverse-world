@@ -31,9 +31,26 @@ admin 身份——所以新部署的环境里没有任何人能通过界面拿�
 | `SYSTEM_CREATOR_ID` | `00000000-…-0001` | seed 内置角色班底 | `seed_residents.ensure_system_user()` |
 | `ADMIN_CREATOR_ID` | `system` | admin 控制台建的预设居民 | `system_users.ensure_admin_creator_user()` |
 
-两者都由 bootstrap 服务（`alembic upgrade head && python -m seed.reset_builtin_residents`）
-建出来；`POST /admin/residents/presets` 另外会在插入前自愈调用一次，所以即使 seed 没跑过
-也不会外键违约。
+日常部署的 `bootstrap` 现在**只**执行 `alembic upgrade head`，不会再隐式重置花名册。
+全新环境迁移完成后，用非破坏性的 `python -m seed.seed_residents` 建
+`SYSTEM_CREATOR_ID` 和初始班底；`POST /admin/residents/presets` 会在插入前自愈创建
+`ADMIN_CREATOR_ID`，所以不会外键违约。
+
+## 内置花名册重置：默认只预览
+
+重置脚本可能删除居民及其依赖历史，不能绑在日常部署上。独立的 compose 服务受
+`ops-roster-reset` profile 隔离，而且默认命令只读：
+
+    docker compose --profile ops-roster-reset run --rm roster-reset
+
+记录预览里的目标数 `N`，停止 `api`/`agent-worker` 并验证数据库备份后，才用同一个
+镜像显式覆盖命令：
+
+    docker compose --profile ops-roster-reset run --rm roster-reset \
+      python -m seed.reset_builtin_residents --apply --expect-targets N
+
+若实际目标数与 `N` 不同，脚本会在第一笔写入前拒绝执行。正常的
+`docker compose up` 不启用这个 profile，也不会运行 reset。
 
 这两个账号**理论上不该有余额**，现在所有铸币/通知口径都统一从
 `system_users.NON_USER_CREATOR_IDS` 导入判断，两个哨兵可靠地被挡在外面

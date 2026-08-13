@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-12",
+  "generator": "Codex built-in ImageGen",
+  "mode": "reference-guided raster generation",
+  "rights_basis": "first_party_generated",
+  "visual_reference": "docs/design/caravan/caravan-concept-v1.png",
+  "prompt_contract": "Park the exact same dun pony and indigo wagon in strict side view; keep the pony hitched at screen-left and unfold the wagon side into a wooden counter under a matching awning. Show only a folded red textile, two ceramic jars, a brass kettle and herb bundle; no person or text; crisp 16-bit farming-RPG pixel art on flat #FF00FF.",
+  "generated_sources": [
+    "exec-0d209142-1bf5-4180-99e1-09b4d274a6c4.png"
+  ],
+  "postprocess": {
+    "chroma_key": "remove_chroma_key.py --auto-key border --soft-matte --transparent-threshold 12 --opaque-threshold 220 --despill",
+    "algorithm": "caravan_sprite_postprocess.py",
+    "sprite": "nearest-neighbor, 64x64, baseline y=61, 31 opaque colors plus transparent"
+  },
+  "files": [
+    {"file":"texture.png","width":64,"height":64,"mode":"RGBA","bytes":4283,"sha256":"ce8ecd06cdaf1e8efb156c63fab55f1166fefbeeb31ed77470f368271e96d14e"}
+  ]
+}

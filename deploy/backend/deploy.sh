@@ -25,8 +25,11 @@ rsync -avz --delete \
   --exclude '*.pyc' \
   --exclude '.venv/' \
   --exclude 'venv/' \
+  --exclude 'tmp/' \
+  --exclude '_to_delete/' \
   --exclude 'data/' \
   --exclude '*.db' \
+  --exclude '*.db.bak*' \
   --exclude 'static/uploads/' \
   "$BACKEND_DIR/" "$REMOTE:$REMOTE_DIR/backend/"
 
@@ -36,14 +39,22 @@ rsync -avz \
   "$SCRIPT_DIR/Dockerfile" \
   "$REMOTE:$REMOTE_DIR/deploy/"
 
-# Check if .env exists on remote, if not copy example
-ssh "$REMOTE" "test -f $REMOTE_DIR/deploy/.env || echo 'WARNING: No .env file found. Copy .env.example and fill in values.'"
+# Refuse to start with an absent live configuration. The template is never
+# uploaded as a substitute because it contains placeholders and safe defaults,
+# not production credentials or an approved rollout state.
+if ! ssh "$REMOTE" "test -f $REMOTE_DIR/deploy/.env"; then
+  echo "ERROR: $REMOTE_DIR/deploy/.env is missing on $REMOTE; refusing deployment." >&2
+  exit 1
+fi
 
 echo "==> Building and starting services on $REMOTE..."
-ssh "$REMOTE" "cd $REMOTE_DIR/deploy && docker compose up -d --build"
+ssh "$REMOTE" "cd $REMOTE_DIR/deploy && docker compose up -d --build --wait --wait-timeout 300"
 
 echo "==> Checking health..."
-sleep 3
-ssh "$REMOTE" "curl -sf http://localhost:8100/health && echo ' ✓ API healthy' || echo ' ✗ API not responding'"
+if ! ssh "$REMOTE" "curl -fsS http://localhost:8100/health >/dev/null"; then
+  echo "ERROR: API health check failed; deployment is not complete." >&2
+  exit 1
+fi
+echo " ✓ API healthy"
 
 echo "==> Done!"

@@ -63,6 +63,72 @@ async def test_arbitration_energy_forces_go_home(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_critical_need_cancels_sticky_trip(monkeypatch):
+    from app.agent.phases.decide.basic import BasicDecidePlugin
+    from app.agent.actions import ActionType
+    from app.agent.plan_continuity import _active_key
+    from app.agent.schemas import HourlyPlan, TickContext
+    from app.redis_client import get_redis
+    monkeypatch.setattr(settings, "realism_enabled", True)
+    monkeypatch.setattr(settings, "realism_plan_continuity_enabled", True)
+    r = _res(meta={"needs": {"energy": 0.1, "satiety": 0.8, "social": 0.8}})
+    r.id, r.slug, r.tile_x, r.tile_y = "r1", "r1", 10, 10
+    r.home_location_id = None
+    r.home_tile_x, r.home_tile_y = 5, 5
+    r.resident_type = "character"
+    plan = HourlyPlan(1, (9, 12), "VISIT_DISTRICT", "academy", "academy", 3, "上课")
+    trip = {"action": "VISIT_DISTRICT", "target": "academy", "target_tile": [76, 50],
+            "plan_date": "2026-08-11", "plan_slot": 1}
+    ctx = TickContext(db=AsyncMock(), resident=r, world_time="10:00", hour=10,
+                      schedule_phase="上午", current_plan=plan, scheduled_plan=plan,
+                      plan_date="2026-08-11", continuation_trip=trip)
+    await get_redis().set(_active_key(r.id), "saved")
+
+    plugin = BasicDecidePlugin(params={"skip_decide_when_planned": True})
+    plugin._load_memories = AsyncMock()
+    out = await plugin.execute(ctx)
+
+    assert out.action_result.action == ActionType.GO_HOME
+    assert out.plan_interrupt_reason == "critical_need"
+    assert out.continuation_trip is None
+    assert await get_redis().get(_active_key(r.id)) is None
+
+
+@pytest.mark.anyio
+async def test_severe_weather_cancels_sticky_trip(monkeypatch):
+    from app.agent.phases.decide.basic import BasicDecidePlugin
+    from app.agent.actions import ActionType
+    from app.agent.plan_continuity import _active_key
+    from app.agent.schemas import HourlyPlan, TickContext
+    from app.redis_client import get_redis
+    monkeypatch.setattr(settings, "realism_enabled", True)
+    monkeypatch.setattr(settings, "realism_plan_continuity_enabled", True)
+    monkeypatch.setattr(settings, "realism_shelter_prob", 1.0)
+    r = _res(meta={"needs": {"energy": 0.8, "satiety": 0.8, "social": 0.8}})
+    r.id, r.slug, r.tile_x, r.tile_y = "r1", "r1", 10, 10
+    r.home_location_id = None
+    r.home_tile_x, r.home_tile_y = 5, 5
+    r.resident_type = "character"
+    plan = HourlyPlan(1, (9, 12), "VISIT_DISTRICT", "academy", "academy", 3, "上课")
+    trip = {"action": "VISIT_DISTRICT", "target": "academy", "target_tile": [76, 50],
+            "plan_date": "2026-08-11", "plan_slot": 1}
+    ctx = TickContext(db=AsyncMock(), resident=r, world_time="10:00", hour=10,
+                      schedule_phase="上午", current_plan=plan, scheduled_plan=plan,
+                      plan_date="2026-08-11", continuation_trip=trip,
+                      world_events=[{"type": "weather", "payload_json": {"kind": "storm"}}])
+    await get_redis().set(_active_key(r.id), "saved")
+
+    plugin = BasicDecidePlugin(params={"skip_decide_when_planned": True})
+    plugin._load_memories = AsyncMock()
+    out = await plugin.execute(ctx)
+
+    assert out.action_result.action == ActionType.VISIT_DISTRICT
+    assert out.plan_interrupt_reason == "severe_weather"
+    assert out.continuation_trip is None
+    assert await get_redis().get(_active_key(r.id)) is None
+
+
+@pytest.mark.anyio
 async def test_arbitration_satiety_eats_at_dining(monkeypatch):
     from app.agent.phases.decide.basic import BasicDecidePlugin
     from app.agent.actions import ActionType
@@ -112,6 +178,7 @@ async def test_go_home_exhausted_sleeps(monkeypatch):
     ctx.action_result = ActionResult(ActionType.GO_HOME, None, None, "回家")
     await BasicExecutePlugin().execute(ctx)
     assert r.status == "sleeping"
+    assert ctx.action_result.target_tile == (67, 20)
 
 
 @pytest.mark.anyio

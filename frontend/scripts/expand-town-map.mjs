@@ -60,6 +60,70 @@ export const POST_OFFICE = {
   center: [46, 103],
 };
 
+// ── Market hall authoritative geometry ─────────────────────────────────────
+// A permanent 15x11 trading hall sits directly east of the market avenue.
+// Its five-tile-wide west doorway lets the 64px caravan turn off the avenue
+// and unfold inside without clipping the facade or the fixed produce stalls.
+export const MARKET_HALL = {
+  x0: 105, y0: 89, w: 15, h: 11,
+  entrance: [105, 94],
+  center: [112, 94],
+  caravanParking: [109, 94],
+  doorway: { y1: 92, y2: 96 },
+  accessPath: { x1: 102, y1: 92, x2: 105, y2: 96 },
+};
+
+// # = masonry/wood shell, E = five-wide west loading door, . = open trading
+// aisle, S = permanent merchant bay.  The middle five rows stay empty so the
+// wagon has a full two-tile visual envelope all the way to its parking anchor.
+export const MARKET_HALL_BLOCKOUT = [
+  "###############",
+  "#SSS.......SSS#",
+  "#SSS.......SSS#",
+  "E.............#",
+  "E.............#",
+  "E.............#",
+  "E.............#",
+  "E.............#",
+  "#SSS.......SSS#",
+  "#SSS.......SSS#",
+  "###############",
+];
+
+// ── South gate + market avenue authoritative geometry ──────────────────────
+// The old logical `town_entrance` covered (50,85)-(90,99), which is a wooded
+// residential belt rather than an entrance.  A caravan could therefore be
+// collision-valid while visibly driving through trees.  The avenue below is a
+// deliberately authored, five-tile-wide civic spine: it passes Central Plaza,
+// serves the standalone market hall, separates housing from the civic/forest belt,
+// and continues through a visible gate to the south edge of the map.
+export const MARKET_AVENUE = {
+  x1: 100, x2: 104,
+  y1: 58, y2: EXPANDED_HEIGHT - 1,
+  shoulderX1: 98, shoulderX2: 106,
+  plazaExtension: { x1: 96, x2: 104, y1: 56, y2: 60 },
+  plazaLaneClearX: 75,
+  entranceBounds: [100, 119, 104, 122],
+  entranceCenter: [102, 121],
+  gate: { x1: 99, x2: 105, topY: 121, postY: 122 },
+};
+
+// Building bounds mirrored from map_data.  Forest belongs in green belts, not
+// on top of facades or immediately against a doorway, so the deterministic art
+// pass maintains a two-tile tree-free setback around every planned structure.
+export const PLANNED_BUILDING_FOOTPRINTS = [
+  [15, 18, 42, 34], [72, 13, 83, 26], [53, 14, 62, 26], [108, 20, 124, 34],
+  [57, 43, 70, 53], [75, 43, 93, 53], [106, 45, 132, 62], [108, 72, 124, 86],
+  [65, 14, 69, 26], [86, 13, 90, 25], [93, 13, 97, 25],
+  [20, 59, 24, 70], [27, 59, 33, 70], [36, 59, 40, 70],
+  [51, 65, 62, 75], [69, 65, 80, 75], [87, 65, 99, 75],
+  [20, 104, 24, 115], [27, 104, 33, 115], [36, 104, 40, 115],
+  [51, 110, 62, 120], [69, 110, 80, 120], [87, 110, 99, 120],
+  [141, 65, 152, 75], [159, 65, 170, 75], [143, 110, 155, 120], [162, 110, 173, 120],
+  [44, 100, 48, 106], [105, 89, 119, 99],
+];
+export const BUILDING_FOREST_SETBACK = 2;
+
 const POST_OFFICE_LAYOUT = [
   "##E##",
   "#...#",
@@ -379,6 +443,258 @@ export function paintPostOffice(tilemap) {
   return tilemap;
 }
 
+// Permanent market-hall visual pass.  Unlike the market-day caravan sprite,
+// this shell and its fixed merchant bays are present every day, making the
+// market a legible civic destination even while the hall is closed.
+export function paintMarketHall(tilemap) {
+  const resolve = makeGidResolver(tilemap);
+  const { x0, y0, w, h, doorway, accessPath } = MARKET_HALL;
+  const idx = (x, y) => y * EXPANDED_WIDTH + x;
+  const FLOOR = resolve("Room_Builder_32x32", 4658);
+  const WALL = resolve("Room_Builder_32x32", 4164);
+  const BLOCK = resolve("blocks", 0);
+  const MARKET_FIXTURES = {
+    noticeLeft: resolve("CuteRPG_Village_B", 40),
+    noticeRight: resolve("CuteRPG_Village_B", 41),
+    counterLeft: resolve("CuteRPG_Village_B", 56),
+    counterRight: resolve("CuteRPG_Village_B", 57),
+    produceGold: resolve("CuteRPG_Village_B", 42),
+    produceGreen: resolve("CuteRPG_Village_B", 43),
+    produceRed: resolve("CuteRPG_Village_B", 44),
+    produceBrown: resolve("CuteRPG_Village_B", 45),
+    basketGold: resolve("CuteRPG_Village_B", 58),
+    basketGreen: resolve("CuteRPG_Village_B", 59),
+    basketRed: resolve("CuteRPG_Village_B", 60),
+    basketBrown: resolve("CuteRPG_Village_B", 61),
+  };
+
+  const exterior = layerByName(tilemap, "Exterior Ground").data;
+  const decoL1 = layerByName(tilemap, "Exterior Decoration L1").data;
+  const decoL2 = layerByName(tilemap, "Exterior Decoration L2").data;
+  const interior = layerByName(tilemap, "Interior Ground").data;
+  const wall = layerByName(tilemap, "Wall").data;
+  const furnitureL1 = layerByName(tilemap, "Interior Furniture L1").data;
+  const furnitureL2 = layerByName(tilemap, "Interior Furniture L2 ").data;
+  const foregroundL1 = layerByName(tilemap, "Foreground L1").data;
+  const foregroundL2 = layerByName(tilemap, "Foreground L2").data;
+  const collisions = layerByName(tilemap, "Collisions").data;
+
+  // Clear the surveyed construction plot and five-wide loading throat.  Every
+  // touched visual/collision layer is reset so repeat generation is identical.
+  for (let y = y0; y < y0 + h; y += 1) {
+    for (let x = x0; x < x0 + w; x += 1) {
+      const i = idx(x, y);
+      exterior[i] = 0;
+      decoL1[i] = 0;
+      decoL2[i] = 0;
+      foregroundL1[i] = 0;
+      foregroundL2[i] = 0;
+      furnitureL1[i] = 0;
+      furnitureL2[i] = 0;
+    }
+  }
+  for (let y = accessPath.y1; y <= accessPath.y2; y += 1) {
+    for (let x = accessPath.x1; x <= accessPath.x2; x += 1) {
+      const i = idx(x, y);
+      decoL1[i] = 0;
+      decoL2[i] = 0;
+      foregroundL1[i] = 0;
+      foregroundL2[i] = 0;
+      collisions[i] = 0;
+    }
+  }
+
+  for (let v = 0; v < h; v += 1) {
+    for (let u = 0; u < w; u += 1) {
+      const x = x0 + u, y = y0 + v, i = idx(x, y);
+      const cell = MARKET_HALL_BLOCKOUT[v][u];
+      if (cell === "#") {
+        interior[i] = 0;
+        wall[i] = WALL;
+        collisions[i] = BLOCK;
+      } else {
+        interior[i] = FLOOR;
+        wall[i] = 0;
+        collisions[i] = 0;
+      }
+    }
+  }
+
+  const setFixture = (x, y, gid) => {
+    furnitureL1[idx(x, y)] = gid;
+    collisions[idx(x, y)] = BLOCK;
+  };
+  const setPair = (x, y, left, right) => {
+    setFixture(x, y, left);
+    setFixture(x + 1, y, right);
+  };
+
+  // Four permanent bays frame the central loading aisle.  Warm notice/counter
+  // pairs and distinct produce baskets give each corner a recognizable stall
+  // while keeping every fixture at least three tiles from the wagon anchor.
+  setPair(106, 91, MARKET_FIXTURES.noticeLeft, MARKET_FIXTURES.noticeRight);
+  setFixture(108, 91, MARKET_FIXTURES.produceGold);
+  setFixture(114, 91, MARKET_FIXTURES.produceGreen);
+  setPair(115, 91, MARKET_FIXTURES.noticeLeft, MARKET_FIXTURES.noticeRight);
+  setPair(106, 97, MARKET_FIXTURES.counterLeft, MARKET_FIXTURES.counterRight);
+  setFixture(108, 97, MARKET_FIXTURES.produceRed);
+  setFixture(114, 97, MARKET_FIXTURES.produceBrown);
+  setPair(115, 97, MARKET_FIXTURES.counterLeft, MARKET_FIXTURES.counterRight);
+  setFixture(107, 90, MARKET_FIXTURES.basketGold);
+  setFixture(116, 90, MARKET_FIXTURES.basketGreen);
+  setFixture(107, 98, MARKET_FIXTURES.basketRed);
+  setFixture(116, 98, MARKET_FIXTURES.basketBrown);
+
+  // Reassert the complete loading envelope after fixture placement.  This is
+  // the server-authoritative centerline plus two visual-overhang rows.
+  for (let y = doorway.y1; y <= doorway.y2; y += 1) {
+    for (let x = x0; x <= MARKET_HALL.center[0]; x += 1) {
+      const i = idx(x, y);
+      collisions[i] = 0;
+      furnitureL1[i] = 0;
+      furnitureL2[i] = 0;
+      wall[i] = 0;
+      interior[i] = FLOOR;
+    }
+  }
+
+  return tilemap;
+}
+
+// Paint the canonical caravan route as actual map art.  This is intentionally
+// part of the deterministic generator (rather than a runtime overlay) so the
+// frontend image, backend collision authority, minimap, and A* route all share
+// one piece of geometry.
+export function paintMarketAvenue(tilemap) {
+  const resolve = makeGidResolver(tilemap);
+  const idx = (x, y) => y * EXPANDED_WIDTH + x;
+  const exterior = layerByName(tilemap, "Exterior Ground").data;
+  const decoL1 = layerByName(tilemap, "Exterior Decoration L1").data;
+  const decoL2 = layerByName(tilemap, "Exterior Decoration L2").data;
+  const interior = layerByName(tilemap, "Interior Ground").data;
+  const wall = layerByName(tilemap, "Wall").data;
+  const furnitureL1 = layerByName(tilemap, "Interior Furniture L1").data;
+  const furnitureL2 = layerByName(tilemap, "Interior Furniture L2 ").data;
+  const foregroundL1 = layerByName(tilemap, "Foreground L1").data;
+  const foregroundL2 = layerByName(tilemap, "Foreground L2").data;
+  const collisions = layerByName(tilemap, "Collisions").data;
+
+  // CuteRPG_Field_B's established cream-road autotiles.  These are the same
+  // left/middle/right tiles already used by the original town streets.
+  const ROAD_LEFT = resolve("CuteRPG_Field_B", 96);
+  const ROAD_MIDDLE = resolve("CuteRPG_Field_B", 97);
+  const ROAD_RIGHT = resolve("CuteRPG_Field_B", 98);
+  const ROAD_TOP = resolve("CuteRPG_Field_B", 81);
+  const ROAD_TOP_RIGHT = resolve("CuteRPG_Field_B", 82);
+  const ROAD_BOTTOM = resolve("CuteRPG_Field_B", 113);
+
+  // Extend Central Plaza eastward before laying the north/south avenue.  The
+  // existing plaza ends at x=95; this short boulevard creates a legible
+  // T-junction and a one-turn route to the market bay at (75,58).
+  const extension = MARKET_AVENUE.plazaExtension;
+  for (let y = extension.y1; y <= extension.y2; y += 1) {
+    for (let x = extension.x1; x <= extension.x2; x += 1) {
+      const i = idx(x, y);
+      assert(interior[i] === 0 && wall[i] === 0 && furnitureL1[i] === 0 && furnitureL2[i] === 0,
+        `market boulevard overlaps a structure at (${x},${y})`);
+      exterior[i] = y === extension.y1
+        ? (x === extension.x2 ? ROAD_TOP_RIGHT : ROAD_TOP)
+        : y === extension.y2 ? ROAD_BOTTOM
+          : (x === extension.x2 ? ROAD_RIGHT : ROAD_MIDDLE);
+      decoL1[i] = 0;
+      decoL2[i] = 0;
+      foregroundL1[i] = 0;
+      foregroundL2[i] = 0;
+      collisions[i] = 0;
+    }
+  }
+
+  // Keep the pre-existing east-west plaza lane visually clean. It is no longer
+  // the caravan destination, but remains the avenue's northern public apron.
+  for (let y = 56; y <= 58; y += 1) {
+    for (let x = MARKET_AVENUE.plazaLaneClearX; x <= extension.x2; x += 1) {
+      decoL1[idx(x, y)] = 0;
+      decoL2[idx(x, y)] = 0;
+      foregroundL1[idx(x, y)] = 0;
+      foregroundL2[idx(x, y)] = 0;
+    }
+  }
+
+  // Clear a two-tile landscaped shoulder on either side.  Only the road body
+  // clears structural layers/collisions; shoulders remain grass, which keeps
+  // adjacent homes intact while separating them visually from the forest.
+  for (let y = MARKET_AVENUE.y1; y <= MARKET_AVENUE.y2; y += 1) {
+    for (let x = MARKET_AVENUE.shoulderX1; x <= MARKET_AVENUE.shoulderX2; x += 1) {
+      decoL1[idx(x, y)] = 0;
+      decoL2[idx(x, y)] = 0;
+    }
+    for (let x = MARKET_AVENUE.x1; x <= MARKET_AVENUE.x2; x += 1) {
+      const i = idx(x, y);
+      assert(interior[i] === 0 && wall[i] === 0 && furnitureL1[i] === 0 && furnitureL2[i] === 0,
+        `market avenue overlaps a structure at (${x},${y})`);
+      exterior[i] = x === MARKET_AVENUE.x1 ? ROAD_LEFT
+        : x === MARKET_AVENUE.x2 ? ROAD_RIGHT : ROAD_MIDDLE;
+      foregroundL1[i] = 0;
+      foregroundL2[i] = 0;
+      collisions[i] = 0;
+    }
+  }
+
+  // Shoulder-mounted gate posts make the entrance unmistakable without dropping
+  // foreground pixels directly onto the caravan lane.
+  const { x1, x2, topY, postY } = MARKET_AVENUE.gate;
+  foregroundL1[idx(x1, topY)] = resolve("CuteRPG_Village_B", 37);
+  foregroundL1[idx(x2, topY)] = resolve("CuteRPG_Village_B", 39);
+  foregroundL1[idx(x1, postY)] = resolve("CuteRPG_Village_B", 53);
+  foregroundL1[idx(x2, postY)] = resolve("CuteRPG_Village_B", 55);
+  collisions[idx(x1, postY)] = resolve("blocks", 0);
+  collisions[idx(x2, postY)] = resolve("blocks", 0);
+
+  return tilemap;
+}
+
+export function paintBuildingForestSetbacks(tilemap) {
+  const idx = (x, y) => y * EXPANDED_WIDTH + x;
+  const decoL1 = layerByName(tilemap, "Exterior Decoration L1").data;
+  const decoL2 = layerByName(tilemap, "Exterior Decoration L2").data;
+  const interior = layerByName(tilemap, "Interior Ground").data;
+  const wall = layerByName(tilemap, "Wall").data;
+  const furnitureL1 = layerByName(tilemap, "Interior Furniture L1").data;
+  const furnitureL2 = layerByName(tilemap, "Interior Furniture L2 ").data;
+  const collisions = layerByName(tilemap, "Collisions").data;
+  const forestRanges = tilemap.tilesets
+    .filter((tileset) => tileset.name === "CuteRPG_Forest_B" || tileset.name === "CuteRPG_Forest_C")
+    .map((tileset) => [tileset.firstgid, tileset.firstgid + tileset.tilecount - 1]);
+  // Field_B contains the small/large standalone tree pieces used around the
+  // original homes; include just that atlas' tree band, not flowers or props.
+  const field = tilemap.tilesets.find((tileset) => tileset.name === "CuteRPG_Field_B");
+  if (field) forestRanges.push([field.firstgid + 133, field.firstgid + 154]);
+  const isForest = (rawGid) => {
+    const gid = rawGid & 0x1fffffff;
+    return gid !== 0 && forestRanges.some(([first, last]) => first <= gid && gid <= last);
+  };
+
+  for (const [x1, y1, x2, y2] of PLANNED_BUILDING_FOOTPRINTS) {
+    const sx1 = Math.max(0, x1 - BUILDING_FOREST_SETBACK);
+    const sy1 = Math.max(0, y1 - BUILDING_FOREST_SETBACK);
+    const sx2 = Math.min(EXPANDED_WIDTH - 1, x2 + BUILDING_FOREST_SETBACK);
+    const sy2 = Math.min(EXPANDED_HEIGHT - 1, y2 + BUILDING_FOREST_SETBACK);
+    for (let y = sy1; y <= sy2; y += 1) {
+      for (let x = sx1; x <= sx2; x += 1) {
+        const i = idx(x, y);
+        if (!isForest(decoL1[i]) && !isForest(decoL2[i])) continue;
+        // Structural layers win: never erase a building collision merely
+        // because a legacy tree tile was also pasted over the same cell.
+        if (interior[i] || wall[i] || furnitureL1[i] || furnitureL2[i]) continue;
+        decoL1[i] = 0;
+        decoL2[i] = 0;
+        collisions[i] = 0;
+      }
+    }
+  }
+  return tilemap;
+}
+
 // ── Pure build core (no disk I/O) ────────────────────────────────────────────
 export function buildExpandedTilemap(tilemap, maze) {
   const inputWidth = tilemap.width;
@@ -404,6 +720,9 @@ export function buildExpandedTilemap(tilemap, maze) {
 
   paintExperimentBuilding(tilemap);
   paintPostOffice(tilemap);
+  paintMarketHall(tilemap);
+  paintBuildingForestSetbacks(tilemap);
+  paintMarketAvenue(tilemap);
 
   if (maze) maze.size = [EXPANDED_HEIGHT, EXPANDED_WIDTH];
   return { tilemap, maze, rebuilt: shouldRebuild, layerCount: tileLayers.length };
@@ -437,7 +756,7 @@ async function main() {
   await writeFile(backendTilemapPath, tilemapJson); // byte-identical backend copy
 
   console.log(
-    `${rebuilt ? "Expanded" : "Validated"} town map at ${EXPANDED_WIDTH}x${EXPANDED_HEIGHT}: ${layerCount} layers, painted Experiment Building and post office.`,
+    `${rebuilt ? "Expanded" : "Validated"} town map at ${EXPANDED_WIDTH}x${EXPANDED_HEIGHT}: ${layerCount} layers, painted Experiment Building, post office, market hall, and market avenue.`,
   );
 }
 

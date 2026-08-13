@@ -2,8 +2,8 @@
 
 Why this exists
 ---------------
-The five loops started in ``app/main.py`` (heat / event / nightly / agent /
-embedding_backfill) run in exactly one process — the API worker with
+The loops started in ``app/main.py`` (heat / event / nightly / agent /
+embedding_backfill / caravan) run in exactly one process — the API worker with
 ``run_background_tasks=true``, or the standalone agent-worker in split mode.
 If one of them dies (task raised out of its ``while True``, task cancelled,
 worker started without them) the world silently stops doing that job: no log,
@@ -54,14 +54,15 @@ logger = logging.getLogger(__name__)
 _TRUE = {"1", "true", "yes", "on"}
 _PREFIX = "sv:hb:"
 
-# Nominal seconds between rounds for each loop. The agent loop's cadence is a
-# setting, so it is resolved lazily in ``_interval_s``.
+# Nominal seconds between rounds for each loop. Agent, embedding and caravan
+# cadence are settings, so they are resolved lazily in ``_interval_s``.
 LOOP_INTERVALS: dict[str, float | None] = {
     "heat": 3600.0,                # heat_cron.HEAT_CRON_INTERVAL_SECONDS
     "event": 60.0,                 # event_cron.EVENT_CRON_INTERVAL_SECONDS
     "nightly": 86400.0,            # one Beijing-morning anchor per real day
     "agent": None,                 # settings.agent_tick_interval
-    "embedding_backfill": 3600.0,  # embedding_backfill.BACKFILL_INTERVAL_SECONDS
+    "embedding_backfill": None,    # settings.embedding_backfill_interval_seconds
+    "caravan": None,               # settings.caravan_lifecycle_interval_seconds
 }
 
 # Heartbeats outlive any plausible threshold but are not kept forever, so a
@@ -125,9 +126,13 @@ def _interval_s(name: str) -> float:
     interval = LOOP_INTERVALS.get(name)
     if interval is not None:
         return interval
-    try:  # agent loop: cadence comes from settings
+    try:
         from app.config import settings
 
+        if name == "embedding_backfill":
+            return float(settings.embedding_backfill_interval_seconds)
+        if name == "caravan":
+            return float(settings.caravan_lifecycle_interval_seconds)
         return float(settings.agent_tick_interval)
     except Exception:
         return 60.0
@@ -197,6 +202,24 @@ async def beat(name: str, *, check: bool = True) -> None:
         await check_stale()
     except Exception:
         logger.debug("heartbeat sweep failed", exc_info=True)
+
+
+async def clear_owned_heartbeats(names: tuple[str, ...] | list[str]) -> None:
+    """Forget stale leases before a new loop-owner process starts.
+
+    Docker health checks must prove that the *new* worker emitted a beat.  The
+    Redis keys otherwise survive a container replacement for up to seven days,
+    allowing a broken replacement to borrow the previous worker's fresh state.
+    This operation is fail-open for process startup; a Redis outage is handled
+    by the health check itself, which cannot report ``ok`` without Redis.
+    """
+    keys = [heartbeat_key(name) for name in names if name in LOOP_INTERVALS]
+    if not keys:
+        return
+    try:
+        await get_redis().delete(*keys)
+    except Exception:
+        logger.warning("failed to clear prior worker heartbeats", exc_info=True)
 
 
 # --------------------------------------------------------------------------- #

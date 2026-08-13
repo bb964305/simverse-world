@@ -318,6 +318,8 @@ class MemoryService:
         query_text: str = "",
         max_events: int = 10,
         max_reflections: int = 3,
+        commit_access: bool = True,
+        allow_embedding: bool = True,
     ) -> dict:
         """Retrieve memory context for a conversation.
 
@@ -332,15 +334,21 @@ class MemoryService:
         reflections = await self.get_recent_reflections(resident_id, limit=max_reflections)
 
         # 3. Events: realism scored vector retrieval, else recency+importance
-        events = await self._retrieve_events(resident_id, query_text, max_events)
+        events = await self._retrieve_events(
+            resident_id,
+            query_text if allow_embedding else "",
+            max_events,
+        )
 
         # Update last_accessed_at for all retrieved memories
         now = datetime.now(UTC)
         all_memories = [m for m in [relationship] + reflections + events if m is not None]
         for mem in all_memories:
             mem.last_accessed_at = now
-        if all_memories:
+        if all_memories and commit_access:
             await self.db.commit()
+        elif all_memories:
+            await self.db.flush()
 
         return {
             "relationship": relationship,
@@ -760,11 +768,17 @@ class MemoryService:
         else:
             high_importance = [m for m in memories if m.importance >= 0.9]
             trigger = high_importance[0] if high_importance else None
+        shifted = None
         if trigger is not None:
             try:
-                await evo.evaluate_shift(resident, trigger)
+                shifted = await evo.evaluate_shift(resident, trigger)
             except Exception as e:
                 logger.warning("Shift evaluation error (non-fatal): %s", e)
+
+        # One evidence batch has one evolution meaning.  A successful dramatic
+        # shift must not immediately consume another two dimensions as drift.
+        if shifted is not None:
+            return
 
         # Check drift trigger: count total events since last drift
         total_events = await self.count_events_since_last_reflection(resident.id)

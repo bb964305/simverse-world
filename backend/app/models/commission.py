@@ -8,6 +8,8 @@ from app.database import Base
 
 
 def _default_expiry() -> datetime:
+    # master 默认 48h。commission_lifecycle_v2_enabled 开时,创建路径才用
+    # settings.commission_ttl_hours 显式覆盖;闸关走这里,与 master 一致。
     return datetime.now(UTC) + timedelta(hours=48)
 
 

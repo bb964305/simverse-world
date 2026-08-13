@@ -42,6 +42,7 @@ OPENERS: dict[str, str] = {
     "workshop": "{name}正摆弄着手里的工具",
     "shop": "{name}正在整理货架",
     "town_hall": "{name}正低头处理着一些文件",
+    "market_hall": "{name}正在集市大厅的摊位间挑选货物",
     "central_plaza": "{name}正好也在广场上",
 }
 DEFAULT_OPENER = "{name}正好也在这里"

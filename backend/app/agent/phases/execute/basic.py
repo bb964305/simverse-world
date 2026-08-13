@@ -142,6 +142,12 @@ class BasicExecutePlugin:
                     elif ctx.resident.home_tile_x is not None:
                         target = (ctx.resident.home_tile_x, ctx.resident.home_tile_y)
 
+                # Keep the canonical server-resolved destination on the action
+                # result.  Tick continuity and movement telemetry run after this
+                # phase; GO_HOME previously kept ``target_tile=None`` there and
+                # therefore could never become a resumable planned trip.
+                ctx.action_result.target_tile = target
+
                 if target:
                     walkable = get_walkable_tiles()
                     path = find_path(
@@ -169,6 +175,10 @@ class BasicExecutePlugin:
                         ctx.new_tile = next_tile
                     else:
                         # Already at destination or unreachable — reset to idle.
+                        if ((ctx.resident.tile_x, ctx.resident.tile_y) != tuple(target)
+                                and not path):
+                            ctx.movement_failed_reason = "unreachable"
+                            ctx.plan_interrupt_reason = "unreachable"
                         # Realism P1-10: arriving home exhausted → sleep (energy
                         # recovers overnight; loop wakes within the schedule window).
                         if (settings.realism_enabled and action == ActionType.GO_HOME
@@ -180,6 +190,8 @@ class BasicExecutePlugin:
                     await ctx.db.commit()
                 else:
                     # No valid target — reset to idle
+                    ctx.movement_failed_reason = "invalid_target"
+                    ctx.plan_interrupt_reason = "invalid_target"
                     ctx.resident.status = "idle"
                     await ctx.db.commit()
             elif action in {ActionType.IDLE, ActionType.NAP, ActionType.REFLECT, ActionType.JOURNAL}:

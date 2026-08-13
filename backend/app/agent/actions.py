@@ -66,8 +66,21 @@ def get_available_actions(resident, nearby_residents: list) -> list[ActionType]:
     """
     available: list[ActionType] = list(_ALWAYS_AVAILABLE)
 
-    idle_nearby = [r for r in nearby_residents if r.status in ("idle", "walking") and r.id != resident.id]
-    chatting_nearby = [r for r in nearby_residents if r.status in ("chatting", "socializing") and r.id != resident.id]
+    def _targetable(r) -> bool:
+        # Perceive already filters in SQL; keep this boundary defensive for
+        # callers/tests that construct nearby lists directly. Unknown mock
+        # objects retain legacy behavior, persisted non-sim types do not.
+        rtype = getattr(r, "resident_type", None)
+        if isinstance(rtype, str):
+            from app.services.civic_membership import SIM_RESIDENT_TYPES
+            if rtype not in SIM_RESIDENT_TYPES:
+                return False
+        return r.id != resident.id
+
+    idle_nearby = [r for r in nearby_residents
+                   if _targetable(r) and r.status in ("idle", "walking")]
+    chatting_nearby = [r for r in nearby_residents
+                       if _targetable(r) and r.status in ("chatting", "socializing")]
 
     if idle_nearby:
         available.extend(_SOCIAL_NEEDS_IDLE_TARGET)

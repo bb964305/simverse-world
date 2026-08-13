@@ -7,6 +7,7 @@ export default defineConfig({
   plugins: [react()],
   define: {
     __RESIDENT_SPRITE_ASSET_VERSION__: JSON.stringify('legacy-blocked'),
+    __CARAVAN_ASSET_VERSION__: JSON.stringify('caravan-test-assets'),
   },
   test: {
     environment: 'jsdom',

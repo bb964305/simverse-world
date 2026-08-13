@@ -17,11 +17,18 @@ is a bug, so they are restated here):
 3. ``synchronize_session=False`` leaves already-loaded ORM rows stale — callers
    must re-SELECT (``balance()``) rather than read a cached object. The funded
    wage path additionally refreshes ``duty_service.set_wallet_cache``.
+4. 锁序军规(F8):同一个事务要触碰 ``town_treasuries`` 与
+   ``resident_treasuries`` 两张表时,**必须先动 town 行、再动 resident 行**
+   (``town_to_resident`` 的 FOR UPDATE → credit 即该序;``npc_trade_service
+   ._buy`` 的 skim → debit/credit 同序)。倒过来写就是与工资路径的 AB-BA
+   环——真 PG 下 DeadlockDetected,被 kill 一侧的 rollback 还会 expire 调用方
+   session 的全部 ORM 对象。
 
-Auditability: town flows are NOT ledger rows (``transactions.user_id`` is a
-users.id FK — see ``app/models/town_treasury.py``); ``balance_sc`` +
-``updated_at`` are the audit surface, and the nightly job stamps
-``town_last_spend_at`` through ``ConfigService``.
+Auditability: town flows cannot use ``transactions`` (its ``user_id`` is a
+hard users FK), so they are mirrored into the dedicated append-only
+``town_treasury_entries`` ledger in the *same transaction* as the balance
+movement — but only behind ``town_ledger_enabled`` (default off: the 058
+migration and the mirror-write behaviour never ship in the same change).
 
 INTERFACE FREEZE (S1-5 §8 downstream contract). ``tax`` / ``disburse`` /
 ``balance`` are consumed by S2-5 (税率进政策表), S2-2 (镇长财政排序权), S5-8
@@ -34,15 +41,17 @@ INTERFACE FREEZE (S1-5 §8 downstream contract). ``tax`` / ``disburse`` /
 from __future__ import annotations
 
 import logging
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
+import uuid
 
-from sqlalchemy import BigInteger, String, cast, select, update
+from sqlalchemy import BigInteger, String, cast, func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.system_config import SystemConfig
 from app.models.town_treasury import TOWN_KEY, TownTreasury
+from app.models.town_treasury_entry import TownTreasuryEntry
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +72,44 @@ TAX_CARRY_KEY = "town_tax_carry_milli"
 CARRY_SCALE = 1000                              # 1 SC = 1000 milli
 
 
+def _entry_ref(ref_key: str | None = None) -> str:
+    value = ref_key or f"town:{uuid.uuid4()}"
+    if not isinstance(value, str) or not value or len(value) > 200:
+        raise ValueError("town ledger ref_key must be 1..200 characters")
+    return value
+
+
+async def _append_entry_pending(
+    db: AsyncSession,
+    amount: int,
+    balance_after: int,
+    reason: str,
+    *,
+    resident_slug: str | None = None,
+    ref_key: str | None = None,
+) -> None:
+    """Append one signed audit row; the caller owns commit/rollback.
+
+    Gated behind ``town_ledger_enabled`` (default off): the 058 migration and
+    the mirror-write behaviour must not ship in the same change. Gate off →
+    zero ledger writes, money paths untouched; re-anchor before opening it.
+    """
+    from app.config import settings
+    if not settings.town_ledger_enabled:
+        return
+    if amount == 0:
+        return
+    db.add(TownTreasuryEntry(
+        town_key=TOWN_KEY,
+        amount_sc=int(amount),
+        balance_after_sc=int(balance_after),
+        reason=(reason or "unspecified")[:200],
+        resident_slug=resident_slug,
+        ref_key=_entry_ref(ref_key),
+    ))
+    await db.flush()
+
+
 async def balance(db: AsyncSession) -> int:
     """The town's current balance; 0 when the account row does not exist yet
     (mirrors ``coin_service.treasury_balance``)."""
@@ -72,7 +119,13 @@ async def balance(db: AsyncSession) -> int:
     return row.scalar_one_or_none() or 0
 
 
-async def tax_pending(db: AsyncSession, amount: int, reason: str = "") -> None:
+async def tax_pending(
+    db: AsyncSession,
+    amount: int,
+    reason: str = "",
+    *,
+    ref_key: str | None = None,
+) -> None:
     """Flush-owned town credit (upsert). The caller owns the transaction.
 
     Mirrors ``coin_service.treasury_credit_pending``: dialect-native
@@ -93,8 +146,8 @@ async def tax_pending(db: AsyncSession, amount: int, reason: str = "") -> None:
                 "balance_sc": TownTreasury.balance_sc + amount,
                 "updated_at": now,
             },
-        )
-        await db.execute(statement)
+        ).returning(TownTreasury.balance_sc)
+        balance_after = (await db.execute(statement)).scalar_one()
     else:
         result = await db.execute(
             update(TownTreasury)
@@ -104,16 +157,21 @@ async def tax_pending(db: AsyncSession, amount: int, reason: str = "") -> None:
         )
         if result.rowcount == 0:
             db.add(TownTreasury(**values))
+        await db.flush()
+        balance_after = (await db.execute(
+            select(TownTreasury.balance_sc).where(TownTreasury.key == TOWN_KEY)
+        )).scalar_one()
     await db.flush()
+    await _append_entry_pending(
+        db, amount, balance_after, reason, ref_key=ref_key,
+    )
 
 
 async def tax(db: AsyncSession, amount: int, reason: str = "") -> None:
     """Credit the town treasury (sales tax / gift tax / fines / escheat).
 
-    ``amount <= 0`` is a silent no-op. The town row is created on demand.
-    ``reason`` is accepted for call-site readability and symmetry with
-    ``coin_service`` but is not persisted — there is no town ledger table (see
-    the module docstring).
+    ``amount <= 0`` is a silent no-op. The town row is created on demand and
+    ``reason`` is persisted in the dedicated town ledger in the same transaction.
     """
     if amount <= 0:
         return
@@ -370,10 +428,136 @@ async def disburse(db: AsyncSession, amount: int, reason: str = "") -> bool:
             balance_sc=TownTreasury.balance_sc - amount,
             updated_at=datetime.now(UTC),
         )
+        .returning(TownTreasury.balance_sc)
         .execution_options(synchronize_session=False)
     )
+    balance_after = result.scalar_one_or_none()
+    landed = balance_after is not None
+    if landed:
+        await _append_entry_pending(db, -amount, balance_after, reason)
+    # Keep the historical transaction-owner contract even on a zero-row guard.
+    # In-memory SQLite tests share one connection across sessions; letting a
+    # losing session close with an open transaction would roll back a winner.
     await db.commit()
-    return (result.rowcount or 0) > 0
+    return landed
+
+
+async def wage_window_totals(
+    db: AsyncSession, *, window_days: int = 7,
+) -> tuple[int, int]:
+    """Return ``(realized_income, public_wages)`` for the trailing window.
+
+    The migration's opening anchor is deliberately excluded from income: it
+    explains pre-ledger stock, but is not recurring revenue that can sustain a
+    payroll.  Explicit future grants remain ordinary positive income.
+    """
+    since = datetime.now(UTC) - timedelta(days=max(1, int(window_days)))
+    income = (await db.execute(
+        select(func.coalesce(func.sum(TownTreasuryEntry.amount_sc), 0)).where(
+            TownTreasuryEntry.town_key == TOWN_KEY,
+            TownTreasuryEntry.created_at >= since,
+            TownTreasuryEntry.amount_sc > 0,
+            TownTreasuryEntry.reason != "opening_balance",
+        )
+    )).scalar_one()
+    wages = (await db.execute(
+        select(func.coalesce(func.sum(-TownTreasuryEntry.amount_sc), 0)).where(
+            TownTreasuryEntry.town_key == TOWN_KEY,
+            TownTreasuryEntry.created_at >= since,
+            TownTreasuryEntry.amount_sc < 0,
+            TownTreasuryEntry.reason.like("wage:%"),
+        )
+    )).scalar_one()
+    return int(income or 0), int(wages or 0)
+
+
+async def town_to_resident(
+    db: AsyncSession,
+    resident_slug: str,
+    amount: int,
+    *,
+    reason: str,
+    ref_key: str | None = None,
+    wage_budget_ratio: float | None = None,
+    wage_window_days: int = 7,
+) -> bool:
+    """Atomically move town funds into one resident treasury.
+
+    The town row is locked before the optional rolling-income budget is read,
+    serialising competing wage payments on PostgreSQL.  Debit, resident
+    credit, and the signed ledger row share one commit; any failure rolls the
+    whole move back.  A stable ``ref_key`` makes a retry a no-op.
+    """
+    if amount <= 0:
+        return False
+    if ref_key is not None:
+        ref_key = _entry_ref(ref_key)
+    try:
+        locked_balance = (await db.execute(
+            select(TownTreasury.balance_sc)
+            .where(TownTreasury.key == TOWN_KEY)
+            .with_for_update()
+        )).scalar_one_or_none()
+        if locked_balance is None or locked_balance < amount:
+            # This function owns the transaction.  Even a SELECT FOR UPDATE
+            # no-op must end it so the town row is never left locked in a
+            # long-lived caller session.
+            await db.commit()
+            return False
+
+        if ref_key and (await db.execute(
+            select(TownTreasuryEntry.id).where(
+                TownTreasuryEntry.ref_key == ref_key
+            ).limit(1)
+        )).scalar_one_or_none() is not None:
+            await db.commit()
+            return False
+
+        if wage_budget_ratio is not None:
+            ratio = min(1.0, max(0.0, float(wage_budget_ratio)))
+            income, wages = await wage_window_totals(
+                db, window_days=wage_window_days,
+            )
+            if wages + amount > int(income * ratio):
+                logger.info(
+                    "town wage budget exhausted: resident=%s amount=%d "
+                    "income=%d wages=%d ratio=%.3f",
+                    resident_slug, amount, income, wages, ratio,
+                )
+                await db.commit()
+                return False
+
+        debited = await db.execute(
+            update(TownTreasury)
+            .where(
+                TownTreasury.key == TOWN_KEY,
+                TownTreasury.balance_sc >= amount,
+            )
+            .values(
+                balance_sc=TownTreasury.balance_sc - amount,
+                updated_at=datetime.now(UTC),
+            )
+            .returning(TownTreasury.balance_sc)
+            .execution_options(synchronize_session=False)
+        )
+        balance_after = debited.scalar_one_or_none()
+        if balance_after is None:
+            await db.commit()
+            return False
+
+        from app.services import coin_service
+        await coin_service.treasury_credit_pending(
+            db, resident_slug, amount, reason=reason,
+        )
+        await _append_entry_pending(
+            db, -amount, balance_after, reason,
+            resident_slug=resident_slug, ref_key=ref_key,
+        )
+        await db.commit()
+        return True
+    except Exception:
+        await db.rollback()
+        raise
 
 
 async def notify_changed(db: AsyncSession, *, delta: int, reason: str = "") -> bool:

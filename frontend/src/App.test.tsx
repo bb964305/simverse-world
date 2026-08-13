@@ -18,6 +18,14 @@ vi.mock('./pages/OnboardingPage', () => ({
   OnboardingPage: () => <main data-testid="onboarding-page">Onboarding</main>,
 }))
 
+vi.mock('./pages/TownPage', () => ({
+  TownPage: () => <main data-testid="town-page">Public Town</main>,
+}))
+
+vi.mock('./pages/WatchPage', () => ({
+  WatchPage: () => <main data-testid="watch-page">Agent Viewer</main>,
+}))
+
 // HomeRoute (E2E-01) re-checks onboarding before rendering GamePage so a
 // player landing on "/" directly (bookmark, closed tab, browser back) can't
 // skip the resident picker. Stub the API call; individual tests override it.
@@ -93,6 +101,51 @@ describe('public and authenticated routes', () => {
     renderRoute('/play')
     expect(await screen.findByRole('heading', { name: '进入 Simverse' })).toBeInTheDocument()
     expect(screen.queryByTestId('game-page')).not.toBeInTheDocument()
+  })
+
+  it('exposes /town and /watch without a player login', async () => {
+    const town = renderRoute('/town')
+    expect(await screen.findByTestId('town-page')).toBeInTheDocument()
+    town.unmount()
+
+    renderRoute('/watch')
+    expect(await screen.findByTestId('watch-page')).toBeInTheDocument()
+  })
+
+  it('normalizes trailing-slash spectator routes without mounting gameplay overlays', async () => {
+    useGameStore.setState({
+      user,
+      token: 'token',
+      wsStatus: 'reconnecting',
+      achievementToast: { code: 'first', title: 'Hidden Achievement', reward_sc: 5 },
+      pendingEncounter: { resident_slug: 'mei', resident_name: '梅', location_id: 'square', opener: '不应显示' },
+    })
+
+    const town = renderRoute('/town/')
+    expect(await screen.findByTestId('town-page')).toBeInTheDocument()
+    expect(screen.queryByText('连接已断开，正在重连…')).not.toBeInTheDocument()
+    expect(screen.queryByText('Hidden Achievement')).not.toBeInTheDocument()
+    expect(screen.queryByText('不应显示')).not.toBeInTheDocument()
+    town.unmount()
+
+    renderRoute('/watch/')
+    expect(await screen.findByTestId('watch-page')).toBeInTheDocument()
+    expect(screen.queryByText('连接已断开，正在重连…')).not.toBeInTheDocument()
+    expect(screen.queryByText('Hidden Achievement')).not.toBeInTheDocument()
+    expect(screen.queryByText('不应显示')).not.toBeInTheDocument()
+  })
+
+  it('does not mount authenticated gameplay overlays over spectator routes', async () => {
+    useGameStore.setState({
+      user,
+      token: 'token',
+      wsStatus: 'reconnecting',
+      achievementToast: { code: 'first', title: 'Hidden Achievement', reward_sc: 5 },
+    })
+    renderRoute('/town')
+    expect(await screen.findByTestId('town-page')).toBeInTheDocument()
+    expect(screen.queryByText('连接已断开，正在重连…')).not.toBeInTheDocument()
+    expect(screen.queryByText('Hidden Achievement')).not.toBeInTheDocument()
   })
 
   it('shows encounter cards only on the authenticated game route', async () => {

@@ -75,3 +75,23 @@ async def test_shift_gate_double_condition(db_session, monkeypatch):
     assert await run(_res(0.1), [_mem(0.96)]) == 0
     # strong valence but low percentile → no shift
     assert await run(_res(0.8), [_mem(0.5)]) == 0
+
+
+@pytest.mark.anyio
+async def test_successful_shift_does_not_drift_same_evidence_batch(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "realism_enabled", True)
+    resident = MagicMock(id="rr", mood_json={"valence": 0.9})
+    memory = MagicMock(importance=0.99)
+    svc = MemoryService(db_session)
+
+    with patch("app.memory.service.EvolutionService") as Evo, \
+         patch.object(svc, "count_events_since_last_reflection",
+                      new=AsyncMock(return_value=100)) as count_events:
+        evo = AsyncMock()
+        evo.evaluate_shift.return_value = object()
+        Evo.return_value = evo
+        await svc._run_evolution_hooks(resident, [memory])
+
+    evo.evaluate_shift.assert_awaited_once_with(resident, memory)
+    evo.evaluate_drift.assert_not_awaited()
+    count_events.assert_not_awaited()

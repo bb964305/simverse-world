@@ -264,6 +264,154 @@ async def test_decide_force_plan_only_never_interrupts():
     assert ctx.plan_followed is True
 
 
+@pytest.mark.anyio
+async def test_social_interrupt_probability_runs_once_per_plan_slot(monkeypatch):
+    from app.agent.phases.decide.basic import BasicDecidePlugin
+    from app.config import settings
+    monkeypatch.setattr(settings, "realism_plan_continuity_enabled", True)
+    plan_date = "2026-08-11"
+
+    def context():
+        ctx = _decide_ctx_with_plan()
+        ctx.plan_date = plan_date
+        ctx.scheduled_plan = ctx.current_plan
+        ctx.resident.meta_json["needs"] = {
+            "energy": 0.8, "satiety": 0.8, "social": 0.1,
+        }
+        neighbor = _make_resident("neighbor")
+        neighbor.id = "other-res"
+        neighbor.status = "idle"
+        ctx.nearby_residents = [neighbor]
+        return ctx
+
+    plugin = BasicDecidePlugin(params={
+        "skip_decide_when_planned": True, "social_interrupt_chance": 1.0,
+    })
+    with patch("app.agent.phases.decide.basic.llm_chat") as llm, \
+         patch("app.agent.phases.decide.basic.MemoryService") as MockMS:
+        llm.return_value = (
+            '{"action":"IDLE","target_slug":null,"target_tile":null,"reason":"聊聊"}'
+        )
+        MockMS.return_value = AsyncMock(get_memories=AsyncMock(return_value=[]))
+        first = await plugin.execute(context())
+        second = await plugin.execute(context())
+
+    assert first.plan_interrupt_reason == "social"
+    assert llm.await_count == 1
+    assert second.action_result.action == ActionType.IDLE
+    assert second.plan_interrupt_reason is None
+
+
+@pytest.mark.anyio
+async def test_walking_plan_is_sticky_against_social_noise(monkeypatch):
+    from app.agent.phases.decide.basic import BasicDecidePlugin
+    from app.config import settings
+    monkeypatch.setattr(settings, "realism_enabled", True)
+    monkeypatch.setattr(settings, "realism_plan_continuity_enabled", True)
+    ctx = _decide_ctx_with_plan(action="VISIT_DISTRICT")
+    ctx.current_plan.target = "academy"
+    ctx.current_plan.location = "学院"
+    ctx.scheduled_plan = ctx.current_plan
+    ctx.plan_date = "2026-08-11"
+    ctx.resident.status = "walking"
+    ctx.resident.meta_json["needs"] = {
+        "energy": 0.8, "satiety": 0.8, "social": 0.1,
+    }
+    neighbor = _make_resident("neighbor")
+    neighbor.id = "other-res"
+    neighbor.status = "idle"
+    ctx.nearby_residents = [neighbor]
+
+    with patch("app.agent.phases.decide.basic.llm_chat") as llm, \
+         patch("app.agent.phases.decide.basic.MemoryService") as MockMS:
+        MockMS.return_value = AsyncMock(get_memories=AsyncMock(return_value=[]))
+        out = await BasicDecidePlugin(
+            params={"skip_decide_when_planned": True}
+        ).execute(ctx)
+
+    llm.assert_not_awaited()
+    assert out.action_result.action == ActionType.VISIT_DISTRICT
+    assert out.plan_followed is True
+
+
+@pytest.mark.anyio
+async def test_distraction_marks_plan_not_followed(monkeypatch):
+    """F5 回归锚: distraction 分支必须显式写 plan_followed=False。
+
+    否则 TickContext 默认 True 一路活到 tick 收尾, LLM 的自由移动会因
+    plan_followed && scheduled_plan 被误判为 planned_move 建 sticky trip。
+    """
+    from app.agent.phases.decide.spontaneous import SpontaneousDecidePlugin
+    from app.config import settings
+    monkeypatch.setattr(settings, "realism_plan_continuity_enabled", True)
+
+    ctx = _decide_ctx_with_plan(action="WORK")
+    ctx.plan_date = "2026-08-11"
+    ctx.scheduled_plan = ctx.current_plan
+
+    with patch("app.agent.phases.decide.basic.llm_chat") as mock_llm, \
+         patch("app.agent.phases.decide.basic.MemoryService") as MockMS:
+        mock_llm.return_value = (
+            '{"action": "WANDER", "target_slug": null,'
+            ' "target_tile": [80, 55], "reason": "随便走走"}'
+        )
+        MockMS.return_value = AsyncMock(get_memories=AsyncMock(return_value=[]))
+        plugin = SpontaneousDecidePlugin(
+            params={"distraction_chance": 1.0, "social_eagerness": False})
+        out = await plugin.execute(ctx)
+
+    assert out.plan_interrupt_reason == "spontaneous"
+    assert out.current_plan is None
+    assert out.action_result.action == ActionType.WANDER
+    assert out.plan_followed is False
+
+
+@pytest.mark.anyio
+async def test_distraction_free_move_does_not_create_sticky_trip(monkeypatch):
+    """F5 端到端: distraction 后的 LLM 自由移动不得建 sticky planned trip。
+
+    走真 resident_tick + 真 SpontaneousDecidePlugin: PlanStub 模拟 plan 阶段
+    产出 current_plan/scheduled_plan, distraction 命中清 plan 后 LLM 自由
+    WANDER——tick 收尾不允许对已放弃的 plan slot set_active_trip。
+    """
+    from app.agent.phases.decide.spontaneous import SpontaneousDecidePlugin
+    from app.agent.plan_continuity import _active_key
+    from app.agent.tick import resident_tick
+    from app.config import settings
+    from app.redis_client import get_redis
+
+    monkeypatch.setattr(settings, "realism_plan_continuity_enabled", True)
+
+    resident = _make_resident("distracted-res")
+
+    class PlanStub:
+        async def execute(self, ctx):
+            ctx.current_plan = HourlyPlan(
+                slot=1, hour_range=(9, 12), action="WORK", target=None,
+                location="office", importance=3, reason="上班", status="pending",
+            )
+            ctx.scheduled_plan = ctx.current_plan
+            ctx.plan_date = "2026-08-11"
+            return ctx
+
+    decide = SpontaneousDecidePlugin(
+        params={"distraction_chance": 1.0, "social_eagerness": False})
+
+    with patch("app.agent.tick.registry") as mock_reg, \
+         patch("app.agent.phases.decide.basic.llm_chat") as mock_llm, \
+         patch("app.agent.phases.decide.basic.MemoryService") as MockMS:
+        mock_reg.get_phases.return_value = [PlanStub(), decide]
+        mock_llm.return_value = (
+            '{"action": "WANDER", "target_slug": null,'
+            ' "target_tile": [80, 55], "reason": "随便走走"}'
+        )
+        MockMS.return_value = AsyncMock(get_memories=AsyncMock(return_value=[]))
+        result = await resident_tick(AsyncMock(), resident)
+
+    assert result is not None and result.action == ActionType.WANDER
+    assert await get_redis().get(_active_key(resident.id)) is None
+
+
 # ── Plan Tests ───────────────────────────────────────────────────────
 
 @pytest.mark.anyio

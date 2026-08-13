@@ -13,13 +13,14 @@ from app.agent.map_data import (
 
 
 def test_locations_has_all_entries():
-    assert len(LOCATIONS) == 33
+    assert len(LOCATIONS) == 34
     assert "academy" in LOCATIONS
     assert "tavern" in LOCATIONS
     assert "house_a" in LOCATIONS
     assert "apt_star" in LOCATIONS
     assert "central_plaza" in LOCATIONS
     assert "experiment_building" in LOCATIONS
+    assert "market_hall" in LOCATIONS
     assert "east_gardens" in LOCATIONS
     assert "south_quarter" in LOCATIONS
 
@@ -49,7 +50,7 @@ def test_get_location_by_id():
 
 def test_get_public_locations():
     pubs = get_public_locations()
-    assert len(pubs) == 8  # +experiment_building (P0 Lab, type=public)
+    assert len(pubs) == 9  # +experiment_building and standalone market_hall
     names = [p["name"] for p in pubs]
     assert "学院" in names
     assert "市政厅" in names
@@ -91,6 +92,28 @@ def test_get_valid_target_tile():
 def test_get_valid_target_tile_fallback_to_center():
     tile = get_valid_target_tile("central_plaza")
     assert tile == (75, 56)  # center, since no entrance
+
+
+def test_market_day_location_metadata_tracks_the_authored_gate_and_parking():
+    assert LOCATIONS["town_entrance"]["bounds"] == (100, 119, 104, 122)
+    assert LOCATIONS["town_entrance"]["center"] == (102, 121)
+    assert LOCATIONS["market_hall"]["bounds"] == (105, 89, 119, 99)
+    assert LOCATIONS["market_hall"]["entrance"] == (105, 94)
+    assert LOCATIONS["market_hall"]["caravan_parking"] == (109, 94)
+    assert LOCATIONS["market_hall"]["allocatable"] is False
+    assert "caravan_parking" not in LOCATIONS["central_plaza"]
+
+
+def test_market_hall_is_visit_only_not_a_resident_allocation_district():
+    from app.services.resident_placement import (
+        ALLOCATABLE_LOCATION_IDS,
+        LOCATION_TILE_SLOTS,
+        normalize_location_id,
+    )
+
+    assert "market_hall" not in LOCATION_TILE_SLOTS
+    assert "market_hall" not in ALLOCATABLE_LOCATION_IDS
+    assert normalize_location_id("market_hall", allocatable_only=True) == "central_plaza"
 
 
 # ── Housing Assignment Tests ─────────────────────────────────────────

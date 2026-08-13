@@ -27,17 +27,23 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import settings
+from app.models.resident import Resident
 from app.models.resident_treasury import ResidentTreasury
 from app.models.shop import Item
 from app.models.system_config import SystemConfig
 from app.models.town_treasury import TownTreasury
+from app.models.town_treasury_entry import TownTreasuryEntry
+from app.models.user import User
 from app.services import treasury_service
 
 pytestmark = [pytest.mark.economy_postgres, pytest.mark.anyio]
 
 DB_URL = (os.environ.get("ECONOMY_TEST_DATABASE_URL")
           or os.environ.get("LAB_TEST_DATABASE_URL") or "")
-TABLES = (SystemConfig.__table__, TownTreasury.__table__, Item.__table__,
+# users/residents 排最前:residents.creator_id 有指向 users.id 的行内 FK
+# (users.avatar_resident_id 是 use_alter FK,单表 create 时被跳过,不成环)。
+TABLES = (User.__table__, Resident.__table__, SystemConfig.__table__,
+          TownTreasury.__table__, TownTreasuryEntry.__table__, Item.__table__,
           ResidentTreasury.__table__)
 
 
@@ -129,3 +135,146 @@ async def test_concurrent_buyers_cannot_oversell_a_single_copy(
             select(Item.stock, Item.active).where(Item.code == "work_a"))).one()
     assert row.stock == 0
     assert row.active is False
+
+
+async def test_concurrent_public_wages_obey_the_income_budget(
+    pg_sessions, monkeypatch,
+):
+    """The town-row lock serialises budget reads: 10 simultaneous 1-SC wages
+    against 10 SC income at 70% may land exactly seven, never eight-plus.
+
+    预算判据读的是 ``town_treasury_entries`` 滚动窗口——挂闸(S6)后默认不写
+    ledger,这条测的就是预算机制本身,须显式开闸。
+    """
+    monkeypatch.setattr(settings, "town_ledger_enabled", True)
+    async with pg_sessions() as db:
+        await treasury_service.tax(db, 10, reason="sales_tax:seed")
+
+    async def pay(i: int) -> bool:
+        async with pg_sessions() as db:
+            return await treasury_service.town_to_resident(
+                db,
+                f"worker-{i}",
+                1,
+                reason=f"wage:worker-{i}",
+                ref_key=f"wage:concurrent:{i}",
+                wage_budget_ratio=0.70,
+            )
+
+    results = await asyncio.gather(*(pay(i) for i in range(10)))
+    assert sum(results) == 7
+    async with pg_sessions() as db:
+        assert await treasury_service.balance(db) == 3
+        assert await treasury_service.wage_window_totals(db) == (10, 7)
+
+
+async def test_rejected_wage_releases_town_row_lock(pg_sessions):
+    """A SELECT-FOR-UPDATE no-op must end its transaction before returning.
+
+    If the insufficient-funds branch merely returns, the second session blocks
+    on the town row until this test times out.
+    """
+    async with pg_sessions() as db:
+        await treasury_service.tax(db, 1, reason="sales_tax:seed")
+
+    async with pg_sessions() as rejecting:
+        assert not await treasury_service.town_to_resident(
+            rejecting, "worker", 2, reason="wage:worker",
+        )
+        assert rejecting.in_transaction() is False
+
+        async def credit_from_other_session() -> None:
+            async with pg_sessions() as other:
+                await treasury_service.tax(other, 1, reason="sales_tax:next")
+
+        await asyncio.wait_for(credit_from_other_session(), timeout=2.0)
+
+
+async def test_wage_and_npc_buy_share_the_town_first_lock_order(
+    pg_sessions, monkeypatch,
+):
+    """并发 工资(town_to_resident:FOR UPDATE town 行 → credit resident 行) ×
+    夜间消费(_buy)。锁序倒置(先 debit buyer 的 resident 行、后动 town 行)时两
+    路构成 AB-BA 环 → 真 PG DeadlockDetected,一侧被 abort;统一成 town→resident
+    之后只会排队。sleep 只是把「拿到第一把锁 → 要第二把锁」的窗口撑开,让交错
+    必然发生,不偏向任何一侧。断言:零异常 + 金额守恒到具体数字。
+    """
+    from app.services import coin_service, npc_trade_service
+
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "tax_carry_enabled", False)
+    monkeypatch.setattr(settings, "polis_policy_enabled", False)
+    monkeypatch.setattr(settings, "town_tax_rate_sales", 0.1)
+    monkeypatch.setattr(settings, "town_ledger_enabled", False)
+    monkeypatch.setattr(settings, "item_stock_guard_enabled", True)
+
+    async def _quiet_narrate(*a, **kw):
+        return None
+
+    monkeypatch.setattr(npc_trade_service, "_narrate", _quiet_narrate)
+
+    async with pg_sessions() as db:
+        db.add(Resident(id="id-buyer", slug="buyer", name="买主",
+                        district="free", status="idle", resident_type="npc"))
+        db.add(Resident(id="id-maker", slug="maker", name="作者",
+                        district="free", status="idle", resident_type="npc"))
+        db.add(Item(code="work_pg", kind="resident_work", name="陶罐",
+                    description="", price_sc=15,
+                    payload_json={"creator_slug": "maker", "stock": 5},
+                    stock=5, active=True))
+        db.add(ResidentTreasury(resident_slug="buyer", balance_sc=100))
+        db.add(ResidentTreasury(resident_slug="maker", balance_sc=0))
+        await db.commit()
+    async with pg_sessions() as db:
+        await treasury_service.tax(db, 100, reason="sales_tax:seed")
+
+    # 撑开竞态窗口:_buy 侧在要 town 行之前、工资侧在拿到 town 行锁之后各睡
+    # 0.2s——倒置锁序下两事务必然各握一把锁再互相要对方的。
+    real_tax_pending = treasury_service.tax_pending
+
+    async def _slow_tax_pending(db, amount, reason="", **kw):
+        await asyncio.sleep(0.2)
+        return await real_tax_pending(db, amount, reason, **kw)
+
+    monkeypatch.setattr(treasury_service, "tax_pending", _slow_tax_pending)
+
+    real_credit = coin_service.treasury_credit_pending
+
+    async def _slow_credit(db, slug, amount, **kw):
+        await asyncio.sleep(0.2)
+        return await real_credit(db, slug, amount, **kw)
+
+    monkeypatch.setattr(coin_service, "treasury_credit_pending", _slow_credit)
+
+    offer = {"code": "work_pg", "kind": "resident_work", "name": "陶罐",
+             "price": 15, "creator_slug": "maker", "creator_id": "id-maker"}
+
+    async def buy_once() -> bool:
+        summary = {"bought": 0, "spent": 0, "tax": 0}
+        async with pg_sessions() as db:
+            return await npc_trade_service._buy(db, "id-buyer", "buyer", offer,
+                                                summary)
+
+    async def wage_once(i: int) -> bool:
+        async with pg_sessions() as db:
+            return await treasury_service.town_to_resident(
+                db, "buyer", 5, reason=f"wage:buyer:{i}",
+            )
+
+    rounds = 3
+    for i in range(rounds):
+        bought, paid = await asyncio.gather(buy_once(), wage_once(i))
+        assert bought is True
+        assert paid is True
+
+    # 守恒到具体数字:每轮 工资 town-5/buyer+5,成交 buyer-15/maker+14/town+1。
+    async with pg_sessions() as db:
+        town = await treasury_service.balance(db)
+        buyer = await coin_service.treasury_balance(db, "buyer")
+        maker = await coin_service.treasury_balance(db, "maker")
+    assert (town, buyer, maker) == (
+        100 - 5 * rounds + 1 * rounds,      # 88
+        100 + 5 * rounds - 15 * rounds,     # 70
+        14 * rounds,                        # 42
+    )
+    assert town + buyer + maker == 200      # 镇+居民总量守恒

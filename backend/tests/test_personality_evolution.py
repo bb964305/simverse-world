@@ -282,3 +282,30 @@ async def test_evaluate_drift_llm_failure_returns_none(db_session, evo_resident)
     )
     entries = hist_result.scalars().all()
     assert len(entries) == 1  # only the seeded old_drift
+
+
+@pytest.mark.anyio
+async def test_exhausted_pacing_budget_skips_drift_llm(
+    db_session, evo_resident, monkeypatch,
+):
+    """A zero safety budget is checked before any evaluation/sync LLM call."""
+    from app.config import settings
+    monkeypatch.setattr(settings, "realism_personality_pacing_enabled", True)
+    evo_resident.created_at = datetime.now(UTC) - timedelta(days=1)
+    for i in range(15):
+        db_session.add(Memory(
+            resident_id=evo_resident.id, type="event", content=f"event {i}",
+            importance=0.5, source="agent_action",
+        ))
+    db_session.add(PersonalityHistory(
+        resident_id=evo_resident.id, trigger_type="shift",
+        changes_json={f"D{i}": {"from": "M", "to": "H"} for i in range(8)},
+        old_type="CTRL", new_type="CTRL", reason="budget used",
+        created_at=datetime.now(UTC),
+    ))
+    await db_session.commit()
+
+    llm = AsyncMock()
+    with patch("app.personality.evolution.llm_chat", new=llm):
+        assert await EvolutionService(db_session).evaluate_drift(evo_resident) is None
+    llm.assert_not_awaited()

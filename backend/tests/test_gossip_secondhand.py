@@ -95,3 +95,50 @@ async def test_classic_resident_gossip_still_works_gate_off(db_session, monkeypa
     b = await db_session.get(Resident, "B")
     mem = await gs.maybe_gossip(db_session, a, b)
     assert mem is not None and mem.related_resident_id == "S"
+
+
+@pytest.mark.anyio
+async def test_event_lane_rescues_low_rank_world_event(db_session, monkeypatch):
+    """A recent event_id rumor is eligible even below forty personal memories."""
+    monkeypatch.setattr(settings, "realism_info_gradient_enabled", True)
+    monkeypatch.setattr(settings, "realism_gossip_event_lane_enabled", False)
+    monkeypatch.setattr(settings, "realism_relations_enabled", False)
+    monkeypatch.setattr(gs, "GOSSIP_PROBABILITY", 1.0)
+    monkeypatch.setattr(gs, "_distort", AsyncMock(side_effect=lambda c: c))
+    await _residents(db_session, "A", "B")
+    for i in range(45):
+        db_session.add(Memory(
+            id=f"noise-{i}", resident_id="A", type="event",
+            content=f"private {i}", importance=0.9, source="agent_action",
+        ))
+    db_session.add(Memory(
+        id="buried-event", resident_id="A", type="event", content="镇上有新消息",
+        importance=0.3, source="world_event", metadata_json={"event_id": "ev-buried"},
+    ))
+    await db_session.commit()
+    a = await db_session.get(Resident, "A")
+    b = await db_session.get(Resident, "B")
+
+    assert await gs.maybe_gossip(db_session, a, b) is None
+    monkeypatch.setattr(settings, "realism_gossip_event_lane_enabled", True)
+    relayed = await gs.maybe_gossip(db_session, a, b)
+    assert relayed is not None
+    assert (relayed.metadata_json or {}).get("event_id") == "ev-buried"
+
+
+@pytest.mark.anyio
+async def test_event_lane_does_not_repeat_known_event(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "realism_info_gradient_enabled", True)
+    monkeypatch.setattr(settings, "realism_gossip_event_lane_enabled", True)
+    monkeypatch.setattr(gs, "GOSSIP_PROBABILITY", 1.0)
+    await _residents(db_session, "A", "B")
+    await _first_hand_event(db_session, "A", event_id="already-known")
+    db_session.add(Memory(
+        id="b-known", resident_id="B", type="event", content="我已经知道",
+        importance=0.5, source="gossip", metadata_json={"event_id": "already-known"},
+    ))
+    await db_session.commit()
+
+    a = await db_session.get(Resident, "A")
+    b = await db_session.get(Resident, "B")
+    assert await gs.maybe_gossip(db_session, a, b) is None

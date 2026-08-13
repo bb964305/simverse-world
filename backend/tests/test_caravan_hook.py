@@ -44,6 +44,7 @@ def caravan_gate(monkeypatch):
     def _set(economy: bool, caravan: bool):
         monkeypatch.setattr(settings, "npc_economy_enabled", economy)
         monkeypatch.setattr(settings, "caravan_enabled", caravan)
+        monkeypatch.setattr(settings, "caravan_lifecycle_enabled", False)
 
     return _set
 
@@ -51,7 +52,9 @@ def caravan_gate(monkeypatch):
 @pytest.fixture
 def one_pass(monkeypatch):
     """跑 `event_cron_loop` 恰一轮,返回本轮的调用序 + 商队拿到的实参。"""
-    from app.services import caravan_service, debate_service, script_service
+    from app.services import (
+        caravan_lifecycle_service, caravan_service, debate_service, script_service,
+    )
     from app.tasks import event_cron, weather
 
     async def _run(changes, *, boom: bool = False):
@@ -90,6 +93,14 @@ def one_pass(monkeypatch):
         monkeypatch.setattr(event_cron.manager, "broadcast", _spy("broadcast"))
         monkeypatch.setattr(weather, "ensure_weather_event", _spy("weather"))
         monkeypatch.setattr(caravan_service, "run_caravan_visit", _visit)
+        monkeypatch.setattr(
+            caravan_lifecycle_service, "ensure_visit_for_event",
+            _spy("caravan_wake"),
+        )
+        monkeypatch.setattr(
+            caravan_lifecycle_service, "wake_visit_for_event",
+            _spy("caravan_close_wake"),
+        )
         monkeypatch.setattr(script_service, "fire_due_scripts", _spy("c3_fire", []))
         monkeypatch.setattr(script_service, "settle_due_seasons", _spy("c3_settle", []))
         monkeypatch.setattr(script_service, "ensure_active_season", _spy("c3_open"))
@@ -105,6 +116,15 @@ def one_pass(monkeypatch):
     return _run
 
 
+def test_event_cron_reads_binding_caravan_policy():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1]
+              / "app" / "tasks" / "event_cron.py").read_text()
+    assert "is_caravan_enabled" in source
+    assert source.index("is_caravan_enabled") < source.index("run_caravan_visit(db, event)")
+
+
 async def test_market_day_start_runs_the_visit_once(one_pass, caravan_gate):
     caravan_gate(True, True)
 
@@ -115,6 +135,19 @@ async def test_market_day_start_runs_the_visit_once(one_pass, caravan_gate):
     visit_db, event = seen[0]
     assert visit_db is db, "商队要复用本轮 event_cron 的 session,不许另开"
     assert event is MARKET, "整个事件 dict 原样传下去(服务按 id 做 at-most-once)"
+
+
+async def test_lifecycle_gate_wakes_state_machine_instead_of_legacy_settlement(
+    one_pass, caravan_gate, monkeypatch,
+):
+    caravan_gate(True, True)
+    monkeypatch.setattr(settings, "caravan_lifecycle_enabled", True)
+
+    calls, seen, _ = await one_pass([(MARKET, "start")])
+
+    assert calls.count("caravan_wake") == 1
+    assert "caravan" not in calls
+    assert seen == []
 
 
 async def test_visit_runs_after_collective_memories(one_pass, caravan_gate):
@@ -155,6 +188,18 @@ async def test_market_day_end_is_ignored(one_pass, caravan_gate):
     calls, _, _ = await one_pass([(MARKET, "end")])
 
     assert "caravan" not in calls, f"phase=='end' 不许触发到访,实测 {calls!r}"
+
+
+async def test_market_day_end_wakes_lifecycle_for_safe_departure(
+    one_pass, caravan_gate, monkeypatch,
+):
+    caravan_gate(True, True)
+    monkeypatch.setattr(settings, "caravan_lifecycle_enabled", True)
+
+    calls, _, _ = await one_pass([(MARKET, "end")])
+
+    assert calls.count("caravan_close_wake") == 1
+    assert "caravan" not in calls
 
 
 async def test_visit_failure_is_swallowed_with_rollback(one_pass, caravan_gate, caplog):

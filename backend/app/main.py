@@ -4,10 +4,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
-from app.routers import auth, users, residents, forge, profile, search, bulletin, onboarding, sprites, avatar, settings as settings_router, media as media_router, events as events_router, notifications as notifications_router, achievements as achievements_router, shop as shop_router, digest as digest_router, daily as daily_router, commissions as commissions_router, graph as graph_router, exploration as exploration_router, capsules as capsules_router, feed as feed_router, photos as photos_router, tts as tts_router, seasons as seasons_router, goals as goals_router, debates as debates_router, polls as polls_router, home_decor as home_decor_router
+from app.routers import auth, users, residents, forge, profile, search, bulletin, onboarding, sprites, avatar, settings as settings_router, media as media_router, events as events_router, notifications as notifications_router, achievements as achievements_router, shop as shop_router, digest as digest_router, daily as daily_router, commissions as commissions_router, graph as graph_router, exploration as exploration_router, capsules as capsules_router, feed as feed_router, photos as photos_router, tts as tts_router, seasons as seasons_router, goals as goals_router, debates as debates_router, polls as polls_router, home_decor as home_decor_router, caravans as caravans_router
 from app.routers import lab as lab_router
 from app.routers import world as world_router
 from app.routers import townhall as townhall_router
+from app.routers import agent_players as agent_players_router
 # Import the modules whose @on(...) handlers must register on the event bus.
 import app.events.achievements  # noqa: F401
 import app.services.daily_quest_service  # noqa: F401
@@ -21,14 +22,20 @@ from app.tasks.heat_cron import heat_cron_loop
 from app.tasks.event_cron import event_cron_loop
 from app.tasks.nightly_cron import nightly_cron_loop
 from app.tasks.embedding_backfill import embedding_backfill_loop
+from app.tasks.caravan_lifecycle import caravan_lifecycle_loop
 from app.tasks.resident_sprite_worker import resident_sprite_worker_loop
 from app.agent.loop import agent_loop
 from app.http import close_client
 from app.redis_client import close_redis
 from app.ws.manager import manager
+from app.services.player_npc_chat_service import run_agent_npc_chat_reaper
 from app.observability import init_sentry, wire_runtime_gauges
 
 logger = logging.getLogger(__name__)
+
+# Upper bound for waiting on cancelled background tasks during lifespan
+# teardown. Module-level so tests can monkeypatch it down.
+_SHUTDOWN_TIMEOUT = 10.0
 
 # Sentry must initialise before the app object so its FastAPI/Starlette
 # integration can wrap request handling. No-op without SENTRY_DSN.
@@ -63,6 +70,8 @@ async def lifespan(app):
     # run_background_tasks — this process owns live WebSocket clients even when
     # the agent loops live in the standalone worker.
     subscriber_task = asyncio.create_task(manager.run_subscriber())
+    agent_presence_task = asyncio.create_task(manager.run_agent_presence_reaper())
+    agent_npc_chat_task = asyncio.create_task(run_agent_npc_chat_reaper())
 
     # S5: the location-visit consumer runs on every API worker (move messages
     # arrive on the worker that owns the user's socket), independent of
@@ -91,6 +100,7 @@ async def lifespan(app):
             asyncio.create_task(nightly_cron_loop()),
             asyncio.create_task(agent_loop.run()),
             asyncio.create_task(embedding_backfill_loop()),
+            asyncio.create_task(caravan_lifecycle_loop()),
         ]
         if settings.resident_sprite_enabled:
             background_tasks.append(asyncio.create_task(resident_sprite_worker_loop()))
@@ -101,11 +111,34 @@ async def lifespan(app):
             "to the agent-worker process"
         )
     yield
-    subscriber_task.cancel()
-    location_task.cancel()
-    world_reload_task.cancel()
-    for task in background_tasks:
+    all_tasks = [
+        subscriber_task,
+        agent_presence_task,
+        agent_npc_chat_task,
+        location_task,
+        world_reload_task,
+        *background_tasks,
+    ]
+    for task in all_tasks:
         task.cancel()
+    # Bounded wait for the cancelled tasks to actually finish their cleanup
+    # BEFORE tearing down the shared HTTP/Redis clients they may still touch.
+    # asyncio.wait (not wait_for(gather(...))) because a task that swallows
+    # cancellation would make a cancelled gather wait on it forever; wait()
+    # returns after the timeout regardless, keeping shutdown bounded.
+    done, pending = await asyncio.wait(all_tasks, timeout=_SHUTDOWN_TIMEOUT)
+    if pending:
+        logger.warning(
+            "lifespan teardown timed out after %.1fs; %d task(s) still pending: %s",
+            _SHUTDOWN_TIMEOUT,
+            len(pending),
+            sorted(t.get_name() for t in pending),
+        )
+    for task in done:
+        # Retrieve exceptions so the loop doesn't log
+        # "Task exception was never retrieved" at GC time.
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning("background task ended with error", exc_info=task.exception())
     await close_client()
     await close_redis()
 
@@ -164,6 +197,7 @@ app.include_router(avatar.router)
 app.include_router(settings_router.router)
 app.include_router(media_router.router)
 app.include_router(events_router.router)
+app.include_router(caravans_router.router)
 app.include_router(notifications_router.router)
 app.include_router(achievements_router.router)
 app.include_router(shop_router.router)
@@ -184,6 +218,7 @@ app.include_router(lab_router.router)
 app.include_router(world_router.router)
 app.include_router(townhall_router.router)
 app.include_router(townhall_router.alias_router)  # 收口: /town/{treasury,policies} 别名
+app.include_router(agent_players_router.router)
 app.include_router(admin_router)
 
 # --- Observability (Phase 3): GET /metrics + runtime gauges ---
@@ -226,7 +261,7 @@ async def health():
 async def health_loops():
     """Read-only liveness view of the background loops (P2, Roadmap #5).
 
-    The five loops above run in a single process; heartbeats live in Redis, so
+    The background loops above run in a single process; heartbeats live in Redis, so
     this answers correctly from any API worker even when the loops are owned by
     the standalone agent-worker. ``degraded`` = at least one loop's heartbeat
     expired (a loop that never beat at all is ``never_seen``, not an outage).

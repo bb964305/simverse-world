@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-12",
+  "generator": "Codex built-in ImageGen",
+  "mode": "reference-guided raster generation",
+  "rights_basis": "first_party_generated",
+  "visual_reference": "docs/design/caravan/caravan-concept-v1.png",
+  "prompt_contract": "Exactly one dun pony with dark mane pulling one compact indigo-blue two-wheel covered merchant wagon with warm oak chassis, brass trim, leather harness and bell; no person, rider or text. Create a consistent identity anchor and three-panel down/left/up wheel-roll and pony-walk strips in crisp 16-bit farming-RPG pixel art on flat #FF00FF; derive right by mirroring left.",
+  "generated_sources": [
+    "exec-0e3b36d9-b2e7-451d-942d-37025b1aee3a.png",
+    "exec-32ca9529-009d-4181-a182-e7221c5d7d52.png",
+    "exec-4025c546-b5db-499a-abc1-b1826de20691.png",
+    "exec-d18c5274-f100-4b8d-adb4-f2c1f3b36ffb.png"
+  ],
+  "postprocess": {
+    "chroma_key": "remove_chroma_key.py --auto-key border --soft-matte --transparent-threshold 12 --opaque-threshold 220 --despill",
+    "algorithm": "caravan_sprite_postprocess.py",
+    "atlas": "nearest-neighbor, shared scale, 64x64 frames, 3x4 directions, right mirrors left, baseline y=61, 31 opaque colors plus transparent"
+  },
+  "files": [
+    {"file":"texture.png","width":192,"height":256,"mode":"RGBA","bytes":33031,"sha256":"4be4ef3b221b363781582bcc0bb4216f71568beae14524e5409d85b2deea51ed"}
+  ]
+}

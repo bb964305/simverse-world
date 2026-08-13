@@ -1,1 +1,2 @@
 declare const __RESIDENT_SPRITE_ASSET_VERSION__: string
+declare const __CARAVAN_ASSET_VERSION__: string

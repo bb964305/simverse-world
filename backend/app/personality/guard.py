@@ -30,7 +30,8 @@ class PersonalityGuard:
     SHIFT_STEP: int = 2        # max single-step distance for shift (L→H allowed)
     MIN_DRIFT_INTERVAL: int = 15  # event memories required since last drift
     SHIFT_COOLDOWN_HOURS: int = 24
-    TOTAL_MONTHLY_CHANGE: int = 8  # sum of all dimension changes per calendar month
+    TOTAL_MONTHLY_CHANGE: int = 8  # legacy calendar month / paced rolling real 30d
+    DRIFT_ROLLING_7D_CHANGE: int = 2
 
     async def can_drift(self, resident_id: str, db: AsyncSession) -> bool:
         """Return True if enough event memories have accumulated since last drift.
@@ -51,13 +52,46 @@ class PersonalityGuard:
         result = await db.execute(stmt)
         last_drift_at = result.scalar_one_or_none()
 
-        # No previous drift → allow drift immediately
+        # Legacy residents drifted immediately once.  V2 requires an evidence
+        # floor even for the first drift, preventing a new personality from
+        # changing after its first chat wrap-up.
         if last_drift_at is None:
-            return True
+            if not _pacing_enabled():
+                return True
+            # With no previous drift, the resident's creation is the cooldown
+            # anchor. Otherwise a busy new resident could mutate after merely
+            # fifteen tick memories, long before the 72-world-hour narrative
+            # interval has elapsed.
+            from app.models.resident import Resident
+            created_at = (await db.execute(
+                select(Resident.created_at).where(Resident.id == resident_id)
+            )).scalar_one_or_none()
+            if created_at is None:
+                return False
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+            from app import world_clock
+            from app.config import settings
+            elapsed_world = world_clock.now_world() - world_clock.real_to_world(created_at)
+            if elapsed_world < timedelta(hours=settings.realism_drift_min_world_hours):
+                return False
+            count_stmt = select(func.count()).select_from(Memory).where(
+                Memory.resident_id == resident_id,
+                Memory.type == "event",
+            )
+            count = (await db.execute(count_stmt)).scalar_one()
+            return count >= self.MIN_DRIFT_INTERVAL
 
         # Make timezone-naive datetimes from SQLite timezone-aware
         if last_drift_at.tzinfo is None:
             last_drift_at = last_drift_at.replace(tzinfo=UTC)
+
+        if _pacing_enabled():
+            from app import world_clock
+            elapsed_world = world_clock.now_world() - world_clock.real_to_world(last_drift_at)
+            from app.config import settings
+            if elapsed_world < timedelta(hours=settings.realism_drift_min_world_hours):
+                return False
 
         # Count event memories since last drift
         count_stmt = select(func.count()).select_from(Memory).where(
@@ -91,7 +125,11 @@ class PersonalityGuard:
         if last_shift_at.tzinfo is None:
             last_shift_at = last_shift_at.replace(tzinfo=UTC)
 
-        elapsed = datetime.now(UTC) - last_shift_at
+        if _pacing_enabled():
+            from app import world_clock
+            elapsed = world_clock.now_world() - world_clock.real_to_world(last_shift_at)
+        else:
+            elapsed = datetime.now(UTC) - last_shift_at
         return elapsed >= timedelta(hours=self.SHIFT_COOLDOWN_HOURS)
 
     async def validate_drift(
@@ -111,9 +149,10 @@ class PersonalityGuard:
             for dim, change in changes.items()
             if _step_distance(change["from"], change["to"]) <= self.DRIFT_STEP
         }
-        if len(valid) > self.MAX_DRIFT_PER_CYCLE:
+        max_changes = 1 if _pacing_enabled() else self.MAX_DRIFT_PER_CYCLE
+        if len(valid) > max_changes:
             # Keep the first N (LLM ordering reflects priority)
-            keys = list(valid.keys())[: self.MAX_DRIFT_PER_CYCLE]
+            keys = list(valid.keys())[:max_changes]
             valid = {k: valid[k] for k in keys}
         return valid
 
@@ -137,22 +176,60 @@ class PersonalityGuard:
     async def check_monthly_budget(
         self, resident_id: str, db: AsyncSession
     ) -> int:
-        """Return remaining monthly dimension-change budget.
+        """Return remaining total dimension-change budget.
 
-        Counts total dimension changes recorded in personality_history
-        during the current calendar month.
+        Legacy mode counts the current calendar month. Paced mode uses a real
+        rolling 30-day safety window so an accelerated world clock cannot
+        multiply the allowed mutation rate.
         """
-        from sqlalchemy import extract
-        now = datetime.now(UTC)
-        stmt = (
-            select(PersonalityHistory.changes_json)
-            .where(
+        if _pacing_enabled():
+            # This is a safety budget, not resident-calendar narrative.  Keep it
+            # on real rolling time so k=4 cannot multiply the allowed mutation
+            # rate fourfold: at most 8 dimensions in any real 30-day window.
+            from app import world_clock
+            since = world_clock.now_real().astimezone(UTC) - timedelta(days=30)
+            stmt = select(PersonalityHistory.changes_json).where(
                 PersonalityHistory.resident_id == resident_id,
-                extract("year", PersonalityHistory.created_at) == now.year,
-                extract("month", PersonalityHistory.created_at) == now.month,
+                PersonalityHistory.created_at >= since,
             )
-        )
+        else:
+            from sqlalchemy import extract
+            now = datetime.now(UTC)
+            stmt = (
+                select(PersonalityHistory.changes_json)
+                .where(
+                    PersonalityHistory.resident_id == resident_id,
+                    extract("year", PersonalityHistory.created_at) == now.year,
+                    extract("month", PersonalityHistory.created_at) == now.month,
+                )
+            )
         result = await db.execute(stmt)
         rows = result.scalars().all()
         used = sum(len(row) for row in rows if isinstance(row, dict))
         return max(0, self.TOTAL_MONTHLY_CHANGE - used)
+
+    async def check_drift_budget(self, resident_id: str, db: AsyncSession) -> int:
+        """Remaining ordinary-drift budget.
+
+        V2 combines the total rolling-30d cap with a rolling-7d ordinary cap;
+        dramatic shifts use only the total cap.  Legacy mode preserves the old
+        calendar-month calculation.
+        """
+        total_remaining = await self.check_monthly_budget(resident_id, db)
+        if not _pacing_enabled():
+            return total_remaining
+        from app import world_clock
+        since = world_clock.now_real().astimezone(UTC) - timedelta(days=7)
+        stmt = select(PersonalityHistory.changes_json).where(
+            PersonalityHistory.resident_id == resident_id,
+            PersonalityHistory.trigger_type == "drift",
+            PersonalityHistory.created_at >= since,
+        )
+        rows = (await db.execute(stmt)).scalars().all()
+        used = sum(len(row) for row in rows if isinstance(row, dict))
+        return min(total_remaining, max(0, self.DRIFT_ROLLING_7D_CHANGE - used))
+
+
+def _pacing_enabled() -> bool:
+    from app.config import settings
+    return bool(settings.realism_personality_pacing_enabled)

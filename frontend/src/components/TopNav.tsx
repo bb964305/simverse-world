@@ -14,6 +14,10 @@ import { bridge } from '../game/phaserBridge'
 import { disconnectWS, onWSMessage } from '../services/ws'
 import { getNotifications, getDailyQuest, getActiveEvents, getMe } from '../services/api'
 import type { DailyQuestResponse, ActiveEventData } from '../services/api'
+import {
+  caravanBannerText, refreshCaravanProjection, subscribeCaravanProjection,
+} from '../services/caravanProjection'
+import type { CaravanState } from '../services/api'
 import '../styles/game-ui.css'
 
 // Streak reward ladder (D3): SC amounts for each day of the 7-day cycle.
@@ -71,6 +75,7 @@ export function TopNav() {
   const [events, setEvents] = useState<ActiveEventData[]>([])
   const [eventIdx, setEventIdx] = useState(0)
   const [bannerVisible, setBannerVisible] = useState(true)
+  const [caravanState, setCaravanState] = useState<CaravanState | null>(null)
   const dismissedEvents = getDismissedEvents(user?.id)
   const streakOpen = activePopover === 'streak'
   const notifOpen = activePopover === 'notifications'
@@ -112,6 +117,17 @@ export function TopNav() {
       .catch(() => {})
   }, [dismissedEvents, refreshDailyQuest])
 
+  // The caravan is a server-authoritative temporary world entity. Subscribe to
+  // the shared REST/WS convergence store so duplicate and out-of-order frames
+  // cannot flicker the banner back to an older phase.
+  useEffect(() => {
+    const unsubscribe = subscribeCaravanProjection((projection) => {
+      setCaravanState(projection.snapshot)
+    })
+    void refreshCaravanProjection().catch(() => { /* optional status copy */ })
+    return unsubscribe
+  }, [])
+
   // Refetch when the popup opens — streak/quest status may have changed.
   useEffect(() => {
     if (streakOpen) refreshDailyQuest()
@@ -138,8 +154,11 @@ export function TopNav() {
   // indexes with `eventIdx % events.length`, so no sync reset is needed when
   // the list shrinks; the fade timeout is left to fire (it only restores
   // visibility, a harmless no-op after unmount).
+  const caravanStatus = caravanBannerText(caravanState)
   useEffect(() => {
-    if (events.length <= 1) return
+    // The caravan is a single live status, so do not blink it while background
+    // world events continue to accumulate/cycle.
+    if (caravanStatus || events.length <= 1) return
     const id = setInterval(() => {
       setBannerVisible(false)
       setTimeout(() => {
@@ -148,7 +167,7 @@ export function TopNav() {
       }, 300)
     }, 8000)
     return () => clearInterval(id)
-  }, [events.length])
+  }, [caravanStatus, events.length])
 
   // Only one nav popover can own focus at a time. Outside click and Escape use
   // the active popover's trigger/container as the boundary.
@@ -189,11 +208,12 @@ export function TopNav() {
   const streakIdx = loginStreak > 0 ? (loginStreak - 1) % 7 : -1
   const quest = dailyData?.quest ?? null
   const currentEvent = events.length > 0 ? events[eventIdx % events.length] : null
+  const hasTopBanner = Boolean(caravanStatus || currentEvent)
 
   useEffect(() => {
-    document.documentElement.style.setProperty('--game-event-height', currentEvent ? '30px' : '0px')
+    document.documentElement.style.setProperty('--game-event-height', hasTopBanner ? '30px' : '0px')
     return () => document.documentElement.style.setProperty('--game-event-height', '0px')
-  }, [currentEvent])
+  }, [hasTopBanner])
 
   useEffect(() => {
     if (!activeModal) return
@@ -481,23 +501,27 @@ export function TopNav() {
     <TownHallPanel />
     <LabTerminalPanel />
     {/* The shared event-height variable moves every game HUD surface below it. */}
-    {currentEvent && (
+    {(caravanStatus || currentEvent) && (
       <div className="game-world-event" style={{ opacity: bannerVisible ? 1 : 0, transition: 'opacity 0.3s ease' }} role="status">
-        <span>📣</span>
+        <span>{caravanStatus ? '🛒' : '📣'}</span>
         <span className="game-world-event__copy">
-          <span style={{ fontWeight: 600 }}>{currentEvent.title}</span>
-          <span className="game-world-event__description" style={{ color: '#d2c5c4' }}> · {currentEvent.description.slice(0, 80)}</span>
+          <span style={{ fontWeight: 600 }}>{caravanStatus ? '靛篷商队' : currentEvent?.title}</span>
+          <span className="game-world-event__description" style={{ color: '#d2c5c4' }}>
+            {' · '}{caravanStatus ?? currentEvent?.description.slice(0, 80)}
+          </span>
         </span>
-        {events.length > 1 && (
+        {!caravanStatus && events.length > 1 && (
           <span style={{ fontSize: 10, color: 'var(--text-muted)', fontVariantNumeric: 'tabular-nums' }}>
             {(eventIdx % events.length) + 1}/{events.length}
           </span>
         )}
-        <button
-          onClick={() => dismissEvent(currentEvent.id)}
-          aria-label="关闭世界事件"
-          className="game-dialog-close"
-        >✕</button>
+        {!caravanStatus && currentEvent && (
+          <button
+            onClick={() => dismissEvent(currentEvent.id)}
+            aria-label="关闭世界事件"
+            className="game-dialog-close"
+          >✕</button>
+        )}
       </div>
     )}
   </>)

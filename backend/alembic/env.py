@@ -14,6 +14,7 @@ from app.models.conversation import Conversation, Message
 from app.models.transaction import Transaction
 from app.models.llm_usage import LLMUsage
 from app.models.world_event import WorldEvent
+from app.models.caravan_visit import CaravanVisit, CaravanVisitPurchase
 from app.models.notification import Notification
 from app.models.achievement import Achievement, UserAchievement
 from app.models.shop import Item, Purchase

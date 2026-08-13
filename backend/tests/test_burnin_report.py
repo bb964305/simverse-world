@@ -14,6 +14,7 @@ from scripts.burnin_report import (
     aggregate, fetch_rows, render_report, summarize_day,
     fetch_move_records, plan_arrival_rate, behavior_memory_consistency, render_probes,
     location_hourly_traffic, needs_health, render_probes_p1, fetch_resident_needs,
+    fetch_plan_records, plan_trip_summary,
 )
 
 
@@ -125,6 +126,46 @@ def test_probes_none_on_empty():
     assert plan_arrival_rate([]) is None
     assert behavior_memory_consistency([]) is None
     assert "-" in render_probes([])
+
+
+@pytest.mark.anyio
+async def test_v2_plan_probe_counts_interrupted_trip_in_denominator(db_session):
+    now = datetime.now(UTC)
+    db_session.add_all([
+        Memory(
+            resident_id="r1", type="event", content="和人聊天", importance=0.3,
+            source="agent_action", created_at=now,
+            metadata_json={"plan": {
+                "date": "2028-06-08", "slot": 1,
+                "scheduled_action": "VISIT_DISTRICT",
+                "scheduled_target": "academy", "followed": False,
+                "interrupt_reason": "social",
+            }},
+        ),
+        Memory(
+            resident_id="r2", type="event", content="到达了学院", importance=0.3,
+            source="agent_action", created_at=now,
+            metadata_json={
+                "plan": {"date": "2028-06-08", "slot": 1,
+                         "scheduled_action": "VISIT_DISTRICT",
+                         "scheduled_target": "academy", "followed": True,
+                         "interrupt_reason": None},
+                "move": {"intent": "VISIT_DISTRICT", "target": "academy",
+                         "moved": True, "arrived": True, "planned": True,
+                         "plan_date": "2028-06-08", "plan_slot": 1},
+            },
+        ),
+        # Unplanned visit is intentionally not a scheduled-trip denominator.
+        _move_mem("r3", "到达了咖啡馆", target="cafe", moved=True, arrived=True),
+    ])
+    await db_session.commit()
+    records = await fetch_plan_records(db_session, since=now - timedelta(minutes=1))
+    summary = plan_trip_summary(records)
+    assert summary["total"] == 2
+    assert summary["started"] == 1 and summary["arrived"] == 1
+    assert summary["arrival_rate"] == pytest.approx(0.5)
+    assert summary["failure_reasons"] == {"social": 1}
+    assert "50.0%" in render_probes([], records)
 
 
 def test_behavior_consistency_flags_phantom():

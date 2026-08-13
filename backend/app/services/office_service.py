@@ -30,13 +30,10 @@ S10 —— 与 ``meta_json['duty']`` 的边界(``app/services/duty_service.py`` 
 对向的同一段说明):
 
 官职(下面的 ``OFFICE_DEFS``,4 键)与营生(``duty_service``,11 键)是**两个概
-念**,不是同一概念的两套存储。重叠只有 ``{town_clerk, postman}``,来自迁移 046
-的一次性快照拷贝,之后零同步:生产那两行 ``holder_slug`` 恒为 NULL,而赵启文与
-骆小舟一直在做那两件营生。这不是待修的不一致,而是
-``duty_service.find_duty_resident`` 的 offices 索引优化对这两键永久失效(恒回落
-O(N) 扫描)——回填是数据变更,与开闸同车会触红线,所以本批不做。
-``tests/test_office_duty_boundary.py`` 张了一张双向漂移网:``holder_slug`` 非空
-且与营生持有人不一致 → 红;offices 空而营生有人 → warning(今天的生产态)。
+念**,不是同一概念的两套存储。重叠只有 ``{town_clerk, postman}``。迁移 046
+曾做一次快照，但 roster reset 会先腾空 office 再重建居民；
+:func:`reconcile_seed_offices` 在 reset 末尾幂等补回这两个 seed 席位，并拒绝
+覆盖任何非空冲突。其余 duty 与 mayor/doctor 始终不互抄。
 
 镇长是官职,从来不是营生;``mayor`` 的权威读法是
 ``election_service.current_mayor``,不是裸读本表(见 ``_effective_holder``)。
@@ -64,6 +61,87 @@ OFFICE_DEFS: dict[str, dict] = {
     "doctor": {"institution": "clinic", "fill_strategy": "appointment"},
 }
 _DEFAULT_INSTITUTION = "town_hall"
+
+# Only these labour duties intentionally overlap the offices table.  Mayor and
+# doctor have no legacy duty counterpart; private duties must never be copied
+# into offices merely because both concepts have a human-readable title.
+SEED_DUTY_OFFICE_KEYS: tuple[str, ...] = ("town_clerk", "postman")
+
+
+async def reconcile_seed_offices(
+    db: AsyncSession, *, apply: bool = False,
+) -> dict:
+    """Plan or apply the two safe seed-duty → office appointments.
+
+    Vacancies are filled only when exactly one autonomous resident carries the
+    matching duty. A non-vacant disagreement is reported as a conflict and is
+    never overwritten. The default is a read-only dry run so operators can use
+    this function directly against production before choosing ``apply=True``.
+    """
+    from app.models.resident import Resident
+    from app.services.duty_service import duty_key
+
+    residents = (await db.execute(
+        select(Resident).where(
+            Resident.is_autonomous,
+            Resident.meta_json.isnot(None),
+        ).order_by(Resident.slug)
+    )).scalars().all()
+    candidates = {
+        key: [r.slug for r in residents if duty_key(r) == key]
+        for key in SEED_DUTY_OFFICE_KEYS
+    }
+    holders = dict((await db.execute(
+        select(Office.office_key, Office.holder_slug).where(
+            Office.office_key.in_(SEED_DUTY_OFFICE_KEYS)
+        )
+    )).all())
+
+    report: dict = {
+        "dry_run": not apply,
+        "would_appoint": [],
+        "appointed": [],
+        "unchanged": [],
+        "missing": [],
+        "ambiguous": {},
+        "conflicts": {},
+    }
+    service = OfficeService(db)
+    for key in SEED_DUTY_OFFICE_KEYS:
+        slugs = candidates[key]
+        if not slugs:
+            report["missing"].append(key)
+            continue
+        if len(slugs) != 1:
+            report["ambiguous"][key] = slugs
+            continue
+        expected = slugs[0]
+        actual = holders.get(key)
+        if actual == expected:
+            report["unchanged"].append({"office_key": key, "holder": expected})
+            continue
+        if actual:
+            report["conflicts"][key] = {
+                "office_holder": actual,
+                "duty_holder": expected,
+            }
+            continue
+        item = {"office_key": key, "holder": expected}
+        if not apply:
+            report["would_appoint"].append(item)
+            continue
+        if await service.appoint_if_vacant(
+            key, expected, fill_strategy="seed",
+        ):
+            report["appointed"].append(item)
+        else:
+            raced_holder = await service.get_holder(key)
+            report["conflicts"][key] = {
+                "office_holder": raced_holder,
+                "duty_holder": expected,
+                "reason": "concurrent_appointment_or_failure",
+            }
+    return report
 
 
 def _term_window(term_days: int | None) -> tuple[datetime, datetime | None]:
@@ -140,6 +218,73 @@ class OfficeService:
             "office_appointed", office_key, holder_slug=slug,
         )
         return True
+
+    async def appoint_if_vacant(
+        self, office_key: str, slug: str, *, fill_strategy: str,
+        term_days: int | None = None,
+    ) -> bool:
+        """Install a holder only while the seat is vacant.
+
+        Unlike :meth:`appoint`, this never transfers a non-empty office. It is
+        the reconciliation primitive: a concurrent appointment between dry
+        read and apply is observed as ``False``, never overwritten.
+        """
+        if not office_key or not slug:
+            return False
+        started, ends = _term_window(term_days)
+        values = {
+            "holder_slug": slug,
+            "fill_strategy": fill_strategy,
+            "term_started_at": started,
+            "term_ends_at": ends,
+            "updated_at": datetime.now(UTC),
+        }
+        for _attempt in range(3):
+            result = await self.db.execute(
+                update(Office)
+                .where(
+                    Office.office_key == office_key,
+                    Office.holder_slug.is_(None),
+                )
+                .values(**values)
+                .execution_options(synchronize_session=False)
+            )
+            if (result.rowcount or 0) > 0:
+                await self.db.commit()
+                await self._emit_office_changed(
+                    "office_appointed", office_key, holder_slug=slug,
+                )
+                return True
+
+            existing = (await self.db.execute(
+                select(Office.holder_slug).where(
+                    Office.office_key == office_key
+                )
+            )).scalar_one_or_none()
+            if existing is not None:
+                await self.db.commit()  # end the read transaction / any lock
+                return existing == slug
+
+            defaults = OFFICE_DEFS.get(office_key, {})
+            self.db.add(Office(
+                office_key=office_key,
+                institution=defaults.get("institution", _DEFAULT_INSTITUTION),
+                perms_json={},
+                **values,
+            ))
+            try:
+                await self.db.commit()
+                await self._emit_office_changed(
+                    "office_appointed", office_key, holder_slug=slug,
+                )
+                return True
+            except IntegrityError:
+                await self.db.rollback()
+                continue
+        logger.warning(
+            "vacant-only office appoint lost upsert race: %s", office_key,
+        )
+        return False
 
     async def vacate(self, office_key: str, *, audit: bool = False) -> bool:
         """Clear the office holder + term end. Guard UPDATE — returns True

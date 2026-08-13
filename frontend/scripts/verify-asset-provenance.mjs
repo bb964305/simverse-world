@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Release gate for third-party tilemaps and the canonical 25 generated sprite slots.
+// Release gate for third-party tilemaps, resident sprites, and caravan atlases.
 import { readFileSync, readdirSync, existsSync, lstatSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { inflateSync } from 'node:zlib'
@@ -17,9 +17,23 @@ const VILLAGE_DIR = process.env.SIMVERSE_ASSET_VILLAGE_DIR || (useDist
   : join(REPO, 'frontend', 'public', 'assets', 'village'))
 const TILEMAP_DIR = join(VILLAGE_DIR, 'tilemap')
 const AGENT_DIR = join(VILLAGE_DIR, 'agents')
+const CARAVAN_DIR = join(VILLAGE_DIR, 'caravan')
 const release = process.argv.includes('--release') || useDist
 const RECEIPT_POLICY_FILE = 'agents/*/{texture,portrait}.png'
 const HEX64 = /^[0-9a-f]{64}$/
+
+// The resident installer deliberately verifies an isolated fixture whose
+// village root contains only `agents/`.  Treat only that exact explicit
+// override shape as a resident-scoped gate.  Source/dist trees, and fuller
+// override trees with a missing caravan directory, still require the complete
+// caravan contract below.
+const explicitVillageOverride = Boolean(process.env.SIMVERSE_ASSET_VILLAGE_DIR)
+const overrideRootEntries = explicitVillageOverride && directory(VILLAGE_DIR)
+  ? readdirSync(VILLAGE_DIR).sort()
+  : []
+const agentsOnlyOverride = explicitVillageOverride && directory(AGENT_DIR) &&
+  overrideRootEntries.includes('agents') && overrideRootEntries.every((name) =>
+    name === 'agents' || (name === '.resident-sprite-install.lock' && regular(join(VILLAGE_DIR, name))))
 
 let errors = 0
 let releaseBlocks = 0
@@ -115,6 +129,53 @@ function portraitMatches(texture, portrait) {
     for (let channel = 0; channel < 4; channel++) if (texture.pixels[si + channel] !== portrait.pixels[pi + channel]) return false
   }
   return true
+}
+
+function validateGridAtlas(atlas, action, size, anchorY) {
+  if (!atlas || atlas.meta?.image !== 'texture.png' || atlas.meta?.format !== 'RGBA8888' ||
+      atlas.meta?.size?.w !== size * 3 || atlas.meta?.size?.h !== size * 4) return false
+  const frames = new Map((atlas.frames || []).map((entry) => [entry.filename, entry]))
+  if (frames.size !== 20) return false
+  for (const [row, direction] of ['down', 'left', 'right', 'up'].entries()) {
+    const names = [
+      `${direction}-${action}.000`, `${direction}-${action}.001`,
+      `${direction}-${action}.002`, `${direction}-${action}.003`, direction,
+    ]
+    const xs = [0, size, size * 2, size, size]
+    for (let index = 0; index < names.length; index++) {
+      const entry = frames.get(names[index])
+      const frame = entry?.frame
+      if (!frame || frame.x !== xs[index] || frame.y !== row * size ||
+          frame.w !== size || frame.h !== size ||
+          entry.anchor?.x !== 0.5 || entry.anchor?.y !== anchorY) return false
+    }
+  }
+  return true
+}
+
+function validateCaravanPng(path, record, width, height) {
+  if (!record || record.file !== path.split('/').at(-1) || record.width !== width ||
+      record.height !== height || record.mode !== 'RGBA' || record.bytes !== readFileSync(path).length ||
+      record.sha256 !== sha256(path) || !HEX64.test(record.sha256 || '')) return false
+  try {
+    const decoded = decodeRgbaPng(path)
+    if (decoded.width !== width || decoded.height !== height) return false
+    const palette = new Set(); let opaquePixels = 0
+    for (let offset = 0; offset < decoded.pixels.length; offset += 4) {
+      const red = decoded.pixels[offset]; const green = decoded.pixels[offset + 1]
+      const blue = decoded.pixels[offset + 2]; const alpha = decoded.pixels[offset + 3]
+      if (alpha !== 0 && alpha !== 255) return false
+      if (alpha === 0) palette.add('transparent')
+      else {
+        opaquePixels++
+        palette.add(`${red},${green},${blue},255`)
+        if (red >= 240 && green <= 24 && blue >= 240) return false
+      }
+    }
+    return opaquePixels > 0 && palette.size <= 32
+  } catch {
+    return false
+  }
 }
 
 const manifest = parseJson(MANIFEST, 'asset provenance manifest')
@@ -275,6 +336,83 @@ for (const slot of catalog.slots) {
 if (generatedBatchPresent && clearedGeneratedFiles !== 50) block(`generated batch clears ${clearedGeneratedFiles}/50 resident files`, 50 - clearedGeneratedFiles)
 if (!generatedBatchPresent) rows.push([RECEIPT_POLICY_FILE, 'pending', 'blocked', '0/50 receipts'])
 
+// The caravan is a first-party generated runtime entity rather than a resident
+// slot. Its receipts, PNG constraints, and coupled Phaser atlases are still
+// release-gated so a stale JSON/new texture cache pair cannot ship unnoticed.
+// The one exception is the explicit agents-only installer fixture identified
+// above; it has no caravan tree by design and cannot be mistaken for a full
+// release tree.
+const caravanContracts = [
+  {
+    part: 'merchant',
+    files: [['texture.png', 96, 128], ['portrait.png', 256, 256]],
+    atlas: ['walk', 32, 0.5],
+  },
+  {
+    part: 'convoy',
+    files: [['texture.png', 192, 256]],
+    atlas: ['roll', 64, 0.75],
+  },
+  {
+    part: 'stall',
+    files: [['texture.png', 64, 64]],
+    atlas: null,
+  },
+]
+if (!agentsOnlyOverride && !directory(CARAVAN_DIR)) fail('caravan asset directory is missing or unsafe')
+else if (!agentsOnlyOverride) {
+  const caravanDirs = readdirSync(CARAVAN_DIR, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+    .map((entry) => entry.name).sort()
+  if (JSON.stringify(caravanDirs) !== JSON.stringify(['convoy', 'merchant', 'stall'])) {
+    fail('caravan directory must contain exactly convoy, merchant, and stall assets')
+  }
+}
+for (const contract of agentsOnlyOverride ? [] : caravanContracts) {
+  const partDir = join(CARAVAN_DIR, contract.part)
+  let valid = directory(partDir)
+  const expectedNames = [
+    ...contract.files.map(([file]) => file),
+    'generation-provenance.json',
+    ...(contract.atlas ? ['atlas.json'] : []),
+  ].sort()
+  if (valid) {
+    const names = readdirSync(partDir, { withFileTypes: true })
+    if (names.some((entry) => entry.isSymbolicLink() || !entry.isFile()) ||
+        JSON.stringify(names.map((entry) => entry.name).sort()) !== JSON.stringify(expectedNames)) valid = false
+  }
+  const receipt = parseJson(join(partDir, 'generation-provenance.json'), `${contract.part} caravan generation receipt`)
+  if (!receipt || receipt.schema_version !== 1 || receipt.generator !== 'Codex built-in ImageGen' ||
+      receipt.rights_basis !== 'first_party_generated' || typeof receipt.prompt_contract !== 'string' ||
+      receipt.prompt_contract.length < 80 || !Array.isArray(receipt.generated_sources) ||
+      receipt.generated_sources.length === 0 || !String(receipt.postprocess?.chroma_key || '').includes('remove_chroma_key.py') ||
+      receipt.files?.length !== contract.files.length) valid = false
+  const receiptFiles = new Map((receipt?.files || []).map((record) => [record.file, record]))
+  for (const [file, width, height] of contract.files) {
+    const path = join(partDir, file)
+    if (!regular(path) || !validateCaravanPng(path, receiptFiles.get(file), width, height)) valid = false
+  }
+  if (contract.part === 'merchant' && valid) {
+    try {
+      if (!portraitMatches(
+        decodeRgbaPng(join(partDir, 'texture.png')),
+        decodeRgbaPng(join(partDir, 'portrait.png')),
+      )) valid = false
+    } catch { valid = false }
+  }
+  if (contract.atlas) {
+    const atlas = parseJson(join(partDir, 'atlas.json'), `${contract.part} caravan atlas`)
+    if (!validateGridAtlas(atlas, ...contract.atlas)) valid = false
+  }
+  if (!valid) fail(`generated provenance, image, or atlas contract is invalid for caravan/${contract.part}`)
+  rows.push([
+    `caravan/${contract.part}/{${expectedNames.join(',')}}`,
+    valid ? 'cleared' : 'invalid',
+    valid ? 'allowed' : 'blocked',
+    valid ? 'receipt ok' : 'INVALID',
+  ])
+}
+
 const fileWidth = Math.max(37, ...rows.map(([file]) => file.length + 1))
 console.log(`\nAsset provenance (${useDist ? 'dist' : 'source'} tree; ${manifest.task})`)
 console.log(`${'file'.padEnd(fileWidth)} audit      distribution  integrity`)
@@ -290,8 +428,12 @@ if (release && releaseBlocks > 0) {
   console.error(`FAILED release gate: ${releaseBlocks} generated/third-party file condition(s) are not cleared.`)
   process.exit(1)
 }
-if (release) console.log('ok release gate passed: tilemaps and all 50 generated resident files are cleared.')
+if (release) console.log(agentsOnlyOverride
+  ? 'ok release gate passed: all 50 generated resident files are cleared (agents-only override).'
+  : 'ok release gate passed: tilemaps and all 50 generated resident files are cleared; caravan atlases are cleared.')
 else {
-  console.log('ok integrity check passed: tilemaps and the canonical 25-slot baseline are byte-accounted.')
+  console.log(agentsOnlyOverride
+    ? 'ok integrity check passed: the canonical 25-slot baseline is byte-accounted (agents-only override).'
+    : 'ok integrity check passed: tilemaps, the canonical 25-slot baseline, and caravan atlases are byte-accounted.')
   if (releaseBlocks > 0) console.log(`  note: ${releaseBlocks} generated-file condition(s) remain blocked; run --release for the packaging gate.`)
 }

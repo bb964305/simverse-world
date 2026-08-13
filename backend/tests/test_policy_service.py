@@ -307,6 +307,31 @@ async def test_propose_amend_simple_majority_opens_poll(db_session, policy_gate)
 
 
 @pytest.mark.anyio
+async def test_caravan_policy_opens_a_binding_simple_majority_poll(
+    db_session, policy_gate,
+):
+    from app.models.season import Poll
+    from app.services.policy_service import PolicyService, PolicyValueError
+
+    result = await PolicyService(db_session).propose_amend(
+        "caravan_enabled", True, origin="resident", author="jiang-lin",
+    )
+    assert result.tier == "simple_majority"
+    poll = await db_session.get(Poll, result.poll_id)
+    assert poll.options_json[0]["effect"] == {
+        "type": "policy",
+        "key": "caravan_enabled",
+        "value": True,
+        "tier": "simple_majority",
+    }
+
+    with pytest.raises(PolicyValueError, match="requires a boolean value"):
+        await PolicyService(db_session).propose_amend(
+            "caravan_enabled", "yes", origin="resident", author="jiang-lin",
+        )
+
+
+@pytest.mark.anyio
 async def test_propose_amend_absolute_majority_sets_supermajority(db_session,
                                                                   policy_gate):
     from app.models.season import Poll

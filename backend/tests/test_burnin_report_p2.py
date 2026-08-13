@@ -41,13 +41,21 @@ def test_skewness_none_on_empty():
     assert degree_distribution_skewness([]) is None
 
 
+def test_skewness_includes_autonomous_isolates():
+    edges = [("a", "b", 0.5)]
+    s = degree_distribution_skewness(edges, {"a", "b", "isolated"})
+    assert s["n_nodes"] == 3
+    assert s["min_degree"] == 0
+
+
 # --------------------------- info diffusion half-life ---------------------------
 
 def _diffusion(records, types, total):
     return {"records": records, "event_type": types, "total_residents": total}
 
 
-def test_half_life_time_to_50pct():
+def test_half_life_time_to_50pct(monkeypatch):
+    monkeypatch.setattr(settings, "world_clock_k", 4)
     t0 = datetime(2026, 1, 1, tzinfo=UTC)
     # 10 residents; 2 first-hand at t0, then one more each hour → 50% (5) at +3h
     recs = []
@@ -57,7 +65,8 @@ def test_half_life_time_to_50pct():
     out = info_diffusion_half_life(_diffusion(recs, {"e": "news"}, 10))
     ev = out["events"][0]
     assert ev["informed_count"] == 7
-    assert ev["time_to_50pct_hours"] == pytest.approx(3.0)   # 5th distinct at +3h
+    assert ev["time_to_50pct_hours"] == pytest.approx(3.0)  # compatibility: real hours
+    assert ev["time_to_50pct_world_hours"] == pytest.approx(12.0)
 
 
 def test_half_life_weather_excluded():
@@ -73,6 +82,7 @@ def test_half_life_control_instant():
     recs = [{"event_id": "e", "resident_id": f"r{i}", "created_at": t0} for i in range(10)]
     out = info_diffusion_half_life(_diffusion(recs, {"e": "news"}, 10))
     assert out["events"][0]["time_to_50pct_hours"] == pytest.approx(0.0)
+    assert out["events"][0]["time_to_50pct_world_hours"] == pytest.approx(0.0)
     assert out["events"][0]["informed_ratio"] == pytest.approx(1.0)
 
 
@@ -137,3 +147,26 @@ async def test_seeded_probes_end_to_end(db_session, monkeypatch, capsys):
     block = render_probes_p2(edges, diffusion)
     print("\n" + block)     # -s to view; numbers recorded in PROGRESS
     assert "度分布偏度" in block and "信息扩散半衰期" in block
+
+
+@pytest.mark.anyio
+async def test_diffusion_population_excludes_player_avatar(db_session):
+    db_session.add_all([
+        Resident(id="npc", slug="npc", name="NPC", creator_id="sys",
+                 resident_type="npc", district="cafe", status="idle", tile_x=1, tile_y=1),
+        Resident(id="avatar", slug="avatar", name="Avatar", creator_id="player",
+                 resident_type="player", district="cafe", status="idle", tile_x=1, tile_y=1),
+        WorldEvent(id="scope-event", type="news", title="消息", description="消息",
+                   is_active=True),
+    ])
+    db_session.add_all([
+        Memory(id="npc-event", resident_id="npc", type="event", content="消息",
+               importance=0.5, source="world_event", metadata_json={"event_id": "scope-event"}),
+        Memory(id="avatar-event", resident_id="avatar", type="event", content="消息",
+               importance=0.5, source="world_event", metadata_json={"event_id": "scope-event"}),
+    ])
+    await db_session.commit()
+
+    diffusion = await fetch_event_diffusion(db_session)
+    assert diffusion["total_residents"] == 1
+    assert {row["resident_id"] for row in diffusion["records"]} == {"npc"}

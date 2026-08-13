@@ -45,6 +45,39 @@ async def test_list_residents(client, seeded_db):
     assert data[1]["slug"] == "isabella"
 
 @pytest.mark.anyio
+async def test_list_residents_includes_players_by_default(client, seeded_db, db_session):
+    """回归锚: 默认行为必须与 master 逐字节一致——包含玩家化身。
+    DecorEditor/ShopModal 靠这个默认列表找玩家自己的化身。"""
+    player = Resident(
+        id="player-row",
+        slug="p-player",
+        name="Player",
+        resident_type="player",
+        creator_id="11111111-1111-1111-1111-111111111111",
+    )
+    db_session.add(player)
+    await db_session.commit()
+
+    data = (await client.get("/residents")).json()
+    assert {item["slug"] for item in data} == {"isabella", "klaus", "p-player"}
+
+@pytest.mark.anyio
+async def test_list_residents_exclude_players_opt_in(client, seeded_db, db_session):
+    """NPC layer 显式传 exclude_players=true 时过滤玩家化身。"""
+    player = Resident(
+        id="player-row",
+        slug="p-player",
+        name="Player",
+        resident_type="player",
+        creator_id="11111111-1111-1111-1111-111111111111",
+    )
+    db_session.add(player)
+    await db_session.commit()
+
+    data = (await client.get("/residents", params={"exclude_players": "true"})).json()
+    assert {item["slug"] for item in data} == {"isabella", "klaus"}
+
+@pytest.mark.anyio
 async def test_get_resident_by_slug(client, seeded_db):
     resp = await client.get("/residents/isabella")
     assert resp.status_code == 200

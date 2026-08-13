@@ -2,6 +2,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { visualizer } from 'rollup-plugin-visualizer'
 import { existsSync, readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 
 const residentBatchReceipt = new URL(
   './public/assets/village/agents/generation-batch.json',
@@ -20,10 +21,33 @@ function residentSpriteAssetVersion(): string {
   }
 }
 
+const caravanAssetInputs = [
+  'merchant/generation-provenance.json',
+  'merchant/texture.png',
+  'merchant/atlas.json',
+  'convoy/generation-provenance.json',
+  'convoy/texture.png',
+  'convoy/atlas.json',
+  'stall/generation-provenance.json',
+  'stall/texture.png',
+].map((path) => new URL(`./public/assets/village/caravan/${path}`, import.meta.url))
+
+function caravanAssetVersion(): string {
+  if (caravanAssetInputs.some((path) => !existsSync(path))) return 'caravan-assets-missing'
+  try {
+    const digest = createHash('sha256')
+    for (const path of caravanAssetInputs) digest.update(readFileSync(path))
+    return digest.digest('hex').slice(0, 24)
+  } catch {
+    return 'caravan-assets-invalid'
+  }
+}
+
 // https://vite.dev/config/
 export default defineConfig({
   define: {
     __RESIDENT_SPRITE_ASSET_VERSION__: JSON.stringify(residentSpriteAssetVersion()),
+    __CARAVAN_ASSET_VERSION__: JSON.stringify(caravanAssetVersion()),
   },
   plugins: [
     react(),

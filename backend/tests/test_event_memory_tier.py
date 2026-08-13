@@ -249,11 +249,12 @@ async def test_weather_stays_a_direct_write_when_tiered(
 
 @pytest.mark.anyio
 async def test_market_day_festival_stays_trivial_when_tiered(
-        db_session, realism_on, gradient_on, tiered_on):
+        db_session, realism_on, gradient_on, tiered_on, monkeypatch):
     """集市日归琐事:它每周复现(``MARKET_DAY_WEEKDAY``),而 NPC 已经从事实层
     (``town_facts`` 的 ``today.is_market_day``)知道今天是不是集市日 —— 再占一个
     候选池的坑只会自我复制。判据与 ``shop_service._market_discount`` 同源。"""
-    cx, cy = _plaza_center()
+    monkeypatch.setattr(settings, "market_day_venue", "market_hall")
+    cx, cy = get_location_by_id("market_hall")["center"]
     await _residents(db_session, 1, (cx, cy))
     content = _long_description("集市日：")
 

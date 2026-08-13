@@ -173,6 +173,17 @@ class AgentLoop:
                 await _metabolize_sleepers(current_hour, current_weekday)
             except Exception:
                 logger.warning("sleeper metabolism failed", exc_info=True)
+        active_trip_ids: set[str] = set()
+        if getattr(settings, "realism_plan_continuity_enabled", False):
+            try:
+                from app.agent.plan_continuity import active_trip_resident_ids
+                active_trip_ids = await active_trip_resident_ids(
+                    [row.id for row in rows])
+            except Exception:
+                # Existence is only a scheduling hint. Redis trouble falls back
+                # to the ordinary random gate; resident_tick still owns full
+                # trip validation once a tick is admitted.
+                logger.warning("active plan trip batch check failed", exc_info=True)
         semaphore = asyncio.Semaphore(settings.agent_max_concurrent)
 
         async def guarded_tick(
@@ -209,7 +220,12 @@ class AgentLoop:
 
             weather_kind = (weather or {}).get("kind")
             valence = (mood_json or {}).get("valence") if settings.realism_enabled else None
-            if not should_tick(schedule, current_hour, weather_kind, festival_active, valence):
+            # A started route must get consecutive opportunities to advance.
+            # This bypasses only the stochastic gate: the explicit awake-window
+            # check above and the sleeping re-check below remain authoritative.
+            if (resident_id not in active_trip_ids
+                    and not should_tick(
+                        schedule, current_hour, weather_kind, festival_active, valence)):
                 return None
 
             async with semaphore:
@@ -221,6 +237,20 @@ class AgentLoop:
                         or resident.status == "sleeping"
                     ):
                         return None
+                    if (
+                        settings.chat_engaged_tick_skip_enabled
+                        and resident.status in ("chatting", "socializing")
+                    ):
+                        if resident.status == "socializing":
+                            return None
+                        # chatting: only skip while the Redis chat lock is
+                        # held. A missing lock means the chat ended without a
+                        # status reset (stale) — self-heal to idle and tick
+                        # normally so needs/plans/memories keep flowing.
+                        if await manager.resident_lock_owner(resident_id) is not None:
+                            return None
+                        resident.status = "idle"
+                        await db.commit()
                     try:
                         # Pass force_plan_only only when set, so patched ticks
                         # with a (db, resident) signature stay compatible.
@@ -284,6 +314,21 @@ class AgentLoop:
                 "target_tile": list(action_result.target_tile) if action_result.target_tile else None,
                 "status": "walking",
             })
+            # A durable market assignment turns into a purchase only after the
+            # resident has genuinely reached its unique slot.  The service owns
+            # idempotency, wallet/stock CAS and rollback; this broadcast is only
+            # the committed playback frame returned by that authority.
+            try:
+                from app.services.caravan_market_service import maybe_purchase_for_resident
+
+                purchase = await maybe_purchase_for_resident(db, resident)
+                if purchase is not None:
+                    await manager.broadcast(purchase)
+            except Exception:
+                logger.warning(
+                    "market purchase hook failed for %s", resident.slug,
+                    exc_info=True,
+                )
 
         elif action_result.action == ActionType.CHAT_RESIDENT:
             if suppress_chat:

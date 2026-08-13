@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from app.database import Base
 from app.models.user import User
 from app.models.conversation import Conversation
+from app.models.resident import Resident
 
 pytestmark = pytest.mark.anyio
 
@@ -44,6 +45,48 @@ class _FakeManager:
 
     async def send(self, user_id, data):
         self.sent.append(data)
+
+
+async def test_player_avatar_is_never_routed_through_npc_chat():
+    from app.ws.handlers import chat as chat_handler
+    from app.ws.handlers.context import ConnectionContext
+
+    engine = create_async_engine(
+        "sqlite+aiosqlite://", poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        user = User(id="agent-user", name="Agent", email="agent@test.invalid")
+        session.add(user)
+        await session.flush()
+        session.add(
+            Resident(
+                id="agent-avatar",
+                slug="p-agent",
+                name="Agent",
+                resident_type="player",
+                creator_id=user.id,
+            )
+        )
+        await session.commit()
+
+    fake = _FakeManager()
+    ctx = ConnectionContext(user_id="human", user_name="Human")
+    with patch.object(chat_handler, "async_session", factory), patch.object(
+        chat_handler, "manager", fake
+    ):
+        await chat_handler.handle_start_chat(
+            ctx, {"type": "start_chat", "resident_slug": "p-agent"}
+        )
+
+    await engine.dispose()
+    assert fake.sent == [
+        {"type": "error", "message": "Player avatars do not support NPC chat"}
+    ]
+    assert ctx.in_chat is False
 
 
 async def test_player_chat_sends_windowed_history():

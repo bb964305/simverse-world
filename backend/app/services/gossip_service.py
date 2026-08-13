@@ -66,13 +66,46 @@ async def maybe_gossip(db, speaker: Resident, listener: Resident, rng=random) ->
     #              propagates "知情者→朋友→朋友的朋友" second-hand. Only when the
     #              info gradient is on. Gate off → the classic filter alone, i.e.
     #              behavior is byte-identical to pre-P2.
-    fetched = (await db.execute(
+    fetched = list((await db.execute(
         select(Memory).where(
             Memory.resident_id == speaker.id,
             Memory.type == "event",
             Memory.importance >= EVENT_GOSSIP_MIN_IMPORTANCE,
         ).order_by(Memory.importance.desc()).limit(40)
-    )).scalars().all()
+    )).scalars().all())
+
+    # A dedicated recent-event lane prevents 0.5/0.6 world-event memories from
+    # being permanently hidden behind a resident's thousands of high-scoring
+    # personal memories.  It is independently gated for production canaries.
+    if (settings.realism_info_gradient_enabled
+            and settings.realism_gossip_event_lane_enabled):
+        event_rows = list((await db.execute(
+            select(Memory).where(
+                Memory.resident_id == speaker.id,
+                Memory.type == "event",
+                Memory.source.in_(("world_event", "gossip")),
+                Memory.metadata_json["event_id"].as_string().is_not(None),
+            ).order_by(Memory.created_at.desc()).limit(10)
+        )).scalars().all())
+        seen_ids = {m.id for m in fetched}
+        fetched.extend(m for m in event_rows if m.id not in seen_ids)
+
+        # Do not spend a gossip handoff telling the listener an event they
+        # already know; diffusion probes dedupe residents, so duplicates are
+        # pure write/LLM waste.
+        known_rows = (await db.execute(
+            select(Memory.metadata_json).where(
+                Memory.resident_id == listener.id,
+                Memory.type == "event",
+                Memory.source.in_(("world_event", "gossip")),
+                Memory.metadata_json["event_id"].as_string().is_not(None),
+            )
+        )).scalars().all()
+        listener_event_ids = {
+            meta.get("event_id") for meta in known_rows if isinstance(meta, dict)
+        }
+    else:
+        listener_event_ids = set()
 
     def _is_candidate(m: Memory) -> bool:
         meta = m.metadata_json or {}
@@ -84,6 +117,8 @@ async def maybe_gossip(db, speaker: Resident, listener: Resident, rng=random) ->
             and m.related_resident_id != listener.id
         )
         event_class = settings.realism_info_gradient_enabled and bool(meta.get("event_id"))
+        if event_class and meta.get("event_id") in listener_event_ids:
+            return False
         return classic or event_class
 
     usable = [m for m in fetched if _is_candidate(m)]

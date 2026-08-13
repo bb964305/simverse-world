@@ -49,6 +49,15 @@ async def handle_start_chat(ctx: ConnectionContext, data: dict) -> None:
         if not resident:
             await manager.send(ctx.user_id, {"type": "error", "message": "Resident not found"})
             return
+        # Player avatars are controlled by a human or an external Agent and
+        # must never be routed through the NPC LLM/chat lifecycle. They use the
+        # dedicated player_chat path instead.
+        if resident.resident_type == "player":
+            await manager.send(
+                ctx.user_id,
+                {"type": "error", "message": "Player avatars do not support NPC chat"},
+            )
+            return
         # Queue if NPC is chatting or locked by another player
         if resident.status == "chatting" or (not await manager.lock_resident(resident.id, ctx.user_id)):
             pos = await manager.enqueue(resident.id, ctx.user_id)
@@ -70,13 +79,17 @@ async def handle_start_chat(ctx: ConnectionContext, data: dict) -> None:
                     "resident_name": resident.name,
                     "cost": wake_cost,
                 })
-                await manager.unlock_resident(resident.id)
+                await manager.unlock_resident(
+                    resident.id, expected_owner=ctx.user_id
+                )
                 return
             wake_cost = resident.token_cost_per_turn * 3
             ok = await charge(db, ctx.user_id, wake_cost, f"wake:{slug}")
             if not ok:
                 await manager.send(ctx.user_id, {"type": "error", "message": "Insufficient Soul Coins"})
-                await manager.unlock_resident(resident.id)
+                await manager.unlock_resident(
+                    resident.id, expected_owner=ctx.user_id
+                )
                 return
             balance = await get_balance(db, ctx.user_id)
             await manager.send(ctx.user_id, {
@@ -405,7 +418,7 @@ async def handle_end_chat(ctx: ConnectionContext, data: dict) -> None:
                turns=conv_turns, conversation_id=conv_id)
 
     # Release the resident lock
-    await manager.unlock_resident(resident_id)
+    await manager.unlock_resident(resident_id, expected_owner=ctx.user_id)
 
     await manager.send(ctx.user_id, {
         "type": "chat_ended",

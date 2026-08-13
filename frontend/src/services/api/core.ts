@@ -1,4 +1,5 @@
 import { useGameStore } from '../../stores/gameStore'
+import { disconnectWS } from '../ws'
 
 export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -48,6 +49,10 @@ export async function apiFetchResponse(path: string, options: RequestInit = {}):
   }
   if (!resp.ok) {
     if (resp.status === 401) {
+      // The token is dead: tear the authenticated WebSocket down BEFORE
+      // clearing auth, so the next login in this tab cannot ride the old
+      // identity's socket (F9). Safe on repeat — disconnectWS is idempotent.
+      disconnectWS()
       // Centralize logout through the store: it clears token + user (state and
       // localStorage) once. ProtectedRoute then redirects to /login, avoiding
       // the multiple hard `window.location` jumps concurrent 401s used to cause.

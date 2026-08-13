@@ -144,7 +144,14 @@ async def test_flag_off_no_advance(db_session, monkeypatch):
 
 @pytest.mark.anyio
 async def test_seed_arcs_present(db_session):
-    from seed.preset_characters import PRESET_ARCS, seed_preset_arcs, PRESET_CHARACTERS
+    from seed.preset_characters import (
+        PRESET_ARCS,
+        PRESET_GOALS,
+        preset_arc_template_key,
+        preset_goal_template_key,
+        seed_preset_arcs,
+        seed_preset_goals,
+    )
     from app.models.user import User
     from seed.preset_characters import seed_presets
 
@@ -159,6 +166,43 @@ async def test_seed_arcs_present(db_session):
     assert len(arcs) == len(PRESET_ARCS) == 5
     for g in arcs:
         assert g.milestones_json and all("trigger" in m for m in g.milestones_json)
+        assert g.template_key
 
     # idempotent
     assert await seed_preset_arcs(db_session) == 0
+
+    # Resolution used to make both seeders replay the same template on the next
+    # deploy.  Stable keys must survive every lifecycle state.
+    arc = arcs[0]
+    arc.status = "achieved"
+    lives = (await db_session.execute(
+        select(ResidentGoal).where(
+            ResidentGoal.kind == "life",
+            ResidentGoal.template_key.is_not(None),
+        )
+        .order_by(ResidentGoal.template_key)
+    )).scalars().all()
+    life = lives[0]
+    abandoned_life = lives[1]
+    life.status = "achieved"
+    abandoned_life.status = "abandoned"
+    await db_session.commit()
+
+    assert await seed_preset_arcs(db_session) == 0
+    assert await seed_preset_goals(db_session) == 0
+    assert (await db_session.execute(
+        select(ResidentGoal.id).where(
+            ResidentGoal.template_key == preset_arc_template_key(
+                next(slug for slug, data in PRESET_ARCS.items()
+                     if data["title"] == arc.title)
+            )
+        )
+    )).scalars().all() == [arc.id]
+    assert len((await db_session.execute(
+        select(ResidentGoal.template_key).where(
+            ResidentGoal.template_key.like("preset_goal:%")
+        )
+    )).scalars().all()) == len(PRESET_GOALS)
+    assert life.template_key == preset_goal_template_key(
+        next(slug for slug, value in PRESET_GOALS.items() if value[0] == life.title)
+    )

@@ -181,7 +181,9 @@ async def _cleanup(ctx: ConnectionContext) -> None:
     user_id = ctx.user_id
 
     if ctx.in_chat:
-        await manager.unlock_resident(ctx.resident.id)
+        await manager.unlock_resident(
+            ctx.resident.id, expected_owner=ctx.user_id
+        )
         try:
             async with async_session() as db:
                 result = await db.execute(select(Resident).where(Resident.id == ctx.resident.id))

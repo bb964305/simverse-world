@@ -250,3 +250,138 @@ async def test_check_monthly_budget_decreases_with_changes(db_session, guard_res
     remaining = await guard.check_monthly_budget(guard_resident.id, db_session)
     # Each dimension change counts as 1 toward the budget
     assert remaining == PersonalityGuard.TOTAL_MONTHLY_CHANGE - 2
+
+
+# ── staged pacing: world narrative time + real safety windows ─────────────
+
+
+@pytest.mark.anyio
+async def test_pacing_shift_cooldown_uses_world_hours(db_session, guard_resident, monkeypatch):
+    from app import world_clock
+    from app.config import settings
+    real_now = datetime(2026, 8, 11, 8, tzinfo=UTC)
+    monkeypatch.setattr(settings, "realism_personality_pacing_enabled", True)
+    monkeypatch.setattr(settings, "world_clock_k", 4)
+    monkeypatch.setattr(world_clock, "now_real", lambda: real_now)
+    history = PersonalityHistory(
+        resident_id=guard_resident.id, trigger_type="shift",
+        changes_json={"E1": {"from": "H", "to": "M"}},
+        old_type="CTRL", new_type="CTRL", reason="shift",
+        created_at=real_now - timedelta(hours=5),  # 20 world hours
+    )
+    db_session.add(history)
+    await db_session.commit()
+
+    guard = PersonalityGuard()
+    assert await guard.can_shift(guard_resident.id, db_session) is False
+    history.created_at = real_now - timedelta(hours=7)  # 28 world hours
+    await db_session.commit()
+    assert await guard.can_shift(guard_resident.id, db_session) is True
+
+
+@pytest.mark.anyio
+async def test_pacing_drift_requires_72_world_hours_and_15_events(
+    db_session, guard_resident, monkeypatch,
+):
+    from app import world_clock
+    from app.config import settings
+    real_now = datetime(2026, 8, 11, 8, tzinfo=UTC)
+    monkeypatch.setattr(settings, "realism_personality_pacing_enabled", True)
+    monkeypatch.setattr(settings, "world_clock_k", 4)
+    monkeypatch.setattr(world_clock, "now_real", lambda: real_now)
+    history = PersonalityHistory(
+        resident_id=guard_resident.id, trigger_type="drift",
+        changes_json={"S1": {"from": "M", "to": "H"}},
+        old_type="CTRL", new_type="CTRL", reason="drift",
+        created_at=real_now - timedelta(hours=17),  # 68 world hours
+    )
+    db_session.add(history)
+    for i in range(15):
+        db_session.add(Memory(
+            resident_id=guard_resident.id, type="event", content=f"event {i}",
+            importance=0.5, source="agent_action",
+            created_at=real_now - timedelta(hours=1),
+        ))
+    await db_session.commit()
+
+    guard = PersonalityGuard()
+    assert await guard.can_drift(guard_resident.id, db_session) is False
+    history.created_at = real_now - timedelta(hours=19)  # 76 world hours
+    await db_session.commit()
+    assert await guard.can_drift(guard_resident.id, db_session) is True
+
+
+@pytest.mark.anyio
+async def test_first_pacing_drift_uses_resident_creation_as_cooldown_anchor(
+    db_session, guard_resident, monkeypatch,
+):
+    from app import world_clock
+    from app.config import settings
+    real_now = datetime(2026, 8, 11, 8, tzinfo=UTC)
+    monkeypatch.setattr(settings, "realism_personality_pacing_enabled", True)
+    monkeypatch.setattr(settings, "world_clock_k", 4)
+    monkeypatch.setattr(world_clock, "now_real", lambda: real_now)
+    guard_resident.created_at = real_now - timedelta(hours=17)
+    for i in range(15):
+        db_session.add(Memory(
+            resident_id=guard_resident.id, type="event", content=f"event {i}",
+            importance=0.5, source="agent_action",
+        ))
+    await db_session.commit()
+
+    guard = PersonalityGuard()
+    assert await guard.can_drift(guard_resident.id, db_session) is False
+    guard_resident.created_at = real_now - timedelta(hours=19)
+    await db_session.commit()
+    assert await guard.can_drift(guard_resident.id, db_session) is True
+
+
+@pytest.mark.anyio
+async def test_pacing_budgets_are_real_rolling_windows(
+    db_session, guard_resident, monkeypatch,
+):
+    from app import world_clock
+    from app.config import settings
+    real_now = datetime(2026, 8, 11, 8, tzinfo=UTC)
+    monkeypatch.setattr(settings, "realism_personality_pacing_enabled", True)
+    monkeypatch.setattr(world_clock, "now_real", lambda: real_now)
+    db_session.add(PersonalityHistory(
+        resident_id=guard_resident.id, trigger_type="drift",
+        changes_json={
+            "S1": {"from": "M", "to": "H"},
+            "E1": {"from": "H", "to": "M"},
+        },
+        old_type="CTRL", new_type="CTRL", reason="recent drift",
+        created_at=real_now - timedelta(days=6),
+    ))
+    await db_session.commit()
+
+    guard = PersonalityGuard()
+    # Ordinary drift: <=2 dimensions in any real rolling seven days.
+    assert await guard.check_drift_budget(guard_resident.id, db_session) == 0
+    # Total safety cap remains a real rolling 30-day window (not a world month).
+    assert await guard.check_monthly_budget(guard_resident.id, db_session) == 6
+
+    db_session.add(PersonalityHistory(
+        resident_id=guard_resident.id, trigger_type="shift",
+        changes_json={f"D{i}": {"from": "M", "to": "H"} for i in range(6)},
+        old_type="CTRL", new_type="CTRL", reason="shift",
+        created_at=real_now - timedelta(days=20),
+    ))
+    await db_session.commit()
+    assert await guard.check_monthly_budget(guard_resident.id, db_session) == 0
+
+
+@pytest.mark.anyio
+async def test_pacing_clamps_ordinary_drift_to_one_dimension(
+    db_session, guard_resident, monkeypatch,
+):
+    from app.config import settings
+    monkeypatch.setattr(settings, "realism_personality_pacing_enabled", True)
+    changes = {
+        "S1": {"from": "M", "to": "H"},
+        "E1": {"from": "H", "to": "M"},
+    }
+    validated = await PersonalityGuard().validate_drift(
+        changes, guard_resident.id, db_session)
+    assert list(validated) == ["S1"]

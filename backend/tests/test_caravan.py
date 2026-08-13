@@ -146,6 +146,20 @@ async def _town(sessions) -> int:
         return await treasury_service.balance(db)
 
 
+async def test_binding_policy_overrides_caravan_env(db_session, monkeypatch):
+    from app.services.policy_service import PolicyService
+
+    monkeypatch.setattr(settings, "polis_policy_enabled", True)
+    monkeypatch.setattr(settings, "caravan_enabled", False)
+    service = PolicyService(db_session)
+    await service.seed_defaults()
+    assert await caravan_service.is_caravan_enabled(db_session) is False
+    assert await service.apply_amend(
+        "caravan_enabled", True, expected_version=1, updated_by="poll:test",
+    )
+    assert await caravan_service.is_caravan_enabled(db_session) is True
+
+
 async def _marker(sessions):
     async with sessions() as db:
         return (await db.execute(select(SystemConfig).where(
