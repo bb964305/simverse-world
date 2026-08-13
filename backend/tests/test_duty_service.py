@@ -338,3 +338,59 @@ async def test_sync_duty_meta_backfills_existing(db_session):
     assert legacy.meta_json["origin"] == "preset"  # merged, not replaced
 
     assert await sync_duty_meta(db_session) == 0  # idempotent
+
+
+# ── F8 异常路径不触过期 ORM ─────────────────────────────────────────────
+
+class _ExpiringORM:
+    """handler/资金腿炸掉后再摸任何 ORM 属性都抛——模拟 rollback 之后的
+    MissingGreenlet(rollback 会 expire 调用方 session 里的所有 ORM 对象,
+    asyncio 下一次惰性取属性就炸,见 treasury_service 模块头军规 2)。"""
+
+    def __init__(self, inner):
+        self.expired = False
+        self._inner = inner
+
+    def __getattribute__(self, name):
+        if name.startswith("_") or name == "expired":
+            return object.__getattribute__(self, name)
+        if object.__getattribute__(self, "expired"):
+            raise AssertionError(f"expired ORM attribute touched: {name}")
+        return getattr(object.__getattribute__(self, "_inner"), name)
+
+
+@pytest.mark.anyio
+async def test_on_work_except_log_does_not_touch_expired_orm(db_session, monkeypatch):
+    """except 的日志行只许用进 try 前取好的局部变量, 不许再摸 resident 属性。"""
+    proxy = _ExpiringORM(_resident("boomer", "炸弹人", {"key": "lecturer"}))
+
+    async def _boom(db, r):
+        proxy.expired = True
+        raise RuntimeError("handler exploded after a rollback")
+
+    monkeypatch.setitem(duty_service._WORK_HANDLERS, "lecturer", _boom)
+
+    assert await duty_service.on_work(db_session, proxy) is None  # fail-open
+
+
+@pytest.mark.anyio
+async def test_pay_wage_except_log_does_not_touch_expired_orm(db_session, monkeypatch):
+    """town_to_resident 做死锁牺牲者被 abort 时会 rollback 后 raise——
+    _pay_wage 的 except 不许再摸 resident.slug。"""
+    from app.config import settings
+    from app.services import treasury_service
+
+    monkeypatch.setattr(settings, "npc_economy_enabled", True)
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "town_duty_funding_enabled", False)
+    monkeypatch.setattr(settings, "polis_policy_enabled", False)
+
+    proxy = _ExpiringORM(_resident("wager", "领薪人", {"key": "tavern_hub"}))
+
+    async def _deadlock_victim(*a, **kw):
+        proxy.expired = True
+        raise RuntimeError("DeadlockDetected: transaction aborted")
+
+    monkeypatch.setattr(treasury_service, "town_to_resident", _deadlock_victim)
+
+    await duty_service._pay_wage(db_session, proxy)  # fail-open, 不许抛

@@ -407,3 +407,82 @@ async def test_failed_trade_rolls_back_and_the_pass_carries_on(sessions, trade_o
     assert await _memories(sessions, "id-b1") == []
     assert sorted((slug, kind) for slug, kind, _ in feed_pushes) == [
         ("b2", "npc_purchase"), ("maker", "npc_purchase")]
+
+
+# --------------------------------------------------------------------------- #
+# 10. F8 锁序军规:同事务先 town 行(税)再 resident 行(debit/credit)              #
+# --------------------------------------------------------------------------- #
+
+async def test_buy_skims_town_row_before_debiting_resident_row(
+        sessions, trade_on, tax_on, feed_pushes, monkeypatch):
+    """与 town_to_resident(FOR UPDATE town 行 → credit resident 行)同序,
+    真 PG 下工资×消费两路并发才不会 AB-BA 成环死锁。"""
+    await _seed(
+        sessions,
+        [_res("id-buyer-001", "buyer", "买主"), _res("id-maker-001", "maker", "作者")],
+        [_work("work_a", "maker", "陶罐")],
+        buyer=30,
+    )
+
+    calls: list[str] = []
+    real_skim = treasury_service.skim_tax_pending
+    real_debit = coin_service.treasury_debit_pending
+
+    async def _skim_spy(db, gross, rate, reason=""):
+        calls.append("skim_town")
+        return await real_skim(db, gross, rate, reason)
+
+    async def _debit_spy(db, slug, amount):
+        calls.append("debit_resident")
+        return await real_debit(db, slug, amount)
+
+    monkeypatch.setattr(treasury_service, "skim_tax_pending", _skim_spy)
+    monkeypatch.setattr(coin_service, "treasury_debit_pending", _debit_spy)
+
+    assert (await _run(sessions))["bought"] == 1
+    assert calls == ["skim_town", "debit_resident"]
+
+
+async def test_debit_failure_rolls_back_pending_town_writes(
+        sessions, trade_on, tax_on, feed_pushes, monkeypatch):
+    """锁序翻转后 debit 失败时镇税+carry 已是 pending 写,必须就地 rollback——
+    否则会被下一买家(b2)的 commit 带落库=无成交凭空征税。"""
+    await _seed(
+        sessions,
+        [_res("id-b1", "b1", "买主甲"), _res("id-b2", "b2", "买主乙"),
+         _res("id-maker-001", "maker", "作者")],
+        [_work("work_a", "maker", "陶罐")],
+        b1=30, b2=30,
+    )
+
+    real_debit = coin_service.treasury_debit_pending
+    seen = {"n": 0}
+
+    async def _first_debit_loses_the_guard(db, slug, amount):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            return False       # 模拟扫描到成交之间 b1 的余额被别的段落动过
+        return await real_debit(db, slug, amount)
+
+    monkeypatch.setattr(coin_service, "treasury_debit_pending",
+                        _first_debit_loses_the_guard)
+
+    rollbacks = {"n": 0}
+    async with sessions() as db:
+        real_rollback = db.rollback
+
+        async def _rollback_spy():
+            rollbacks["n"] += 1
+            await real_rollback()
+
+        monkeypatch.setattr(db, "rollback", _rollback_spy)
+        summary = await npc_trade_service.run_consumption_pass(
+            db, rng=random.Random(42))
+
+    assert summary == {"bought": 1, "spent": 15, "tax": 1}
+    assert rollbacks["n"] == 1              # debit 失败那一笔必须就地回滚
+    # 15 × 0.1 = 1.5:只有 b2 真成交,征 1 SC + 500 milli carry;b1 悬挂的那份
+    # 税若被 b2 的 commit 带落库,carry 会凑满整 SC 兑走 → 镇库 3 SC / carry 0。
+    assert await _town(sessions) == 1
+    assert int((await _carry(sessions)).value) == 500
+    assert await _balance(sessions, "b1") == 30

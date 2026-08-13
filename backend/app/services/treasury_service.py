@@ -17,6 +17,12 @@ is a bug, so they are restated here):
 3. ``synchronize_session=False`` leaves already-loaded ORM rows stale — callers
    must re-SELECT (``balance()``) rather than read a cached object. The funded
    wage path additionally refreshes ``duty_service.set_wallet_cache``.
+4. 锁序军规(F8):同一个事务要触碰 ``town_treasuries`` 与
+   ``resident_treasuries`` 两张表时,**必须先动 town 行、再动 resident 行**
+   (``town_to_resident`` 的 FOR UPDATE → credit 即该序;``npc_trade_service
+   ._buy`` 的 skim → debit/credit 同序)。倒过来写就是与工资路径的 AB-BA
+   环——真 PG 下 DeadlockDetected,被 kill 一侧的 rollback 还会 expire 调用方
+   session 的全部 ORM 对象。
 
 Auditability: town flows cannot use ``transactions`` (its ``user_id`` is a
 hard users FK), so they are mirrored into the dedicated append-only

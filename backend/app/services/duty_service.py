@@ -172,6 +172,9 @@ async def on_work(db, resident, *, market_day: bool = False) -> str | None:
     handler = _WORK_HANDLERS.get(key or "")
     if handler is None:
         return None
+    # F8: 进 try 前取好——异常路径上游的 rollback 会 expire session 里的 ORM
+    # 对象,except 里再摸 resident 属性就是 MissingGreenlet。
+    slug = resident.slug
     try:
         r = get_redis()
         cd_key = f"sv:duty_work:{resident.id}"
@@ -186,7 +189,7 @@ async def on_work(db, resident, *, market_day: bool = False) -> str | None:
             await _pay_wage(db, resident)
         return result
     except Exception:
-        logger.warning("duty on_work failed for %s", resident.slug, exc_info=True)
+        logger.warning("duty on_work failed for %s", slug, exc_info=True)
         return None
 
 
@@ -240,6 +243,10 @@ async def _pay_wage(db, resident) -> None:
             wage = int(round(wage * settings.election_mayor_wage_bonus))
     if wage <= 0:
         return
+    # F8: 进 try 前取好——town_to_resident 做死锁牺牲者被 abort 时会 rollback 后
+    # raise,rollback 已 expire 本 session 的 ORM 对象,except 里再摸
+    # resident.slug 就是 MissingGreenlet。
+    slug = resident.slug
     try:
         from app.services import coin_service
         funded = False
@@ -275,7 +282,7 @@ async def _pay_wage(db, resident) -> None:
         set_wallet_cache(db, resident, balance)
         await _feed(resident.slug, "wage", {"amount": wage, "duty": duty_key(resident)})
     except Exception:
-        logger.warning("duty wage credit failed for %s", resident.slug, exc_info=True)
+        logger.warning("duty wage credit failed for %s", slug, exc_info=True)
 
 
 def set_wallet_cache(db, resident, balance: int) -> None:
