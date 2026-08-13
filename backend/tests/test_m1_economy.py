@@ -153,7 +153,8 @@ async def test_resident_work_listed_and_sold(db_session, monkeypatch):
 # ── F1.5 集市日 ────────────────────────────────────────────────────────
 
 @pytest.mark.anyio
-async def test_market_day_event_scheduled(db_session, monkeypatch):
+async def test_market_day_defaults_to_plaza(db_session, monkeypatch):
+    # market_day_venue 默认 central_plaza: payload/文案与 master 逐字节一致。
     from app.tasks import event_templates
     from app.models.world_event import WorldEvent
 
@@ -165,8 +166,57 @@ async def test_market_day_event_scheduled(db_session, monkeypatch):
     )).scalars().first()
     assert ev is not None
     assert (ev.payload_json or {}).get("market_day") is True
+    assert (ev.payload_json or {}).get("location_id") == "central_plaza"
+    assert ev.description == "广场上支起了摊子,居民们摆摊、赶集、讨价还价,热闹了一整天。"
+
+
+@pytest.mark.anyio
+async def test_market_day_scheduled_in_hall_when_venue_configured(db_session, monkeypatch):
+    from app.tasks import event_templates
+    from app.models.world_event import WorldEvent
+
+    monkeypatch.setattr(settings, "market_day_venue", "market_hall")
+    monkeypatch.setattr(event_templates.random, "random", lambda: 1.0)  # no news
+    # 2026-07-25 is a Saturday (weekday 5).
+    await event_templates.ensure_scheduled_events(db_session, date(2026, 7, 25))
+    ev = (await db_session.execute(
+        select(WorldEvent).where(WorldEvent.title == "集市日")
+    )).scalars().first()
+    assert ev is not None
+    assert (ev.payload_json or {}).get("market_day") is True
     assert (ev.payload_json or {}).get("location_id") == "market_hall"
     assert "集市大厅" in ev.description
+
+
+@pytest.mark.anyio
+async def test_market_day_news_text_follows_venue(db_session, monkeypatch):
+    from app.tasks import event_templates
+    from app.models.world_event import WorldEvent
+
+    monkeypatch.setattr(event_templates.random, "random", lambda: 0.0)  # force news
+    monkeypatch.setattr(
+        event_templates.random, "choice",
+        lambda pool: next(entry for entry in pool if entry[0] == "集市日"),
+    )
+    # 2026-07-20 is a Monday: the 3-day lookahead stays clear of Saturday, so
+    # the only "集市日" row each run is the forced news event.
+    await event_templates.ensure_scheduled_events(db_session, date(2026, 7, 20))
+    ev = (await db_session.execute(
+        select(WorldEvent).where(WorldEvent.title == "集市日",
+                                 WorldEvent.type == "news")
+    )).scalars().first()
+    assert ev is not None
+    assert ev.description == "广场上办起了临时集市，热闹非凡。"  # master 原文
+
+    monkeypatch.setattr(settings, "market_day_venue", "market_hall")
+    await event_templates.ensure_scheduled_events(db_session, date(2026, 7, 21))
+    hall_news = (await db_session.execute(
+        select(WorldEvent).where(WorldEvent.title == "集市日",
+                                 WorldEvent.type == "news",
+                                 WorldEvent.description != ev.description)
+    )).scalars().first()
+    assert hall_news is not None
+    assert hall_news.description == "集市大厅里摊位林立，热闹非凡。"
 
 
 @pytest.mark.anyio

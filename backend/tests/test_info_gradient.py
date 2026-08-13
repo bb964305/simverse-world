@@ -88,6 +88,7 @@ async def test_non_weather_informs_minority_with_event_id(db_session, monkeypatc
 @pytest.mark.anyio
 async def test_geo_related_get_higher_importance(db_session, monkeypatch):
     monkeypatch.setattr(settings, "realism_info_gradient_enabled", True)
+    monkeypatch.setattr(settings, "market_day_venue", "market_hall")
     from app.agent.map_data import get_location_by_id
     loc = get_location_by_id("market_hall")
     center = loc.get("center") or (

@@ -593,6 +593,10 @@ class Settings(BaseSettings):
     npc_work_item_stock: int = 3                  # limited stock per listing
     market_day_weekday: int = 5                   # Saturday=5: weekly 集市日
     market_day_discount: float = 0.9              # shop price × this on market day
+    # 集市日场地: central_plaza = master 原行为(payload/文案逐字节一致,读端不投影);
+    # market_hall = 集市大厅(新文案 + 读端把历史 central_plaza 行投影到 market_hall)。
+    # 开 CARAVAN_ENABLED/CARAVAN_LIFECYCLE_ENABLED 前必须先切 market_hall。
+    market_day_venue: str = "central_plaza"
     # M-A 经济内生化: NPC↔NPC 真实钱流。三个闸门互相独立、默认全关 → 行为与
     # 现状逐字节一致；开闸是 deploy/.env 的单独变更（红线：迁移/暗上与开闸分车）。
     npc_trade_enabled: bool = False               # C1 餐费入账 + C2 消费 pass + C3 委托接单/结算

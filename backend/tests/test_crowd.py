@@ -32,11 +32,14 @@ MARKET_DAY = {
 
 def test_active_event_location_defaults_to_plaza():
     assert crowd_service.active_event_location([FESTIVAL]) == "central_plaza"
+    # Default venue (central_plaza): a plaza market-day row stays at the plaza.
+    assert crowd_service.active_event_location([LEGACY_MARKET_DAY]) == "central_plaza"
     assert crowd_service.active_event_location([{"type": "news", "payload_json": {}}]) is None
     assert crowd_service.active_event_location([]) is None
 
 
-def test_active_legacy_market_day_is_read_from_the_market_hall():
+def test_active_legacy_market_day_is_read_from_the_market_hall(monkeypatch):
+    monkeypatch.setattr(settings, "market_day_venue", "market_hall")
     assert crowd_service.active_event_location([LEGACY_MARKET_DAY]) == "market_hall"
     custom = {
         **LEGACY_MARKET_DAY,

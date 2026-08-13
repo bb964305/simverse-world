@@ -31,9 +31,13 @@ HOLIDAYS: dict[tuple[int, int], tuple[str, str, dict]] = {
 NEWS_POOL: list[tuple[str, str]] = [
     ("神秘旅人", "一位神秘的旅人经过小镇，带来了远方的传闻。"),
     ("流星雨", "昨夜有流星划过，居民们都在讨论许了什么愿。"),
-    ("集市日", "集市大厅里摊位林立，热闹非凡。"),
+    ("集市日", "广场上办起了临时集市，热闹非凡。"),
     ("旧物展", "图书馆展出了一批小镇的旧物，勾起许多回忆。"),
 ]
+
+# market_day_venue="market_hall" swaps the market-day texts/venue; the defaults
+# above and in ensure_scheduled_events stay byte-identical to the plaza era.
+_MARKET_HALL_NEWS_DESCRIPTION = "集市大厅里摊位林立，热闹非凡。"
 
 HOLIDAY_WINDOW_DAYS = 2  # holiday event lasts this many REAL days (player-visible continuity)
 SCHEDULE_LOOKAHEAD_DAYS = 3
@@ -94,9 +98,19 @@ async def ensure_scheduled_events(db, today: date_type | None = None) -> int:
         created += 1
         announcements.append((title, desc, day))
 
-    # M1 F1.5: 集市日 — a weekly all-day festival in the market hall.摊贩 duties get a
-    # halved WORK cooldown and the shop runs a discount that day. Weekday is read
-    # on the WORLD calendar; the active window stays real-time.
+    # M1 F1.5: 集市日 — a weekly all-day festival at the configured venue
+    # (``market_day_venue``: central_plaza = original behavior; market_hall =
+    # the purpose-built hall).摊贩 duties get a halved WORK cooldown and the
+    # shop runs a discount that day. Weekday is read on the WORLD calendar; the
+    # active window stays real-time.
+    if settings.market_day_venue == "market_hall":
+        market_description = "集市大厅里摊位依次开张,居民们赶集、讨价还价,热闹了一整天。"
+        market_announcement = "本周集市日,欢迎各位摊主到集市大厅出摊。"
+        market_location_id = "market_hall"
+    else:
+        market_description = "广场上支起了摊子,居民们摆摊、赶集、讨价还价,热闹了一整天。"
+        market_announcement = "本周集市日,欢迎各位摊主到中央广场出摊。"
+        market_location_id = "central_plaza"
     for offset in range(SCHEDULE_LOOKAHEAD_DAYS + 1):
         day = today + timedelta(days=offset)
         if day.weekday() != settings.market_day_weekday:
@@ -107,15 +121,17 @@ async def ensure_scheduled_events(db, today: date_type | None = None) -> int:
             continue
         db.add(WorldEvent(
             type="festival", title=title,
-            description="集市大厅里摊位依次开张,居民们赶集、讨价还价,热闹了一整天。",
-            payload_json={"market_day": True, "location_id": "market_hall", "ambience": "market"},
+            description=market_description,
+            payload_json={"market_day": True, "location_id": market_location_id, "ambience": "market"},
             starts_at=start, ends_at=start + timedelta(days=1), is_active=False,
         ))
         created += 1
-        announcements.append((title, "本周集市日,欢迎各位摊主到集市大厅出摊。", day))
+        announcements.append((title, market_announcement, day))
 
     if random.random() < NEWS_PROBABILITY:
         title, desc = random.choice(NEWS_POOL)
+        if title == "集市日" and settings.market_day_venue == "market_hall":
+            desc = _MARKET_HALL_NEWS_DESCRIPTION
         start = _world_day_real_start(today)
         if not await _exists(db, title, start):
             db.add(WorldEvent(
