@@ -21,7 +21,8 @@ is a bug, so they are restated here):
 Auditability: town flows cannot use ``transactions`` (its ``user_id`` is a
 hard users FK), so they are mirrored into the dedicated append-only
 ``town_treasury_entries`` ledger in the *same transaction* as the balance
-movement.
+movement — but only behind ``town_ledger_enabled`` (default off: the 058
+migration and the mirror-write behaviour never ship in the same change).
 
 INTERFACE FREEZE (S1-5 §8 downstream contract). ``tax`` / ``disburse`` /
 ``balance`` are consumed by S2-5 (税率进政策表), S2-2 (镇长财政排序权), S5-8
@@ -81,7 +82,15 @@ async def _append_entry_pending(
     resident_slug: str | None = None,
     ref_key: str | None = None,
 ) -> None:
-    """Append one signed audit row; the caller owns commit/rollback."""
+    """Append one signed audit row; the caller owns commit/rollback.
+
+    Gated behind ``town_ledger_enabled`` (default off): the 058 migration and
+    the mirror-write behaviour must not ship in the same change. Gate off →
+    zero ledger writes, money paths untouched; re-anchor before opening it.
+    """
+    from app.config import settings
+    if not settings.town_ledger_enabled:
+        return
     if amount == 0:
         return
     db.add(TownTreasuryEntry(

@@ -103,7 +103,24 @@ async def test_migration_anchors_existing_balance(db_engine, db_session):
 
 
 @pytest.mark.anyio
-async def test_tax_and_spend_record_returned_balances(db_session):
+async def test_ledger_off_no_entries_written(db_session):
+    # 默认闸关(058 已落库但镜像写未开): 资金操作全部照常成功, 但
+    # town_treasury_entries 一行不写——迁移与行为变更解耦(07-25 红线)。
+    assert settings.town_ledger_enabled is False
+    await treasury_service.tax(db_session, 10, reason="sales_tax:test")
+    assert await treasury_service.disburse(db_session, 3, reason="public_works")
+    assert await treasury_service.town_to_resident(
+        db_session, "clerk", 2, reason="wage:clerk",
+    )
+    assert await treasury_service.balance(db_session) == 5
+    assert await coin_service.treasury_balance(db_session, "clerk") == 2
+    rows = (await db_session.execute(select(TownTreasuryEntry))).scalars().all()
+    assert rows == []
+
+
+@pytest.mark.anyio
+async def test_tax_and_spend_record_returned_balances(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "town_ledger_enabled", True)
     await treasury_service.tax(db_session, 10, reason="sales_tax:test")
     assert await treasury_service.disburse(
         db_session, 3, reason="public_works"
@@ -121,6 +138,7 @@ async def test_tax_and_spend_record_returned_balances(db_session):
 
 @pytest.mark.anyio
 async def test_town_to_resident_is_one_transaction(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "town_ledger_enabled", True)
     await treasury_service.tax(db_session, 10, reason="sales_tax:test")
 
     async def fail_credit(*args, **kwargs):
@@ -139,7 +157,8 @@ async def test_town_to_resident_is_one_transaction(db_session, monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_stable_ref_makes_transfer_retry_a_noop(db_session):
+async def test_stable_ref_makes_transfer_retry_a_noop(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "town_ledger_enabled", True)
     await treasury_service.tax(db_session, 10, reason="sales_tax:test")
     assert await treasury_service.town_to_resident(
         db_session, "clerk", 2, reason="wage:clerk", ref_key="wage:run:1",
@@ -152,7 +171,10 @@ async def test_stable_ref_makes_transfer_retry_a_noop(db_session):
 
 
 @pytest.mark.anyio
-async def test_transfer_noop_paths_release_the_locking_transaction(db_session):
+async def test_transfer_noop_paths_release_the_locking_transaction(
+    db_session, monkeypatch,
+):
+    monkeypatch.setattr(settings, "town_ledger_enabled", True)
     await treasury_service.tax(db_session, 10, reason="sales_tax:test")
 
     assert not await treasury_service.town_to_resident(
@@ -175,7 +197,10 @@ async def test_transfer_noop_paths_release_the_locking_transaction(db_session):
 
 
 @pytest.mark.anyio
-async def test_rolling_income_budget_keeps_thirty_percent_reserve(db_session):
+async def test_rolling_income_budget_keeps_thirty_percent_reserve(
+    db_session, monkeypatch,
+):
+    monkeypatch.setattr(settings, "town_ledger_enabled", True)
     await treasury_service.tax(db_session, 10, reason="sales_tax:test")
     assert await treasury_service.town_to_resident(
         db_session, "clerk", 7, reason="wage:clerk", wage_budget_ratio=0.70,
@@ -196,6 +221,7 @@ async def test_funding_split_is_dark_then_public_only(db_session, monkeypatch):
 
     monkeypatch.setattr(settings, "npc_economy_enabled", True)
     monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "town_ledger_enabled", True)
     monkeypatch.setattr(settings, "town_wage_unfunded_policy", "skip")
     monkeypatch.setattr(settings, "election_enabled", False)
     monkeypatch.setattr(settings, "town_duty_funding_enabled", False)
@@ -223,6 +249,7 @@ async def test_sustainable_gate_never_falls_back_to_mint(db_session, monkeypatch
 
     monkeypatch.setattr(settings, "npc_economy_enabled", True)
     monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    monkeypatch.setattr(settings, "town_ledger_enabled", True)
     monkeypatch.setattr(settings, "town_duty_funding_enabled", True)
     monkeypatch.setattr(settings, "town_wage_unfunded_policy", "mint")
     monkeypatch.setattr(settings, "town_public_duty_wage_sc", 1)

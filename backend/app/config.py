@@ -758,6 +758,10 @@ class Settings(BaseSettings):
     # nightly public-spending job is skipped whole, and no treasury_changed WS
     # event is emitted. Pure rules, zero new LLM calls.
     town_treasury_enabled: bool = False         # 主开关 (env TOWN_TREASURY_ENABLED)
+    # town ledger 镜像写独立闸(058 迁移落库后的**第二次变更**再开, 迁移与行为
+    # 变更不同车)。闸关期间镇财政流水不入 town_treasury_entries——开闸前需重新
+    # 锚定(重跑 opening_balance 锚点), 否则窗口期的流水在账面上是缺口。
+    town_ledger_enabled: bool = False           # (env TOWN_LEDGER_ENABLED)
     town_tax_rate_sales: float = 0.1            # 居民售货销售税率(skim 进镇财政)
     town_tax_rate_gift: float = 0.0             # 送礼/打赏分成税率,默认 0(留旋钮)
     town_wage_unfunded_policy: str = "skip"     # 镇财政见底: skip=欠薪 / mint=回落凭空铸造
