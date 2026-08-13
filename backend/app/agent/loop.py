@@ -234,9 +234,23 @@ class AgentLoop:
                     if (
                         resident is None
                         or not resident.is_autonomous
-                        or resident.status in ("sleeping", "chatting", "socializing")
+                        or resident.status == "sleeping"
                     ):
                         return None
+                    if (
+                        settings.chat_engaged_tick_skip_enabled
+                        and resident.status in ("chatting", "socializing")
+                    ):
+                        if resident.status == "socializing":
+                            return None
+                        # chatting: only skip while the Redis chat lock is
+                        # held. A missing lock means the chat ended without a
+                        # status reset (stale) — self-heal to idle and tick
+                        # normally so needs/plans/memories keep flowing.
+                        if await manager.resident_lock_owner(resident_id) is not None:
+                            return None
+                        resident.status = "idle"
+                        await db.commit()
                     try:
                         # Pass force_plan_only only when set, so patched ticks
                         # with a (db, resident) signature stay compatible.

@@ -291,6 +291,10 @@ class Settings(BaseSettings):
     agent_observation_event_limit: int = 20
     agent_message_max_chars: int = 280
     agent_presence_ttl_seconds: int = 90
+    # 主 tick 跳过 chatting/socializing:开 = 跳过(chatting 先查 Redis 聊天锁,
+    # 无锁视为陈旧状态 → 自愈复位 idle 并照常 tick)。关 = master 行为逐字节一致:
+    # 主 tick 仅跳 sleeping(夜间归巢路径本就是三态检查,不受此闸影响)。
+    chat_engaged_tick_skip_enabled: bool = False
 
     # --- Observability (OPTIMIZATION_PLAN P1-3) ---
     # metrics_enabled / sentry_* live in the Observability block above (a

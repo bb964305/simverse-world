@@ -433,3 +433,104 @@ async def test_active_trip_does_not_bypass_closed_schedule(
     tick.assert_not_awaited()
     random_gate.assert_not_called()
     assert homing.await_count == len(loop_residents)
+
+
+# --------------------------------------------------------------------------- #
+# S3: tick skip of chatting/socializing gated behind chat_engaged_tick_skip   #
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.anyio
+async def test_default_ticks_chatting_residents(
+    db_session, loop_session_factory, loop_residents
+):
+    """Flag off (default): chatting/socializing residents still tick (master)."""
+    loop_residents[0].status = "chatting"
+    loop_residents[1].status = "socializing"
+    await db_session.commit()
+    ticked: list[str] = []
+
+    async def capture_tick(db, resident):
+        ticked.append(resident.slug)
+        return None
+
+    with patch("app.agent.loop.async_session", loop_session_factory), \
+         patch("app.agent.loop.resident_tick", side_effect=capture_tick), \
+         patch("app.agent.loop.should_tick", return_value=True), \
+         patch("app.agent.loop.get_activity_probability", return_value=0.5), \
+         patch("app.agent.loop.build_schedule", return_value=MagicMock(
+             wake_hour=6, sleep_hour=23, peak_hours=[10],
+             social_slots=[14], rest_ratio=0.3)):
+        await AgentLoop()._tick_round()
+
+    assert set(ticked) == {r.slug for r in loop_residents}
+
+
+@pytest.mark.anyio
+async def test_flag_on_skips_locked_chatting(
+    db_session, loop_session_factory, loop_residents, monkeypatch
+):
+    """Flag on: a chatting resident whose Redis chat lock exists is skipped."""
+    from app.config import settings
+    from app.redis_client import get_redis
+    from app.ws.manager import CHATTING_PREFIX
+
+    monkeypatch.setattr(settings, "chat_engaged_tick_skip_enabled", True)
+    loop_residents[0].status = "chatting"
+    loop_residents[1].status = "socializing"
+    await db_session.commit()
+    await get_redis().set(CHATTING_PREFIX + loop_residents[0].id, "human-user")
+    ticked: list[str] = []
+
+    async def capture_tick(db, resident):
+        ticked.append(resident.slug)
+        return None
+
+    with patch("app.agent.loop.async_session", loop_session_factory), \
+         patch("app.agent.loop.resident_tick", side_effect=capture_tick), \
+         patch("app.agent.loop.should_tick", return_value=True), \
+         patch("app.agent.loop.get_activity_probability", return_value=0.5), \
+         patch("app.agent.loop.build_schedule", return_value=MagicMock(
+             wake_hour=6, sleep_hour=23, peak_hours=[10],
+             social_slots=[14], rest_ratio=0.3)):
+        await AgentLoop()._tick_round()
+
+    # locked chatting + socializing both skipped; only the idle one ticks
+    assert ticked == [loop_residents[2].slug]
+    # locked chatting resident's status is untouched
+    await db_session.refresh(loop_residents[0])
+    assert loop_residents[0].status == "chatting"
+
+
+@pytest.mark.anyio
+async def test_flag_on_heals_stale_chatting(
+    db_session, loop_session_factory, loop_residents, monkeypatch
+):
+    """Flag on: chatting without a Redis lock is stale — reset to idle + tick."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "chat_engaged_tick_skip_enabled", True)
+    # The :memory: test engine rides one shared StaticPool connection: a
+    # concurrent tick session closing (ROLLBACK) between the heal UPDATE and
+    # its COMMIT would discard the write. Serialize ticks so the heal commit
+    # is deterministic (prod PG gives each session its own connection).
+    monkeypatch.setattr(settings, "agent_max_concurrent", 1)
+    loop_residents[0].status = "chatting"
+    await db_session.commit()
+    ticked: list[str] = []
+
+    async def capture_tick(db, resident):
+        ticked.append(resident.slug)
+        return None
+
+    with patch("app.agent.loop.async_session", loop_session_factory), \
+         patch("app.agent.loop.resident_tick", side_effect=capture_tick), \
+         patch("app.agent.loop.should_tick", return_value=True), \
+         patch("app.agent.loop.get_activity_probability", return_value=0.5), \
+         patch("app.agent.loop.build_schedule", return_value=MagicMock(
+             wake_hour=6, sleep_hour=23, peak_hours=[10],
+             social_slots=[14], rest_ratio=0.3)):
+        await AgentLoop()._tick_round()
+
+    assert set(ticked) == {r.slug for r in loop_residents}
+    await db_session.refresh(loop_residents[0])
+    assert loop_residents[0].status == "idle"
