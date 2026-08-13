@@ -42,6 +42,12 @@ def test_059_chains_after_058_on_the_single_head_branch():
     assert len(revision.revision) <= 32
 
 
+def test_059_runs_in_transaction_without_concurrent_machinery():
+    source = MIGRATION.read_text(encoding="utf-8").lower()
+    assert "autocommit" not in source
+    assert "concurrently" not in source
+
+
 def test_model_declares_the_partial_fifo_index():
     index = next(index for index in Memory.__table__.indexes if index.name == INDEX_NAME)
     assert [column.name for column in index.columns] == ["created_at", "id"]

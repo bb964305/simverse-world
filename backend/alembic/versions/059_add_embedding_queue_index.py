@@ -23,34 +23,18 @@ _INDEX_NAME = "ix_memories_embedding_backfill_queue"
 
 
 def upgrade() -> None:
-    kwargs = {
-        "unique": False,
-        "postgresql_where": sa.text(_QUEUE_WHERE),
-        "sqlite_where": sa.text(_QUEUE_WHERE),
-    }
-    if op.get_bind().dialect.name == "postgresql":
-        # The production table is hot; avoid blocking memory writers while the
-        # partial index is built. Alembic's autocommit block is required by
-        # PostgreSQL for CREATE INDEX CONCURRENTLY.
-        with op.get_context().autocommit_block():
-            op.create_index(
-                _INDEX_NAME,
-                "memories",
-                ["created_at", "id"],
-                postgresql_concurrently=True,
-                **kwargs,
-            )
-        return
-    op.create_index(_INDEX_NAME, "memories", ["created_at", "id"], **kwargs)
+    # Plain transactional CREATE INDEX on every dialect: if bootstrap is
+    # interrupted mid-migration the transaction rolls back cleanly instead of
+    # leaving an INVALID index that blocks the rerun.
+    op.create_index(
+        _INDEX_NAME,
+        "memories",
+        ["created_at", "id"],
+        unique=False,
+        postgresql_where=sa.text(_QUEUE_WHERE),
+        sqlite_where=sa.text(_QUEUE_WHERE),
+    )
 
 
 def downgrade() -> None:
-    if op.get_bind().dialect.name == "postgresql":
-        with op.get_context().autocommit_block():
-            op.drop_index(
-                _INDEX_NAME,
-                table_name="memories",
-                postgresql_concurrently=True,
-            )
-        return
     op.drop_index(_INDEX_NAME, table_name="memories")
