@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, UTC
-from sqlalchemy import String, Text, Float, DateTime, JSON, ForeignKey, Index
+from sqlalchemy import String, Text, Float, DateTime, JSON, ForeignKey, Index, text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator, UserDefinedType
 from app.database import Base
@@ -82,4 +82,18 @@ class Memory(Base):
         Index("ix_memories_resident_type", "resident_id", "type"),
         Index("ix_memories_resident_related_resident", "resident_id", "related_resident_id"),
         Index("ix_memories_resident_related_user", "resident_id", "related_user_id"),
+        # Supports the FIFO compensation queue without indexing the vector or
+        # archived/non-event rows.  The source/tier exclusion remains a cheap
+        # residual predicate after this partial index finds the NULL lane.
+        Index(
+            "ix_memories_embedding_backfill_queue",
+            "created_at",
+            "id",
+            postgresql_where=text(
+                "type = 'event' AND embedding IS NULL AND archived_at IS NULL"
+            ),
+            sqlite_where=text(
+                "type = 'event' AND embedding IS NULL AND archived_at IS NULL"
+            ),
+        ),
     )

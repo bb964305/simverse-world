@@ -1,7 +1,7 @@
 """P2 — background-loop heartbeats + stale alerting (engineering-health batch C).
 
-Gap being closed: the five loops registered in ``app/main.py:86-99``
-(heat / event / nightly / agent / embedding_backfill) run in exactly one
+Gap being closed: the loops registered in ``app/main.py``
+(heat / event / nightly / agent / embedding_backfill / caravan) run in exactly one
 process (``run_background_tasks=true``). If one of them dies — a task that
 raises out of its ``while True``, a cancelled task, a worker that never
 started them — there is **no signal at all**: no log, no metric, no alert. The
@@ -45,9 +45,9 @@ async def _write_beat(name: str, age_s: float) -> None:
 # registry + config                                                            #
 # --------------------------------------------------------------------------- #
 
-def test_all_five_background_loops_are_registered():
+def test_all_background_loops_are_registered():
     assert set(hb.LOOP_INTERVALS) == {
-        "heat", "event", "nightly", "agent", "embedding_backfill",
+        "heat", "event", "nightly", "agent", "embedding_backfill", "caravan",
     }
 
 
@@ -60,6 +60,24 @@ def test_threshold_is_a_multiple_of_the_loop_interval(monkeypatch):
     monkeypatch.setenv("LOOP_HEARTBEAT_MIN_STALE_SEC", "0")
     assert hb.stale_threshold_s("heat") == 3 * 3600
     assert hb.stale_threshold_s("event") == 3 * 60
+
+
+def test_embedding_threshold_tracks_the_configured_backfill_interval(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "embedding_backfill_interval_seconds", 42)
+    monkeypatch.setenv("LOOP_HEARTBEAT_STALE_FACTOR", "3")
+    monkeypatch.setenv("LOOP_HEARTBEAT_MIN_STALE_SEC", "0")
+    assert hb.stale_threshold_s("embedding_backfill") == 3 * 42
+
+
+def test_caravan_threshold_tracks_the_configured_interval(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "caravan_lifecycle_interval_seconds", 7)
+    monkeypatch.setenv("LOOP_HEARTBEAT_STALE_FACTOR", "3")
+    monkeypatch.setenv("LOOP_HEARTBEAT_MIN_STALE_SEC", "0")
+    assert hb.stale_threshold_s("caravan") == 3 * 7
 
 
 def test_threshold_respects_the_floor(monkeypatch):
@@ -106,6 +124,17 @@ async def test_beat_never_raises_when_redis_is_down(monkeypatch):
 
     monkeypatch.setattr(hb, "get_redis", _boom)
     await hb.beat("heat", check=False)  # must not raise
+
+
+@pytest.mark.anyio
+async def test_worker_start_clear_prevents_borrowing_old_heartbeats():
+    await _write_beat("agent", 1)
+    await _write_beat("event", 1)
+    await hb.clear_owned_heartbeats(["agent", "event", "unknown"])
+
+    snap = await hb.snapshot()
+    assert snap["agent"]["state"] == "never_seen"
+    assert snap["event"]["state"] == "never_seen"
 
 
 # --------------------------------------------------------------------------- #
@@ -226,6 +255,7 @@ def test_every_background_loop_emits_a_heartbeat():
 
     from app.agent.loop import AgentLoop
     from app.tasks.embedding_backfill import embedding_backfill_loop
+    from app.tasks.caravan_lifecycle import caravan_lifecycle_loop
     from app.tasks.event_cron import event_cron_loop
     from app.tasks.heat_cron import heat_cron_loop
     from app.tasks.nightly_cron import nightly_cron_loop
@@ -236,6 +266,7 @@ def test_every_background_loop_emits_a_heartbeat():
         "nightly": inspect.getsource(nightly_cron_loop),
         "agent": inspect.getsource(AgentLoop.run),
         "embedding_backfill": inspect.getsource(embedding_backfill_loop),
+        "caravan": inspect.getsource(caravan_lifecycle_loop),
     }
     for name, src in sources.items():
         assert "beat(" in src, f"{name} loop writes no heartbeat"

@@ -191,6 +191,21 @@ LOCATIONS: dict[str, dict[str, Any]] = {
         "bounds": (162, 110, 173, 120), "center": (168, 115), "entrance": (170, 119),
         "capacity": 5,
     },
+    # === Market Hall ===
+    # A purpose-built market-day destination.  It is a visit/trade location,
+    # not a resident spawn district; the caravan owns its parking anchor.
+    "market_hall": {
+        "name": "集市大厅",
+        "type": "public",
+        "role": "economy",
+        "bounds": (105, 89, 119, 99),
+        "center": (112, 94),
+        "entrance": (105, 94),
+        "caravan_parking": (109, 94),
+        "allocatable": False,
+        "description": "集市日开放的独立交易大厅，商队与本地摊主在此摆摊买卖",
+        "boosted_actions": ["WORK", "OBSERVE"],
+    },
     # === Outdoor Areas ===
     "north_path": {
         "name": "北林荫道", "type": "outdoor",
@@ -209,8 +224,8 @@ LOCATIONS: dict[str, dict[str, Any]] = {
     },
     "town_entrance": {
         "name": "小镇入口", "type": "outdoor",
-        "bounds": (50, 85, 90, 99), "center": (70, 92),
-        "description": "小镇南端的入口区域",
+        "bounds": (100, 119, 104, 122), "center": (102, 121),
+        "description": "南部商道尽头的木门楼，宽阔大道由此直通集市大厅",
     },
     "east_gardens": {
         "name": "东岸花园", "type": "outdoor",
@@ -415,7 +430,9 @@ def format_location_list_for_prompt(from_tile: tuple[int, int] | None = None) ->
             continue
         desc = loc.get("description", "")
         boosted = loc.get("boosted_actions", [])
-        line = f"- {loc['name']}：{desc}"
+        # The stable id is the only movement target accepted from new plans.
+        # Display names remain for prose and for legacy-plan fallback.
+        line = f"- {loc['name']}（id={loc_id}）：{desc}"
         if boosted:
             line += f"（适合：{', '.join(boosted)}）"
         entrance = loc.get("entrance")

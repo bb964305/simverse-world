@@ -66,9 +66,47 @@ async def test_global_cap(db_session):
     from app.services.commission_service import create_commission, _cap
     boss = await _resident(db_session, "boss")
     for i in range(_cap()):
-        await create_commission(db_session, boss.id, "chat_topic", "带话", {"target_slug": "boss"}, 10)
-    overflow = await create_commission(db_session, boss.id, "chat_topic", "带话", {"target_slug": "boss"}, 10)
+        await create_commission(db_session, boss.id, f"kind_{i}", "带话", {"target_slug": "boss"}, 10)
+    overflow = await create_commission(db_session, boss.id, "kind_overflow", "带话", {"target_slug": "boss"}, 10)
     assert overflow is None
+
+
+@pytest.mark.anyio
+async def test_create_uses_configured_ttl_and_deduplicates_active_kind(
+    db_session, monkeypatch,
+):
+    from app.config import settings
+    from app.services.commission_service import create_commission
+
+    boss = await _resident(db_session, "dedupe-boss")
+    monkeypatch.setattr(settings, "commission_ttl_hours", 72)
+    before = datetime.now(UTC)
+    first = await create_commission(
+        db_session, boss.id, "visit_location", "取件",
+        {"location_id": "workshop"}, 8,
+    )
+    after = datetime.now(UTC)
+    duplicate = await create_commission(
+        db_session, boss.id, "visit_location", "重复取件",
+        {"location_id": "workshop"}, 8,
+    )
+
+    assert first is not None
+    # SQLite drops timezone metadata from DateTime(timezone=True).
+    expiry = first.expires_at
+    if expiry.tzinfo is None:
+        before, after = before.replace(tzinfo=None), after.replace(tzinfo=None)
+    assert before + timedelta(hours=72) <= expiry <= (
+        after + timedelta(hours=72)
+    )
+    assert duplicate is None
+
+    first.status = "completed"
+    await db_session.commit()
+    assert await create_commission(
+        db_session, boss.id, "visit_location", "下一单",
+        {"location_id": "workshop"}, 8,
+    ) is not None
 
 
 @pytest.mark.anyio

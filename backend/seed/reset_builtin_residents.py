@@ -1,7 +1,8 @@
 """Reset the town's built-in cast: remove the old preset/demo residents and
 seed the new 10-person original town cast (with relations + goals).
 
-Run: python -m seed.reset_builtin_residents
+Preview (read-only): python -m seed.reset_builtin_residents
+Apply after backup:  python -m seed.reset_builtin_residents --apply --expect-targets N
 
 What it deletes (player characters are NEVER touched):
 - residents matching either
@@ -31,6 +32,7 @@ held only for the automatic path — 2026-07-25 16:53 a hand-written roster
 migration called ``purge_residents`` directly with its own id list and destroyed
 12 player characters.
 """
+import argparse
 import asyncio
 
 from sqlalchemy import delete, or_, select, update
@@ -208,20 +210,55 @@ async def purge_residents(
     await db.commit()
 
 
-async def main() -> None:
+async def main(*, apply: bool = False, expect_targets: int | None = None) -> None:
+    """Preview by default; mutate only after an exact target-count handshake.
+
+    The count is supplied after an operator reviews the preview.  If the roster
+    changes between preview and apply, the command fails before its first write.
+    """
     async with async_session() as db:
         targets = await find_targets(db)
         if targets:
-            print("Removing old built-in residents:")
+            print("Built-in residents targeted by this reset:")
             for r in targets:
                 print(f"  - {r.slug} ({r.name})")
-            await purge_residents(db, targets)
         else:
             print("No old built-in residents found.")
+
+        if not apply:
+            print(
+                "DRY RUN: no rows changed. After a verified database backup, "
+                f"re-run with --apply --expect-targets {len(targets)}."
+            )
+            return
+        if expect_targets is None:
+            raise RuntimeError("--apply requires --expect-targets N")
+        if expect_targets < 0:
+            raise RuntimeError("--expect-targets must be non-negative")
+        if len(targets) != expect_targets:
+            raise RuntimeError(
+                "roster changed after review: "
+                f"expected {expect_targets} purge target(s), found {len(targets)}; "
+                "refusing before the first write"
+            )
+
+        if targets:
+            await purge_residents(db, targets)
 
         await ensure_system_user(db)
         await ensure_admin_creator_user(db)
         created = await seed_presets(db)
+        # purge_residents vacates offices held by the old roster. Reconcile the
+        # only two intentional duty/office overlaps after the replacement rows
+        # exist; non-empty conflicts are reported and never overwritten.
+        from app.services.office_service import reconcile_seed_offices
+        office_report = await reconcile_seed_offices(db, apply=True)
+        print(f"Seed office reconciliation: {office_report}")
+        if (office_report["missing"] or office_report["ambiguous"]
+                or office_report["conflicts"]):
+            raise RuntimeError(
+                f"seed office reconciliation was unsafe: {office_report}"
+            )
 
         kept = (await db.execute(
             select(Resident.slug, Resident.name, Resident.resident_type, Resident.district)
@@ -232,4 +269,22 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(
+        description="Preview or explicitly apply the destructive built-in roster reset"
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="perform writes (requires --expect-targets)",
+    )
+    parser.add_argument(
+        "--expect-targets",
+        type=int,
+        help="exact target count observed during the preceding dry run",
+    )
+    args = parser.parse_args()
+    if args.apply and args.expect_targets is None:
+        parser.error("--apply requires --expect-targets N")
+    if not args.apply and args.expect_targets is not None:
+        parser.error("--expect-targets is only valid together with --apply")
+    asyncio.run(main(apply=args.apply, expect_targets=args.expect_targets))

@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.memory.embedding import generate_embedding
 from app.models.world_event import WorldEvent
+from app.services.event_location import resolve_event_location_id
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +274,7 @@ def _geo_relevant_residents(event: dict, rows) -> set[str]:
     radius is the resident geo-relevance signal (see PROGRESS P2-5 deviation)."""
     from app.config import settings
     from app.agent.map_data import get_location_by_id
-    loc_id = (event.get("payload_json") or {}).get("location_id")
+    loc_id = resolve_event_location_id(event.get("payload_json"))
     if not loc_id:
         return set()
     loc = get_location_by_id(loc_id)
@@ -332,7 +333,10 @@ async def write_collective_memories(db: AsyncSession, event: dict, rng=None) -> 
 
     rng = rng or _random
     rows = (await db.execute(
-        select(Resident.id, Resident.tile_x, Resident.tile_y).where(Resident.status != "sleeping")
+        select(Resident.id, Resident.tile_x, Resident.tile_y).where(
+            Resident.is_autonomous,
+            Resident.status != "sleeping",
+        )
     )).all()
     content = (event.get("description") or event.get("title") or "")[:200]
     if not content or not rows:

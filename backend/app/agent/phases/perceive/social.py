@@ -22,7 +22,10 @@ class SocialPerceivePlugin:
     async def execute(self, ctx: TickContext) -> TickContext:
         try:
             result = await ctx.db.execute(
-                select(Resident).where(Resident.id != ctx.resident.id)
+                select(Resident).where(
+                    Resident.id != ctx.resident.id,
+                    Resident.is_autonomous,
+                )
             )
             all_residents = result.scalars().all()
 

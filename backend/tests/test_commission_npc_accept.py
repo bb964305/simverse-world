@@ -169,6 +169,7 @@ def trade_on(monkeypatch):
     monkeypatch.setattr(settings, "npc_economy_enabled", True)
     monkeypatch.setattr(settings, "npc_trade_enabled", True)
     monkeypatch.setattr(settings, "npc_trade_buy_prob", 1.0)
+    monkeypatch.setattr(settings, "npc_commission_accept_prob", 1.0)
     return settings
 
 
@@ -440,6 +441,24 @@ async def test_accept_picks_exactly_one_autonomous_resident(sessions, trade_on,
     assert any("带个话" in m for m in await _memories(sessions, "id-issuer-001"))
     assert sorted(slug for slug, _, _ in feed_pushes) == sorted(["tie-sheng", taker_slug])
     assert {kind for _, kind, _ in feed_pushes} == {"npc_commission_taken"}
+
+
+@pytest.mark.anyio
+async def test_accept_probability_is_independent_from_product_buying(
+    sessions, trade_on, feed_pushes, monkeypatch,
+):
+    monkeypatch.setattr(settings, "npc_trade_buy_prob", 0.0)
+    monkeypatch.setattr(settings, "npc_commission_accept_prob", 1.0)
+    [cid] = await _seed(
+        sessions,
+        [_res("id-issuer-prob", "issuer-prob", "发单人"),
+         _res("id-worker-prob", "worker-prob", "承接人")],
+        [_commission("id-issuer-prob")],
+        **{"issuer-prob": 20},
+    )
+
+    assert await _accept(sessions) == {"accepted": 1}
+    assert (await _row(sessions, cid)).status == "accepted"
 
 
 @pytest.mark.anyio

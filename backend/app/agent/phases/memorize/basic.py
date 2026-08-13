@@ -38,7 +38,7 @@ def _movement_memory(ctx) -> tuple[str, dict]:
     - moved this tick but not arrived  -> "正在前往X"
     - no movement happened             -> "在X停留" (never claims a move)
     """
-    from app.agent.plan_target import resolve_target_tile
+    from app.agent.plan_target import resolve_location_id, resolve_target_tile
     ar = ctx.action_result
     res = ctx.resident
     action = ar.action
@@ -53,8 +53,16 @@ def _movement_memory(ctx) -> tuple[str, dict]:
             target_tile = None
         dest = "家"
     else:
-        target_tile = ar.target_tile or resolve_target_tile(ar.target_slug, ar.target_slug)
-        dest = _target_name(ar.target_slug) or "某处"
+        scheduled = getattr(ctx, "scheduled_plan", None)
+        follows_scheduled = bool(
+            scheduled is not None
+            and ctx.plan_followed
+            and scheduled.action == action.value
+        )
+        location_name = scheduled.location if follows_scheduled else ar.target_slug
+        target_id = resolve_location_id(ar.target_slug, location_name)
+        target_tile = ar.target_tile or resolve_target_tile(target_id, location_name)
+        dest = _target_name(target_id) or "某处"
 
     cur = (res.tile_x, res.tile_y)
     arrived = target_tile is not None and cur == tuple(target_tile)
@@ -68,11 +76,45 @@ def _movement_memory(ctx) -> tuple[str, dict]:
         loc = get_location_at(res.tile_x, res.tile_y)
         text = f"在{loc['name'] if loc else '户外'}停留"
 
+    scheduled = getattr(ctx, "scheduled_plan", None)
+    planned = bool(
+        scheduled is not None
+        and ctx.plan_followed
+        and scheduled.action == action.value
+    )
+    if action == ActionType.GO_HOME:
+        target_id = getattr(res, "home_location_id", None)
     return text, {
         "intent": action.value,
-        "target": ar.target_slug if isinstance(ar.target_slug, str) else None,
+        "target": target_id if isinstance(target_id, str) else None,
         "moved": bool(moved),
         "arrived": bool(arrived),
+        "planned": planned,
+        "plan_date": getattr(ctx, "plan_date", None) if planned else None,
+        "plan_slot": scheduled.slot if planned else None,
+    }
+
+
+def _plan_memory(ctx) -> dict | None:
+    """Structured attribution for every action taken inside a scheduled slot."""
+    plan = getattr(ctx, "scheduled_plan", None)
+    if plan is None:
+        return None
+    target = plan.target
+    try:
+        action = ActionType(plan.action)
+    except ValueError:
+        action = None
+    if action in (ActionType.WANDER, ActionType.VISIT_DISTRICT):
+        from app.agent.plan_target import resolve_location_id
+        target = resolve_location_id(plan.target, plan.location)
+    return {
+        "date": getattr(ctx, "plan_date", None),
+        "slot": plan.slot,
+        "scheduled_action": plan.action,
+        "scheduled_target": target if isinstance(target, str) else None,
+        "followed": bool(ctx.plan_followed and ctx.action_result.action.value == plan.action),
+        "interrupt_reason": getattr(ctx, "plan_interrupt_reason", None),
     }
 
 
@@ -142,13 +184,19 @@ class BasicMemorizePlugin:
 
         try:
             memory_svc = MemoryService(ctx.db)
+            metadata = {}
+            if move_meta:
+                metadata["move"] = move_meta
+            plan_meta = _plan_memory(ctx)
+            if plan_meta:
+                metadata["plan"] = plan_meta
             await memory_svc.add_memory(
                 resident_id=ctx.resident.id,
                 type="event",
                 content=memory_content,
                 importance=importance,
                 source="agent_action",
-                metadata_json=({"move": move_meta} if move_meta else None),
+                metadata_json=(metadata or None),
             )
             ctx.memory_created = True
         except Exception as e:

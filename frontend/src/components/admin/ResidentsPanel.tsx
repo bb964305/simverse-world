@@ -18,6 +18,7 @@ const DISTRICT_OPTIONS = [
   { value: 'library', label: '图书馆' },
   { value: 'shop', label: '杂货铺' },
   { value: 'town_hall', label: '市政厅' },
+  { value: 'market_hall', label: '集市大厅' },
   { value: 'north_path', label: '北林荫道' },
   { value: 'central_plaza', label: '中央广场' },
   { value: 'south_lawn', label: '南草坪' },

@@ -189,6 +189,12 @@ class Settings(BaseSettings):
     embedding_api_key: str = ""
     embedding_model: str = "text-embedding-v4"
     embedding_dimensions: int = 1024  # must match vector(1024) column
+    # Compensation queue rollout knobs.  Start conservatively in production;
+    # after one hour of provider/DB observation, ops may raise the DB batch to
+    # 400 without rebuilding the image.
+    embedding_backfill_batch_size: int = Field(default=100, ge=1, le=10_000)
+    embedding_backfill_interval_seconds: int = Field(default=600, ge=1)
+    embedding_backfill_request_size: int = Field(default=50, ge=1, le=1_000)
 
     # --- Ollama (local embedding fallback) ---
     ollama_base_url: str = "http://localhost:11434"
@@ -418,6 +424,14 @@ class Settings(BaseSettings):
     # Master switch. Default False → behavior identical to pre-realism. Deploys
     # opt in via REALISM_ENABLED=true for burn-in A/B and easy rollback.
     realism_enabled: bool = False
+    # V2 plan continuity is independently reversible: edge-triggered plan
+    # interruptions, sticky planned travel and per-trip (not per-step) action
+    # accounting.  Canonical target parsing/telemetry remain additive without it.
+    realism_plan_continuity_enabled: bool = False
+    realism_social_interrupt_need_max: float = 0.35
+    realism_social_interrupt_max_importance: int = 4
+    realism_notable_event_max_world_minutes: int = 60
+    realism_plan_continuation_max_steps: int = 32
     # P1 movement (defined now so REALISM_MOVE_SPEED env parses; used in P1).
     realism_move_speed: int = 8
     # Task 2 retrieval scoring (Generative-Agents weights; must sum to 1.0).
@@ -512,15 +526,19 @@ class Settings(BaseSettings):
     realism_importance_window: int = 100
     realism_shift_percentile: float = 0.95       # shift gate: normalized ≥ P95 ...
     realism_shift_valence_gate: float = 0.5      # ... AND |valence| > this
+    # Personality pacing is a separate rollback plane from the rest of realism.
+    realism_personality_pacing_enabled: bool = False
+    realism_drift_min_world_hours: int = 72
 
 
-    # --- Realism P2 (social structure; three INDEPENDENT switches, all False) ---
+    # --- Realism P2 (social structure; independent switches, all False) ---
     # Each gate is independent of realism_enabled and of each other, so relations,
     # information gradient and crowd can be A/B'd separately during burn-in. Any
     # one False → the corresponding path behaves exactly as pre-P2.
     realism_relations_enabled: bool = False
     realism_info_gradient_enabled: bool = False
     realism_crowd_enabled: bool = False
+    realism_gossip_event_lane_enabled: bool = False
     # P2 Task 1 — relation write deltas (reused, zero new LLM calls) + decay.
     realism_rel_familiarity_chat: float = 0.05
     realism_rel_affinity_chat: float = 0.03      # ± by wrapup mood (positive/negative)
@@ -568,11 +586,21 @@ class Settings(BaseSettings):
     # 现状逐字节一致；开闸是 deploy/.env 的单独变更（红线：迁移/暗上与开闸分车）。
     npc_trade_enabled: bool = False               # C1 餐费入账 + C2 消费 pass + C3 委托接单/结算
     npc_trade_buy_prob: float = 0.25              # 每个合格买方每晚掷骰的成交概率
+    npc_commission_accept_prob: float = 0.25      # C3 独立接单概率（不再借用商品购买口味）
+    commission_ttl_hours: int = 72                # 新委托生命周期；跨过至少两次 nightly
     npc_trade_reserve_sc: int = 5                 # 买方保留金,兼作贫困线(余额须 > 它 + 价)
     npc_trade_max_buys_per_night: int = 2         # 全镇每晚成交上限(每人至多 1 笔)
     caravan_enabled: bool = False                 # C4 外来商队(绑集市日,外生买方 + 第二税源)
     caravan_stall_fee_sc: int = 5                 # 摊位费→镇库,不依赖 tax_rate
     caravan_budget_sc: int = 30                   # 每次到访的作品收购预算
+    # Durable lifecycle is a separate dark-launch gate.  Keep it false while
+    # migration/API/worker ship; enabling it makes event_cron enqueue visits
+    # instead of invoking the legacy one-shot settlement.
+    caravan_lifecycle_enabled: bool = False
+    caravan_lifecycle_interval_seconds: int = Field(default=5, ge=1, le=300)
+    caravan_wait_lead_seconds: int = Field(default=600, ge=0, le=86400)
+    caravan_route_tile_ms: int = Field(default=150, ge=10, le=5000)
+    caravan_lease_seconds: int = Field(default=30, ge=5, le=600)
     tax_carry_enabled: bool = False               # C5 分数税账:尾数以整数 milli-SC 累入 town_tax_carry_milli(原子增量);关=旧 int() 截断
     # M-A 加固闸:库存扣减走 items.stock 的 guarded UPDATE(迁移 056 必须先落库)。
     # 关 = 旧 payload_json 读-改-写,与现状逐字节一致 —— 迁移暗上与开闸分车。
@@ -708,6 +736,13 @@ class Settings(BaseSettings):
     town_wage_unfunded_policy: str = "skip"     # 镇财政见底: skip=欠薪 / mint=回落凭空铸造
     town_public_works_daily_sc: int = 0         # nightly 公共支出预算,0=只做对账不拨款
     town_ws_min_delta_sc: int = 0               # treasury_changed 广播阈值,0=不广播
+    # 财政可持续工资闸：默认关，暗上后仍保持原有“所有有产出的 duty 按 perk
+    # 发薪”语义。开闸后仅 public funding_source 由镇库支付统一低额工钱，并受
+    # 近 7 日真实收入 × 70% 的硬预算约束；其余 30% 留作公共储备。
+    town_duty_funding_enabled: bool = False
+    town_public_duty_wage_sc: int = 1
+    town_wage_income_window_days: int = 7
+    town_wage_budget_ratio: float = 0.70
 
     # ── S2-5 policies + 四级分级审批 (POLIS_POLICY_*) ────────────────────
     # 两个独立门, 都默认 False → 行为与现状字节级一致 (KICKOFF_S2-5 §3):

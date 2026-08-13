@@ -34,6 +34,7 @@ POLICY_LABELS: dict[str, str] = {
     "tax_rate": "税率",
     "medical_subsidy_sc": "医疗补贴",
     "npc_default_wage_sc": "基础工钱",
+    "caravan_enabled": "外来商队准入",
     "curfew_hours": "宵禁",
     "business_hours": "营业时间",
     # 绝对多数级

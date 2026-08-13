@@ -115,14 +115,9 @@ async def test_policy_default_wage_flows_into_funded_wage(
     monkeypatch.setattr(settings, "election_enabled", False)
 
     paid = []
-    credited = []
-
-    async def fake_disburse(db, amount, reason=""):
-        paid.append((amount, reason))
+    async def fake_town_to_resident(db, slug, amount, *, reason, **kwargs):
+        paid.append((slug, amount, reason))
         return True
-
-    async def fake_credit(db, slug, amount, reason=""):
-        credited.append((slug, amount, reason))
 
     async def fake_balance(db, slug):
         return 17
@@ -130,8 +125,9 @@ async def test_policy_default_wage_flows_into_funded_wage(
     async def fake_feed(*args, **kwargs):
         return None
 
-    monkeypatch.setattr(treasury_service, "disburse", fake_disburse)
-    monkeypatch.setattr(coin_service, "treasury_credit", fake_credit)
+    monkeypatch.setattr(
+        treasury_service, "town_to_resident", fake_town_to_resident,
+    )
     monkeypatch.setattr(coin_service, "treasury_balance", fake_balance)
     monkeypatch.setattr(duty_service, "_feed", fake_feed)
 
@@ -141,8 +137,7 @@ async def test_policy_default_wage_flows_into_funded_wage(
     ) == 17
     await duty_service._pay_wage(db_session, resident)
 
-    assert paid == [(17, "wage:worker")]
-    assert credited == [("worker", 17, "duty_wage")]
+    assert paid == [("worker", 17, "wage:worker")]
     assert resident.meta_json["wallet"] == 17
 
 

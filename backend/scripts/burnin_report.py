@@ -266,6 +266,45 @@ async def fetch_move_records(session, since: datetime) -> list[dict]:
             "intent": mv.get("intent"),
             "moved": bool(mv.get("moved")),
             "arrived": bool(mv.get("arrived")),
+            "planned": bool(mv.get("planned")),
+            "plan_date": mv.get("plan_date"),
+            "plan_slot": mv.get("plan_slot"),
+        })
+    return records
+
+
+async def fetch_plan_records(session, since: datetime) -> list[dict]:
+    """Fetch additive v2 plan-attribution breadcrumbs from all agent actions.
+
+    Unlike ``fetch_move_records`` this deliberately keeps non-movement actions:
+    a scheduled trip that was interrupted by chat must remain in the denominator.
+    Legacy rows have no ``plan`` object and are excluded rather than guessed.
+    """
+    from app.models.memory import Memory
+    stmt = (
+        select(Memory.resident_id, Memory.metadata_json, Memory.created_at)
+        .where(Memory.source == "agent_action", Memory.created_at >= since)
+    )
+    records: list[dict] = []
+    for rid, meta, created in (await session.execute(stmt)).all():
+        if not isinstance(meta, dict):
+            continue
+        plan = meta.get("plan")
+        if not isinstance(plan, dict):
+            continue
+        move = meta.get("move") if isinstance(meta.get("move"), dict) else {}
+        records.append({
+            "resident_id": rid,
+            "created_at": created,
+            "plan_date": plan.get("date"),
+            "plan_slot": plan.get("slot"),
+            "scheduled_action": plan.get("scheduled_action"),
+            "scheduled_target": plan.get("scheduled_target"),
+            "followed": bool(plan.get("followed")),
+            "interrupt_reason": plan.get("interrupt_reason"),
+            "move_target": move.get("target"),
+            "arrived": bool(move.get("arrived")),
+            "move_planned": bool(move.get("planned")),
         })
     return records
 
@@ -316,9 +355,52 @@ def needs_health(needs_list: list[dict]) -> dict | None:
     return stats
 
 
-def plan_arrival_rate(records: list[dict]) -> float | None:
+def plan_trip_summary(plan_records: list[dict]) -> dict:
+    """Aggregate v2 scheduled VISIT slots, including never-started trips."""
+    from collections import Counter
+    trips: dict[tuple, dict] = {}
+    for r in plan_records:
+        if r.get("scheduled_action") != "VISIT_DISTRICT":
+            continue
+        date, slot, target = (r.get("plan_date"), r.get("plan_slot"),
+                              r.get("scheduled_target"))
+        if date is None or slot is None or not target:
+            continue
+        key = (r.get("resident_id"), date, slot)
+        trip = trips.setdefault(key, {
+            "target": target, "started": False, "arrived": False,
+            "reasons": Counter(),
+        })
+        if r.get("followed") and r.get("move_planned"):
+            trip["started"] = True
+            if r.get("arrived") and r.get("move_target") == target:
+                trip["arrived"] = True
+        elif not r.get("followed"):
+            trip["reasons"][r.get("interrupt_reason") or "unclassified"] += 1
+
+    total = len(trips)
+    started = sum(1 for t in trips.values() if t["started"])
+    arrived = sum(1 for t in trips.values() if t["arrived"])
+    reasons: Counter = Counter()
+    for t in trips.values():
+        if not t["arrived"]:
+            reasons.update(t["reasons"])
+    return {
+        "total": total,
+        "started": started,
+        "arrived": arrived,
+        "start_rate": (started / total if total else None),
+        "arrival_rate": (arrived / total if total else None),
+        "started_arrival_rate": (arrived / started if started else None),
+        "failure_reasons": dict(reasons.most_common()),
+    }
+
+
+def plan_arrival_rate(records: list[dict], plan_records: list[dict] | None = None) -> float | None:
     """计划到达率：VISIT_DISTRICT 计划-地点 trip（resident+target+day 去重）中实际
     到达的比例。修复前 ≈0（计划移动不动），目标 >70%。无 trip 返回 None。"""
+    if plan_records is not None:
+        return plan_trip_summary(plan_records)["arrival_rate"]
     trips: dict[tuple, bool] = {}
     for r in records:
         if r["intent"] != "VISIT_DISTRICT" or not r["target"]:
@@ -348,10 +430,21 @@ def behavior_memory_consistency(records: list[dict]) -> float | None:
     return ok / len(records)
 
 
-def render_probes(records: list[dict]) -> str:
+def render_probes(records: list[dict], plan_records: list[dict] | None = None) -> str:
     out = ["== 拟真探针（P0 验收）=="]
-    out.append(f"  计划到达率        = {_pct(plan_arrival_rate(records))}"
-               "（VISIT_DISTRICT 计划-地点 trip 到达比例；修复前≈0，目标 >70%）")
+    if plan_records is None:
+        out.append(f"  计划到达率(legacy)= {_pct(plan_arrival_rate(records))}"
+                   "（旧面包屑无法区分计划/临时出行，仅供历史对照）")
+    else:
+        trips = plan_trip_summary(plan_records)
+        out.append(f"  计划执行率(v2)    = {_pct(trips['start_rate'])}"
+                   f"（已启动 {trips['started']}/{trips['total']}）")
+        out.append(f"  计划到达率(v2)    = {_pct(trips['arrival_rate'])}"
+                   f"（已到达 {trips['arrived']}/{trips['total']}；目标 >70%）")
+        out.append(f"  启动后到达率(v2)  = {_pct(trips['started_arrival_rate'])}"
+                   "（目标 >85%）")
+        if trips["failure_reasons"]:
+            out.append(f"  未到达原因         = {trips['failure_reasons']}")
     out.append(f"  行为-记忆一致率   = {_pct(behavior_memory_consistency(records))}"
                "（移动记忆文本匹配真实位移；目标 >95%）")
     out.append(f"  样本 = {len(records)} 条移动记忆"
@@ -388,12 +481,17 @@ def render_probes_p1(records: list[dict], needs_list: list[dict]) -> str:
 async def fetch_relation_edges(session) -> list[tuple[str, str, float]]:
     """resident_relations 中 familiarity>0.1 的居民-居民边 (a, b, familiarity)。"""
     from app.models.resident_relation import ResidentRelation
+    from app.models.resident import Resident
+    autonomous = set((await session.execute(
+        select(Resident.id).where(Resident.is_autonomous)
+    )).scalars().all())
     rows = (await session.execute(
         select(ResidentRelation.party_a, ResidentRelation.party_b, ResidentRelation.familiarity,
                ResidentRelation.party_a_type, ResidentRelation.party_b_type)
     )).all()
     return [(a, b, float(fam)) for a, b, fam, at, bt in rows
-            if fam is not None and fam > 0.1 and at == "resident" and bt == "resident"]
+            if (fam is not None and fam > 0.1 and at == "resident" and bt == "resident"
+                and a in autonomous and b in autonomous)]
 
 
 async def fetch_event_diffusion(session) -> dict:
@@ -403,28 +501,35 @@ async def fetch_event_diffusion(session) -> dict:
     from app.models.resident import Resident
     ev_type = {eid: t for eid, t in (await session.execute(
         select(WorldEvent.id, WorldEvent.type))).all()}
+    resident_ids = set((await session.execute(
+        select(Resident.id).where(Resident.is_autonomous)
+    )).scalars().all())
     records = []
     for rid, meta, created in (await session.execute(
         select(Memory.resident_id, Memory.metadata_json, Memory.created_at)
         .where(Memory.source.in_(("world_event", "gossip")))
     )).all():
         eid = (meta or {}).get("event_id")
-        if eid:
+        if eid and rid in resident_ids:
             records.append({"event_id": eid, "resident_id": rid, "created_at": created})
-    total = (await session.execute(select(func.count()).select_from(Resident))).scalar_one()
-    return {"records": records, "event_type": ev_type, "total_residents": total or 0}
+    return {"records": records, "event_type": ev_type,
+            "total_residents": len(resident_ids), "resident_ids": resident_ids}
 
 
-def degree_distribution_skewness(edges: list[tuple[str, str, float]]) -> dict | None:
+def degree_distribution_skewness(
+    edges: list[tuple[str, str, float]], nodes: set[str] | None = None,
+) -> dict | None:
     """居民对话/关系图的度分布 + 偏度（Fisher-Pearson g1，纯 Python）。右偏(>0) =
     存在社交明星与边缘者；关闭开关的对照组因均匀随机应近 0/近对称。无边返回 None。"""
-    if not edges:
+    if not edges and not nodes:
         return None
     from collections import Counter
     deg: Counter = Counter()
     for a, b, _ in edges:
         deg[a] += 1
         deg[b] += 1
+    for node in nodes or ():
+        deg[node] += 0
     degrees = list(deg.values())
     n = len(degrees)
     mean = sum(degrees) / n
@@ -446,7 +551,12 @@ def _ts(x):
 
 
 def info_diffusion_half_life(diffusion: dict, exclude_weather: bool = True) -> dict:
-    """每个非天气事件：知情居民比例随模拟时间的终值 + 到 50% 的时长（小时）。
+    """每个非天气事件：知情居民比例终值 + 到 50% 的世界时长。
+
+    Memory timestamps are real instants.  ``time_to_50pct_hours`` is retained
+    as the historical real-hour field for downstream compatibility, while the
+    explicitly named world-hour field is the acceptance/probe metric.
+
     梯度开启时应为数小时量级；对照组(全知广播)所有一手记忆同刻写入 → t50≈0。"""
     from collections import defaultdict
     records = diffusion["records"]
@@ -463,16 +573,27 @@ def info_diffusion_half_life(diffusion: dict, exclude_weather: bool = True) -> d
         entries.sort(key=lambda e: _ts(e[0]))
         start = entries[0][0]
         seen: set[str] = set()
-        t50 = None
+        t50_real = None
+        t50_world = None
         for ts, rid in entries:
             seen.add(rid)
-            if t50 is None and len(seen) / total >= 0.5:
-                t50 = ((ts - start).total_seconds() / 3600.0) if (ts and start) else 0.0
+            if t50_real is None and len(seen) / total >= 0.5:
+                if ts and start:
+                    from app.world_clock import real_to_world
+                    t50_real = (ts - start).total_seconds() / 3600.0
+                    t50_world = (
+                        real_to_world(ts) - real_to_world(start)
+                    ).total_seconds() / 3600.0
+                else:
+                    t50_real = t50_world = 0.0
         events.append({
             "event_id": eid,
             "informed_count": len(seen),
             "informed_ratio": round(len(seen) / total, 3),
-            "time_to_50pct_hours": (round(t50, 3) if t50 is not None else None),
+            "time_to_50pct_hours": (
+                round(t50_real, 3) if t50_real is not None else None),
+            "time_to_50pct_world_hours": (
+                round(t50_world, 3) if t50_world is not None else None),
         })
     events.sort(key=lambda e: -e["informed_ratio"])
     return {"events": events, "total_residents": total}
@@ -585,7 +706,7 @@ def render_probes_s13(rows: list[tuple[str, str, float]]) -> str:
 
 def render_probes_p2(edges: list[tuple[str, str, float]], diffusion: dict) -> str:
     out = ["== 拟真探针（P2 验收：社会结构）=="]
-    skew = degree_distribution_skewness(edges)
+    skew = degree_distribution_skewness(edges, set(diffusion.get("resident_ids") or ()))
     if skew:
         out.append(f"  社交网络度分布偏度 = {skew['skewness']}"
                    f"（节点 {skew['n_nodes']}, 均度 {skew['mean_degree']}, "
@@ -598,17 +719,18 @@ def render_probes_p2(edges: list[tuple[str, str, float]], diffusion: dict) -> st
 
     hl = info_diffusion_half_life(diffusion)
     if hl["events"]:
-        out.append(f"  信息扩散半衰期（非天气事件，共 {len(hl['events'])} 个，"
+        out.append(f"  信息扩散半衰期（世界小时；非天气事件，共 {len(hl['events'])} 个，"
                    f"居民 {hl['total_residents']}）：")
         for e in hl["events"][:5]:
-            t50 = "未达50%" if e["time_to_50pct_hours"] is None else f"{e['time_to_50pct_hours']}h"
+            t50 = ("未达50%" if e["time_to_50pct_world_hours"] is None
+                   else f"{e['time_to_50pct_world_hours']}世界h")
             out.append(f"    {e['event_id'][:12]:<12} 知情 {e['informed_count']} 人"
                        f"（{e['informed_ratio']*100:.0f}%）| 到50%={t50}")
         corr = diffusion_relation_correlation(diffusion, edges)
         if corr is not None:
             out.append(f"    知情顺序×关系强度 Pearson = {corr}"
                        "（负=信息沿强关系先流动，抽样最广事件）")
-        out.append("    （目标：t50 数小时量级；对照组全知广播 t50≈0）")
+        out.append("    （目标：t50 数个世界小时量级；对照组全知广播 t50≈0）")
     else:
         out.append("  信息扩散半衰期 = -（无带 event_id 的事件记忆；"
                    "REALISM_INFO_GRADIENT_ENABLED 关或无世界事件）")
@@ -1565,6 +1687,7 @@ async def _run(days_window: int, residents: int, budget: float | None,
     async with async_session() as session:
         rows = await fetch_rows(session, since)
         move_records = await fetch_move_records(session, since)
+        plan_records = await fetch_plan_records(session, since)
         resident_needs = await fetch_resident_needs(session)
         rel_edges = await fetch_relation_edges(session)
         diffusion = await fetch_event_diffusion(session)
@@ -1579,7 +1702,7 @@ async def _run(days_window: int, residents: int, budget: float | None,
     report = render_report(
         aggregate(rows), residents=residents, budget=budget, window_days=days_window
     )
-    return (report + "\n\n" + render_probes(move_records)
+    return (report + "\n\n" + render_probes(move_records, plan_records)
             + "\n\n" + render_probes_p1(move_records, resident_needs)
             + "\n\n" + render_probes_p2(rel_edges, diffusion)
             + "\n\n" + render_probes_offices(

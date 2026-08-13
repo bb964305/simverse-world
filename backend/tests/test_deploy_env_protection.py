@@ -50,6 +50,20 @@ def test_backend_rsync_excludes_dotenv():
             "--delete-excluded 使 --exclude '.env' 不再保护远端活配置:\n" + block)
 
 
+def test_backend_rsync_excludes_runtime_and_disposal_artifacts():
+    blocks = [b for b in _rsync_blocks(DEPLOY_SH.read_text(encoding="utf-8"))
+              if "--delete" in b]
+    assert blocks
+    required = {"tmp/", "*.db.bak*", "_to_delete/"}
+    for block in blocks:
+        missing = {pattern for pattern in required
+                   if f"--exclude '{pattern}'" not in block}
+        assert not missing, (
+            "backend rsync 会同步或删除远端运行态文件: "
+            f"missing excludes {sorted(missing)}\n{block}"
+        )
+
+
 def test_dockerignore_excludes_dotenv():
     """镜像不得内嵌 .env——运行时配置一律走 compose env_file 注入。"""
     assert DOCKERIGNORE.exists(), (
@@ -64,6 +78,21 @@ def test_deploy_health_check_hits_published_port():
     text = DEPLOY_SH.read_text(encoding="utf-8")
     assert "localhost:8100/health" in text
     assert "localhost:8000/health" not in text
+
+
+def test_deploy_waits_for_compose_and_propagates_health_failure():
+    text = DEPLOY_SH.read_text(encoding="utf-8")
+    assert "docker compose up -d --build --wait" in text
+    assert "if ! ssh" in text
+    assert "API health check failed" in text
+    assert "|| echo ' ✗" not in text
+
+
+def test_deploy_refuses_to_substitute_for_missing_live_env():
+    text = DEPLOY_SH.read_text(encoding="utf-8")
+    assert 'if ! ssh "$REMOTE" "test -f $REMOTE_DIR/deploy/.env"' in text
+    assert "refusing deployment" in text
+    assert "No .env file found" not in text
 
 
 def test_agent_llm_keys_in_deploy_env_example():

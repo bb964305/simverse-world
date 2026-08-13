@@ -760,11 +760,17 @@ class MemoryService:
         else:
             high_importance = [m for m in memories if m.importance >= 0.9]
             trigger = high_importance[0] if high_importance else None
+        shifted = None
         if trigger is not None:
             try:
-                await evo.evaluate_shift(resident, trigger)
+                shifted = await evo.evaluate_shift(resident, trigger)
             except Exception as e:
                 logger.warning("Shift evaluation error (non-fatal): %s", e)
+
+        # One evidence batch has one evolution meaning.  A successful dramatic
+        # shift must not immediately consume another two dimensions as drift.
+        if shifted is not None:
+            return
 
         # Check drift trigger: count total events since last drift
         total_events = await self.count_events_since_last_reflection(resident.id)

@@ -43,18 +43,34 @@ async def event_cron_loop():
                             logger.warning("collective memory write failed", exc_info=True)
                         # M-A C4: 集市日开场 = 外来商队进镇。判据(market_day,与
                         # shop_service._market_discount 同源)留在调用点,服务只管
-                        # 到访本身;双闸关 = 连 import 都不做,零 DB 触碰。
-                        if (settings.npc_economy_enabled and settings.caravan_enabled
+                        # 到访本身；准入值由 binding policy 读取，env 只作政策存储
+                        # 门关闭/缺行时的回滚 fallback。
+                        if (settings.npc_economy_enabled
                                 and (event.get("payload_json") or {}).get("market_day")):
                             try:
-                                from app.services.caravan_service import run_caravan_visit
-                                visit = await run_caravan_visit(db, event)
-                                if visit["bought"] or visit["fee"] or visit["imported"]:
-                                    logger.info(
-                                        "Event cron: caravan bought=%d spent=%d tax=%d "
-                                        "fee=%d imported=%d",
-                                        visit["bought"], visit["spent"], visit["tax"],
-                                        visit["fee"], visit["imported"])
+                                if settings.caravan_lifecycle_enabled:
+                                    # Wake only: the leased state-machine owns
+                                    # admission, movement and every money step.
+                                    from app.services.caravan_lifecycle_service import (
+                                        ensure_visit_for_event,
+                                    )
+                                    await ensure_visit_for_event(db, event)
+                                else:
+                                    # Dark-launch rollback path: unchanged
+                                    # one-shot semantics until the lifecycle gate opens.
+                                    from app.services.caravan_service import (
+                                        is_caravan_enabled, run_caravan_visit,
+                                    )
+                                    if await is_caravan_enabled(db):
+                                        visit = await run_caravan_visit(db, event)
+                                        if (visit["bought"] or visit["fee"]
+                                                or visit["imported"]):
+                                            logger.info(
+                                                "Event cron: caravan bought=%d spent=%d "
+                                                "tax=%d fee=%d imported=%d",
+                                                visit["bought"], visit["spent"],
+                                                visit["tax"], visit["fee"],
+                                                visit["imported"])
                             except Exception:
                                 logger.warning("C4 caravan visit step failed", exc_info=True)
                                 # 这一轮的 session 下面还要给 C3/E3 用：写了半截不
@@ -67,6 +83,23 @@ async def event_cron_loop():
                                                    exc_info=True)
                     # M3 F3.3: a public lecture ending spawns a resident debate.
                     if phase == "end":
+                        if (settings.caravan_lifecycle_enabled
+                                and (event.get("payload_json") or {}).get("market_day")):
+                            try:
+                                from app.services.caravan_lifecycle_service import (
+                                    wake_visit_for_event,
+                                )
+                                await wake_visit_for_event(db, event)
+                            except Exception:
+                                logger.warning(
+                                    "caravan close wake failed", exc_info=True,
+                                )
+                                try:
+                                    await db.rollback()
+                                except Exception:
+                                    logger.warning(
+                                        "caravan close wake rollback failed", exc_info=True,
+                                    )
                         try:
                             from app.services.civic_service import maybe_spawn_lecture_debate
                             if await maybe_spawn_lecture_debate(db, event):

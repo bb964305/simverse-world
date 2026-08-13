@@ -7,7 +7,8 @@ in-process ConnectionManager and a worker-side broadcast would be a dead letter.
 P0-3b landed the cross-process bus (Redis pub/sub + Redis-backed locks/queues/
 presence/counters), so the deploy topology now is:
 - a `redis` service (the shared bus),
-- a one-shot `bootstrap` service that migrates and synchronises built-in data,
+- a one-shot, schema-only `bootstrap` service that is the sole migration owner,
+- an explicitly profile-gated, dry-run-by-default roster reset,
 - the `api` service delegating background loops (RUN_BACKGROUND_TASKS=false) and
   free to run multiple uvicorn workers,
 - the `agent-worker` service starting by default (no profile gate),
@@ -73,6 +74,17 @@ def test_agent_worker_starts_by_default():
     )
 
 
+def test_agent_worker_healthchecks_critical_loop_heartbeats():
+    worker = _load_services()["agent-worker"]
+    healthcheck = worker.get("healthcheck") or {}
+    command = " ".join(str(part) for part in healthcheck.get("test") or [])
+    assert "python -c" in command
+    assert "loop_heartbeat" in command and "snapshot" in command
+    assert "('agent','event')" in command
+    assert "state" in command and "ok" in command
+    assert str(healthcheck.get("start_period")) == "180s"
+
+
 def test_api_and_worker_point_at_redis():
     """Both the API and the agent-worker must be configured with REDIS_URL."""
     services = _load_services()
@@ -126,18 +138,36 @@ def test_api_and_worker_depend_on_redis():
         )
 
 
-def test_builtin_roster_bootstrap_precedes_api_and_worker():
-    """A deploy must replace legacy built-ins before any world loop starts."""
+def test_schema_bootstrap_precedes_api_and_worker_without_resetting_roster():
+    """Routine deploys migrate first but never invoke destructive roster code."""
     services = _load_services()
     bootstrap = services.get("bootstrap")
     assert bootstrap is not None, "missing one-shot production bootstrap"
     assert bootstrap.get("restart") == "no"
     command = str(bootstrap.get("command") or "")
     assert "alembic upgrade head" in command
-    assert "python -m seed.reset_builtin_residents" in command
+    assert "reset_builtin_residents" not in command
 
     for name in ("api", "agent-worker"):
         dependency = (services[name].get("depends_on") or {}).get("bootstrap")
         assert dependency == {"condition": "service_completed_successfully"}, (
-            f"{name} may start before the built-in roster is synchronised"
+            f"{name} may start before the schema migration completes"
         )
+
+
+def test_roster_reset_is_profile_gated_and_dry_run_by_default():
+    reset = _load_services().get("roster-reset")
+    assert reset is not None
+    assert reset.get("profiles") == ["ops-roster-reset"]
+    command = str(reset.get("command") or "")
+    assert "python -m seed.reset_builtin_residents" in command
+    assert "--apply" not in command
+
+
+def test_all_service_logs_are_bounded():
+    for name, service in _load_services().items():
+        logging = service.get("logging") or {}
+        assert logging.get("driver") == "json-file", f"{name} logging driver drifted"
+        options = logging.get("options") or {}
+        assert str(options.get("max-size")) == "20m", f"{name} log size is unbounded"
+        assert str(options.get("max-file")) == "5", f"{name} log count is unbounded"

@@ -161,16 +161,6 @@ async def run_nightly_jobs(*, once_per_day: bool = False) -> None:
     except Exception:
         logger.error("Nightly village digest failed", exc_info=True)
 
-    # B1: expire stale commissions.
-    try:
-        from app.services.commission_service import expire_commissions
-        async with async_session() as db:
-            n = await expire_commissions(db)
-        if n:
-            logger.info("Expired %d commissions", n)
-    except Exception:
-        logger.error("Commission expiry failed", exc_info=True)
-
     # E2: generate dreams for active residents.
     try:
         from app.services.dream_service import run_nightly_dreams
@@ -440,30 +430,58 @@ async def run_nightly_jobs(*, once_per_day: bool = False) -> None:
 
     # M-A: NPC↔NPC trade night (same realism-family shape: gate INSIDE the cron,
     # own try/except, fail-open). Order is a hard requirement, not style:
-    # settle → accept → consume. Settling first keeps a commission accepted
-    # tonight from being completed the same night; consuming last lets a reward
-    # that just landed be spent without waiting a whole night. Both gates are
-    # read before the session opens — a disabled world touches no DB.
-    try:
-        from app.config import settings as _trade_settings
-        if _trade_settings.npc_economy_enabled and _trade_settings.npc_trade_enabled:
+    # settle → expire → accept → consume. Expiry used to run near the top of
+    # the nightly chain, so a commission accepted on its last eligible night
+    # was expired before the NPC settlement pass could pay it. Expiry remains
+    # unconditional, but now sits between old accepted-work settlement and new
+    # acceptance. A disabled trade world still performs the legacy expiry pass.
+    from app.config import settings as _trade_settings
+    settled = {"settled": 0, "paid": 0, "reopened": 0}
+    accepted = {"accepted": 0}
+    bought = {"bought": 0, "spent": 0, "tax": 0}
+
+    # Old accepted work gets first claim, but a failure here must not suppress
+    # the unconditional lifecycle expiry job below.
+    if (_trade_settings.npc_economy_enabled
+            and _trade_settings.npc_trade_enabled):
+        try:
             from app.services.npc_trade_service import (
-                run_commission_accept_pass, run_commission_settle_pass,
-                run_consumption_pass,
+                run_commission_settle_pass,
             )
             async with async_session() as db:
                 settled = await run_commission_settle_pass(db)
+        except Exception:
+            logger.error("M-A npc commission settlement failed", exc_info=True)
+
+    try:
+        from app.services.commission_service import expire_commissions
+        async with async_session() as db:
+            expired = await expire_commissions(db)
+        if expired:
+            logger.info("Expired %d commissions", expired)
+    except Exception:
+        logger.error("Commission expiry failed", exc_info=True)
+
+    # Only after expired rows are gone may residents accept fresh work.
+    if (_trade_settings.npc_economy_enabled
+            and _trade_settings.npc_trade_enabled):
+        try:
+            from app.services.npc_trade_service import (
+                run_commission_accept_pass, run_consumption_pass,
+            )
+            async with async_session() as db:
                 accepted = await run_commission_accept_pass(db)
                 bought = await run_consumption_pass(db)
-            if settled["settled"] or accepted["accepted"] or bought["bought"]:
-                logger.info(
-                    "M-A: %d commissions settled (%d SC paid, %d reopened), "
-                    "%d accepted, %d purchases for %d SC (tax %d)",
-                    settled["settled"], settled["paid"], settled["reopened"],
-                    accepted["accepted"], bought["bought"], bought["spent"],
-                    bought["tax"])
-    except Exception:
-        logger.error("M-A npc trade nightly failed", exc_info=True)
+        except Exception:
+            logger.error("M-A npc commission acceptance/trade failed", exc_info=True)
+
+    if settled["settled"] or accepted["accepted"] or bought["bought"]:
+        logger.info(
+            "M-A: %d commissions settled (%d SC paid, %d reopened), "
+            "%d accepted, %d purchases for %d SC (tax %d)",
+            settled["settled"], settled["paid"], settled["reopened"],
+            accepted["accepted"], bought["bought"], bought["spent"],
+            bought["tax"])
     # Future: E2 dreams, E7 capsule delivery — each own try/except.
 
 

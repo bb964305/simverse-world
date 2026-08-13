@@ -1,5 +1,6 @@
 import pytest
 import json
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 from sqlalchemy import select
 from app.models.resident import Resident
@@ -146,3 +147,69 @@ async def test_resident_tick_phase_failure_returns_none(db_session, tick_residen
         result = await resident_tick(db_session, tick_resident)
 
     assert result is None
+
+
+@pytest.mark.anyio
+async def test_valid_continuation_finishes_over_cap_without_step_charges(
+    db_session, tick_resident, monkeypatch,
+):
+    from app import world_clock
+    from app.agent.map_data import get_valid_target_tile
+    from app.agent.plan_continuity import get_active_trip, set_active_trip
+    from app.config import settings
+    monkeypatch.setattr(settings, "realism_plan_continuity_enabled", True)
+    now = world_clock.now_world()
+    target = get_valid_target_tile("academy")
+    await set_active_trip(tick_resident.id, {
+        "action": "VISIT_DISTRICT", "target": "academy",
+        "target_tile": list(target), "location": "academy",
+        "plan_date": world_clock.world_date_key(), "plan_slot": 1,
+        "plan_hour_range": [now.hour, now.hour + 1],
+        "importance": 3, "reason": "上课",
+        "started_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "step_count": 1,
+    })
+    await get_redis().set(
+        _daily_key(tick_resident.id), settings.agent_max_daily_actions)
+
+    class ContinuePhase:
+        async def execute(self, ctx):
+            assert ctx.continuation_trip is not None
+            ctx.action_result = ActionResult(
+                ActionType.VISIT_DISTRICT, "academy", target, "继续上课")
+            return ctx
+
+    with patch("app.agent.tick.registry") as mock_reg:
+        mock_reg.get_phases.return_value = [ContinuePhase()]
+        result = await resident_tick(db_session, tick_resident)
+
+    assert result is not None and result.action == ActionType.VISIT_DISTRICT
+    assert int(await get_redis().get(_daily_key(tick_resident.id))) == \
+        settings.agent_max_daily_actions
+    assert (await get_active_trip(tick_resident.id))["step_count"] == 2
+
+
+@pytest.mark.anyio
+async def test_invalid_active_action_cannot_bypass_daily_cap(
+    db_session, tick_resident, monkeypatch,
+):
+    from app import world_clock
+    from app.agent.map_data import get_valid_target_tile
+    from app.agent.plan_continuity import set_active_trip
+    from app.config import settings
+    monkeypatch.setattr(settings, "realism_plan_continuity_enabled", True)
+    now = world_clock.now_world()
+    await set_active_trip(tick_resident.id, {
+        "action": "IDLE", "target": "academy",
+        "target_tile": list(get_valid_target_tile("academy")),
+        "plan_date": world_clock.world_date_key(), "plan_slot": 1,
+        "plan_hour_range": [now.hour, now.hour + 1],
+        "started_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "step_count": 1,
+    })
+    await get_redis().set(
+        _daily_key(tick_resident.id), settings.agent_max_daily_actions)
+
+    with patch("app.agent.tick.registry") as mock_reg:
+        assert await resident_tick(db_session, tick_resident) is None
+    mock_reg.get_phases.assert_not_called()

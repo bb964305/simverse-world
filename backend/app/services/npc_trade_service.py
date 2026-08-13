@@ -445,7 +445,8 @@ async def run_commission_accept_pass(db: AsyncSession, rng=None) -> dict:
     """让居民接下 open 的委托。返回 `{"accepted"}` 摘要。
 
     只接**发单人当下付得起**的单(NPC 路径的赏金是真实出资,不是铸币),挑人用
-    `_stable_unit(承接人 slug, 委托 id)` 的稳定口味哈希 + `npc_trade_buy_prob`
+    `_stable_unit(承接人 slug, 委托 id)` 的稳定口味哈希 + 独立的
+    `npc_commission_accept_prob`
     掷骰;占坑是 guarded UPDATE(`status='open' AND acceptor_user_id IS NULL AND
     expires_at>now`,与 `commission_service.accept:69` 同款),抢输了就放弃。
     同一个人一晚只接一单(与 C2 的"每人一笔"同口径)。钱在结算那一段才动。
@@ -466,7 +467,7 @@ async def run_commission_accept_pass(db: AsyncSession, rng=None) -> dict:
     taken: set[str] = set()
     for cid, issuer_id, reward, title in rows:
         try:
-            if rng.random() >= settings.npc_trade_buy_prob:
+            if rng.random() >= settings.npc_commission_accept_prob:
                 continue
             issuer = await _resident_by_id(db, issuer_id)
             if issuer is None:

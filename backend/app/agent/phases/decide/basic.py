@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import logging
 import random
+from datetime import timedelta
 from typing import Any
 
 from app.agent.actions import ActionType, ActionResult, get_available_actions
 from app.agent.prompts import build_decision_prompt
-from app.agent.schemas import TickContext, parse_action_result
+from app.agent.schemas import HourlyPlan, TickContext, parse_action_result
 from app.config import settings
 from app.llm.client import chat as llm_chat
 from app.llm.metering import Meter
@@ -54,6 +55,7 @@ class BasicDecidePlugin:
         # Newest event memory at/above this importance (0–1 scale) counts as a
         # fresh notable event -> interrupt and re-decide with the LLM.
         self.interrupt_memory_importance: float = params.get("interrupt_memory_importance", 0.8)
+        self.social_interrupt_chance: float = params.get("social_interrupt_chance", 0.15)
 
     async def execute(self, ctx: TickContext) -> TickContext:
         ctx.available_actions = get_available_actions(ctx.resident, ctx.nearby_residents)
@@ -62,7 +64,8 @@ class BasicDecidePlugin:
         plan = ctx.current_plan
 
         # Case 1: High-importance plan -> force execute
-        if plan and plan.importance >= self.interrupt_threshold:
+        if (plan and plan.importance >= self.interrupt_threshold
+                and not ctx.continuation_trip):
             result = self._force_execute_plan(plan, ctx)
             if result:
                 ctx.action_result = result
@@ -75,6 +78,7 @@ class BasicDecidePlugin:
         # weather/plan-skip paths.
         needs_action = self._maybe_needs_action(ctx)
         if needs_action is not None:
+            await self._clear_continuation(ctx, "critical_need")
             ctx.action_result = needs_action
             ctx.plan_followed = False
             if plan:
@@ -86,15 +90,25 @@ class BasicDecidePlugin:
         # above the plan-skip fast path.
         shelter = self._maybe_shelter(ctx)
         if shelter is not None:
+            await self._clear_continuation(ctx, "severe_weather")
             ctx.action_result = shelter
             ctx.plan_followed = False
             if plan:
                 plan.status = "interrupted"
             return ctx
 
+        # Once a trip has started it stays sticky against crowd and ordinary
+        # social noise, but never outranks the survival/weather rules above.
+        if settings.realism_plan_continuity_enabled and ctx.continuation_trip:
+            result = await self._continue_active_trip(ctx)
+            if result is not None:
+                ctx.action_result = result
+                ctx.plan_followed = True
+                return ctx
+
         # Realism P2-7: festival/script events draw a crowd — with the crowd gate
         # on, the event location wins the VISIT_DISTRICT draw ×3 (人流聚集, zero LLM).
-        crowd = self._maybe_crowd_draw(ctx)
+        crowd = await self._maybe_crowd_draw(ctx)
         if crowd is not None:
             ctx.action_result = crowd
             ctx.plan_followed = False
@@ -106,7 +120,8 @@ class BasicDecidePlugin:
         # call when nothing warrants reconsidering. force_plan_only (budget 95%+)
         # hard-disables interrupts — the breaker's rule-based fallback.
         if plan and (self.skip_decide_when_planned or ctx.force_plan_only):
-            if ctx.force_plan_only or not self._should_interrupt(ctx):
+            interrupt_reason = None if ctx.force_plan_only else await self._should_interrupt(ctx)
+            if ctx.force_plan_only or interrupt_reason is None:
                 result = self._force_execute_plan(plan, ctx)
                 if result:
                     ctx.action_result = result
@@ -118,6 +133,8 @@ class BasicDecidePlugin:
                 if ctx.force_plan_only:
                     ctx.skip_remaining = True
                     return ctx
+            else:
+                ctx.plan_interrupt_reason = interrupt_reason
 
         # Case 3: no plan, an interrupt fired, or the plan was unexecutable -> LLM
         try:
@@ -152,7 +169,7 @@ class BasicDecidePlugin:
 
         return ctx
 
-    def _should_interrupt(self, ctx: TickContext) -> bool:
+    async def _should_interrupt(self, ctx: TickContext) -> str | None:
         """Rule-level interrupt detection (E-09/E-10): should the fresh plan be
         overridden by an LLM decision? Uses only TickContext data — zero LLM.
 
@@ -162,18 +179,119 @@ class BasicDecidePlugin:
         - a social opportunity: a partner is available nearby (CHAT_RESIDENT is in
           available_actions) and the plan isn't already social.
         """
+        if not settings.realism_plan_continuity_enabled:
+            if ctx.memories:
+                newest = ctx.memories[0]
+                importance = getattr(newest, "importance", None)
+                if importance is not None and importance >= self.interrupt_memory_importance:
+                    return "notable_event"
+            plan = ctx.current_plan
+            if ActionType.CHAT_RESIDENT in ctx.available_actions:
+                if plan is None or plan.action != ActionType.CHAT_RESIDENT.value:
+                    return "social"
+            return None
+
+        plan = ctx.current_plan
+        if plan is None:
+            return None
+
+        async def _claim(reason: str) -> str | None:
+            from app.agent.plan_continuity import claim_slot_interrupt
+            claimed = await claim_slot_interrupt(
+                ctx.resident.id, ctx.plan_date, plan.slot, reason)
+            return reason if claimed else None
+
         if ctx.memories:
             newest = ctx.memories[0]
             importance = getattr(newest, "importance", None)
             if importance is not None and importance >= self.interrupt_memory_importance:
-                return True
+                created_at = getattr(newest, "created_at", None)
+                fresh = False
+                if created_at is not None:
+                    from app.world_clock import now_world, real_to_world
+                    age = now_world() - real_to_world(created_at)
+                    fresh = timedelta(0) <= age <= timedelta(
+                        minutes=settings.realism_notable_event_max_world_minutes)
+                if fresh:
+                    return await _claim("notable_event")
 
-        plan = ctx.current_plan
-        if ActionType.CHAT_RESIDENT in ctx.available_actions:
-            if plan is None or plan.action != ActionType.CHAT_RESIDENT.value:
-                return True
+        # A route already in progress is sticky against ordinary social noise.
+        # Critical needs/weather/crowd have already been arbitrated above.
+        if ctx.resident.status == "walking":
+            return None
 
-        return False
+        if (ActionType.CHAT_RESIDENT in ctx.available_actions
+                and plan.action != ActionType.CHAT_RESIDENT.value
+                and plan.importance <= settings.realism_social_interrupt_max_importance):
+            from app.agent.needs import get_needs
+            if (get_needs(ctx.resident).get("social", 1.0)
+                    <= settings.realism_social_interrupt_need_max):
+                claimed = await _claim("social")
+                if claimed and random.random() < self.social_interrupt_chance:
+                    return claimed
+
+        return None
+
+    async def _continue_active_trip(self, ctx: TickContext) -> ActionResult | None:
+        """Rehydrate the saved route; no LLM and no new action-cap charge."""
+        trip = ctx.continuation_trip or {}
+        if trip.get("kind") == "market_day":
+            from app.services.crowd_service import active_market_day_id
+
+            if active_market_day_id(ctx.world_events) != trip.get("event_id"):
+                await self._clear_continuation(ctx, "market_closed")
+                return None
+        try:
+            action = ActionType(trip.get("action"))
+        except (TypeError, ValueError):
+            await self._clear_continuation(ctx, "invalid_action")
+            return None
+        if action not in _MOVEMENT_ACTIONS | {ActionType.GO_HOME}:
+            await self._clear_continuation(ctx, "invalid_action")
+            return None
+        raw_tile = trip.get("target_tile")
+        if not (isinstance(raw_tile, list) and len(raw_tile) == 2):
+            await self._clear_continuation(ctx, "invalid_target")
+            return None
+        try:
+            target_tile = (int(raw_tile[0]), int(raw_tile[1]))
+        except (TypeError, ValueError):
+            await self._clear_continuation(ctx, "invalid_target")
+            return None
+        plan = HourlyPlan(
+            slot=int(trip.get("plan_slot") or 0),
+            hour_range=(ctx.hour, ctx.hour + 1),
+            action=action.value,
+            target=trip.get("target"),
+            location=trip.get("location"),
+            importance=int(trip.get("importance") or 3),
+            reason=str(trip.get("reason") or "继续前往目的地"),
+            status="executing",
+        )
+        ctx.current_plan = plan
+        ctx.scheduled_plan = plan
+        ctx.plan_date = trip.get("plan_date")
+        return ActionResult(
+            action=action,
+            target_slug=trip.get("target"),
+            target_tile=target_tile,
+            reason="继续完成已开始的行程",
+        )
+
+    @staticmethod
+    async def _clear_continuation(ctx: TickContext, reason: str) -> None:
+        if ctx.continuation_trip is None:
+            return
+        from app.agent.plan_continuity import clear_active_trip
+        try:
+            await clear_active_trip(ctx.resident.id, reason=reason)
+        except Exception:
+            logger.warning(
+                "Active plan trip clear failed for %s reason=%s",
+                ctx.resident.slug, reason,
+            )
+        ctx.continuation_trip = None
+        ctx.plan_interrupt_reason = reason
 
     def _maybe_needs_action(self, ctx: TickContext) -> ActionResult | None:
         """Realism P1-10: force a behavior when a need is critical. energy→GO_HOME
@@ -229,24 +347,51 @@ class BasicDecidePlugin:
             target_tile=get_valid_target_tile(target_id), reason="躲雨",
         )
 
-    def _maybe_crowd_draw(self, ctx: TickContext, rng=random) -> ActionResult | None:
+    async def _maybe_crowd_draw(self, ctx: TickContext, rng=random) -> ActionResult | None:
         """Realism P2-7: during an active festival/script event, the event location
-        gets a ×realism_festival_weight pull in the VISIT_DISTRICT draw. Gated on
-        the crowd flag; a high-importance plan (handled above) still wins, and it
-        never fires when the resident is already there."""
+        gets a ×realism_festival_weight pull in the VISIT_DISTRICT draw.  An
+        active market day additionally gives a deterministic cohort of at most
+        four real residents a direct pull to the market hall. Gated on the crowd
+        flag; high-priority/urgent/active-trip behavior is handled before here."""
         if not settings.realism_crowd_enabled:
             return None
         if ActionType.VISIT_DISTRICT not in ctx.available_actions:
             return None
+        # A cached cohort can be a few seconds stale. Never use it to pull a
+        # resident out of a live conversation or an already-started journey.
+        if ctx.resident.status in ("sleeping", "chatting", "socializing"):
+            return None
+        if ctx.continuation_trip is not None:
+            return None
+        # Returning home is not an entertainment plan. Critical energy and an
+        # active GO_HOME trip are already protected above; this also protects
+        # the first step before continuity state has been persisted.
+        if any(
+            plan is not None and plan.action == ActionType.GO_HOME.value
+            for plan in (ctx.current_plan, ctx.scheduled_plan)
+        ):
+            return None
         from app.agent.map_data import get_location_id_at, get_valid_target_tile
         from app.services import crowd_service
         here = get_location_id_at(ctx.resident.tile_x, ctx.resident.tile_y)
-        target = crowd_service.festival_draw_target(getattr(ctx, "world_events", None), here, rng)
+        world_events = getattr(ctx, "world_events", None)
+        cohort = await crowd_service.market_day_crowd_cohort(ctx.db, world_events)
+        if ctx.resident.id in cohort and here != "market_hall":
+            target = "market_hall"
+            target_tile = crowd_service.market_day_visitor_tile(
+                ctx.resident.id, cohort, world_events,
+            )
+            ctx.market_trip_event_id = crowd_service.active_market_day_id(world_events)
+        else:
+            # Keep the established ×3 draw for non-market festivals and for
+            # residents outside the bounded deterministic market cohort.
+            target = crowd_service.festival_draw_target(world_events, here, rng)
+            target_tile = None
         if not target:
             return None
         return ActionResult(
             action=ActionType.VISIT_DISTRICT, target_slug=target,
-            target_tile=get_valid_target_tile(target), reason="去凑热闹",
+            target_tile=target_tile or get_valid_target_tile(target), reason="去凑热闹",
         )
 
     async def _crowd_hint(self, ctx: TickContext) -> str:
@@ -279,11 +424,14 @@ class BasicDecidePlugin:
         # location (id or display name); model-reported coords are ignored.
         target_tile = None
         if settings.realism_enabled and action in _MOVEMENT_ACTIONS:
-            from app.agent.plan_target import resolve_target_tile
-            target_tile = resolve_target_tile(plan.target, plan.location)
+            from app.agent.plan_target import resolve_location_id, resolve_target_tile
+            canonical_target = resolve_location_id(plan.target, plan.location)
+            target_tile = resolve_target_tile(canonical_target, plan.location)
+        else:
+            canonical_target = plan.target
         return ActionResult(
             action=action,
-            target_slug=plan.target,
+            target_slug=canonical_target,
             target_tile=target_tile,
             reason=plan.reason[:100],
         )
@@ -357,8 +505,10 @@ class BasicDecidePlugin:
         # actions; resolve it server-side from target_slug (tried as id and name).
         if (result is not None and settings.realism_enabled
                 and result.action in _MOVEMENT_ACTIONS):
-            from app.agent.plan_target import resolve_target_tile
-            result.target_tile = resolve_target_tile(result.target_slug, result.target_slug)
+            from app.agent.plan_target import resolve_location_id, resolve_target_tile
+            canonical_target = resolve_location_id(result.target_slug, result.target_slug)
+            result.target_slug = canonical_target
+            result.target_tile = resolve_target_tile(canonical_target, canonical_target)
         return result
 
     async def _load_memories(self, ctx: TickContext) -> None:

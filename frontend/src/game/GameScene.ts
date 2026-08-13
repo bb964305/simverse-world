@@ -15,10 +15,35 @@ import {
   staticResidentSpriteUrl,
   type ResidentSpriteUpdatedMessage,
 } from './residentSpriteRuntime'
+import {
+  caravanRenderMode,
+  projectCaravanPose,
+  refreshCaravanProjection,
+  subscribeCaravanProjection,
+  type CaravanPose,
+  type CaravanProjection,
+} from '../services/caravanProjection'
+import {
+  CARAVAN_CONVOY_ATLAS_URL,
+  CARAVAN_CONVOY_TEXTURE_URL,
+  CARAVAN_MERCHANT_ATLAS_URL,
+  CARAVAN_MERCHANT_TEXTURE_URL,
+  CARAVAN_STALL_TEXTURE_URL,
+} from './caravanAssetRuntime'
+import {
+  caravanTileKey,
+  resolveCaravanWorldPlacement,
+} from './caravanRenderRuntime'
+import { MarketHallRuntime } from './marketHallRuntime'
+import { MarketAmbienceController } from './marketAmbience'
+import { MarketPurchaseRuntime } from './marketPurchaseRuntime'
 
 const PLAYER_SPEED = 160
 const NPC_INTERACT_DISTANCE = 60
 const PLAYER_INTERACT_DISTANCE = 80
+const CARAVAN_MERCHANT_TEXTURE = 'caravan-merchant'
+const CARAVAN_CONVOY_TEXTURE = 'caravan-convoy'
+const CARAVAN_STALL_TEXTURE = 'caravan-stall'
 const REQUIRED_RESIDENT_FRAMES = [
   'down', 'left', 'right', 'up',
   'down-walk.000', 'down-walk.001', 'down-walk.002',
@@ -67,31 +92,71 @@ export interface ResidentData {
   mood_label?: string
 }
 
+interface CaravanView {
+  container: Phaser.GameObjects.Container
+  convoy: Phaser.GameObjects.Sprite
+  merchant: Phaser.GameObjects.Sprite
+  stall: Phaser.GameObjects.Sprite
+  label: Phaser.GameObjects.Text
+}
+
 let gameInstance: Phaser.Game | null = null
 let stopResizeObserver: (() => void) | null = null
 let initGeneration = 0
+let gameOwner: symbol | null = null
+let pendingOwner: symbol | null = null
+let gameZoom = 1
 
-export function destroyGame(): void {
-  initGeneration += 1
+export function destroyGame(owner?: symbol): void {
+  const ownsPending = owner === undefined || pendingOwner === owner
+  const ownsGame = owner === undefined || gameOwner === owner
+  // A delayed cleanup from React StrictMode (or a fast route swap) must not
+  // tear down a newer mount which has already adopted the game instance.
+  if (!ownsPending && !ownsGame) return
+  if (ownsPending) {
+    initGeneration += 1
+    pendingOwner = null
+  }
   if (stopResizeObserver) {
     stopResizeObserver()
     stopResizeObserver = null
   }
-  if (gameInstance) {
+  if (gameInstance && ownsGame) {
     gameInstance.destroy(true)
     gameInstance = null
+    gameOwner = null
   }
 }
 
-export async function initGame(container: HTMLElement): Promise<void> {
-  if (gameInstance) return
+function bindGameContainer(container: HTMLElement): void {
+  if (!gameInstance) return
+  if (gameInstance.canvas.parentElement !== container) container.appendChild(gameInstance.canvas)
+  stopResizeObserver?.()
+  stopResizeObserver = observeContainerResize(container, (w, h) => {
+    if (gameInstance && w > 0 && h > 0) {
+      gameInstance.scale.resize(w / gameZoom, h / gameZoom)
+    }
+  })
+}
+
+export async function initGame(container: HTMLElement, owner?: symbol): Promise<void> {
+  if (gameInstance) {
+    gameOwner = owner ?? gameOwner
+    bindGameContainer(container)
+    return
+  }
   // burn-in 修复：首登画布只渲染左上角 150x90——Phaser 在布局稳定前读了一次
   // 容器尺寸（scale mode NONE 不会自愈）。先等容器有真实尺寸再建 Game，
   // 之后 ResizeObserver 跟随容器变化（顺带修 chatOpen 380px 推移不重排）。
   const generation = ++initGeneration
+  pendingOwner = owner ?? null
   const { width, height } = await waitForNonZeroSize(container)
-  if (generation !== initGeneration || gameInstance) return // unmount 竞态防护
+  if (generation !== initGeneration || gameInstance
+      || (owner !== undefined && pendingOwner !== owner)) return // unmount 竞态防护
   const zoom = Math.max(1, window.innerWidth / 4400)
+  gameZoom = zoom
+  gameOwner = owner ?? null
+  pendingOwner = null
   gameInstance = new Phaser.Game({
     type: Phaser.AUTO,
     width: width / zoom,
@@ -102,11 +167,7 @@ export async function initGame(container: HTMLElement): Promise<void> {
     scene: [MainScene],
     scale: { zoom },
   })
-  stopResizeObserver = observeContainerResize(container, (w, h) => {
-    if (gameInstance && w > 0 && h > 0) {
-      gameInstance.scale.resize(w / zoom, h / zoom)
-    }
-  })
+  bindGameContainer(container)
 }
 
 class MainScene extends Phaser.Scene {
@@ -138,6 +199,14 @@ class MainScene extends Phaser.Scene {
   private weatherEmitter: Phaser.GameObjects.Particles.ParticleEmitter | null = null
   private weatherOverlay: Phaser.GameObjects.Rectangle | null = null
   private stormFlashTimer: Phaser.Time.TimerEvent | null = null
+  // Temporary market-day entity. It deliberately lives outside residents[] and
+  // residentSpritesById: a caravan is not a Resident and never enters NPC UI.
+  private caravanProjection: CaravanProjection | null = null
+  private caravanView: CaravanView | null = null
+  private caravanBlockedTiles = new Set<string>()
+  private marketHallRuntime: MarketHallRuntime | null = null
+  private marketAmbience: MarketAmbienceController | null = null
+  private marketPurchaseRuntime: MarketPurchaseRuntime | null = null
   // Unsubscribers for listeners registered on module-level singletons
   // (ws.ts wsListeners, phaserBridge) — Phaser does NOT clean these up when
   // the scene dies, so without explicit teardown every StrictMode
@@ -168,6 +237,7 @@ class MainScene extends Phaser.Scene {
     this.desiredResidentTextureKeys.clear()
     this.dynamicResidentTextureKeys.clear()
     this.residentTextureLoads.clear()
+    this.caravanBlockedTiles.clear()
     // Decor objects die with the scene; drop the references so a late
     // getHomeDecor() resolution can't touch dead text objects.
     this.decorTexts.clear()
@@ -180,6 +250,13 @@ class MainScene extends Phaser.Scene {
     // here (SHUTDOWN fires before children are torn down), so a scene swap
     // leaves no particles or ticking timers behind.
     this._clearWeather()
+    this._destroyCaravanView()
+    this.marketHallRuntime?.destroy()
+    this.marketHallRuntime = null
+    this.marketAmbience?.destroy()
+    this.marketAmbience = null
+    this.marketPurchaseRuntime?.destroy()
+    this.marketPurchaseRuntime = null
     // StatusVisuals keeps a module-level sprite→visuals registry; the objects
     // themselves die with the scene, but the Map entries must be released here.
     releaseAllStatusVisuals()
@@ -191,6 +268,20 @@ class MainScene extends Phaser.Scene {
       this.load.image(key, base + filename)
     }
     this.load.tilemapTiledJSON('map', base + 'tilemap.json')
+
+    // Caravan assets have their own contract and lifecycle; they are not added
+    // to the canonical 25 resident slots. Missing optional assets fail cosmetic.
+    this.load.atlas(
+      CARAVAN_MERCHANT_TEXTURE,
+      CARAVAN_MERCHANT_TEXTURE_URL,
+      CARAVAN_MERCHANT_ATLAS_URL,
+    )
+    this.load.atlas(
+      CARAVAN_CONVOY_TEXTURE,
+      CARAVAN_CONVOY_TEXTURE_URL,
+      CARAVAN_CONVOY_ATLAS_URL,
+    )
+    this.load.image(CARAVAN_STALL_TEXTURE, CARAVAN_STALL_TEXTURE_URL)
 
     const spriteKey = useGameStore.getState().playerSpriteKey
     this.load.atlas(
@@ -321,6 +412,12 @@ class MainScene extends Phaser.Scene {
     const collisionLayer = map.createLayer('Collisions', tilesetMap.blocks_1!, 0, 0)
     collisionLayer?.setCollisionByExclusion([-1])
     collisionLayer?.setVisible(false)
+    this.caravanBlockedTiles.clear()
+    collisionLayer?.layer.data.forEach((row) => {
+      row.forEach((tile) => {
+        if (tile.index !== -1) this.caravanBlockedTiles.add(caravanTileKey(tile.x, tile.y))
+      })
+    })
 
     // B3 decor layer: above ground tiles (depth 0), below characters (depth 1).
     this.decorLayer = this.add.layer().setDepth(0.5)
@@ -346,6 +443,11 @@ class MainScene extends Phaser.Scene {
         repeat: -1,
       })
     }
+    this._setupCaravanAnimations()
+    this.marketHallRuntime = new MarketHallRuntime(this)
+    this.marketAmbience = new MarketAmbienceController()
+    this.marketAmbience.arm()
+    this.marketPurchaseRuntime = new MarketPurchaseRuntime(this)
 
     // NPCs
     for (const r of this.residents) {
@@ -373,6 +475,7 @@ class MainScene extends Phaser.Scene {
       this.npcLabels.push(label)
       this.residentSpritesById.set(r.id, sprite)
       this.desiredResidentTextureKeys.set(r.id, textureKey)
+      this.marketPurchaseRuntime?.registerResident(r.slug, sprite, r.tile_x, r.tile_y)
     }
 
     // Camera
@@ -409,6 +512,9 @@ class MainScene extends Phaser.Scene {
       if (msg.type === 'resident_move') {
         this._handleResidentMove(msg as { resident_slug: string; tile_x: number; tile_y: number; status: string })
       }
+      if (msg.type === 'market_purchase') {
+        this.marketPurchaseRuntime?.handleMessage(msg, this.time.now)
+      }
       if (msg.type === 'resident_chat') {
         this._handleResidentChatStart(msg as { initiator_slug: string; target_slug: string; summary: string | null })
       }
@@ -432,6 +538,15 @@ class MainScene extends Phaser.Scene {
         this._handleCommissionNotification(msg)
       }
     }))
+
+    // A full snapshot is delivered for every accepted WS update. The same
+    // convergence store is refreshed via GET on initial load/auth reconnect.
+    this.externalCleanups.push(subscribeCaravanProjection((projection) => {
+      if (this.isShutdown) return
+      this.caravanProjection = projection
+      this._updateCaravanProjection()
+    }))
+    void refreshCaravanProjection().catch(() => { /* caravan visuals are optional */ })
 
     // E6: seed the weather layer from the currently active events (the WS
     // broadcast only covers transitions that happen while we're connected).
@@ -526,7 +641,9 @@ class MainScene extends Phaser.Scene {
   }
 
   update() {
-    if (!this.mapReady || !this.player?.body) return
+    if (!this.mapReady) return
+    this._updateCaravanProjection()
+    if (!this.player?.body) return
 
     // B1: ❗ markers track their resident sprite (which resident_move may be
     // tweening) — same follow pattern as the other-player labels below. Runs
@@ -719,6 +836,8 @@ class MainScene extends Phaser.Scene {
     const sprite = this.npcSprites[idx]
     if (!sprite) return
 
+    this.marketPurchaseRuntime?.setResidentMoving(msg.resident_slug)
+
     const targetX = msg.tile_x * TILE_SIZE + TILE_SIZE / 2
     const targetY = msg.tile_y * TILE_SIZE + TILE_SIZE / 2
 
@@ -741,6 +860,7 @@ class MainScene extends Phaser.Scene {
         clearStatusVisuals(this, sprite)
         applyStatusVisuals(this, sprite, 'idle', targetX, targetY)
         this.residents[idx].status = 'idle'
+        this.marketPurchaseRuntime?.setResidentTile(msg.resident_slug, msg.tile_x, msg.tile_y)
       },
     })
   }
@@ -1057,6 +1177,152 @@ class MainScene extends Phaser.Scene {
     if (msg.mood_label) this.residents[idx].mood_label = msg.mood_label
     clearStatusVisuals(this, sprite)
     applyStatusVisuals(this, sprite, msg.status, sprite.x, sprite.y)
+  }
+
+  // ── Market-day caravan projection ─────────────────────────────────
+
+  private _setupCaravanAnimations(): void {
+    const directions: CaravanPose['direction'][] = ['down', 'left', 'right', 'up']
+    for (const direction of directions) {
+      const merchantFrames = Array.from({ length: 4 }, (_, frame) =>
+        `${direction}-walk.${String(frame).padStart(3, '0')}`)
+      const merchantAnim = `${CARAVAN_MERCHANT_TEXTURE}-${direction}-walk`
+      if (this.textures.exists(CARAVAN_MERCHANT_TEXTURE)
+        && merchantFrames.every((frame) => this.textures.get(CARAVAN_MERCHANT_TEXTURE).has(frame))
+        && !this.anims.exists(merchantAnim)) {
+        this.anims.create({
+          key: merchantAnim,
+          frames: merchantFrames.map((frame) => ({ key: CARAVAN_MERCHANT_TEXTURE, frame })),
+          frameRate: 8,
+          repeat: -1,
+        })
+      }
+
+      const convoyFrames = Array.from({ length: 4 }, (_, frame) =>
+        `${direction}-roll.${String(frame).padStart(3, '0')}`)
+      const convoyAnim = `${CARAVAN_CONVOY_TEXTURE}-${direction}-roll`
+      if (this.textures.exists(CARAVAN_CONVOY_TEXTURE)
+        && convoyFrames.every((frame) => this.textures.get(CARAVAN_CONVOY_TEXTURE).has(frame))
+        && !this.anims.exists(convoyAnim)) {
+        this.anims.create({
+          key: convoyAnim,
+          frames: convoyFrames.map((frame) => ({ key: CARAVAN_CONVOY_TEXTURE, frame })),
+          frameRate: 6,
+          repeat: -1,
+        })
+      }
+    }
+  }
+
+  private _ensureCaravanView(): CaravanView | null {
+    if (this.caravanView) return this.caravanView
+    if (!this.textures.exists(CARAVAN_MERCHANT_TEXTURE)
+      || !this.textures.exists(CARAVAN_CONVOY_TEXTURE)
+      || !this.textures.exists(CARAVAN_STALL_TEXTURE)) return null
+
+    const convoy = this.add.sprite(0, 0, CARAVAN_CONVOY_TEXTURE, 'down')
+      .setOrigin(0.5, 0.75)
+      .setDepth(0)
+    const stall = this.add.sprite(0, 0, CARAVAN_STALL_TEXTURE)
+      // Match the convoy atlas' 0.75 pivot so opening the side panel does not
+      // make the parked wagon jump half a tile downward.
+      .setOrigin(0.5, 0.75).setDepth(0).setVisible(false)
+    const merchant = this.add.sprite(-24, -6, CARAVAN_MERCHANT_TEXTURE, 'down')
+      .setOrigin(0.5, 0.5)
+      .setDepth(1)
+    const label = this.add.text(0, -44, '靛篷商队', {
+      fontSize: '12px',
+      color: '#ffffff',
+      backgroundColor: '#172f4fcc',
+      padding: { x: 5, y: 2 },
+    }).setOrigin(0.5).setDepth(2).setAlpha(0.8)
+    const container = this.add.container(0, 0, [convoy, stall, merchant]).setDepth(1)
+    this.caravanView = { container, convoy, merchant, stall, label }
+    return this.caravanView
+  }
+
+  private _destroyCaravanView(): void {
+    this.caravanView?.container.destroy(true)
+    this.caravanView?.label.destroy()
+    this.caravanView = null
+  }
+
+  private _setCaravanDirectionalFrame(
+    sprite: Phaser.GameObjects.Sprite,
+    animation: string,
+    idleFrame: string,
+    moving: boolean,
+  ): void {
+    if (moving && this.anims.exists(animation)) {
+      sprite.anims.play(animation, true)
+      return
+    }
+    sprite.anims.stop()
+    if (this.textures.get(sprite.texture.key).has(idleFrame)) sprite.setFrame(idleFrame)
+  }
+
+  private _updateCaravanProjection(): void {
+    const projection = this.caravanProjection
+    const snapshot = projection?.snapshot ?? null
+    this.marketHallRuntime?.update(snapshot, this.time.now)
+    this.marketPurchaseRuntime?.update(snapshot, this.time.now)
+    this.marketAmbience?.setPhase(snapshot?.visible ? snapshot.phase : null)
+    if (this.player) {
+      this.marketAmbience?.setListenerTile(
+        this.player.x / TILE_SIZE,
+        this.player.y / TILE_SIZE,
+      )
+    }
+    const mode = caravanRenderMode(snapshot)
+    if (!projection || mode === 'hidden') {
+      this._destroyCaravanView()
+      return
+    }
+    const pose = projectCaravanPose(projection)
+    if (!pose) {
+      this._destroyCaravanView()
+      return
+    }
+    const view = this._ensureCaravanView()
+    if (!view) return
+
+    const placement = resolveCaravanWorldPlacement(pose, mode, this.caravanBlockedTiles)
+    view.container.setPosition(placement.pixelX, placement.pixelY)
+    view.container.setDepth(placement.depth)
+    view.label.setPosition(placement.pixelX, placement.pixelY - 44).setDepth(3)
+    view.convoy.setVisible(mode === 'convoy')
+    view.stall.setVisible(mode === 'stall')
+
+    if (mode === 'stall') {
+      view.merchant.setPosition(27, 6)
+      this._setCaravanDirectionalFrame(
+        view.merchant,
+        `${CARAVAN_MERCHANT_TEXTURE}-down-walk`,
+        'down',
+        false,
+      )
+      return
+    }
+
+    const merchantOffsets: Record<CaravanPose['direction'], { x: number; y: number }> = {
+      down: { x: -24, y: -6 },
+      up: { x: 24, y: 6 },
+      left: { x: 19, y: 14 },
+      right: { x: -19, y: 14 },
+    }
+    view.merchant.setPosition(merchantOffsets[pose.direction].x, merchantOffsets[pose.direction].y)
+    this._setCaravanDirectionalFrame(
+      view.convoy,
+      `${CARAVAN_CONVOY_TEXTURE}-${pose.direction}-roll`,
+      pose.direction,
+      pose.moving,
+    )
+    this._setCaravanDirectionalFrame(
+      view.merchant,
+      `${CARAVAN_MERCHANT_TEXTURE}-${pose.direction}-walk`,
+      pose.direction,
+      pose.moving,
+    )
   }
 
   // ── E6 weather rendering ─────────────────────────────────────────

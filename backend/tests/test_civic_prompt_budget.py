@@ -64,7 +64,7 @@ _FACTS_CHAR_BUDGET = 1200
 #: 1579 是**算术**上界,由 ``test_facts_caps_sum_under_the_ceiling`` 逐字段顶格算出来
 #: 并咬死(任一常量调宽都当场红)。走真链路的 flood 测试实测只到 1487,差的 92 字分两处:
 #:
-#: - **地点 57 字**:8 个静态公共设施的名字都短于 ``PLACE_MAX_CHARS`` 且恒排在最前,
+#: - **地点未顶格**:9 个静态公共设施（含集市大厅）的名字都短于 ``PLACE_MAX_CHARS`` 且恒排在最前,
 #:   库里灌多少动态地点都顶不满那 12 个坑;
 #: - **截止倒计时 35 字**(5 张 × 7):顶格那一档是「还有 99 天以上截止」11 字,而
 #:   ``_read_open_polls`` 取的是**最近截止**的五张 —— 顶到 ``POLL_CLOSES_IN_MAX_DAYS``
@@ -325,7 +325,7 @@ async def test_full_facts_stay_within_the_char_budget(db_session, all_facts_on):
     text = format_town_facts(facts)
 
     assert len(facts["duties"]) == 14, "满配口径:11 位 preset + 3 位 UGC 全在岗"
-    assert len(facts["places"]) == 10, "8 个静态公共设施 + 邮局 + 剧院"
+    assert len(facts["places"]) == 11, "9 个静态公共设施（含集市大厅）+ 邮局 + 剧院"
     for probe in ("现任镇长", "镇上的营生分工", "现行的规矩", "镇库余额",
                   "镇上正在议的事", "今天是", "是集市日", "小镇的公共去处",
                   "你自己的营生", "你对镇上议题的态度"):

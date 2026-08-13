@@ -18,7 +18,7 @@ from app.models.resident import Resident
 
 _LOCATION_BOUNDS = {
     k: v["bounds"] for k, v in _MAP_LOCATIONS.items()
-    if v["type"] not in ("private", "apartment")
+    if v["type"] not in ("private", "apartment") and v.get("allocatable", True)
 }
 
 

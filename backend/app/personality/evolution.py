@@ -45,9 +45,9 @@ class EvolutionService:
                 return None
 
             # Check monthly budget
-            budget = await self.guard.check_monthly_budget(resident.id, self.db)
+            budget = await self.guard.check_drift_budget(resident.id, self.db)
             if budget <= 0:
-                logger.info("Drift skipped for %s: monthly budget exhausted", resident.id)
+                logger.debug("Drift skipped for %s: pacing budget exhausted", resident.id)
                 return None
 
             sbti = (resident.meta_json or {}).get("sbti", {})
@@ -138,12 +138,12 @@ class EvolutionService:
         """
         try:
             if not await self.guard.can_shift(resident.id, self.db):
-                logger.info("Shift skipped for %s: 24h cooldown active", resident.id)
+                logger.debug("Shift skipped for %s: 24h cooldown active", resident.id)
                 return None
 
             budget = await self.guard.check_monthly_budget(resident.id, self.db)
             if budget <= 0:
-                logger.info("Shift skipped for %s: monthly budget exhausted", resident.id)
+                logger.debug("Shift skipped for %s: monthly budget exhausted", resident.id)
                 return None
 
             sbti = (resident.meta_json or {}).get("sbti", {})
@@ -341,4 +341,3 @@ class EvolutionService:
 
                 except Exception as e:
                     logger.warning("soul_md sync failed for %s: %s", resident.id, e)
-

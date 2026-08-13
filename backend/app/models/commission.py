@@ -8,7 +8,9 @@ from app.database import Base
 
 
 def _default_expiry() -> datetime:
-    return datetime.now(UTC) + timedelta(hours=48)
+    # Runtime creation sets the same value from Settings so ops can tune it;
+    # the model fallback protects direct/admin construction paths.
+    return datetime.now(UTC) + timedelta(hours=72)
 
 
 class Commission(Base):

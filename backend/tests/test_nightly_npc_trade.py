@@ -77,6 +77,14 @@ def test_settle_then_accept_then_consume():
         f"{i_accept} consume={i_consume}")
 
 
+def test_settle_happens_before_expiry_and_new_acceptance():
+    order = _call_order("run_nightly_jobs")
+    i_settle = order.index("run_commission_settle_pass")
+    i_expire = order.index("expire_commissions")
+    i_accept = order.index("run_commission_accept_pass")
+    assert i_settle < i_expire < i_accept
+
+
 def test_block_is_appended_after_the_existing_ones():
     """新段追加在 S1-5 之后,既有段一个都不许挪位。"""
     order = _call_order("run_nightly_jobs")
@@ -185,7 +193,9 @@ async def test_gate_off_calls_nothing(nightly, spy_passes, trade_gate, economy, 
 
 
 @pytest.mark.parametrize("boom,before", [
-    ("settle", []),
+    # Settlement is isolated from expiry/acceptance: a broken old-settlement
+    # pass must not suppress the rest of the commission lifecycle.
+    ("settle", ["settle", "accept"]),
     ("accept", ["settle"]),
     ("consume", ["settle", "accept"]),
 ])
@@ -198,8 +208,9 @@ async def test_a_failing_pass_is_swallowed(nightly, spy_passes, trade_gate, capl
     with caplog.at_level("ERROR"):
         await nightly.run_nightly_jobs()      # 不得抛
 
-    assert calls == before + [boom], (
-        f"{boom} 抛之前的 pass 应已跑完,实测 {calls!r}")
+    expected = (["settle", "accept", "consume"]
+                if boom == "settle" else before + [boom])
+    assert calls == expected, f"{boom} fail-open 调用序异常,实测 {calls!r}"
     assert any("M-A" in r.message or "npc trade" in r.message.lower()
                for r in caplog.records if r.levelname == "ERROR"), (
         "失败必须留下 logger.error 痕迹——静默吞掉等于夜间链上悄悄失效")

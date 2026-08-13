@@ -23,10 +23,10 @@ class TownTreasury(Base):
     ``balance_sc`` + ``updated_at``) so the already-proven atomic write idioms in
     ``coin_service`` transfer verbatim.
 
-    AUDIT NOTE (deliberate deviation, same as ``resident_treasury.py``): town
-    flows are NOT mirrored into the ``transactions`` ledger — ``transactions
-    .user_id`` is a hard FK to ``users.id``, so a synthetic town account cannot
-    be a ledger row. Auditability rests on ``balance_sc`` + ``updated_at``.
+    AUDIT NOTE: town flows cannot be mirrored into ``transactions`` because
+    ``transactions.user_id`` is a hard FK to ``users.id``.  Migration 058 adds
+    the dedicated ``town_treasury_entries`` ledger instead; each entry carries
+    the signed movement and the balance returned by the same SQL statement.
     Scalar policy knobs (tax rate, last_collected_at) live in ``system_config``
     via ``ConfigService`` rather than in new columns here.
     """

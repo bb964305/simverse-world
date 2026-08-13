@@ -31,7 +31,7 @@ HOLIDAYS: dict[tuple[int, int], tuple[str, str, dict]] = {
 NEWS_POOL: list[tuple[str, str]] = [
     ("神秘旅人", "一位神秘的旅人经过小镇，带来了远方的传闻。"),
     ("流星雨", "昨夜有流星划过，居民们都在讨论许了什么愿。"),
-    ("集市日", "广场上办起了临时集市，热闹非凡。"),
+    ("集市日", "集市大厅里摊位林立，热闹非凡。"),
     ("旧物展", "图书馆展出了一批小镇的旧物，勾起许多回忆。"),
 ]
 
@@ -94,7 +94,7 @@ async def ensure_scheduled_events(db, today: date_type | None = None) -> int:
         created += 1
         announcements.append((title, desc, day))
 
-    # M1 F1.5: 集市日 — a weekly all-day festival at the plaza.摊贩 duties get a
+    # M1 F1.5: 集市日 — a weekly all-day festival in the market hall.摊贩 duties get a
     # halved WORK cooldown and the shop runs a discount that day. Weekday is read
     # on the WORLD calendar; the active window stays real-time.
     for offset in range(SCHEDULE_LOOKAHEAD_DAYS + 1):
@@ -107,12 +107,12 @@ async def ensure_scheduled_events(db, today: date_type | None = None) -> int:
             continue
         db.add(WorldEvent(
             type="festival", title=title,
-            description="广场上支起了摊子,居民们摆摊、赶集、讨价还价,热闹了一整天。",
-            payload_json={"market_day": True, "location_id": "central_plaza", "ambience": "market"},
+            description="集市大厅里摊位依次开张,居民们赶集、讨价还价,热闹了一整天。",
+            payload_json={"market_day": True, "location_id": "market_hall", "ambience": "market"},
             starts_at=start, ends_at=start + timedelta(days=1), is_active=False,
         ))
         created += 1
-        announcements.append((title, "本周集市日,欢迎各位摊主到中央广场出摊。", day))
+        announcements.append((title, "本周集市日,欢迎各位摊主到集市大厅出摊。", day))
 
     if random.random() < NEWS_PROBABILITY:
         title, desc = random.choice(NEWS_POOL)

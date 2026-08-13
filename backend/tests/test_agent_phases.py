@@ -264,6 +264,76 @@ async def test_decide_force_plan_only_never_interrupts():
     assert ctx.plan_followed is True
 
 
+@pytest.mark.anyio
+async def test_social_interrupt_probability_runs_once_per_plan_slot(monkeypatch):
+    from app.agent.phases.decide.basic import BasicDecidePlugin
+    from app.config import settings
+    monkeypatch.setattr(settings, "realism_plan_continuity_enabled", True)
+    plan_date = "2026-08-11"
+
+    def context():
+        ctx = _decide_ctx_with_plan()
+        ctx.plan_date = plan_date
+        ctx.scheduled_plan = ctx.current_plan
+        ctx.resident.meta_json["needs"] = {
+            "energy": 0.8, "satiety": 0.8, "social": 0.1,
+        }
+        neighbor = _make_resident("neighbor")
+        neighbor.id = "other-res"
+        neighbor.status = "idle"
+        ctx.nearby_residents = [neighbor]
+        return ctx
+
+    plugin = BasicDecidePlugin(params={
+        "skip_decide_when_planned": True, "social_interrupt_chance": 1.0,
+    })
+    with patch("app.agent.phases.decide.basic.llm_chat") as llm, \
+         patch("app.agent.phases.decide.basic.MemoryService") as MockMS:
+        llm.return_value = (
+            '{"action":"IDLE","target_slug":null,"target_tile":null,"reason":"聊聊"}'
+        )
+        MockMS.return_value = AsyncMock(get_memories=AsyncMock(return_value=[]))
+        first = await plugin.execute(context())
+        second = await plugin.execute(context())
+
+    assert first.plan_interrupt_reason == "social"
+    assert llm.await_count == 1
+    assert second.action_result.action == ActionType.IDLE
+    assert second.plan_interrupt_reason is None
+
+
+@pytest.mark.anyio
+async def test_walking_plan_is_sticky_against_social_noise(monkeypatch):
+    from app.agent.phases.decide.basic import BasicDecidePlugin
+    from app.config import settings
+    monkeypatch.setattr(settings, "realism_enabled", True)
+    monkeypatch.setattr(settings, "realism_plan_continuity_enabled", True)
+    ctx = _decide_ctx_with_plan(action="VISIT_DISTRICT")
+    ctx.current_plan.target = "academy"
+    ctx.current_plan.location = "学院"
+    ctx.scheduled_plan = ctx.current_plan
+    ctx.plan_date = "2026-08-11"
+    ctx.resident.status = "walking"
+    ctx.resident.meta_json["needs"] = {
+        "energy": 0.8, "satiety": 0.8, "social": 0.1,
+    }
+    neighbor = _make_resident("neighbor")
+    neighbor.id = "other-res"
+    neighbor.status = "idle"
+    ctx.nearby_residents = [neighbor]
+
+    with patch("app.agent.phases.decide.basic.llm_chat") as llm, \
+         patch("app.agent.phases.decide.basic.MemoryService") as MockMS:
+        MockMS.return_value = AsyncMock(get_memories=AsyncMock(return_value=[]))
+        out = await BasicDecidePlugin(
+            params={"skip_decide_when_planned": True}
+        ).execute(ctx)
+
+    llm.assert_not_awaited()
+    assert out.action_result.action == ActionType.VISIT_DISTRICT
+    assert out.plan_followed is True
+
+
 # ── Plan Tests ───────────────────────────────────────────────────────
 
 @pytest.mark.anyio

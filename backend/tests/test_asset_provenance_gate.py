@@ -86,3 +86,39 @@ def test_policy_status_edit_cannot_override_invalid_generated_receipt(tmp_path: 
     result = _run(village, release=True, manifest=changed_manifest)
     assert result.returncode == 1
     assert "generated provenance or image derivation is invalid" in result.stderr
+
+
+def test_caravan_texture_drift_fails_release_gate(tmp_path: Path) -> None:
+    village = _copy_village(tmp_path)
+    path = village / "caravan/convoy/texture.png"
+    path.write_bytes(path.read_bytes() + b"drift")
+
+    result = _run(village, release=True)
+
+    assert result.returncode == 1
+    assert "invalid for caravan/convoy" in result.stderr
+
+
+def test_caravan_atlas_drift_fails_release_gate(tmp_path: Path) -> None:
+    village = _copy_village(tmp_path)
+    path = village / "caravan/merchant/atlas.json"
+    atlas = json.loads(path.read_text())
+    atlas["frames"][0]["frame"]["x"] = 1
+    path.write_text(json.dumps(atlas), encoding="utf-8")
+
+    result = _run(village, release=True)
+
+    assert result.returncode == 1
+    assert "invalid for caravan/merchant" in result.stderr
+
+
+def test_missing_caravan_from_full_override_still_fails_release_gate(
+    tmp_path: Path,
+) -> None:
+    village = _copy_village(tmp_path)
+    shutil.rmtree(village / "caravan")
+
+    result = _run(village, release=True)
+
+    assert result.returncode == 1
+    assert "caravan asset directory is missing or unsafe" in result.stderr

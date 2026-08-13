@@ -67,6 +67,15 @@ def test_get_available_actions_with_nearby():
     assert ActionType.CHAT_RESIDENT in actions
 
 
+def test_player_avatar_is_not_a_social_action_target():
+    r = _make_resident()
+    avatar = _make_resident(status="idle")
+    avatar.id = "player-avatar"
+    avatar.resident_type = "player"
+    actions = get_available_actions(r, nearby_residents=[avatar])
+    assert ActionType.CHAT_RESIDENT not in actions
+
+
 def test_get_available_actions_chatting_resident_excluded():
     """Residents actively chatting cannot be targeted."""
     r = _make_resident()

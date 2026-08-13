@@ -197,6 +197,79 @@ async def test_agent_loop_broadcasts_movement(loop_session_factory, loop_residen
 
 
 @pytest.mark.anyio
+async def test_movement_broadcasts_only_committed_market_purchase_frame(db_session):
+    """The loop relays the production service's committed frame verbatim."""
+    resident = Resident(
+        id="market-buyer-id", slug="market-buyer", name="赶集居民",
+        creator_id="system", resident_type="npc", district="market_hall",
+        status="idle", tile_x=114, tile_y=93,
+    )
+    db_session.add(resident)
+    await db_session.commit()
+    movement = ActionResult(
+        action=ActionType.VISIT_DISTRICT,
+        target_slug="market_hall",
+        target_tile=(114, 93),
+        reason="去集市购买商队货物",
+    )
+    frame = {
+        "type": "market_purchase",
+        "visit_id": "visit-1",
+        "resident_slug": resident.slug,
+        "purchase_id": "receipt-1",
+        "sequence": 1,
+        "item_name": "茶叶",
+        "quantity": 1,
+        "amount_sc": 6,
+    }
+    broadcasts: list[dict] = []
+
+    with patch(
+        "app.services.caravan_market_service.maybe_purchase_for_resident",
+        AsyncMock(return_value=frame),
+    ) as purchase, patch("app.agent.loop.manager") as mock_manager:
+        mock_manager.broadcast = AsyncMock(
+            side_effect=lambda data, **_kwargs: broadcasts.append(data)
+        )
+        await AgentLoop()._handle_action(db_session, resident, movement)
+
+    purchase.assert_awaited_once_with(db_session, resident)
+    assert [message["type"] for message in broadcasts] == [
+        "resident_move", "market_purchase",
+    ]
+    assert broadcasts[-1] is frame
+
+
+@pytest.mark.anyio
+async def test_movement_does_not_invent_purchase_when_service_returns_none(db_session):
+    resident = Resident(
+        id="market-browser-id", slug="market-browser", name="逛集居民",
+        creator_id="system", resident_type="npc", district="market_hall",
+        status="walking", tile_x=110, tile_y=94,
+    )
+    db_session.add(resident)
+    await db_session.commit()
+    movement = ActionResult(
+        action=ActionType.VISIT_DISTRICT,
+        target_slug="market_hall",
+        target_tile=(114, 93),
+        reason="去集市",
+    )
+    broadcasts: list[dict] = []
+
+    with patch(
+        "app.services.caravan_market_service.maybe_purchase_for_resident",
+        AsyncMock(return_value=None),
+    ), patch("app.agent.loop.manager") as mock_manager:
+        mock_manager.broadcast = AsyncMock(
+            side_effect=lambda data, **_kwargs: broadcasts.append(data)
+        )
+        await AgentLoop()._handle_action(db_session, resident, movement)
+
+    assert [message["type"] for message in broadcasts] == ["resident_move"]
+
+
+@pytest.mark.anyio
 async def test_agent_loop_one_failed_tick_doesnt_crash(loop_session_factory, loop_residents):
     """A failing tick should be caught and loop should continue."""
     loop = AgentLoop()
@@ -302,3 +375,61 @@ async def test_tick_round_night_runs_homing_not_llm(loop_session_factory, loop_r
     assert mock_manager.broadcast.await_count >= 1   # resident_move 帧广播
     frame = mock_manager.broadcast.await_args_list[0].args[0]
     assert frame["type"] == "resident_move" and frame["status"] == "walking"
+
+
+@pytest.mark.anyio
+async def test_active_trip_bypasses_only_awake_random_gate(
+    loop_session_factory, loop_residents, monkeypatch,
+):
+    """A saved trip advances even when should_tick loses its random roll."""
+    from app.agent.plan_continuity import _active_key
+    from app.config import settings
+    from app.redis_client import get_redis
+    monkeypatch.setattr(settings, "realism_plan_continuity_enabled", True)
+    active_id = loop_residents[0].id
+    await get_redis().set(_active_key(active_id), "existence-hint")
+    ticked = []
+
+    async def capture_tick(db, resident):
+        ticked.append(resident.id)
+        return None
+
+    with patch("app.agent.loop.async_session", loop_session_factory), \
+         patch("app.agent.loop.resident_tick", side_effect=capture_tick), \
+         patch("app.agent.loop.should_tick", return_value=False) as random_gate, \
+         patch("app.agent.loop.get_activity_probability", return_value=0.5), \
+         patch("app.agent.loop.build_schedule", return_value=MagicMock(
+             wake_hour=6, sleep_hour=23, peak_hours=[10],
+             social_slots=[14], rest_ratio=0.3)):
+        await AgentLoop()._tick_round()
+
+    assert ticked == [active_id]
+    # The other two residents still went through (and failed) the random gate.
+    assert random_gate.call_count == len(loop_residents) - 1
+
+
+@pytest.mark.anyio
+async def test_active_trip_does_not_bypass_closed_schedule(
+    loop_session_factory, loop_residents, monkeypatch,
+):
+    from app.agent.plan_continuity import _active_key
+    from app.config import settings
+    from app.redis_client import get_redis
+    monkeypatch.setattr(settings, "realism_plan_continuity_enabled", True)
+    await get_redis().set(_active_key(loop_residents[0].id), "existence-hint")
+    tick = AsyncMock()
+    homing = AsyncMock(return_value=None)
+
+    with patch("app.agent.loop.async_session", loop_session_factory), \
+         patch("app.agent.loop.resident_tick", tick), \
+         patch("app.agent.loop.night_homing_step", homing), \
+         patch("app.agent.loop.should_tick") as random_gate, \
+         patch("app.agent.loop.get_activity_probability", return_value=0.0), \
+         patch("app.agent.loop.build_schedule", return_value=MagicMock(
+             wake_hour=8, sleep_hour=22, peak_hours=[10],
+             social_slots=[], rest_ratio=0.3)):
+        await AgentLoop()._tick_round()
+
+    tick.assert_not_awaited()
+    random_gate.assert_not_called()
+    assert homing.await_count == len(loop_residents)

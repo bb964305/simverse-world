@@ -109,7 +109,7 @@ PRESET_CHARACTERS = [
         "meta_json": {
             "role": "咖啡馆老板娘", "impression": "记得你上次说过的话",
             "duty": {
-                "key": "cafe_host", "title": "客厅主理人",
+                "key": "cafe_host", "title": "客厅主理人", "funding_source": "private",
                 "prompt_hint": "你经营着咖啡馆,白天多在店里招待客人、倾听心事(WORK/CHAT_RESIDENT);和你聊过的人心情会好起来。",
                 "perks": {"chat_mood_uplift": 0.08, "chat_affinity_bonus": 0.02},
             },
@@ -181,7 +181,7 @@ PRESET_CHARACTERS = [
         "meta_json": {
             "role": "酒馆老板", "impression": "嗓门大,消息灵",
             "duty": {
-                "key": "tavern_hub", "title": "消息集散地",
+                "key": "tavern_hub", "title": "消息集散地", "funding_source": "private",
                 "prompt_hint": "你经营着酒馆,热衷收集和传播镇上的消息;白天多在酒馆张罗(WORK),逮着人就聊(CHAT_RESIDENT/GOSSIP)。",
                 "perks": {"gossip_multiplier": 2.0},
             },
@@ -253,7 +253,7 @@ PRESET_CHARACTERS = [
         "meta_json": {
             "role": "修理匠", "impression": "话少,活儿好",
             "duty": {
-                "key": "workshop_fixer", "title": "修理委托台",
+                "key": "workshop_fixer", "title": "修理委托台", "funding_source": "private",
                 "prompt_hint": "你在工坊修理物件,修好了会在委托栏贴出取件通知;你的日子几乎都泡在工坊里(WORK)。",
                 "perks": {"commission_reward": 8, "wage_sc": 8},
             },
@@ -325,7 +325,7 @@ PRESET_CHARACTERS = [
         "meta_json": {
             "role": "图书管理员", "impression": "安静,总在写什么",
             "duty": {
-                "key": "chronicle_editor", "title": "小镇文摘主编",
+                "key": "chronicle_editor", "title": "小镇文摘主编", "funding_source": "public",
                 "prompt_hint": "你守着图书馆,负责整理小镇的记录——每晚的《小镇文摘》以你的名义发布;白天整理档案、写作(WORK/STUDY/JOURNAL)。",
                 "perks": {},
             },
@@ -397,7 +397,7 @@ PRESET_CHARACTERS = [
         "meta_json": {
             "role": "学院教师", "impression": "小镇的活镇志",
             "duty": {
-                "key": "lecturer", "title": "公开课讲席",
+                "key": "lecturer", "title": "公开课讲席", "funding_source": "public",
                 "prompt_hint": "你在学院授课,每周会开一场面向全镇的公开课;平日备课授课(WORK/STUDY),傍晚沿林荫道散步反思(REFLECT)。",
                 "perks": {"lecture_cooldown_days": 7},
             },
@@ -469,7 +469,7 @@ PRESET_CHARACTERS = [
         "meta_json": {
             "role": "学生", "impression": "问题最多的人",
             "duty": {
-                "key": "explorer", "title": "小镇探索员",
+                "key": "explorer", "title": "小镇探索员", "funding_source": "none",
                 "prompt_hint": "你对什么都好奇,爱在各个地点之间转悠打听新鲜事(VISIT_DISTRICT/OBSERVE/STUDY);你在哪儿,哪儿就容易发生偶遇。",
                 "perks": {"encounter_multiplier": 1.5, "quest_magnet": 0.5},
             },
@@ -541,7 +541,7 @@ PRESET_CHARACTERS = [
         "meta_json": {
             "role": "杂货铺店主", "impression": "嘴硬,秤准,心软",
             "duty": {
-                "key": "shop_keeper", "title": "杂货补给线",
+                "key": "shop_keeper", "title": "杂货补给线", "funding_source": "private",
                 "prompt_hint": "你打理杂货铺的进货补货,到了新货会张贴到货公告;白天基本守在铺子里(WORK)。",
                 "perks": {"restock_jitter": 0.1},
             },
@@ -613,7 +613,7 @@ PRESET_CHARACTERS = [
         "meta_json": {
             "role": "市政厅文书", "impression": "章程活字典",
             "duty": {
-                "key": "town_clerk", "title": "公告与登记处",
+                "key": "town_clerk", "title": "公告与登记处", "funding_source": "public",
                 "prompt_hint": "你负责市政厅的公文与档案,节庆和大事由你张贴官方公告;白天在市政厅办公(WORK),下班常去酒馆听听民情。",
                 "perks": {},
             },
@@ -687,7 +687,7 @@ PRESET_CHARACTERS = [
             "impression": "什么都记录的人",
             "lab": {"access": True, "tier": "junior", "skills": ["observation", "modeling"]},
             "duty": {
-                "key": "researcher", "title": "驻镇研究员",
+                "key": "researcher", "title": "驻镇研究员", "funding_source": "none",
                 "prompt_hint": "你在实验楼做研究,维护着小镇唯一的镇况日志;在实验楼时优先 RESEARCH,平日记录观测(WORK/REFLECT)。",
                 "perks": {"wage_sc": 10},
             },
@@ -759,7 +759,7 @@ PRESET_CHARACTERS = [
         "meta_json": {
             "role": "街头画家", "impression": "广场上支画架的姑娘",
             "duty": {
-                "key": "street_artist", "title": "小镇画师",
+                "key": "street_artist", "title": "小镇画师", "funding_source": "private",
                 "prompt_hint": "你在广场支画架给居民画速写,天气好时尤其勤快(WORK/OBSERVE);画过的人会记得这份小礼物。",
                 "perks": {"sketch_radius": 8},
             },
@@ -833,7 +833,7 @@ PRESET_CHARACTERS = [
         "meta_json": {
             "role": "邮差", "impression": "有信找我,有话我带",
             "duty": {
-                "key": "postman", "title": "邮差",
+                "key": "postman", "title": "邮差", "funding_source": "public",
                 "prompt_hint": "你负责全镇的信件与时间胶囊投递,白天在街上跑投递路线(WORK/WANDER/VISIT_DISTRICT)。",
                 "perks": {"wage_sc": 6},
             },
@@ -1089,6 +1089,20 @@ PRESET_ARCS: dict[str, dict] = {
 }
 
 
+def preset_arc_template_key(slug: str) -> str:
+    """Versioned, title-independent identity for one code-owned story arc.
+
+    Changing display copy must not replay an achieved story.  A genuinely new
+    chapter must opt in explicitly by changing the version suffix.
+    """
+    return f"preset_arc:{slug}:v1"
+
+
+def preset_goal_template_key(slug: str) -> str:
+    """Versioned identity for one code-owned life-goal template."""
+    return f"preset_goal:{slug}:v1"
+
+
 # ── Life goals (A1) ────────────────────────────────────────────────────
 PRESET_GOALS: dict[str, tuple[str, str]] = {
     "lin-wanqiu": ("把咖啡馆变成小镇的客厅", "人需要一个可以不解释自己的地方"),
@@ -1141,8 +1155,10 @@ async def sync_duty_meta(db: AsyncSession) -> int:
 
 
 async def seed_preset_goals(db: AsyncSession) -> int:
-    """Seed life goals for preset residents that lack one. Idempotent."""
+    """Seed each preset life-goal template at most once across all statuses."""
+    from app.models.resident_goal import ResidentGoal
     from app.services.goal_service import create_goal, get_active_goal
+    from sqlalchemy.exc import IntegrityError
 
     ids = await _slug_to_id(db)
     created = 0
@@ -1150,18 +1166,45 @@ async def seed_preset_goals(db: AsyncSession) -> int:
         rid = ids.get(slug)
         if not rid:
             continue
+        template_key = preset_goal_template_key(slug)
+        installed = (await db.execute(
+            select(ResidentGoal.id).where(
+                ResidentGoal.template_key == template_key,
+            )
+        )).scalar_one_or_none()
+        if installed is not None:
+            continue
+        # Preserve the legacy/non-destructive rule: never replace a resident's
+        # current custom life goal merely because its preset was not installed.
         if await get_active_goal(db, rid):
             continue
-        await create_goal(db, rid, title, motivation)
+        try:
+            await create_goal(
+                db,
+                rid,
+                title,
+                motivation,
+                template_key=template_key,
+            )
+        except IntegrityError:
+            await db.rollback()
+            raced = (await db.execute(
+                select(ResidentGoal.id).where(
+                    ResidentGoal.template_key == template_key,
+                )
+            )).scalar_one_or_none()
+            if raced is not None:
+                continue
+            raise
         created += 1
     return created
 
 
 async def seed_preset_arcs(db: AsyncSession) -> int:
     """Seed one kind='arc' goal per resident with rule-triggered milestones.
-    Idempotent: a resident that already has an active arc is skipped."""
+    Idempotent across every lifecycle state via a stable template key."""
     from app.models.resident_goal import ResidentGoal
-    from app.services.goal_service import create_goal
+    from sqlalchemy.exc import IntegrityError
 
     ids = await _slug_to_id(db)
     created = 0
@@ -1169,20 +1212,42 @@ async def seed_preset_arcs(db: AsyncSession) -> int:
         rid = ids.get(slug)
         if not rid:
             continue
+        template_key = preset_arc_template_key(slug)
         existing = (await db.execute(
             select(ResidentGoal).where(
-                ResidentGoal.resident_id == rid,
-                ResidentGoal.kind == "arc", ResidentGoal.status == "active",
+                ResidentGoal.template_key == template_key,
             )
         )).scalars().first()
         if existing:
             continue
-        goal = await create_goal(db, rid, arc["title"], arc.get("motivation", ""), kind="arc")
-        goal.milestones_json = [
-            {"title": m["title"], "done": False, "trigger": m["trigger"]}
-            for m in arc["milestones"]
-        ]
-        await db.commit()
+        goal = ResidentGoal(
+            resident_id=rid,
+            kind="arc",
+            template_key=template_key,
+            title=arc["title"],
+            motivation=arc.get("motivation", ""),
+            status="active",
+            milestones_json=[
+                {"title": m["title"], "done": False, "trigger": m["trigger"]}
+                for m in arc["milestones"]
+            ],
+        )
+        db.add(goal)
+        try:
+            await db.commit()
+        except IntegrityError:
+            # A second bootstrap may have won the SELECT/INSERT race.  The DB
+            # unique index is authoritative; recover the session and treat the
+            # already-installed template as an idempotent no-op.
+            await db.rollback()
+            raced = (await db.execute(
+                select(ResidentGoal.id).where(
+                    ResidentGoal.template_key == template_key,
+                )
+            )).scalar_one_or_none()
+            if raced is not None:
+                continue
+            raise
         created += 1
     return created
 

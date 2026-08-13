@@ -165,6 +165,8 @@ async def test_market_day_event_scheduled(db_session, monkeypatch):
     )).scalars().first()
     assert ev is not None
     assert (ev.payload_json or {}).get("market_day") is True
+    assert (ev.payload_json or {}).get("location_id") == "market_hall"
+    assert "集市大厅" in ev.description
 
 
 @pytest.mark.anyio

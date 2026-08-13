@@ -19,7 +19,8 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
   buildExpandedTilemap, makeGidResolver, LAB, LAB_BLOCKOUT,
-  EXPANDED_WIDTH as W, EXPANDED_HEIGHT as H, POST_OFFICE,
+  EXPANDED_WIDTH as W, EXPANDED_HEIGHT as H, MARKET_AVENUE, MARKET_HALL,
+  MARKET_HALL_BLOCKOUT, POST_OFFICE,
 } from "./expand-town-map.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -128,6 +129,87 @@ async function main() {
     }
   }
   check(outsideNeighborhoodIntact, "post-office pass preserves decoration outside the surveyed footprint");
+
+  console.log("3c. standalone market-hall footprint + loading aisle");
+  const hallInterior = layer(tm, "Interior Ground").data;
+  const hallWall = layer(tm, "Wall").data;
+  const hallFurnitureL1 = layer(tm, "Interior Furniture L1").data;
+  const hallFurnitureL2 = layer(tm, "Interior Furniture L2 ").data;
+  const hallDecoL1 = layer(tm, "Exterior Decoration L1").data;
+  const hallDecoL2 = layer(tm, "Exterior Decoration L2").data;
+  let hallShellOk = true, hallTreesCleared = true;
+  for (let v = 0; v < MARKET_HALL.h; v += 1) {
+    for (let u = 0; u < MARKET_HALL.w; u += 1) {
+      const x = MARKET_HALL.x0 + u, y = MARKET_HALL.y0 + v, i = idx(x, y);
+      const shell = MARKET_HALL_BLOCKOUT[v][u] === "#";
+      if (shell !== Boolean(hallWall[i])) hallShellOk = false;
+      if (hallDecoL1[i] || hallDecoL2[i]) hallTreesCleared = false;
+    }
+  }
+  check(hallShellOk, "market hall has an independent wall shell with a five-tile west door");
+  check(hallTreesCleared, "market-hall construction footprint has no tree overlap");
+  check(hallInterior[idx(...MARKET_HALL.center)] !== 0, "market-hall center is visibly floored");
+  check(col[idx(...MARKET_HALL.entrance)] === 0, "market-hall entrance is walkable");
+  check(col[idx(...MARKET_HALL.caravanParking)] === 0, "market-hall caravan parking is walkable");
+  let loadingEnvelopeOpen = true;
+  for (let y = MARKET_HALL.doorway.y1; y <= MARKET_HALL.doorway.y2; y += 1) {
+    for (let x = MARKET_HALL.accessPath.x1; x <= MARKET_HALL.center[0]; x += 1) {
+      const i = idx(x, y);
+      if (col[i] || hallWall[i] || hallFurnitureL1[i] || hallFurnitureL2[i]) loadingEnvelopeOpen = false;
+    }
+  }
+  check(loadingEnvelopeOpen, "five-tile loading envelope is clear from avenue through the hall");
+  const hallSeen = floodFill(col, [[MARKET_HALL.accessPath.x1, MARKET_HALL.center[1]]]);
+  check(hallSeen[idx(...MARKET_HALL.center)] === 1, "market-hall center is connected to the town road network");
+
+  console.log("3d. south gate + market avenue planning contract");
+  const avenueExterior = layer(tm, "Exterior Ground").data;
+  const avenueDecoL1 = layer(tm, "Exterior Decoration L1").data;
+  const avenueDecoL2 = layer(tm, "Exterior Decoration L2").data;
+  const avenueWall = layer(tm, "Wall").data;
+  const avenueInterior = layer(tm, "Interior Ground").data;
+  const avenueFurnitureL1 = layer(tm, "Interior Furniture L1").data;
+  const avenueFurnitureL2 = layer(tm, "Interior Furniture L2 ").data;
+  const avenueForeground = layer(tm, "Foreground L1").data;
+  const roadGids = new Set([
+    resolve("CuteRPG_Field_B", 96),
+    resolve("CuteRPG_Field_B", 97),
+    resolve("CuteRPG_Field_B", 98),
+  ]);
+  let avenueOpen = true, avenuePaved = true, avenueStructureFree = true;
+  for (let y = MARKET_AVENUE.y1; y <= MARKET_AVENUE.y2; y += 1) {
+    for (let x = MARKET_AVENUE.x1; x <= MARKET_AVENUE.x2; x += 1) {
+      const i = idx(x, y);
+      if (col[i] !== 0) avenueOpen = false;
+      if (!roadGids.has(avenueExterior[i])) avenuePaved = false;
+      if (avenueWall[i] || avenueInterior[i] || avenueFurnitureL1[i] || avenueFurnitureL2[i])
+        avenueStructureFree = false;
+    }
+  }
+  check(avenueOpen, "five-tile avenue is collision-open from its north end to map edge");
+  check(avenuePaved, "every avenue anchor row is visibly paved (not grass/forest)");
+  check(avenueStructureFree, "avenue does not erase or intersect a building footprint");
+  let shouldersClear = true;
+  for (let y = MARKET_AVENUE.y1; y <= MARKET_AVENUE.y2; y += 1)
+    for (let x = MARKET_AVENUE.shoulderX1; x <= MARKET_AVENUE.shoulderX2; x += 1)
+      if (avenueDecoL1[idx(x, y)] || avenueDecoL2[idx(x, y)]) shouldersClear = false;
+  check(shouldersClear, "two-tile landscaped shoulders separate buildings/forest from the wagon route");
+  const gate = MARKET_AVENUE.gate;
+  check(
+    avenueForeground[idx(gate.x1, gate.topY)] === resolve("CuteRPG_Village_B", 37) &&
+      avenueForeground[idx(gate.x2, gate.topY)] === resolve("CuteRPG_Village_B", 39),
+    "south entrance has a visible timber gate lintel",
+  );
+  check(
+    col[idx(gate.x1, gate.postY)] !== 0 && col[idx(gate.x2, gate.postY)] !== 0 &&
+      [100, 101, 102, 103, 104].every((x) => col[idx(x, gate.postY)] === 0),
+    "gate posts block only the shoulders; the full five-tile wagon opening stays clear",
+  );
+  check(
+    avenueExterior[idx(MARKET_AVENUE.x2, MARKET_HALL.center[1])] !== 0 &&
+      hallInterior[idx(...MARKET_HALL.caravanParking)] !== 0,
+    "paved avenue connects directly to the market hall's floored loading bay",
+  );
 
   console.log("4. semantic block layers untouched by generation");
   const before = clone(source);

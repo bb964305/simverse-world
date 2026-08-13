@@ -31,14 +31,15 @@ from app.models.resident_treasury import ResidentTreasury
 from app.models.shop import Item
 from app.models.system_config import SystemConfig
 from app.models.town_treasury import TownTreasury
+from app.models.town_treasury_entry import TownTreasuryEntry
 from app.services import treasury_service
 
 pytestmark = [pytest.mark.economy_postgres, pytest.mark.anyio]
 
 DB_URL = (os.environ.get("ECONOMY_TEST_DATABASE_URL")
           or os.environ.get("LAB_TEST_DATABASE_URL") or "")
-TABLES = (SystemConfig.__table__, TownTreasury.__table__, Item.__table__,
-          ResidentTreasury.__table__)
+TABLES = (SystemConfig.__table__, TownTreasury.__table__,
+          TownTreasuryEntry.__table__, Item.__table__, ResidentTreasury.__table__)
 
 
 @pytest.fixture
@@ -129,3 +130,49 @@ async def test_concurrent_buyers_cannot_oversell_a_single_copy(
             select(Item.stock, Item.active).where(Item.code == "work_a"))).one()
     assert row.stock == 0
     assert row.active is False
+
+
+async def test_concurrent_public_wages_obey_the_income_budget(pg_sessions):
+    """The town-row lock serialises budget reads: 10 simultaneous 1-SC wages
+    against 10 SC income at 70% may land exactly seven, never eight-plus."""
+    async with pg_sessions() as db:
+        await treasury_service.tax(db, 10, reason="sales_tax:seed")
+
+    async def pay(i: int) -> bool:
+        async with pg_sessions() as db:
+            return await treasury_service.town_to_resident(
+                db,
+                f"worker-{i}",
+                1,
+                reason=f"wage:worker-{i}",
+                ref_key=f"wage:concurrent:{i}",
+                wage_budget_ratio=0.70,
+            )
+
+    results = await asyncio.gather(*(pay(i) for i in range(10)))
+    assert sum(results) == 7
+    async with pg_sessions() as db:
+        assert await treasury_service.balance(db) == 3
+        assert await treasury_service.wage_window_totals(db) == (10, 7)
+
+
+async def test_rejected_wage_releases_town_row_lock(pg_sessions):
+    """A SELECT-FOR-UPDATE no-op must end its transaction before returning.
+
+    If the insufficient-funds branch merely returns, the second session blocks
+    on the town row until this test times out.
+    """
+    async with pg_sessions() as db:
+        await treasury_service.tax(db, 1, reason="sales_tax:seed")
+
+    async with pg_sessions() as rejecting:
+        assert not await treasury_service.town_to_resident(
+            rejecting, "worker", 2, reason="wage:worker",
+        )
+        assert rejecting.in_transaction() is False
+
+        async def credit_from_other_session() -> None:
+            async with pg_sessions() as other:
+                await treasury_service.tax(other, 1, reason="sales_tax:next")
+
+        await asyncio.wait_for(credit_from_other_session(), timeout=2.0)

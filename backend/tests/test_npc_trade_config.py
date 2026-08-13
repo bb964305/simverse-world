@@ -14,6 +14,7 @@ def test_npc_trade_gates_default_off():
     s = Settings(_env_file=None)
     assert s.npc_trade_enabled is False
     assert s.caravan_enabled is False
+    assert s.caravan_lifecycle_enabled is False
     assert s.tax_carry_enabled is False
     assert s.item_stock_guard_enabled is False   # 加固闸:迁移 056 暗上后单独翻
 
@@ -21,6 +22,8 @@ def test_npc_trade_gates_default_off():
 def test_npc_trade_tuning_defaults():
     s = Settings(_env_file=None)
     assert s.npc_trade_buy_prob == 0.25
+    assert s.npc_commission_accept_prob == 0.25
+    assert s.commission_ttl_hours == 72
     assert s.npc_trade_reserve_sc == 5          # 保留金，兼作贫困线
     assert s.npc_trade_max_buys_per_night == 2  # 全镇每晚成交上限
 
@@ -29,6 +32,10 @@ def test_caravan_defaults():
     s = Settings(_env_file=None)
     assert s.caravan_stall_fee_sc == 5   # 摊位费（第二税源，不依赖 tax_rate）
     assert s.caravan_budget_sc == 30     # 每个集市日的收购预算
+    assert s.caravan_lifecycle_interval_seconds == 5
+    assert s.caravan_wait_lead_seconds == 600
+    assert s.caravan_route_tile_ms == 150
+    assert s.caravan_lease_seconds == 30
 
 
 def test_npc_trade_env_override(monkeypatch):

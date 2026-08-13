@@ -58,6 +58,17 @@ class TickContext:
     # per-candidate). None until first loaded; {} means "loaded, no relations".
     relations: dict | None = None
     current_plan: HourlyPlan | None = None
+    # Snapshot of the slot selected by the plan phase.  Unlike current_plan it
+    # survives a spontaneous interruption and is used only for attribution.
+    scheduled_plan: HourlyPlan | None = None
+    plan_date: str | None = None
+    plan_interrupt_reason: str | None = None
+    continuation_trip: dict | None = None
+    # A zero-LLM market invitation may request the same Redis-backed movement
+    # continuity as a planned trip without rewriting the resident's daily plan.
+    # The event id lets decide cancel it immediately when the market closes.
+    market_trip_event_id: str | None = None
+    movement_failed_reason: str | None = None
     daily_goal: DailyGoal | None = None
     # A1: the resident's active life goal {"title", "progress"}, fetched
     # lazily (fail-open) where needed — currently by the plan phase on

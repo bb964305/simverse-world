@@ -79,6 +79,7 @@ FISCAL_POLICY_KEYS = frozenset({
     "housing_development_scale",
 })
 FISCAL_PENDING_KEYS: frozenset[str] = frozenset()
+BOOLEAN_POLICY_KEYS = frozenset({"caravan_enabled"})
 
 
 def _routing_snapshot() -> dict[str, str]:
@@ -107,6 +108,8 @@ POLICY_CATALOG: tuple[dict[str, Any], ...] = (
      "default": 0},
     {"key": "npc_default_wage_sc", "tier": TIER_SIMPLE_MAJORITY, "group": "fiscal",
      "default": ("settings", "npc_default_wage_sc")},
+    {"key": "caravan_enabled", "tier": TIER_SIMPLE_MAJORITY, "group": "civic",
+     "default": ("settings", "caravan_enabled")},
     {"key": "curfew_hours", "tier": TIER_SIMPLE_MAJORITY, "group": "civic",
      "default": []},
     {"key": "business_hours", "tier": TIER_SIMPLE_MAJORITY, "group": "civic",
@@ -207,6 +210,14 @@ def validate_fiscal_policy_value(key: str, value: Any) -> float | int:
     if numeric < 0 or not numeric.is_integer():
         raise PolicyValueError(f"policy '{key}' requires a non-negative integer")
     return int(numeric)
+
+
+def validate_boolean_policy_value(key: str, value: Any) -> bool:
+    if key not in BOOLEAN_POLICY_KEYS:
+        raise PolicyValueError(f"'{key}' is not a boolean policy")
+    if not isinstance(value, bool):
+        raise PolicyValueError(f"policy '{key}' requires a boolean value")
+    return value
 
 
 @dataclass(frozen=True)
@@ -358,6 +369,8 @@ class PolicyService:
             return False
         if key in FISCAL_POLICY_KEYS:
             new_value = validate_fiscal_policy_value(key, new_value)
+        elif key in BOOLEAN_POLICY_KEYS:
+            new_value = validate_boolean_policy_value(key, new_value)
         tier = await self.classify(key)
         if tier == TIER_CONSTITUTIONAL_CORE:
             await self._record_core_touch(key, updated_by)
@@ -419,6 +432,8 @@ class PolicyService:
         """
         if key in FISCAL_POLICY_KEYS:
             new_value = validate_fiscal_policy_value(key, new_value)
+        elif key in BOOLEAN_POLICY_KEYS:
+            new_value = validate_boolean_policy_value(key, new_value)
         tier = await self.classify(key)
         if tier == TIER_CONSTITUTIONAL_CORE:
             await self._record_core_touch(key, author)

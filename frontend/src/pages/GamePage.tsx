@@ -7,7 +7,7 @@ import { PhotoBooth } from '../components/PhotoBooth'
 import { DecorEditor } from '../components/DecorEditor'
 import { MinimapOverlay } from '../components/minimap/MinimapOverlay'
 import { useGameStore } from '../stores/gameStore'
-import { connectWS, disconnectWS } from '../services/ws'
+import { connectWS } from '../services/ws'
 import { getSettings } from '../services/api'
 import { bridge } from '../game/phaserBridge'
 import '../styles/game-shell.css'
@@ -17,6 +17,7 @@ export function GamePage() {
   const chatOpen = useGameStore((s) => s.chatOpen)
 
   useEffect(() => {
+    const gameOwner = Symbol('game-page')
     let destroyed = false
     connectWS()
 
@@ -34,7 +35,7 @@ export function GamePage() {
 
       const { initGame } = await import('../game/GameScene')
       if (!destroyed && containerRef.current) {
-        initGame(containerRef.current)
+        initGame(containerRef.current, gameOwner)
       }
     }
 
@@ -50,8 +51,11 @@ export function GamePage() {
       destroyed = true
       unsubPlayerInteract()
       useGameStore.getState().closeChat()
-      disconnectWS()
-      import('../game/GameScene').then(({ destroyGame }) => destroyGame())
+      // Keep the authenticated socket alive across route changes. Other pages
+      // consume live frames too, and logout remains the deliberate disconnect.
+      import('../game/GameScene').then(({ destroyGame }) => {
+        destroyGame(gameOwner)
+      })
     }
   }, [])
 
