@@ -31,6 +31,7 @@ chat_end 显式释放。玩家锁重入即续期（每条 chat 消息都会重�
 import asyncio
 import json
 import logging
+import time
 
 from fastapi import WebSocket
 
@@ -39,6 +40,12 @@ from app.redis_client import get_redis
 logger = logging.getLogger(__name__)
 
 POSITIONS_KEY = "sv:positions"
+# REST-controlled Agent players have no WebSocket disconnect hook. Keep their
+# presence in a separate hash with an expiry index, then reap it explicitly so
+# a dead local Agent cannot remain a permanent online ghost.
+AGENT_POSITIONS_KEY = "sv:agent-positions"
+AGENT_PRESENCE_EXPIRY_KEY = "sv:agent-presence-expiry"
+AGENT_PRESENCE_VERSION_KEY = "sv:agent-presence-version"
 CHATTING_PREFIX = "sv:chatting:"      # per-resident string key, value=user_id
 SOCIALIZING_PREFIX = "sv:socializing:"  # per-resident string key, value=partner_id
 QUEUE_PREFIX = "sv:queue:"
@@ -68,10 +75,14 @@ class ConnectionManager:
         """Drop a client: forget its socket, presence, held chat lock, and queue spots."""
         self.local.pop(user_id, None)
         r = get_redis()
+        # A WebSocket disconnect owns only the ordinary WS presence hash.
+        # Headless-Agent leases are refreshed/reaped independently; deleting
+        # them here could race a concurrent REST heartbeat and erase a fresh
+        # lease for the same principal.
         await r.hdel(POSITIONS_KEY, user_id)
         async for key in r.scan_iter(match=CHATTING_PREFIX + "*"):
-            if await r.get(key) == user_id:
-                await r.delete(key)
+            resident_id = key.removeprefix(CHATTING_PREFIX)
+            await self.unlock_resident(resident_id, expected_owner=user_id)
         await self.cancel_all_queues(user_id)
 
     # ------------------------------------------------------------------ #
@@ -173,17 +184,107 @@ class ConnectionManager:
             json.dumps({"x": x, "y": y, "direction": direction, "name": name}),
         )
 
+    async def update_agent_position(
+        self,
+        user_id: str,
+        x: float,
+        y: float,
+        direction: str,
+        name: str,
+        *,
+        ttl_seconds: int,
+    ) -> bool:
+        """Refresh expiring headless-Agent presence.
+
+        Returns True when the lease was absent/expired, allowing the caller to
+        emit one ``player_joined`` frame. Durable position remains in the DB;
+        this is only the realtime online projection.
+        """
+        r = get_redis()
+        now = time.time()
+        ttl = max(1, int(ttl_seconds))
+        # WATCH closes the reaper-vs-heartbeat race: a concurrent renewal
+        # changes the version hash and makes either transaction retry instead
+        # of deleting a fresh payload.
+        while True:
+            async with r.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(
+                        AGENT_PRESENCE_EXPIRY_KEY, AGENT_PRESENCE_VERSION_KEY
+                    )
+                    previous_expiry = await pipe.zscore(
+                        AGENT_PRESENCE_EXPIRY_KEY, user_id
+                    )
+                    became_online = (
+                        previous_expiry is None or float(previous_expiry) <= now
+                    )
+                    current_version = await pipe.hget(
+                        AGENT_PRESENCE_VERSION_KEY, user_id
+                    )
+                    version = int(current_version or 0) + 1
+                    payload = {
+                        "x": x,
+                        "y": y,
+                        "direction": direction,
+                        "name": name,
+                        "agent_controlled": True,
+                        "presence_ttl_seconds": ttl,
+                    }
+                    pipe.multi()
+                    pipe.hset(
+                        AGENT_POSITIONS_KEY, user_id, json.dumps(payload)
+                    )
+                    pipe.hset(AGENT_PRESENCE_VERSION_KEY, user_id, version)
+                    pipe.zadd(AGENT_PRESENCE_EXPIRY_KEY, {user_id: now + ttl})
+                    await pipe.execute()
+                    break
+                except Exception as exc:
+                    from redis.exceptions import WatchError
+
+                    if isinstance(exc, WatchError):
+                        continue
+                    raise
+        return became_online
+
     async def get_position(self, user_id: str) -> dict | None:
-        raw = await get_redis().hget(POSITIONS_KEY, user_id)
+        r = get_redis()
+        raw = await r.hget(POSITIONS_KEY, user_id)
         return json.loads(raw) if raw else None
 
+    async def get_visible_position(self, user_id: str) -> dict | None:
+        """Map projection position for either a WS player or leased Agent."""
+        raw = await self.get_position(user_id)
+        if raw is not None:
+            return raw
+        r = get_redis()
+        expiry = await r.zscore(AGENT_PRESENCE_EXPIRY_KEY, user_id)
+        if expiry is not None and float(expiry) > time.time():
+            agent_raw = await r.hget(AGENT_POSITIONS_KEY, user_id)
+            return json.loads(agent_raw) if agent_raw else None
+        return None
+
     async def is_online(self, user_id: str) -> bool:
-        return bool(await get_redis().hexists(POSITIONS_KEY, user_id))
+        r = get_redis()
+        # Only a live WebSocket can receive legacy player-chat/notification
+        # frames. Headless Agents have their own durable inbox; their map lease
+        # must not make those WS-only services try a pub/sub delivery that no
+        # socket can consume.
+        if await r.hexists(POSITIONS_KEY, user_id):
+            return True
+        return False
 
     async def get_online_players(self, exclude: str | None = None) -> list[dict]:
-        data = await get_redis().hgetall(POSITIONS_KEY)
+        r = get_redis()
+        data = await r.hgetall(POSITIONS_KEY)
+        agent_data = await r.hgetall(AGENT_POSITIONS_KEY)
+        now = time.time()
         players: list[dict] = []
-        for uid, raw in data.items():
+        combined: list[tuple[str, str]] = list(data.items())
+        for uid, raw in agent_data.items():
+            expiry = await r.zscore(AGENT_PRESENCE_EXPIRY_KEY, uid)
+            if expiry is not None and float(expiry) > now and uid not in data:
+                combined.append((uid, raw))
+        for uid, raw in combined:
             if uid == exclude:
                 continue
             try:
@@ -192,10 +293,84 @@ class ConnectionManager:
                 continue
         return players
 
+    async def expire_agent_presences(self, *, now: float | None = None) -> list[str]:
+        """Atomically remove expired leases and enqueue ordered leave events."""
+        r = get_redis()
+        cutoff = time.time() if now is None else now
+        expired = await r.zrangebyscore(AGENT_PRESENCE_EXPIRY_KEY, "-inf", cutoff)
+        removed: list[str] = []
+        for user_id in expired:
+            while True:
+                async with r.pipeline(transaction=True) as pipe:
+                    try:
+                        await pipe.watch(
+                            AGENT_PRESENCE_EXPIRY_KEY,
+                            AGENT_PRESENCE_VERSION_KEY,
+                        )
+                        expiry = await pipe.zscore(
+                            AGENT_PRESENCE_EXPIRY_KEY, user_id
+                        )
+                        if expiry is None or float(expiry) > cutoff:
+                            await pipe.reset()
+                            break
+                        # Read the version while watched. Its value need not be
+                        # returned; watching the key prevents deletion if a
+                        # heartbeat increments it before EXEC.
+                        await pipe.hget(AGENT_PRESENCE_VERSION_KEY, user_id)
+                        pipe.multi()
+                        pipe.zrem(AGENT_PRESENCE_EXPIRY_KEY, user_id)
+                        pipe.hdel(AGENT_POSITIONS_KEY, user_id)
+                        pipe.hdel(AGENT_PRESENCE_VERSION_KEY, user_id)
+                        # Publish inside the same Redis transaction. A racing
+                        # heartbeat is therefore totally ordered: either leave
+                        # precedes its later joined event, or the WATCH retry
+                        # observes the renewed expiry and emits no stale leave.
+                        pipe.publish(
+                            WS_CHANNEL,
+                            json.dumps(
+                                {
+                                    "op": "broadcast",
+                                    "data": {
+                                        "type": "player_left",
+                                        "player_id": user_id,
+                                    },
+                                    "exclude": None,
+                                }
+                            ),
+                        )
+                        result = await pipe.execute()
+                        if result and result[0]:
+                            removed.append(user_id)
+                        break
+                    except Exception as exc:
+                        from redis.exceptions import WatchError
+
+                        if isinstance(exc, WatchError):
+                            continue
+                        raise
+        return removed
+
+    async def run_agent_presence_reaper(self) -> None:
+        """Remove expired headless-Agent leases and notify live browsers."""
+        while True:
+            try:
+                await self.expire_agent_presences()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.warning("Agent presence reaper failed", exc_info=True)
+            await asyncio.sleep(10)
+
     # ------------------------------------------------------------------ #
     # Resident chat lock (player <-> NPC)                                #
     # ------------------------------------------------------------------ #
-    async def lock_resident(self, resident_id: str, user_id: str) -> bool:
+    async def lock_resident(
+        self,
+        resident_id: str,
+        user_id: str,
+        *,
+        ttl_seconds: int = CHAT_LOCK_TTL,
+    ) -> bool:
         """Lock resident for chatting. Returns False if held by another user.
 
         Re-entrant: the same user re-locking their own resident returns True
@@ -206,15 +381,48 @@ class ConnectionManager:
         """
         r = get_redis()
         key = CHATTING_PREFIX + resident_id
-        if await r.set(key, user_id, nx=True, ex=CHAT_LOCK_TTL):
+        ttl = max(1, int(ttl_seconds))
+        if await r.set(key, user_id, nx=True, ex=ttl):
             return True
         if (await r.get(key)) == user_id:
-            await r.expire(key, CHAT_LOCK_TTL)  # 重入=心跳续期
+            await r.expire(key, ttl)  # 重入=心跳续期
             return True
         return False
 
-    async def unlock_resident(self, resident_id: str) -> None:
-        await get_redis().delete(CHATTING_PREFIX + resident_id)
+    async def unlock_resident(
+        self, resident_id: str, *, expected_owner: str | None = None
+    ) -> bool:
+        """Release a resident lock, optionally only when still owned by caller.
+
+        The owner-checked form prevents a stale disconnect/finalizer from
+        deleting a lease that expired and was subsequently acquired by another
+        human or external Agent.
+        """
+        r = get_redis()
+        key = CHATTING_PREFIX + resident_id
+        if expected_owner is None:
+            return bool(await r.delete(key))
+        while True:
+            async with r.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(key)
+                    if await pipe.get(key) != expected_owner:
+                        await pipe.reset()
+                        return False
+                    pipe.multi()
+                    pipe.delete(key)
+                    result = await pipe.execute()
+                    return bool(result and result[0])
+                except Exception as exc:
+                    from redis.exceptions import WatchError
+
+                    if isinstance(exc, WatchError):
+                        continue
+                    raise
+
+    async def resident_lock_owner(self, resident_id: str) -> str | None:
+        """Return the current chat-lock owner for safe queue handoff."""
+        return await get_redis().get(CHATTING_PREFIX + resident_id)
 
     # ------------------------------------------------------------------ #
     # Chat queue                                                         #

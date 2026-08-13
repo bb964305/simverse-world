@@ -8,6 +8,7 @@ from app.routers import auth, users, residents, forge, profile, search, bulletin
 from app.routers import lab as lab_router
 from app.routers import world as world_router
 from app.routers import townhall as townhall_router
+from app.routers import agent_players as agent_players_router
 # Import the modules whose @on(...) handlers must register on the event bus.
 import app.events.achievements  # noqa: F401
 import app.services.daily_quest_service  # noqa: F401
@@ -27,6 +28,7 @@ from app.agent.loop import agent_loop
 from app.http import close_client
 from app.redis_client import close_redis
 from app.ws.manager import manager
+from app.services.player_npc_chat_service import run_agent_npc_chat_reaper
 from app.observability import init_sentry, wire_runtime_gauges
 
 logger = logging.getLogger(__name__)
@@ -64,6 +66,8 @@ async def lifespan(app):
     # run_background_tasks — this process owns live WebSocket clients even when
     # the agent loops live in the standalone worker.
     subscriber_task = asyncio.create_task(manager.run_subscriber())
+    agent_presence_task = asyncio.create_task(manager.run_agent_presence_reaper())
+    agent_npc_chat_task = asyncio.create_task(run_agent_npc_chat_reaper())
 
     # S5: the location-visit consumer runs on every API worker (move messages
     # arrive on the worker that owns the user's socket), independent of
@@ -104,6 +108,8 @@ async def lifespan(app):
         )
     yield
     subscriber_task.cancel()
+    agent_presence_task.cancel()
+    agent_npc_chat_task.cancel()
     location_task.cancel()
     world_reload_task.cancel()
     for task in background_tasks:
@@ -187,6 +193,7 @@ app.include_router(lab_router.router)
 app.include_router(world_router.router)
 app.include_router(townhall_router.router)
 app.include_router(townhall_router.alias_router)  # 收口: /town/{treasury,policies} 别名
+app.include_router(agent_players_router.router)
 app.include_router(admin_router)
 
 # --- Observability (Phase 3): GET /metrics + runtime gauges ---

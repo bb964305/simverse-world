@@ -45,6 +45,21 @@ async def test_list_residents(client, seeded_db):
     assert data[1]["slug"] == "isabella"
 
 @pytest.mark.anyio
+async def test_list_residents_excludes_player_avatar(client, seeded_db, db_session):
+    player = Resident(
+        id="player-row",
+        slug="p-player",
+        name="Player",
+        resident_type="player",
+        creator_id="11111111-1111-1111-1111-111111111111",
+    )
+    db_session.add(player)
+    await db_session.commit()
+
+    data = (await client.get("/residents")).json()
+    assert {item["slug"] for item in data} == {"isabella", "klaus"}
+
+@pytest.mark.anyio
 async def test_get_resident_by_slug(client, seeded_db):
     resp = await client.get("/residents/isabella")
     assert resp.status_code == 200

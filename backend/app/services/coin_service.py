@@ -54,6 +54,25 @@ async def charge(db: AsyncSession, user_id: str, amount: int, reason: str) -> bo
     return True
 
 
+async def charge_pending(
+    db: AsyncSession, user_id: str, amount: int, reason: str
+) -> bool:
+    """Flush-only debit primitive. It never commits or rolls back."""
+    if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+        return False
+    result = await db.execute(
+        update(User)
+        .where(User.id == user_id, User.soul_coin_balance >= amount)
+        .values(soul_coin_balance=User.soul_coin_balance - amount)
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount == 0:
+        return False
+    db.add(Transaction(user_id=user_id, amount=-amount, reason=reason))
+    await db.flush()
+    return True
+
+
 def _sqlstate(exc: BaseException) -> str | None:
     pending: list[BaseException] = [exc]
     seen: set[int] = set()

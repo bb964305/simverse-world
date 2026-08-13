@@ -23,6 +23,13 @@ const GraphPage = lazy(() => import('./pages/GraphPage').then((m) => ({ default:
 const SeasonsPage = lazy(() => import('./pages/SeasonsPage').then((m) => ({ default: m.SeasonsPage })))
 const DebatesPage = lazy(() => import('./pages/DebatesPage').then((m) => ({ default: m.DebatesPage })))
 const CapsulesPage = lazy(() => import('./pages/CapsulesPage').then((m) => ({ default: m.CapsulesPage })))
+const TownPage = lazy(() => import('./pages/TownPage').then((m) => ({ default: m.TownPage })))
+const WatchPage = lazy(() => import('./pages/WatchPage').then((m) => ({ default: m.WatchPage })))
+
+function normalizePathname(pathname: string): string {
+  if (pathname === '/') return pathname
+  return pathname.replace(/\/+$/, '') || '/'
+}
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const token = useGameStore((s) => s.token)
@@ -89,13 +96,20 @@ function PageFallback() {
 function AuthenticatedOverlays() {
   const token = useGameStore((state) => state.token)
   const { pathname } = useLocation()
-  if (!token || pathname === '/login' || pathname === '/auth/callback') return null
+  const normalizedPath = normalizePathname(pathname)
+  if (
+    !token
+    || normalizedPath === '/login'
+    || normalizedPath === '/auth/callback'
+    || normalizedPath === '/town'
+    || normalizedPath === '/watch'
+  ) return null
 
   return (
     <>
       <ConnectionBanner />
       <AchievementToast />
-      {(pathname === '/' || pathname === '/play') && <EncounterCard />}
+      {(normalizedPath === '/' || normalizedPath === '/play') && <EncounterCard />}
     </>
   )
 }
@@ -109,6 +123,8 @@ export function AppRoutes() {
           <Routes>
             <Route path="/login" element={<LoginRoute />} />
             <Route path="/auth/callback" element={<AuthCallbackPage />} />
+            <Route path="/town" element={<TownPage />} />
+            <Route path="/watch" element={<WatchPage />} />
             <Route path="/onboarding" element={<ProtectedRoute><OnboardingPage /></ProtectedRoute>} />
             <Route path="/" element={<HomeRoute />} />
             {/* The game also lives at /play — many entry points (landing CTA,

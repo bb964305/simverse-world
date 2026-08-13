@@ -24,7 +24,13 @@ async def claim_daily_reward(db: AsyncSession, user_id: str) -> dict:
 
     Returns {"claimed", ...}. Idempotent per calendar day (UTC) via last_login_date.
     """
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    # Serialize claims on the user row. Without this, concurrent REST/WS login
+    # requests can all pass the date check and mint duplicate rewards.
+    user = (
+        await db.execute(
+            select(User).where(User.id == user_id).with_for_update()
+        )
+    ).scalar_one_or_none()
     if not user:
         return {"claimed": False, "reason": "user_not_found"}
 

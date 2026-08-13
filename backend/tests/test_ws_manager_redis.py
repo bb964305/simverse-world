@@ -89,6 +89,45 @@ async def test_presence_and_online_players(mgr):
 
 
 @pytest.mark.anyio
+async def test_headless_agent_presence_expires_and_leaves_online_roster(mgr):
+    assert await mgr.update_agent_position(
+        "agent-u", 50, 60, "left", "Agent", ttl_seconds=30
+    ) is True
+    # Agent lease is visible on the map but does not pretend there is a WS
+    # socket for legacy direct-message routing.
+    assert await mgr.is_online("agent-u") is False
+    assert (await mgr.get_visible_position("agent-u"))["agent_controlled"] is True
+    assert await mgr.get_online_players() == [
+        {
+            "player_id": "agent-u",
+            "x": 50,
+            "y": 60,
+            "direction": "left",
+            "name": "Agent",
+            "agent_controlled": True,
+            "presence_ttl_seconds": 30,
+        }
+    ]
+
+    assert await mgr.expire_agent_presences(now=float("inf")) == ["agent-u"]
+    assert await mgr.is_online("agent-u") is False
+    assert await mgr.get_online_players() == []
+
+
+@pytest.mark.anyio
+async def test_websocket_disconnect_does_not_erase_headless_agent_lease(mgr):
+    await mgr.update_agent_position(
+        "shared-id", 50, 60, "left", "Agent", ttl_seconds=30
+    )
+    mgr.register("shared-id", FakeWS())
+    await mgr.disconnect("shared-id")
+
+    assert await mgr.is_online("shared-id") is False
+    assert await mgr.get_position("shared-id") is None
+    assert (await mgr.get_visible_position("shared-id"))["agent_controlled"] is True
+
+
+@pytest.mark.anyio
 async def test_disconnect_clears_presence_lock_and_queue(mgr):
     mgr.register("u1", FakeWS())
     await mgr.update_position("u1", 1, 2, "down", "One")

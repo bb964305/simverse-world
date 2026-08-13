@@ -280,6 +280,17 @@ class Settings(BaseSettings):
     rest_rate_limit_forge_per_minute: int = 10     # forge start/quick (by IP)
     rest_rate_limit_llm_test_per_minute: int = 5   # settings/llm/test (by IP)
     rest_rate_limit_propose_per_minute: int = 5    # polls/propose (by IP)
+    # External Agent players. Self-registration remains local/debug-only unless
+    # an operator explicitly enables it.
+    agent_self_registration_enabled: bool = False
+    agent_player_session_minutes: int = 15
+    agent_viewer_session_minutes: int = 60
+    agent_pairing_minutes: int = 10
+    agent_move_max_tiles: int = 4
+    agent_observation_radius_tiles: int = 12
+    agent_observation_event_limit: int = 20
+    agent_message_max_chars: int = 280
+    agent_presence_ttl_seconds: int = 90
 
     # --- Observability (OPTIMIZATION_PLAN P1-3) ---
     # metrics_enabled / sentry_* live in the Observability block above (a

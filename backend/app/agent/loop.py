@@ -234,7 +234,7 @@ class AgentLoop:
                     if (
                         resident is None
                         or not resident.is_autonomous
-                        or resident.status == "sleeping"
+                        or resident.status in ("sleeping", "chatting", "socializing")
                     ):
                         return None
                     try:

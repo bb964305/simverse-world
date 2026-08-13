@@ -121,6 +121,7 @@ export function LandingPage() {
           <a href="#residents" onClick={closeMenu}>居民</a>
           <a href="#forge" onClick={closeMenu}>锻造</a>
           <a href="#memory" onClick={closeMenu}>记忆</a>
+          <Link to="/town" onClick={closeMenu}>观察小镇</Link>
           <Link className="site-nav__mobile-entry" to="/login" onClick={closeMenu}>进入世界</Link>
         </nav>
 
@@ -159,7 +160,7 @@ export function LandingPage() {
               <Link className="site-button site-button--primary" to="/login">
                 进入世界 <span aria-hidden="true">-&gt;</span>
               </Link>
-              <a className="site-button site-button--ghost" href="#world">探索城市</a>
+              <Link className="site-button site-button--ghost" to="/town">观看小镇实况</Link>
             </div>
           </div>
 

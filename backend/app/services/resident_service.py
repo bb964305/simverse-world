@@ -9,7 +9,15 @@ async def list_residents(
     """List residents by heat desc. ``limit`` is opt-in (P1-3): callers that need
     the whole roster (e.g. the map) pass nothing; API clients can page with
     limit/offset. offset is applied only when meaningful."""
-    stmt = select(Resident).order_by(Resident.heat.desc(), Resident.id)
+    # This public roster backs the Phaser NPC layer. Player avatars (human or
+    # external Agent) are delivered by presence/player events; returning them
+    # here would render a duplicate static NPC and would expose a misleading
+    # NPC-chat target.
+    stmt = (
+        select(Resident)
+        .where(Resident.resident_type != "player")
+        .order_by(Resident.heat.desc(), Resident.id)
+    )
     if offset:
         stmt = stmt.offset(offset)
     if limit is not None:
