@@ -299,6 +299,10 @@ async def _work_workshop_fixer(db, resident) -> str | None:
     )
     if c is None:
         return None  # global cap reached — retry next window
+    if isinstance(c, str):
+        # v2 dedup:上一单还挂着。返回叙事行(非 None)以满足 on_work 契约——
+        # 这班照常算干了活:发薪+设 cooldown,只是不再贴新委托/上架新品。
+        return f"{resident.name}看了看委托栏,上一单还挂着,先去干活。"
     await _maybe_list_resident_work(
         db, resident, "handcraft",
         f"{resident.name}的手工件", "🔧",

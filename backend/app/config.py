@@ -598,7 +598,11 @@ class Settings(BaseSettings):
     npc_trade_enabled: bool = False               # C1 餐费入账 + C2 消费 pass + C3 委托接单/结算
     npc_trade_buy_prob: float = 0.25              # 每个合格买方每晚掷骰的成交概率
     npc_commission_accept_prob: float = 0.25      # C3 独立接单概率（不再借用商品购买口味）
-    commission_ttl_hours: int = 72                # 新委托生命周期；跨过至少两次 nightly
+    commission_ttl_hours: int = 72                # 新委托生命周期；跨过至少两次 nightly（仅 v2 开时生效）
+    # Commission lifecycle v2:开 = issuer+kind 去重(未过期 open/accepted 挡新单,
+    # create 返回哨兵 "deduped") + expires_at 显式取 commission_ttl_hours。
+    # 关 = master 行为逐字节一致:无去重、TTL 走 model 默认 48h。
+    commission_lifecycle_v2_enabled: bool = False
     npc_trade_reserve_sc: int = 5                 # 买方保留金,兼作贫困线(余额须 > 它 + 价)
     npc_trade_max_buys_per_night: int = 2         # 全镇每晚成交上限(每人至多 1 笔)
     caravan_enabled: bool = False                 # C4 外来商队(绑集市日,外生买方 + 第二税源)

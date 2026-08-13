@@ -47,29 +47,41 @@ def serialize(c: Commission) -> dict:
     }
 
 
-async def create_commission(db, issuer_resident_id, kind, title, payload, reward_sc) -> Commission | None:
-    # One active template per issuer/kind. Duty WORK can run daily while a
-    # commission now lives 72h; without this guard it posts three identical
-    # errands before the first one has had a fair chance to settle.
-    duplicate = (await db.execute(
-        select(Commission.id).where(
-            Commission.issuer_resident_id == issuer_resident_id,
-            Commission.kind == kind,
-            Commission.status.in_(["open", "accepted"]),
-        ).limit(1)
-    )).scalar_one_or_none()
-    if duplicate is not None:
-        return None
+async def create_commission(db, issuer_resident_id, kind, title, payload, reward_sc) -> Commission | str | None:
+    """Create an open commission. Three-state return:
+
+    - ``None``       — global open-commission cap reached (master semantics);
+    - ``"deduped"``  — commission_lifecycle_v2_enabled only: the issuer already
+                       has an unexpired open/accepted commission of this kind;
+    - ``Commission`` — created and committed.
+    """
+    if settings.commission_lifecycle_v2_enabled:
+        # One active template per issuer/kind. Duty WORK can run daily while a
+        # commission now lives commission_ttl_hours; without this guard it posts
+        # identical errands before the first one has had a fair chance to settle.
+        # Open-but-expired rows must not block a fresh posting.
+        duplicate = (await db.execute(
+            select(Commission.id).where(
+                Commission.issuer_resident_id == issuer_resident_id,
+                Commission.kind == kind,
+                Commission.status.in_(["open", "accepted"]),
+                Commission.expires_at > datetime.now(UTC),
+            ).limit(1)
+        )).scalar_one_or_none()
+        if duplicate is not None:
+            return "deduped"
     open_count = (await db.execute(
         select(func.count()).select_from(Commission).where(Commission.status == "open")
     )).scalar() or 0
     if open_count >= _cap():
         return None
+    kwargs = {}
+    if settings.commission_lifecycle_v2_enabled:
+        kwargs["expires_at"] = datetime.now(UTC) + timedelta(
+            hours=max(1, int(settings.commission_ttl_hours or 72)))
     c = Commission(
         issuer_resident_id=issuer_resident_id, kind=kind, title=title,
-        payload_json=payload, reward_sc=reward_sc, status="open",
-        expires_at=(datetime.now(UTC) + timedelta(
-            hours=max(1, int(settings.commission_ttl_hours or 72)))),
+        payload_json=payload, reward_sc=reward_sc, status="open", **kwargs,
     )
     db.add(c)
     await db.commit()
