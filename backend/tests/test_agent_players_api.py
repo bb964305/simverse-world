@@ -1213,7 +1213,13 @@ async def test_private_agent_is_omitted_without_becoming_a_human_count(client):
 
 
 @pytest.mark.anyio
-async def test_agent_presence_expires_without_a_rest_heartbeat(client, db_session):
+async def test_agent_presence_expires_without_a_rest_heartbeat(
+    client, db_session, monkeypatch
+):
+    from app.services import agent_player_service
+
+    # 本测同一测试内两次取快照断言不同结果,关掉 3s TTL 缓存(F3)以取实时值
+    monkeypatch.setattr(agent_player_service, "_SNAPSHOT_CACHE_TTL_SECONDS", 0.0)
     created, credentials, _session = await _register_and_session(client)
     live = (await client.get("/api/v1/public/town/snapshot")).json()
     assert live["counts"]["online"] == 1
@@ -1233,6 +1239,185 @@ async def test_agent_presence_expires_without_a_rest_heartbeat(client, db_sessio
     assert viewer.status_code == 200
     view = (await client.get("/api/v1/viewer/snapshot")).json()
     assert view["agent"]["is_online"] is False
+
+
+@pytest.mark.anyio
+async def test_snapshot_cached_within_ttl(db_session, monkeypatch):
+    """F3: 公共快照 3s TTL 内复用,第二次调用零 DB 查询。"""
+    from app.services import agent_player_service
+
+    calls = {"n": 0}
+    original_execute = db_session.execute
+
+    async def counting_execute(*args, **kwargs):
+        calls["n"] += 1
+        return await original_execute(*args, **kwargs)
+
+    monkeypatch.setattr(db_session, "execute", counting_execute)
+
+    first = await agent_player_service.public_town_snapshot(db_session)
+    queries_first = calls["n"]
+    assert queries_first > 0
+
+    second = await agent_player_service.public_town_snapshot(db_session)
+    assert calls["n"] == queries_first
+    assert second == first
+
+
+@pytest.mark.anyio
+async def test_snapshot_online_bulk(db_session, monkeypatch):
+    """F3: 真人在线判定走一次批查集合,不逐人 await is_online。"""
+    import json
+
+    from app.redis_client import get_redis
+    from app.services import agent_player_service
+    from app.ws.manager import POSITIONS_KEY, manager
+
+    online_human = User(
+        id="human-bulk-online",
+        name="真人甲",
+        email="human-bulk-online@example.com",
+        soul_coin_balance=0,
+    )
+    online_avatar = Resident(
+        id="resident-human-bulk-online",
+        slug="human-bulk-online",
+        name="真人化身",
+        resident_type="player",
+        status="idle",
+        creator_id=online_human.id,
+        tile_x=75,
+        tile_y=56,
+    )
+    offline_human = User(
+        id="human-bulk-offline",
+        name="真人乙",
+        email="human-bulk-offline@example.com",
+        soul_coin_balance=0,
+    )
+    offline_avatar = Resident(
+        id="resident-human-bulk-offline",
+        slug="human-bulk-offline",
+        name="离线化身",
+        resident_type="player",
+        status="idle",
+        creator_id=offline_human.id,
+        tile_x=60,
+        tile_y=50,
+    )
+    db_session.add_all([online_human, online_avatar, offline_human, offline_avatar])
+    await db_session.commit()
+
+    await get_redis().hset(
+        POSITIONS_KEY,
+        online_human.id,
+        json.dumps({"x": 75 * 32 + 16, "y": 56 * 32 + 16}),
+    )
+
+    async def _forbidden(user_id: str) -> bool:
+        raise AssertionError("public_town_snapshot 不得逐人调用 is_online")
+
+    monkeypatch.setattr(manager, "is_online", _forbidden)
+
+    snapshot = await agent_player_service.public_town_snapshot(db_session)
+    assert snapshot["counts"]["humans"] == 2
+    assert snapshot["counts"]["online"] == 1
+
+
+@pytest.mark.anyio
+async def test_observation_bbox_keeps_players(client, db_session, monkeypatch):
+    """F3: observation 的 residents 查询在 SQL 层按 bbox 裁剪 npc,
+    但 player 行豁免(其坐标来自 presence 覆盖,DB tile 可能陈旧)。"""
+    from sqlalchemy.sql import Select
+
+    from app.services import agent_player_service
+    from app.ws.manager import manager
+
+    created, _credentials, _session = await _register_and_session(client, "边界观察员")
+    await _set_agent_position(db_session, created["application_id"], 75, 56)
+    profile = await db_session.get(AgentPlayer, created["application_id"])
+    assert profile is not None
+
+    near_npc = Resident(
+        id="resident-bbox-near-npc",
+        slug="bbox-near-npc",
+        name="邻座居民",
+        resident_type="npc",
+        status="idle",
+        tile_x=76,
+        tile_y=56,
+    )
+    far_npc = Resident(
+        id="resident-bbox-far-npc",
+        slug="bbox-far-npc",
+        name="远方居民",
+        resident_type="npc",
+        status="idle",
+        tile_x=10,
+        tile_y=10,
+    )
+    stale_owner = User(
+        id="user-bbox-stale-player",
+        name="漂移真人",
+        email="bbox-stale-player@example.com",
+        soul_coin_balance=0,
+    )
+    stale_player = Resident(
+        id="resident-bbox-stale-player",
+        slug="bbox-stale-player",
+        name="漂移化身",
+        resident_type="player",
+        status="idle",
+        creator_id=stale_owner.id,
+        # DB tile 早已陈旧,远在 bbox 之外;presence 会把它放回 agent 身边
+        tile_x=5,
+        tile_y=5,
+    )
+    db_session.add_all([near_npc, far_npc, stale_owner, stale_player])
+    await db_session.commit()
+
+    monkeypatch.setattr(
+        manager,
+        "get_online_players",
+        AsyncMock(
+            return_value=[
+                {
+                    "player_id": stale_owner.id,
+                    "x": 76 * 32 + 16,
+                    "y": 56 * 32 + 16,
+                }
+            ]
+        ),
+    )
+
+    captured: list[list[Resident]] = []
+    original_execute = db_session.execute
+
+    async def spying_execute(statement, *args, **kwargs):
+        if isinstance(statement, Select):
+            descriptions = statement.column_descriptions
+            if len(descriptions) == 1 and descriptions[0].get("entity") is Resident:
+                probe = await original_execute(statement, *args, **kwargs)
+                captured.append(list(probe.scalars().all()))
+        return await original_execute(statement, *args, **kwargs)
+
+    monkeypatch.setattr(db_session, "execute", spying_execute)
+
+    data = await agent_player_service.observation(
+        db_session, profile, include_private_events=False
+    )
+
+    assert len(captured) == 1
+    loaded_ids = {row.id for row in captured[0]}
+    assert far_npc.id not in loaded_ids  # 半径外 npc 在 SQL 层被裁掉
+    assert near_npc.id in loaded_ids
+    assert stale_player.id in loaded_ids  # player 行豁免 bbox
+
+    nearby_resident_ids = {item["id"] for item in data["nearby"]["residents"]}
+    assert near_npc.id in nearby_resident_ids
+    assert far_npc.id not in nearby_resident_ids
+    nearby_player_ids = {item["id"] for item in data["nearby"]["players"]}
+    assert stale_player.id in nearby_player_ids
 
 
 @pytest.mark.anyio

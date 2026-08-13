@@ -273,6 +273,15 @@ class ConnectionManager:
             return True
         return False
 
+    async def online_user_ids(self) -> set[str]:
+        """Bulk projection of :meth:`is_online` — one HKEYS round-trip.
+
+        Reads POSITIONS_KEY only, so headless Agent leases are deliberately
+        excluded, exactly like the per-user check above.
+        """
+        r = get_redis()
+        return set(await r.hkeys(POSITIONS_KEY))
+
     async def get_online_players(self, exclude: str | None = None) -> list[dict]:
         r = get_redis()
         data = await r.hgetall(POSITIONS_KEY)

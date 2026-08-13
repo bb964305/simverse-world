@@ -5,13 +5,14 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import jwt
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.map_data import LOCATIONS, get_location_id_at
@@ -497,7 +498,23 @@ async def observation(
     user, resident = await _profile_entities(db, profile)
     sx, sy = int(user.last_x // TILE_SIZE), int(user.last_y // TILE_SIZE)
     radius = settings.agent_observation_radius_tiles
-    residents = (await db.execute(select(Resident))).scalars().all()
+    # F3: prune non-player rows to the bbox in SQL instead of a full-table
+    # scan. Player rows are exempt — their coordinates come from the live
+    # presence overlay below, so the DB tile may be stale. The exact circular
+    # (Manhattan) filter in Python below is kept unchanged.
+    residents = (
+        await db.execute(
+            select(Resident).where(
+                or_(
+                    Resident.resident_type == "player",
+                    and_(
+                        Resident.tile_x.between(sx - radius, sx + radius),
+                        Resident.tile_y.between(sy - radius, sy + radius),
+                    ),
+                )
+            )
+        )
+    ).scalars().all()
     visible_player_tiles = await _visible_player_tiles_by_user_id()
     player_creator_ids = {
         other.creator_id
@@ -888,7 +905,32 @@ async def viewer_snapshot(db: AsyncSession, profile: AgentPlayer) -> dict[str, A
     }
 
 
+# F3: the public snapshot is identical for every anonymous caller and the
+# endpoint is unauthenticated (120/min/IP only), so each request must not pay
+# a fresh full projection. One process-local build is shared for a short TTL.
+_SNAPSHOT_CACHE_TTL_SECONDS = 3.0
+_snapshot_cache: dict[str, Any] = {"ts": -1e9, "data": None}
+
+
+def _reset_snapshot_cache_for_tests() -> None:  # pragma: no cover - test hook
+    _snapshot_cache["ts"] = -1e9
+    _snapshot_cache["data"] = None
+
+
 async def public_town_snapshot(db: AsyncSession) -> dict[str, Any]:
+    cached = _snapshot_cache["data"]
+    if (
+        cached is not None
+        and time.monotonic() - _snapshot_cache["ts"] < _SNAPSHOT_CACHE_TTL_SECONDS
+    ):
+        return cached
+    data = await _build_public_town_snapshot(db)
+    _snapshot_cache["ts"] = time.monotonic()
+    _snapshot_cache["data"] = data
+    return data
+
+
+async def _build_public_town_snapshot(db: AsyncSession) -> dict[str, Any]:
     all_profiles = (await db.execute(select(AgentPlayer))).scalars().all()
     visible_player_tiles = await _visible_player_tiles_by_user_id()
     profiles: list[AgentPlayer] = []
@@ -956,10 +998,10 @@ async def public_town_snapshot(db: AsyncSession) -> dict[str, Any]:
     # Anonymous town projection deliberately excludes human identity and exact
     # coordinates. Counts remain useful without becoming a tracking surface.
     human_user_ids = [resident.creator_id for resident in humans if resident.creator_id]
-    online_humans = 0
-    for user_id in human_user_ids:
-        if await manager.is_online(user_id):
-            online_humans += 1
+    # F3: one HKEYS round-trip instead of one HEXISTS per human. Semantics are
+    # byte-identical to the per-user is_online check (POSITIONS_KEY only).
+    online_ids = await manager.online_user_ids()
+    online_humans = sum(1 for user_id in human_user_ids if user_id in online_ids)
     online_agents = sum(1 for actor in actors if actor["kind"] == "agent" and actor["is_online"])
     return {
         "generated_at": datetime.now(UTC).isoformat(),

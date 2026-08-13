@@ -92,6 +92,16 @@ def _reset_rate_limiters():
 
 
 @pytest.fixture(autouse=True)
+def _reset_public_snapshot_cache():
+    """public_town_snapshot 的模块级 3s TTL 缓存(F3)每测清零,否则上一个测试的
+    快照会被下一个测试直接吃到(仿 crowd_service._reset_for_tests 先例)。"""
+    from app.services.agent_player_service import _reset_snapshot_cache_for_tests
+
+    _reset_snapshot_cache_for_tests()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _disable_llm_metering():
     """LLM usage metering (P1-1) writes through its own session/engine. Disable
     it by default so the broad suite never attempts a real-DB telemetry write;
