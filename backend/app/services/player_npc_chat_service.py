@@ -182,7 +182,9 @@ async def run_agent_npc_chat_reaper() -> None:
             async with async_session() as db:
                 await recover_expired_npc_chat_turns(db)
         except asyncio.CancelledError:
-            break
+            # Re-raise so the task ends cancelled and lifespan teardown's
+            # bounded wait can observe completion.
+            raise
         except Exception:
             logger.warning("Agent NPC chat reaper failed", exc_info=True)
         await asyncio.sleep(15)

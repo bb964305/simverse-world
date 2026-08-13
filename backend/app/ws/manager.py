@@ -161,7 +161,9 @@ class ConnectionManager:
                     except Exception:
                         logger.warning("WS deliver failed", exc_info=True)
             except asyncio.CancelledError:
-                break
+                # Re-raise so the task ends in the *cancelled* state and the
+                # lifespan teardown's bounded wait can observe completion.
+                raise
             except Exception:
                 logger.warning("WS subscriber error; retrying", exc_info=True)
                 await asyncio.sleep(1.0)
@@ -365,7 +367,9 @@ class ConnectionManager:
             try:
                 await self.expire_agent_presences()
             except asyncio.CancelledError:
-                break
+                # Re-raise: swallowing cancel leaves the task "done" instead of
+                # "cancelled" and hides stuck-shutdown bugs from the teardown.
+                raise
             except Exception:
                 logger.warning("Agent presence reaper failed", exc_info=True)
             await asyncio.sleep(10)

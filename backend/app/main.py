@@ -33,6 +33,10 @@ from app.observability import init_sentry, wire_runtime_gauges
 
 logger = logging.getLogger(__name__)
 
+# Upper bound for waiting on cancelled background tasks during lifespan
+# teardown. Module-level so tests can monkeypatch it down.
+_SHUTDOWN_TIMEOUT = 10.0
+
 # Sentry must initialise before the app object so its FastAPI/Starlette
 # integration can wrap request handling. No-op without SENTRY_DSN.
 init_sentry("api")
@@ -107,13 +111,34 @@ async def lifespan(app):
             "to the agent-worker process"
         )
     yield
-    subscriber_task.cancel()
-    agent_presence_task.cancel()
-    agent_npc_chat_task.cancel()
-    location_task.cancel()
-    world_reload_task.cancel()
-    for task in background_tasks:
+    all_tasks = [
+        subscriber_task,
+        agent_presence_task,
+        agent_npc_chat_task,
+        location_task,
+        world_reload_task,
+        *background_tasks,
+    ]
+    for task in all_tasks:
         task.cancel()
+    # Bounded wait for the cancelled tasks to actually finish their cleanup
+    # BEFORE tearing down the shared HTTP/Redis clients they may still touch.
+    # asyncio.wait (not wait_for(gather(...))) because a task that swallows
+    # cancellation would make a cancelled gather wait on it forever; wait()
+    # returns after the timeout regardless, keeping shutdown bounded.
+    done, pending = await asyncio.wait(all_tasks, timeout=_SHUTDOWN_TIMEOUT)
+    if pending:
+        logger.warning(
+            "lifespan teardown timed out after %.1fs; %d task(s) still pending: %s",
+            _SHUTDOWN_TIMEOUT,
+            len(pending),
+            sorted(t.get_name() for t in pending),
+        )
+    for task in done:
+        # Retrieve exceptions so the loop doesn't log
+        # "Task exception was never retrieved" at GC time.
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning("background task ended with error", exc_info=task.exception())
     await close_client()
     await close_redis()
 
