@@ -1058,7 +1058,7 @@ async def test_viewer_snapshot_sets_private_no_store_headers(client):
     snapshot = await client.get("/api/v1/viewer/snapshot")
     assert snapshot.status_code == 200, snapshot.text
     assert snapshot.headers["cache-control"] == "private, no-store"
-    assert snapshot.headers["vary"] == "Cookie"
+    assert snapshot.headers["vary"] == "Cookie, X-Viewer-Session"
 
 
 @pytest.mark.anyio
@@ -1189,6 +1189,46 @@ async def test_production_viewer_cookie_supports_cross_site_frontend(
     cookie = response.headers["set-cookie"].lower()
     assert "samesite=none" in cookie
     assert "secure" in cookie
+
+
+@pytest.mark.anyio
+async def test_viewer_session_returns_token(client):
+    """F10: POST /viewer/sessions 除 HttpOnly cookie 外返回 viewer_session_token。
+
+    命名刻意避开 credentials["viewer_token"](长期查看码); 这里是短期会话 token,
+    供跨站 cookie 被浏览器丢弃(Safari/ITP)时走 X-Viewer-Session header 通道。
+    """
+    _created, credentials, _session = await _register_and_session(client)
+    viewer = await client.post(
+        "/api/v1/viewer/sessions", json={"view_token": credentials["viewer_token"]}
+    )
+    assert viewer.status_code == 200, viewer.text
+    payload = viewer.json()
+    assert payload["ok"] is True
+    token = payload["viewer_session_token"]
+    assert isinstance(token, str) and token
+    assert token != credentials["viewer_token"]
+
+
+@pytest.mark.anyio
+async def test_viewer_header_auth(client):
+    """F10: 无 cookie 时仅凭 X-Viewer-Session header 可读 /viewer/snapshot。"""
+    _created, credentials, _session = await _register_and_session(client)
+    viewer = await client.post(
+        "/api/v1/viewer/sessions", json={"view_token": credentials["viewer_token"]}
+    )
+    assert viewer.status_code == 200, viewer.text
+    token = viewer.json()["viewer_session_token"]
+
+    client.cookies.clear()
+    denied = await client.get("/api/v1/viewer/snapshot")
+    assert denied.status_code == 401
+
+    snapshot = await client.get(
+        "/api/v1/viewer/snapshot", headers={"X-Viewer-Session": token}
+    )
+    assert snapshot.status_code == 200, snapshot.text
+    assert snapshot.json()["agent"]["name"] == "测试旅者"
 
 
 @pytest.mark.anyio

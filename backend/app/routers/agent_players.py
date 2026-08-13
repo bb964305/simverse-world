@@ -1125,7 +1125,10 @@ async def create_viewer_session(
         samesite="strict" if settings.debug else "none",
         path="/api/v1/viewer",
     )
-    return {"ok": True}
+    # F10: 跨站拓扑下(前端 simverse.world / API 另一源)Safari/ITP 会丢弃第三方
+    # Set-Cookie, 因此额外返回短期会话 token 供 X-Viewer-Session header 通道使用。
+    # 命名刻意避开 "viewer_token"(那是长期查看码, 见 credentials["viewer_token"])。
+    return {"ok": True, "viewer_session_token": session_token}
 
 
 @router.get("/viewer/snapshot")
@@ -1135,7 +1138,10 @@ async def get_viewer_snapshot(
     response: Response,
     db: AsyncSession = Depends(get_db),
 ):
-    token = request.cookies.get("sv_viewer_session")
+    # F10: header 优先(跨站 cookie 被浏览器丢弃时的备用通道), 回落 cookie(现行为不变)。
+    token = request.headers.get("X-Viewer-Session") or request.cookies.get(
+        "sv_viewer_session"
+    )
     if not token:
         raise HTTPException(status_code=401, detail="Missing viewer session")
     try:
@@ -1143,7 +1149,7 @@ async def get_viewer_snapshot(
     except AgentPlayerError as exc:
         _fail(exc)
     response.headers["Cache-Control"] = "private, no-store"
-    response.headers["Vary"] = "Cookie"
+    response.headers["Vary"] = "Cookie, X-Viewer-Session"
     return await viewer_snapshot(db, profile)
 
 

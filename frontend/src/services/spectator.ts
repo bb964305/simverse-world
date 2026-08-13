@@ -4,7 +4,11 @@ import { API_BASE } from './api/core'
  * The spectator client intentionally does not use apiFetch. Public viewers must
  * never inherit the signed-in player's bearer token or its 401/logout side
  * effects. A view code is sent exactly once to create a read-only HttpOnly
- * cookie session; subsequent requests carry only that cookie.
+ * cookie session; subsequent requests carry that cookie plus, when the backend
+ * returns one, a short-lived viewer session token sent via the X-Viewer-Session
+ * header. The header channel keeps /watch working when the browser drops the
+ * cross-site Set-Cookie (Safari/ITP, third-party-cookie blocking). The token
+ * lives only in module memory — never in localStorage or the URL.
  */
 
 export type SpectatorActorKind = 'npc' | 'agent' | 'human'
@@ -86,6 +90,18 @@ export class SpectatorApiError extends Error {
   }
 }
 
+let viewerSessionToken: string | null = null
+
+export function clearViewerSessionToken(): void {
+  viewerSessionToken = null
+}
+
+function viewerHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { Accept: 'application/json' }
+  if (viewerSessionToken) headers['X-Viewer-Session'] = viewerSessionToken
+  return headers
+}
+
 async function readError(response: Response): Promise<string> {
   try {
     const body = await response.json() as { detail?: unknown }
@@ -139,8 +155,19 @@ export function createViewerSession(viewToken: string, signal?: AbortSignal): Pr
       const detail = await readError(response)
       throw new SpectatorApiError(response.status, detail || '查看码无效或已撤销')
     }
-    // The useful result is the HttpOnly cookie, not any token-shaped response
-    // that page JavaScript could retain. Both a 204 and {ok:true} are valid.
+    // Primary result is the HttpOnly cookie. The backend may also return a
+    // short-lived viewer_session_token for the X-Viewer-Session header channel
+    // (cross-site cookie fallback); a 204 or {ok:true} without it stays valid.
+    let sessionToken: string | null = null
+    try {
+      const body = await response.json() as { viewer_session_token?: unknown }
+      if (typeof body.viewer_session_token === 'string' && body.viewer_session_token) {
+        sessionToken = body.viewer_session_token
+      }
+    } catch {
+      // Empty or non-JSON body: cookie-only session.
+    }
+    viewerSessionToken = sessionToken
     return { ok: true }
   })
 }
@@ -152,7 +179,7 @@ export function getViewerSnapshot(signal?: AbortSignal): Promise<ViewerSnapshot>
       method: 'GET',
       credentials: 'include',
       cache: 'no-store',
-      headers: { Accept: 'application/json' },
+      headers: viewerHeaders(),
       signal,
     },
     '查看会话已失效',
@@ -160,6 +187,7 @@ export function getViewerSnapshot(signal?: AbortSignal): Promise<ViewerSnapshot>
 }
 
 export function deleteViewerSession(signal?: AbortSignal): Promise<{ ok: boolean }> {
+  clearViewerSessionToken()
   return spectatorFetch(
     '/api/v1/viewer/sessions',
     {

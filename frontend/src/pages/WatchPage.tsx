@@ -116,7 +116,14 @@ export function WatchPage() {
     try {
       await createViewerSession(token)
       setViewToken('')
-      await loadSnapshot()
+      // 查看码刚验证成功却拿不到快照(401/403)时不再静默回闸门:
+      // 最常见原因是浏览器丢弃了跨站会话 Cookie(Safari/ITP、第三方 Cookie 拦截)。
+      const ok = await loadSnapshot({ clearOnUnauthorized: false })
+      if (!ok) {
+        setSessionActive(false)
+        setSnapshot(null)
+        setError('查看码验证通过,但查看会话未能建立——浏览器可能拦截了跨站 Cookie(Safari 或开启第三方 Cookie 拦截时常见)。请刷新重试或更换浏览器。')
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '查看码无效或已撤销')
       setSessionActive(false)

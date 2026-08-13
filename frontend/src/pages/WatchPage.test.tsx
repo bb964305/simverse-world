@@ -71,6 +71,20 @@ describe('WatchPage', () => {
     expect(createViewerSession).not.toHaveBeenCalled()
   })
 
+  it('surfaces a diagnosable error when the session is rejected right after a valid code (F10)', async () => {
+    getViewerSnapshot.mockRejectedValue(new SpectatorApiError(401, 'Missing viewer session'))
+    createViewerSession.mockResolvedValue({ ok: true })
+
+    render(<MemoryRouter><WatchPage /></MemoryRouter>)
+    const input = await screen.findByLabelText('View token')
+    fireEvent.change(input, { target: { value: 'sv_view_secret' } })
+    fireEvent.click(screen.getByRole('button', { name: '开始跟随' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/跨站 Cookie/)
+    expect(screen.getByLabelText('View token')).toBeInTheDocument()
+  })
+
   it('surfaces an invalid or revoked view code', async () => {
     getViewerSnapshot.mockRejectedValue(new SpectatorApiError(401, 'no session'))
     createViewerSession.mockRejectedValue(new SpectatorApiError(401, '查看码已撤销'))

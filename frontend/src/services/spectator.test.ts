@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  clearViewerSessionToken,
   createViewerSession,
   deleteViewerSession,
   getPublicTownSnapshot,
@@ -17,6 +18,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 afterEach(() => {
   localStorage.clear()
+  clearViewerSessionToken()
   vi.unstubAllGlobals()
 })
 
@@ -82,5 +84,49 @@ describe('spectator API isolation', () => {
       `${API_BASE}/api/v1/viewer/sessions`,
       expect.objectContaining({ method: 'DELETE', credentials: 'include' }),
     )
+  })
+})
+
+describe('viewer session header channel (F10)', () => {
+  it('keeps viewer_session_token in module memory and sends X-Viewer-Session afterwards', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ok: true, viewer_session_token: 'sv_sess_abc' }))
+      .mockResolvedValueOnce(jsonResponse({ generated_at: 'now' }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await createViewerSession('sv_view_secret')
+    await getViewerSnapshot()
+
+    const init = fetchMock.mock.calls[1][1] as RequestInit
+    expect(init.headers).toMatchObject({ 'X-Viewer-Session': 'sv_sess_abc' })
+    expect(localStorage.length).toBe(0)
+  })
+
+  it('tolerates a token-less session response and stays cookie-only', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(jsonResponse({ generated_at: 'now' }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(createViewerSession('sv_view_secret')).resolves.toEqual({ ok: true })
+    await getViewerSnapshot()
+
+    const init = fetchMock.mock.calls[1][1] as RequestInit
+    expect(init.headers).not.toHaveProperty('X-Viewer-Session')
+  })
+
+  it('stops sending the header once the viewer session ends', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ok: true, viewer_session_token: 'sv_sess_abc' }))
+      .mockResolvedValueOnce(jsonResponse({ ok: true }))
+      .mockResolvedValueOnce(jsonResponse({ generated_at: 'now' }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await createViewerSession('sv_view_secret')
+    await deleteViewerSession()
+    await getViewerSnapshot()
+
+    const init = fetchMock.mock.calls[2][1] as RequestInit
+    expect(init.headers).not.toHaveProperty('X-Viewer-Session')
   })
 })
