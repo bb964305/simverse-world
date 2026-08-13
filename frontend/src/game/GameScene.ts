@@ -293,7 +293,9 @@ class MainScene extends Phaser.Scene {
 
   async create() {
     try {
-      const resp = await fetch(`${API_BASE}/residents`)
+      // NPC layer only: player avatars arrive via presence/player events, so
+      // explicitly opt out of them here (a plain /residents includes players).
+      const resp = await fetch(`${API_BASE}/residents?exclude_players=true`)
       this.residents = resp.ok ? (await resp.json() as ResidentData[]) : []
     } catch {
       this.residents = []
