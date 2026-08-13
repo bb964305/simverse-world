@@ -8,6 +8,11 @@ import {
 } from './caravanProjection'
 
 let socket: WebSocket | null = null
+// Token the current module socket was built (and will authenticate) with.
+// connectWS compares it against the store token so switching accounts in the
+// same tab (setAuth) tears the old identity's socket down instead of silently
+// riding it (F9 cross-account socket reuse).
+let socketToken: string | null = null
 // Highest applied world source_cursor, so a re-delivered world_changed cannot
 // fire a duplicate convergence effect (Phase 9). A reconnect refetches world
 // state through the normal 'world:changed' consumers, which converge forward.
@@ -50,15 +55,24 @@ const QUEUED_TYPES = new Set(['daily_reward', 'coin_earned'])
 
 export function connectWS(): void {
   const token = useGameStore.getState().token
+  if (!token) return
   // Bail if a socket is already OPEN *or* still CONNECTING — opening a second
   // socket during a race (e.g. React StrictMode double-mount / reconnect) makes
   // the module `socket` point at the still-connecting one, so the first
   // socket's onopen `send()` throws "Still in CONNECTING state" (verify-before-done).
   if (
-    !token ||
     socket?.readyState === WebSocket.OPEN ||
     socket?.readyState === WebSocket.CONNECTING
-  ) return
+  ) {
+    if (socketToken === token) return
+    // The live socket authenticated as a DIFFERENT identity (setAuth switched
+    // accounts in this tab). Null the module `socket` before closing so its
+    // onclose sees `socket !== ws` and skips the reconnect + banner, then fall
+    // through to build a fresh socket with the current token.
+    const stale = socket
+    socket = null
+    stale.close()
+  }
 
   const API_WS = (import.meta.env.VITE_API_URL ?? 'http://localhost:8000').replace(/^http/, 'ws')
   // Token goes in the first message, not the URL, so it never lands in access logs (P0-4c)
@@ -66,6 +80,7 @@ export function connectWS(): void {
   // whatever the module `socket` variable happens to point at when it fires.
   const ws = new WebSocket(`${API_WS}/ws`)
   socket = ws
+  socketToken = token
 
   ws.onopen = () => {
     ws.send(JSON.stringify({ type: 'auth', token }))
@@ -318,6 +333,7 @@ export function disconnectWS(): void {
   // the reconnect and the 'reconnecting' status.
   const ws = socket
   socket = null
+  socketToken = null
   ws?.close()
   resetCaravanProjection()
   // Hide the banner if a reconnect cycle was in flight when the user left.
