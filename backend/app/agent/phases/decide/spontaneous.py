@@ -38,6 +38,10 @@ class SpontaneousDecidePlugin(BasicDecidePlugin):
             logger.debug("Spontaneous %s ignoring plan (distraction)", ctx.resident.slug)
             ctx.plan_interrupt_reason = "spontaneous"
             ctx.current_plan = None
+            # F5: the schema default (True) must not survive an abandoned plan —
+            # tick would otherwise promote the LLM's free move into a sticky
+            # planned trip on the dropped slot. Mirrors the social_eager branch.
+            ctx.plan_followed = False
 
         social_ready = self.social_eagerness and ctx.nearby_residents
         if settings.realism_plan_continuity_enabled:
