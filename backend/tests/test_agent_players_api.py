@@ -129,10 +129,10 @@ async def test_registration_issues_scoped_hashed_credentials(client, db_session)
     assert credentials["agent_token"] not in stored_values
     assert credentials["viewer_token"] not in stored_values
 
-    # The browser's public /residents collection is the NPC sprite layer.
-    # Agent-controlled player avatars travel over player presence and must not
+    # The NPC sprite layer asks for exclude_players=true (opt-in filter):
+    # agent-controlled player avatars travel over player presence and must not
     # appear a second time as a static/chat-capable NPC.
-    public_roster = await client.get("/residents")
+    public_roster = await client.get("/residents", params={"exclude_players": "true"})
     assert public_roster.status_code == 200
     assert all(item["id"] != resident.id for item in public_roster.json())
 

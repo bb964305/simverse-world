@@ -43,6 +43,7 @@ async def test_gate_off_broadcasts_to_all(db_session, monkeypatch):
 @pytest.mark.anyio
 async def test_collective_memory_excludes_player_avatars(db_session, monkeypatch):
     monkeypatch.setattr(settings, "realism_info_gradient_enabled", False)
+    monkeypatch.setattr(settings, "collective_memory_sim_only", True)
     await _residents(db_session, 2)
     db_session.add(Resident(
         id="avatar", slug="avatar", name="Avatar", creator_id="player",
