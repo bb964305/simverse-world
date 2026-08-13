@@ -210,6 +210,16 @@ async def _pay_wage(db, resident) -> None:
         # the town budget once this independent gate is opened.
         if funding_source(resident) != "public":
             return
+        if not settings.town_treasury_enabled:
+            # F7 组合守卫: funding 闸开而 treasury 闸关时没有任何资金来源,
+            # 落到下面 `if not funded` 的 treasury_credit 就是凭空铸币——
+            # sustainable 是硬 no-mint 边界, 这里直接欠薪并告警配置错序。
+            logger.warning(
+                "town_duty_funding_enabled without town_treasury_enabled: "
+                "public wage for %s skipped (no funding source, refusing to mint)",
+                resident.slug,
+            )
+            return
         wage = int(settings.town_public_duty_wage_sc or 0)
     else:
         base_wage = settings.npc_default_wage_sc

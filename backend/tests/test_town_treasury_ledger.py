@@ -242,6 +242,34 @@ async def test_funding_split_is_dark_then_public_only(db_session, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_sustainable_without_treasury_pays_nothing(db_session, monkeypatch):
+    """F7 组合守卫: funding 闸开而 treasury 闸关时, public duty 不得绕过国库
+    走 treasury_credit 凭空铸币——直接欠薪(余额不变、treasury_credit 零调用)。"""
+    public = _resident("postman", "postman")
+    db_session.add(public)
+    await db_session.commit()
+
+    monkeypatch.setattr(settings, "npc_economy_enabled", True)
+    monkeypatch.setattr(settings, "town_duty_funding_enabled", True)
+    monkeypatch.setattr(settings, "town_treasury_enabled", False)
+    monkeypatch.setattr(settings, "town_public_duty_wage_sc", 1)
+
+    credit_calls: list[tuple] = []
+    real_credit = coin_service.treasury_credit
+
+    async def spy_credit(*args, **kwargs):
+        credit_calls.append((args, kwargs))
+        return await real_credit(*args, **kwargs)
+
+    monkeypatch.setattr(coin_service, "treasury_credit", spy_credit)
+
+    await duty_service._pay_wage(db_session, public)
+
+    assert credit_calls == []
+    assert await coin_service.treasury_balance(db_session, "postman") == 0
+
+
+@pytest.mark.anyio
 async def test_sustainable_gate_never_falls_back_to_mint(db_session, monkeypatch):
     public = _resident("postman", "postman")
     db_session.add(public)
