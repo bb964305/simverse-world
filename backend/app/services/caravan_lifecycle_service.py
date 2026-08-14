@@ -30,6 +30,7 @@ EMPTY_SUMMARY = {
     "tax_sc": 0,
     "imports_stocked": 0,
 }
+ADMISSION_PENDING_ERROR = "admission_pending"
 
 
 def worker_owner() -> str:
@@ -207,14 +208,41 @@ async def reconcile_market_events(
         if _is_market_event(event):
             await ensure_visit_for_event(db, event, now=now)
             count += 1
-    # A policy kill switch must not wait until a long motion/trading deadline.
-    # Wake visible rows so the next driver pass can cancel waiting admission or
-    # animate a safe outbound return from an in-progress route.
-    if not await _admitted(db):
+    admitted = await _admitted(db)
+    if admitted:
+        # Admission is deliberately reversible for the whole market window. A
+        # row parked at opens/closes while policy was off carries this marker;
+        # waking only marked rows avoids pulling ordinary two-day look-ahead
+        # visits forward before their configured wait lead.
         await db.execute(
             update(CaravanVisit)
             .where(
-                CaravanVisit.phase.in_(("waiting", "inbound", "trading")),
+                CaravanVisit.phase.in_(("scheduled", "waiting")),
+                CaravanVisit.error_code == ADMISSION_PENDING_ERROR,
+                CaravanVisit.next_action_at > now,
+            )
+            .values(next_action_at=now, updated_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        await db.commit()
+    # A policy kill switch must not wait until a long motion/trading deadline.
+    # Wake a newly-paused waiting row once so the next driver pass can park it,
+    # or animate a safe outbound return from an in-progress route. Already
+    # parked admission rows stay asleep until policy reopens or the window ends.
+    else:
+        await db.execute(
+            update(CaravanVisit)
+            .where(
+                or_(
+                    CaravanVisit.phase.in_(("inbound", "trading")),
+                    and_(
+                        CaravanVisit.phase == "waiting",
+                        or_(
+                            CaravanVisit.error_code.is_(None),
+                            CaravanVisit.error_code != ADMISSION_PENDING_ERROR,
+                        ),
+                    ),
+                ),
                 CaravanVisit.next_action_at > now,
             )
             .values(next_action_at=now, updated_at=now)
@@ -490,27 +518,37 @@ async def process_claimed_visit(
                     )
                 return await _transition(
                     db, visit, owner, now=now, phase="waiting",
-                    next_action_at=starts_at,
+                    next_action_at=starts_at, error_code=None,
                 )
             return await _transition(
                 db, visit, owner, now=now, phase="scheduled", next_action_at=starts_at,
+                error_code=ADMISSION_PENDING_ERROR,
             )
         if not await _admitted(db):
+            # Policy can be amended at any point during the all-day market. Keep
+            # the durable fence and retryable visit until the real window closes;
+            # reconcile wakes it immediately when admission reopens.
             return await _transition(
-                db, visit, owner, now=now, phase="cancelled", next_action_at=now,
-                error_code="admission_closed", departed_at=now,
+                db, visit, owner, now=now, phase="scheduled",
+                next_action_at=closes_at, error_code=ADMISSION_PENDING_ERROR,
             )
         return await _begin_inbound(db, visit, owner, now=now, closes_at=closes_at)
 
     if visit.phase == "waiting":
-        if now >= closes_at or not await _admitted(db):
+        if now >= closes_at:
             return await _transition(
                 db, visit, owner, now=now, phase="cancelled", next_action_at=now,
-                error_code="admission_closed", departed_at=now,
+                error_code="market_window_missed", departed_at=now,
+            )
+        if not await _admitted(db):
+            return await _transition(
+                db, visit, owner, now=now, phase="waiting",
+                next_action_at=closes_at, error_code=ADMISSION_PENDING_ERROR,
             )
         if now < starts_at:
             return await _transition(
                 db, visit, owner, now=now, phase="waiting", next_action_at=starts_at,
+                error_code=None,
             )
         return await _begin_inbound(db, visit, owner, now=now, closes_at=closes_at)
 

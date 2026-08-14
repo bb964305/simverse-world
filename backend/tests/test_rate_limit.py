@@ -139,6 +139,67 @@ async def test_rest_forge_rate_limit(client):
     assert codes[limit] == 429
 
 
+@pytest.mark.anyio
+async def test_rest_deep_forge_rate_limit(client):
+    """deep-start uses the same IP limiter as the other Forge entry points."""
+    limit = settings.rest_rate_limit_forge_per_minute
+    codes = []
+    for i in range(limit + 1):
+        response = await client.post(
+            "/forge/deep-start",
+            json={"character_name": f"deep-{i}", "raw_text": "source"},
+        )
+        codes.append(response.status_code)
+    assert codes[:limit] == [401] * limit
+    assert codes[limit] == 429
+
+
+@pytest.mark.anyio
+async def test_rest_guided_answer_rate_limit(client):
+    """Guided answers are directly throttled before auth/session lookup."""
+    limit = settings.rest_rate_limit_forge_per_minute
+    codes = []
+    for _ in range(limit + 1):
+        response = await client.post(
+            "/forge/answer",
+            json={"forge_id": "unknown", "answer": "source"},
+        )
+        codes.append(response.status_code)
+    assert codes[:limit] == [401] * limit
+    assert codes[limit] == 429
+
+
+@pytest.mark.anyio
+async def test_rest_skill_import_rate_limit(client):
+    """Multipart imports are throttled before auth/LLM work."""
+    limit = settings.rest_rate_limit_import_per_minute
+    codes = []
+    for index in range(limit + 1):
+        response = await client.post(
+            "/residents/import",
+            files={"file": ("SKILL.md", b"# Ability\nTest", "text/markdown")},
+            data={"name": f"Import {index}", "slug": f"import-{index}"},
+        )
+        codes.append(response.status_code)
+    assert codes[:limit] == [401] * limit
+    assert codes[limit] == 429
+
+
+@pytest.mark.anyio
+async def test_rest_resident_edit_rate_limit(client):
+    """Persona edits are throttled before auth and optional SBTI work."""
+    limit = settings.rest_rate_limit_resident_edit_per_minute
+    codes = []
+    for index in range(limit + 1):
+        response = await client.put(
+            "/residents/rate-limit-probe",
+            json={"ability_md": f"edit {index}"},
+        )
+        codes.append(response.status_code)
+    assert codes[:limit] == [401] * limit
+    assert codes[limit] == 429
+
+
 # ---------------------------------------------------------------------------
 # Configurability
 # ---------------------------------------------------------------------------

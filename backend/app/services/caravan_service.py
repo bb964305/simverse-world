@@ -363,33 +363,6 @@ async def _claim_purchase_row(
     return purchase_id
 
 
-async def _take_lifecycle_stock(db: AsyncSession, item: Item) -> int | None:
-    """Always use the real ``items.stock`` CAS, independent of the legacy gate."""
-    if item.stock is None:
-        seed_stock = int((item.payload_json or {}).get("stock") or 0)
-        await db.execute(
-            update(Item)
-            .where(Item.id == item.id, Item.stock.is_(None))
-            .values(stock=seed_stock)
-            .execution_options(synchronize_session=False)
-        )
-    result = await db.execute(
-        update(Item)
-        .where(Item.id == item.id, Item.active.is_(True), Item.stock >= 1)
-        .values(stock=Item.stock - 1)
-        .returning(Item.stock)
-        .execution_options(synchronize_session=False)
-    )
-    remaining = result.scalar_one_or_none()
-    if remaining is None:
-        return None
-    payload = dict(item.payload_json or {})
-    payload["stock"] = int(remaining)
-    item.payload_json = payload
-    item.active = remaining > 0
-    return int(remaining)
-
-
 async def _buy_one_for_visit(
     db: AsyncSession, visit_id: str, owner: str, code: str, *, now: datetime,
 ) -> bool:
@@ -419,7 +392,11 @@ async def _buy_one_for_visit(
     if purchase_id is None:
         await db.rollback()
         return False
-    if await _take_lifecycle_stock(db, item) is None:
+    # Durable settlement and every player/NPC consumer share one authoritative
+    # column CAS.  ``take_stock`` also forces this path whenever lifecycle is on,
+    # so a stale ITEM_STOCK_GUARD setting cannot create a second payload ledger.
+    from app.services import item_stock
+    if await item_stock.take_authoritative_stock(db, item, 1) is None:
         await db.rollback()  # also removes the pending purchase claim
         return False
 

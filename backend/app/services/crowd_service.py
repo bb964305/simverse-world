@@ -1,4 +1,8 @@
-"""P2 §8.2 — crowd / 人流聚集. Pure rule, zero LLM, gated by REALISM_CROWD_ENABLED.
+"""P2 §8.2 — crowd / 人流聚集. Pure rule, zero LLM.
+
+Generic festival crowd effects are gated by ``REALISM_CROWD_ENABLED``. Durable
+caravan visitor assignments reuse the routing helpers but are lifecycle gameplay,
+so their directed walk remains active independently of that cosmetic gate.
 
 Two effects that make an event day *look* different on the map:
   (a) festival / script events pull residents to the event location — the event
@@ -33,7 +37,9 @@ MARKET_DAY_VISITOR_TILES: tuple[tuple[int, int], ...] = (
 )
 
 _counts_cache: dict = {"ts": -1e9, "data": {}}
-_market_cohort_cache: dict[tuple[str, str, str], tuple[float, frozenset[str]]] = {}
+_market_cohort_cache: dict[
+    tuple[str, str, str, bool], tuple[float, frozenset[str]]
+] = {}
 _market_cohort_lock = asyncio.Lock()
 
 logger = logging.getLogger(__name__)
@@ -118,6 +124,7 @@ async def market_day_crowd_cohort(
     world_events,
     *,
     ttl: float = MARKET_DAY_COHORT_TTL_SECONDS,
+    persisted_only: bool = False,
 ) -> frozenset[str]:
     """Return at most four deterministic residents invited toward the hall.
 
@@ -125,19 +132,22 @@ async def market_day_crowd_cohort(
     ``VISIT_DISTRICT`` path.  The short process-local cache plus a single-flight
     lock prevents one resident query per concurrently executing tick. Active
     trips and urgent behavior are protected later by the decide-phase ordering.
+    ``persisted_only`` disables the decorative fallback cohort so lifecycle
+    callers cannot invent buyers that lack a durable visitor assignment.
     """
     event_key = _active_market_day_key(world_events)
     if event_key is None:
         return frozenset()
+    cache_key = (*event_key, bool(persisted_only))
 
     now = time.monotonic()
-    cached = _market_cohort_cache.get(event_key)
+    cached = _market_cohort_cache.get(cache_key)
     if cached is not None and ttl > 0 and now - cached[0] < ttl:
         return cached[1]
 
     async with _market_cohort_lock:
         now = time.monotonic()
-        cached = _market_cohort_cache.get(event_key)
+        cached = _market_cohort_cache.get(cache_key)
         if cached is not None and ttl > 0 and now - cached[0] < ttl:
             return cached[1]
 
@@ -152,8 +162,12 @@ async def market_day_crowd_cohort(
             from app.services.caravan_market_service import assigned_visitor_ids
             persisted = await assigned_visitor_ids(db, event_key[0])
             if persisted is not None:
-                _market_cohort_cache[event_key] = (now, persisted)
+                _market_cohort_cache[cache_key] = (now, persisted)
                 return persisted
+            if persisted_only:
+                chosen = frozenset()
+                _market_cohort_cache[cache_key] = (now, chosen)
+                return chosen
 
             from sqlalchemy import select
             from app.models.resident import Resident
@@ -180,12 +194,12 @@ async def market_day_crowd_cohort(
             logger.warning("market-day crowd cohort query failed", exc_info=True)
             chosen = frozenset()
 
-        _market_cohort_cache[event_key] = (now, chosen)
+        _market_cohort_cache[cache_key] = (now, chosen)
         # Only active keys are useful; keep this tiny cache bounded if synthetic
         # events rotate ids unusually quickly.
         if len(_market_cohort_cache) > 8:
             oldest = min(_market_cohort_cache, key=lambda key: _market_cohort_cache[key][0])
-            if oldest != event_key:
+            if oldest != cache_key:
                 _market_cohort_cache.pop(oldest, None)
         return chosen
 

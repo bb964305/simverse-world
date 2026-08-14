@@ -14,7 +14,12 @@ implementations — patch the modules listed above instead.
 
 from app.forge.legacy_helpers import _compute_star_rating_fallback  # noqa: F401
 from app.forge.legacy_pipeline import run_generation_pipeline, run_quick_pipeline  # noqa: F401
-from app.forge.legacy_sessions import _sessions, get_status, start_forge, submit_answer  # noqa: F401
+from app.forge.legacy_sessions import (  # noqa: F401
+    get_status,
+    start_forge,
+    start_quick_forge,
+    submit_answer,
+)
 from app.services.resident_placement import (  # noqa: F401
     ALLOCATABLE_LOCATION_IDS,
     DEFAULT_LOCATION_ID,

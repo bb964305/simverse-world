@@ -32,7 +32,7 @@ def test_artifact_manifest_fields_present():
         id="a-1", run_id="r-1", task_id="t-1", kind="file", title="report.md",
         sha256="deadbeef", byte_size=1234, producer_action_id="act-9",
         provenance="verifier", scan_status="clean", verification_status="verified",
-        retention_hold=True,
+        retention_hold=True, storage_status="legacy",
     )
     locked = svc.serialize_artifact(art, unlocked=False)
     # manifest metadata is always present (even locked) — additive, read-only
@@ -44,10 +44,12 @@ def test_artifact_manifest_fields_present():
     assert locked["byte_size"] == 1234
     assert locked["verification_status"] == "verified"
     assert locked["retention_hold"] is True
-    # content stays withheld while locked; exposed when unlocked
+    # Artifact projections are metadata-only in both states. Unlocking permits
+    # the separate authenticated /download endpoint to release the body.
     assert "uri" not in locked and "text_md" not in locked
     unlocked = svc.serialize_artifact(art, unlocked=True)
-    assert "uri" in unlocked and "text_md" in unlocked
+    assert unlocked["unlocked"] is True
+    assert "uri" not in unlocked and "text_md" not in unlocked
 
 
 # ── world snapshot revision anchor ─────────────────────────────────────────

@@ -196,3 +196,71 @@ async def test_purchase_waits_for_slot_and_never_uses_another_visits_stock(
         db_session, buyer, now=now,
     ) is None
     assert await coin_service.treasury_balance(db_session, buyer.slug) == before
+
+
+async def test_all_four_lifecycle_visitors_buy_with_generic_crowd_gate_off(
+    db_session, market_on, monkeypatch,
+):
+    """Caravan invitations remain executable when cosmetic crowd realism is off."""
+    from app.agent.actions import ActionType
+    from app.agent.phases.decide.basic import BasicDecidePlugin
+    from app.agent.schemas import TickContext
+
+    monkeypatch.setattr(settings, "realism_crowd_enabled", False)
+    crowd_service._reset_for_tests()
+    now, event, visit, people, _poor = await _seed_trading_market(db_session)
+    assignments = await caravan_market_service.ensure_market_visitors(
+        db_session, visit.id, now=now,
+    )
+    await db_session.commit()
+    assert len(assignments) == 4
+
+    world_events = [{
+        "id": event.id,
+        "type": event.type,
+        "starts_at": event.starts_at.isoformat(),
+        "ends_at": event.ends_at.isoformat(),
+        "payload_json": event.payload_json,
+    }]
+    buyers = {person.id: person for person in people}
+    frames = []
+    plugin = BasicDecidePlugin()
+    for assignment in assignments:
+        buyer = buyers[assignment.resident_id]
+        ctx = TickContext(
+            db=db_session,
+            resident=buyer,
+            world_time="",
+            hour=12,
+            schedule_phase="free",
+        )
+        ctx.world_events = world_events
+        ctx.available_actions = [ActionType.VISIT_DISTRICT]
+
+        directed = await plugin._maybe_crowd_draw(ctx)
+        assert directed is not None
+        assert directed.target_slug == "market_hall"
+        assert directed.target_tile == MARKET_DAY_VISITOR_TILES[assignment.slot_index]
+
+        # Movement/pathfinding owns the intermediate ticks; reaching the exact
+        # authoritative target invokes the existing atomic sink unchanged.
+        buyer.tile_x, buyer.tile_y = directed.target_tile
+        await db_session.commit()
+        frame = await caravan_market_service.maybe_purchase_for_resident(
+            db_session, buyer, now=now + timedelta(seconds=assignment.slot_index + 1),
+        )
+        assert frame is not None
+        frames.append(frame)
+
+    assert len(frames) == 4
+    assert (await db_session.execute(
+        select(func.count()).select_from(CaravanMarketVisitor).where(
+            CaravanMarketVisitor.visit_id == visit.id,
+            CaravanMarketVisitor.purchased_at.is_not(None),
+        )
+    )).scalar_one() == 4
+    assert (await db_session.execute(
+        select(func.coalesce(func.sum(Item.stock), 0)).where(
+            Item.kind == "import_good",
+        )
+    )).scalar_one() == 2

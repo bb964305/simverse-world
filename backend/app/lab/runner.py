@@ -38,6 +38,15 @@ class ProtocolConsumerUnavailable(ValueError):
     """The selected protocol has no execution handler in this build."""
 
 
+class LegacyRunStopped(RuntimeError):
+    """The flag-off runner lost authority and must stop without terminal writes.
+
+    Cancellation/kill-switch supervision owns the terminal state and refund.
+    A stale legacy consumer must therefore leave that state untouched rather
+    than translating the fence into a second ``failed`` terminalization.
+    """
+
+
 _PROTOCOL_HANDLERS: dict[int, RunHandler] = {}
 
 
@@ -143,14 +152,44 @@ async def _ws_run_approval(task: LabTask, run: LabRun, approval_id: str, summary
         logger.warning("lab_run_approval WS send failed for %s", run.id, exc_info=True)
 
 
-async def _await_decision(db, run: LabRun, approval_id: str) -> bool:
+async def _assert_legacy_run_active(
+    db, run: LabRun, task: LabTask, *, expected_epoch: int,
+) -> None:
+    """Re-read every authority that can stop the legacy execution loop.
+
+    ``refresh`` bypasses this session's identity-map snapshot, the fencing epoch
+    catches an explicit lease takeover/cancel fence, and the live Redis flag
+    catches the runtime kill switch even before its DB terminalization arrives.
+    """
+    await db.refresh(run)
+    await db.refresh(task)
+    if run.status not in {"running", "needs_approval"}:
+        raise LegacyRunStopped(f"run_terminal:{run.status}")
+    if task.status != "running":
+        raise LegacyRunStopped(f"task_terminal:{task.status}")
+
+    from app.lab import is_lab_runtime_enabled, leases
+
+    try:
+        await leases.assert_epoch(db, run_id=run.id, epoch=expected_epoch)
+    except leases.StaleEpoch as exc:
+        raise LegacyRunStopped("lease_fenced") from exc
+    if not await is_lab_runtime_enabled():
+        raise LegacyRunStopped("runtime_kill_switch")
+
+
+async def _await_decision(
+    db, task: LabTask, run: LabRun, approval_id: str, *, expected_epoch: int,
+) -> bool:
     """Poll the run's approvals for a resolution (set by POST /lab/runs/{id}/approval)
     up to the timeout. Timeout → deny (default-deny, spec §5.3). A non-positive
     timeout denies immediately (no human ever attached)."""
     timeout = int(settings.lab_approval_timeout_s or 0)
     waited = 0
     while waited < timeout:
-        await db.refresh(run)
+        await _assert_legacy_run_active(
+            db, run, task, expected_epoch=expected_epoch,
+        )
         for a in (run.approvals_json or []):
             if a.get("id") == approval_id and a.get("status") in ("approved", "denied"):
                 return a.get("status") == "approved"
@@ -159,7 +198,9 @@ async def _await_decision(db, run: LabRun, approval_id: str) -> bool:
     return False
 
 
-async def _handle_approval(db, task: LabTask, run: LabRun, adapter, handle, ev) -> bool:
+async def _handle_approval(
+    db, task: LabTask, run: LabRun, adapter, handle, ev, *, expected_epoch: int,
+) -> bool:
     """Gate a sensitive action. Financial → hard-denied immediately; other
     sensitive actions pause the run (needs_approval) for human review."""
     approval_id = (ev.approval or {}).get("id") or str(uuid4())
@@ -168,25 +209,55 @@ async def _handle_approval(db, task: LabTask, run: LabRun, adapter, handle, ev) 
         await adapter.approve(handle, approval_id, False)
         return False
 
-    run.status = "needs_approval"
     approvals = list(run.approvals_json or [])
     approvals.append({
         "id": approval_id, "tool": ev.tool,
         "summary": guard.redact_text(ev.summary), "status": "pending",
     })
-    run.approvals_json = approvals
+    from app.lab import transitions
+
+    paused = await transitions.cas_run_status(
+        db,
+        run_id=run.id,
+        expected=("running",),
+        new="needs_approval",
+        approvals_json=approvals,
+    )
+    if not paused:
+        await db.rollback()
+        raise LegacyRunStopped("approval_pause_fenced")
     await db.commit()
+    await db.refresh(run)
     await _ws_run_approval(task, run, approval_id, guard.redact_text(ev.summary) or "")
 
-    decision = await _await_decision(db, run, approval_id)
+    decision = await _await_decision(
+        db, task, run, approval_id, expected_epoch=expected_epoch,
+    )
+    # Timeout/decision waits are the widest cancellation window. Re-read the DB,
+    # runtime flag, and epoch immediately before any resume write or adapter ack.
+    await _assert_legacy_run_active(
+        db, run, task, expected_epoch=expected_epoch,
+    )
 
     approvals = list(run.approvals_json or [])
     for a in approvals:
         if a.get("id") == approval_id:
             a["status"] = "approved" if decision else "denied"
-    run.approvals_json = approvals
-    run.status = "running"
+    resumed = await transitions.cas_run_status(
+        db,
+        run_id=run.id,
+        expected=("needs_approval",),
+        new="running",
+        approvals_json=approvals,
+    )
+    if not resumed:
+        await db.rollback()
+        raise LegacyRunStopped("approval_resume_fenced")
     await db.commit()
+    await db.refresh(run)
+    await _assert_legacy_run_active(
+        db, run, task, expected_epoch=expected_epoch,
+    )
     await adapter.approve(handle, approval_id, decision)
     return decision
 
@@ -224,12 +295,32 @@ async def run_one(run_id: str) -> None:
             await db.commit()
             return
 
-        run.status = "running"
-        run.started_at = datetime.now(UTC)
-        run.heartbeat_at = datetime.now(UTC)
-        task.status = "running"
-        task.updated_at = datetime.now(UTC)
+        # Claim both rows with compare-and-set. A cancel committed after the
+        # initial reads must never be overwritten by these startup writes.
+        from app.lab import leases, transitions
+
+        started_at = datetime.now(UTC)
+        run_started = await transitions.cas_run_status(
+            db,
+            run_id=run.id,
+            expected=("queued",),
+            new="running",
+            started_at=started_at,
+            heartbeat_at=started_at,
+        )
+        task_started = await transitions.cas_task_status(
+            db,
+            task_id=task.id,
+            expected=("assigned",),
+            new="running",
+        )
+        if not run_started or not task_started:
+            await db.rollback()
+            return
         await db.commit()
+        await db.refresh(run)
+        await db.refresh(task)
+        expected_epoch = await leases.current_epoch(db, run.id)
         await _ws_task_update(task)
 
         adapter = get_adapter(run.adapter)
@@ -271,14 +362,40 @@ async def run_one(run_id: str) -> None:
         handle = None
         adapter_stopped = False
         try:
+            await _assert_legacy_run_active(
+                db, run, task, expected_epoch=expected_epoch,
+            )
             handle = await adapter.start(spec)
+            await _assert_legacy_run_active(
+                db, run, task, expected_epoch=expected_epoch,
+            )
             await adapter.submit_goal(handle, spec.brief, spec.scopes)
+            await _assert_legacy_run_active(
+                db, run, task, expected_epoch=expected_epoch,
+            )
             async for ev in adapter.step_stream(handle):
+                # Redis streams and remote adapters are not cancellable iterators.
+                # Check authority on every yielded event before persisting or
+                # acknowledging it so a cancelled run stops at the next boundary.
+                await _assert_legacy_run_active(
+                    db, run, task, expected_epoch=expected_epoch,
+                )
                 # Sensitive-action human-review breakpoint (financial → hard-deny,
                 # others → pause for approval). Handled before the scope backstop
                 # because an approval request is the agent *asking* permission.
                 if ev.approval:
-                    decision = await _handle_approval(db, task, run, adapter, handle, ev)
+                    decision = await _handle_approval(
+                        db,
+                        task,
+                        run,
+                        adapter,
+                        handle,
+                        ev,
+                        expected_epoch=expected_epoch,
+                    )
+                    await _assert_legacy_run_active(
+                        db, run, task, expected_epoch=expected_epoch,
+                    )
                     seq += 1
                     verdict_text = "已批准" if decision else "已拒绝"
                     db.add(LabRunStep(
@@ -310,8 +427,17 @@ async def run_one(run_id: str) -> None:
                 if not guard.check_budget(cost_cents, run.budget_usd_cents):
                     raise RuntimeError("budget exceeded")
 
+            await _assert_legacy_run_active(
+                db, run, task, expected_epoch=expected_epoch,
+            )
             artifacts = await adapter.collect_artifacts(handle)
+            await _assert_legacy_run_active(
+                db, run, task, expected_epoch=expected_epoch,
+            )
             for a in artifacts:
+                await _assert_legacy_run_active(
+                    db, run, task, expected_epoch=expected_epoch,
+                )
                 artifact = LabArtifact(
                     run_id=run.id, task_id=task.id, kind=a.kind,
                     title=guard.redact_text(a.title) or "",
@@ -332,6 +458,9 @@ async def run_one(run_id: str) -> None:
                 db.add(artifact)
             await adapter.stop(handle)
             adapter_stopped = True
+            await _assert_legacy_run_active(
+                db, run, task, expected_epoch=expected_epoch,
+            )
 
             summary = guard.redact_text(
                 "; ".join(a.title for a in artifacts) if artifacts else "研究完成"
@@ -368,21 +497,44 @@ async def run_one(run_id: str) -> None:
                         cost_sc=0,
                         commit=False,
                     )
-                run.status = "succeeded"
-                run.ended_at = datetime.now(UTC)
-                run.cost_usd_cents = cost_cents
-
+                succeeded = await transitions.cas_run_status(
+                    db,
+                    run_id=run.id,
+                    expected=("running",),
+                    new="succeeded",
+                    ended_at=datetime.now(UTC),
+                    cost_usd_cents=cost_cents,
+                )
+                if not succeeded:
+                    # Roll back mark_review/proposal too: another transaction
+                    # terminalized or fenced the run before this completion CAS.
+                    await db.rollback()
+                    logger.info(
+                        "legacy run %s lost completion authority; leaving terminal intact",
+                        run_id,
+                    )
+                    return
                 await db.commit()
+                await db.refresh(run)
                 await _ws_task_update(task)
             else:
                 logger.info("legacy run %s finished but task %s no longer reviewable; "
                             "leaving cancel terminal intact", run.id, task.id)
+        except LegacyRunStopped as stopped:
+            # Cancellation/kill-switch/fence owns the terminal transition. Never
+            # translate authority loss into ``failed`` or revive it via cleanup.
+            await db.rollback()
+            logger.info("legacy lab run %s stopped: %s", run_id, stopped)
+            return
         except Exception as e:
             logger.warning("lab run %s failed: %s", run.id, e, exc_info=True)
             await db.rollback()
             await db.refresh(run)
             await db.refresh(task)
-            if run.status == "cancelled" or task.status == "cancelled":
+            if (
+                run.status not in {"running", "needs_approval"}
+                or task.status != "running"
+            ):
                 return
             cost_trusted = True
             collect_usage = getattr(adapter, "cancel_and_collect_usage", None)
@@ -396,13 +548,24 @@ async def run_one(run_id: str) -> None:
                         run.id,
                         exc_info=True,
                     )
-            run.status = "failed"
-            run.ended_at = datetime.now(UTC)
-            run.cost_usd_cents = cost_cents
-            run.error = (guard.redact_text(
+            safe_error = (guard.redact_text(
                 f"cost_unknown: {e}" if not cost_trusted else str(e)
             ) or "")[:500]
+            failed = await transitions.cas_run_status(
+                db,
+                run_id=run.id,
+                expected=("running", "needs_approval"),
+                new="failed",
+                ended_at=datetime.now(UTC),
+                cost_usd_cents=cost_cents,
+                error=safe_error,
+            )
+            if not failed:
+                await db.rollback()
+                return
             await db.commit()
+            await db.refresh(run)
+            await db.refresh(task)
             if not cost_trusted:
                 return
             try:
@@ -416,7 +579,7 @@ async def run_one(run_id: str) -> None:
                 try:
                     await adapter.stop(handle)
                 except Exception:
-                    logger.warning("lab adapter stop failed for %s", run.id, exc_info=True)
+                    logger.warning("lab adapter stop failed for %s", run_id, exc_info=True)
 
 
 async def _run_v1(run_id: str) -> None:

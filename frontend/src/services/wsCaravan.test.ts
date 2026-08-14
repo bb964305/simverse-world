@@ -9,7 +9,12 @@ import {
   refreshCaravanProjection,
   resetCaravanProjection,
 } from './caravanProjection'
-import { CARAVAN_DISCONNECT_STALE_MS, connectWS, disconnectWS } from './ws'
+import {
+  CARAVAN_DISCONNECT_STALE_MS,
+  CARAVAN_RESYNC_INTERVAL_MS,
+  connectWS,
+  disconnectWS,
+} from './ws'
 import { useGameStore } from '../stores/gameStore'
 
 class FakeWebSocket {
@@ -132,5 +137,39 @@ describe('caravan WebSocket convergence', () => {
     expect(getCaravanProjection().snapshot?.visible).toBe(true)
     vi.advanceTimersByTime(1)
     expect(getCaravanProjection().snapshot).toBeNull()
+  })
+
+  it('periodically clears a missed terminal frame while the socket stays open', async () => {
+    const empty = state({
+      visit_id: null,
+      world_event_id: null,
+      version: 0,
+      phase: null,
+      position: null,
+      motion: null,
+      visible: false,
+    })
+    vi.mocked(getCurrentCaravan)
+      .mockResolvedValueOnce(state({ version: 3, phase: 'trading' }))
+      .mockResolvedValueOnce(empty)
+
+    connectWS()
+    const ws = FakeWebSocket.instances[0]
+    ws.open()
+    ws.message({ type: 'auth_ok' })
+    await refreshCaravanProjection()
+    expect(getCaravanProjection().snapshot).toMatchObject({
+      phase: 'trading', visible: true,
+    })
+
+    // No close/reconnect and no departed WebSocket frame. The bounded REST
+    // heartbeat must still converge to the server's canonical empty snapshot.
+    await vi.advanceTimersByTimeAsync(CARAVAN_RESYNC_INTERVAL_MS)
+
+    expect(ws.readyState).toBe(FakeWebSocket.OPEN)
+    expect(getCurrentCaravan).toHaveBeenCalledTimes(2)
+    expect(getCaravanProjection().snapshot).toMatchObject({
+      visit_id: null, phase: null, visible: false,
+    })
   })
 })

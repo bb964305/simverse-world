@@ -6,12 +6,19 @@ a 15-dimension personality profile and match it to one of 27 SBTI types.
 """
 
 import logging
+import time
 
 from app.llm.client import get_client
 from app.llm.json_extract import extract_json_object
-from app.llm.metering import record_usage
+from app.llm.metering import estimate_tokens, record_usage
 
 logger = logging.getLogger(__name__)
+
+# User-authored resident documents can be much larger than an SBTI analysis
+# needs.  Keep this boundary in the service as well as at upload time because
+# SBTI is also called by admin/backfill and forge code paths.
+SBTI_NAME_MAX_CHARS = 100
+SBTI_LAYER_MAX_CHARS = 4_000
 
 # ── 15 Dimensions ──────────────────────────────────────────────────────
 DIMENSIONS = [
@@ -185,47 +192,62 @@ def _extract_text(response) -> str:
     return ""
 
 
-async def compute_sbti(name: str, ability_md: str, persona_md: str, soul_md: str) -> dict | None:
+async def compute_sbti(
+    name: str,
+    ability_md: str,
+    persona_md: str,
+    soul_md: str,
+    *,
+    user_id: str | None = None,
+    conversation_id: str | None = None,
+) -> dict | None:
     """
     Compute SBTI personality type for a resident using LLM analysis.
 
     Returns dict with keys: type, type_name, type_en, dimensions, similarity, exact
     Returns None if analysis fails.
     """
-    combined_len = len(ability_md or "") + len(persona_md or "") + len(soul_md or "")
+    safe_name = (name or "")[:SBTI_NAME_MAX_CHARS]
+    safe_ability = (ability_md or "")[:SBTI_LAYER_MAX_CHARS]
+    safe_persona = (persona_md or "")[:SBTI_LAYER_MAX_CHARS]
+    safe_soul = (soul_md or "")[:SBTI_LAYER_MAX_CHARS]
+    combined_len = len(safe_ability) + len(safe_persona) + len(safe_soul)
     if combined_len < 50:
-        logger.info(f"SBTI skip for '{name}': text too short ({combined_len} chars)")
+        logger.info("SBTI skip for '%s': text too short (%d chars)", safe_name, combined_len)
         return None
 
+    from app.config import settings
+
+    model = settings.effective_model
+    user_prompt = SBTI_ANALYSIS_USER.format(
+        name=safe_name,
+        ability_md=safe_ability or "（无内容）",
+        persona_md=safe_persona or "（无内容）",
+        soul_md=safe_soul or "（无内容）",
+    )
+    response = None
+    response_text = ""
+    attempted = False
+    parse_ok = False
+    started = time.monotonic()
     try:
         client = get_client("system")
-        from app.config import settings
-        model = settings.effective_model
-
-        resp = await client.messages.create(
+        attempted = True
+        response = await client.messages.create(
             model=model,
             max_tokens=200,
             system=SBTI_ANALYSIS_SYSTEM,
             messages=[{
                 "role": "user",
-                "content": SBTI_ANALYSIS_USER.format(
-                    name=name,
-                    ability_md=ability_md or "（无内容）",
-                    persona_md=persona_md or "（无内容）",
-                    soul_md=soul_md or "（无内容）",
-                ),
+                "content": user_prompt,
             }],
         )
-        text = _extract_text(resp).strip()
+        response_text = _extract_text(response).strip()
 
         # Extract JSON from response (unified extractor, P1-1 E-05)
-        dimensions = extract_json_object(text)
-        await record_usage(
-            "sbti", model=model, owner="system", response=resp,
-            parse_ok=dimensions is not None,
-        )
+        dimensions = extract_json_object(response_text)
         if dimensions is None:
-            logger.warning(f"SBTI: no JSON in LLM response for '{name}'")
+            logger.warning("SBTI: no JSON in LLM response for '%s'", safe_name)
             return None
 
         # Validate all 15 dimensions present and valid
@@ -234,6 +256,7 @@ async def compute_sbti(name: str, ability_md: str, persona_md: str, soul_md: str
             if val not in ("L", "M", "H"):
                 val = "M"
             dimensions[code] = val
+        parse_ok = True
 
         # Match to best type
         result = match_type(dimensions)
@@ -242,13 +265,37 @@ async def compute_sbti(name: str, ability_md: str, persona_md: str, soul_md: str
         # Remove intermediate fields
         result.pop("distance", None)
 
-        logger.info(f"SBTI: '{name}' → {result['type']}（{result['type_name']}）"
-                     f" similarity={result['similarity']}% exact={result['exact']}/15")
+        logger.info("SBTI: '%s' → %s（%s） similarity=%d%% exact=%d/15",
+                    safe_name, result["type"], result["type_name"],
+                    result["similarity"], result["exact"])
         return result
 
     except Exception as e:
-        logger.error(f"SBTI computation failed for '{name}': {e}", exc_info=True)
+        logger.error("SBTI computation failed for '%s': %s", safe_name, e, exc_info=True)
         return None
+    finally:
+        # Meter exactly one row for every attempted request.  When the client
+        # raises before returning a usage block, retain visibility with the
+        # same token-estimation fallback used by the central metering layer.
+        if attempted:
+            try:
+                await record_usage(
+                    "sbti",
+                    model=model,
+                    owner="system",
+                    response=response,
+                    est_input_tokens=estimate_tokens(SBTI_ANALYSIS_SYSTEM + user_prompt),
+                    est_output_tokens=estimate_tokens(response_text),
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    parse_ok=parse_ok,
+                    latency_ms=round((time.monotonic() - started) * 1000),
+                )
+            except Exception:
+                # ``record_usage`` is specified not to raise; keep SBTI's
+                # fail-open contract even if a test double or future change
+                # violates that contract.
+                logger.debug("SBTI usage metering failed", exc_info=True)
 
 
 def update_meta_with_sbti(meta_json: dict | None, sbti: dict) -> dict:

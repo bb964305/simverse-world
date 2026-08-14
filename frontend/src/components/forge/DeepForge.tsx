@@ -3,6 +3,12 @@ import { deepForgeStart, deepForgeStatus, apiFetch } from '../../services/api'
 import type { DeepForgeStage, DeepForgeStatusResponse } from '../../services/api'
 import { useGameStore } from '../../stores/gameStore'
 import { onWSMessage } from '../../services/ws'
+import {
+  DEEP_FORGE_TERMINAL_RECOVERY_MESSAGE,
+  isForgeRecoveryAbort,
+  pollTerminalStatus,
+  recoverTerminalStatus,
+} from './terminalRecovery'
 
 interface DeepForgeProps {
   onStateUpdate?: (state: DeepForgeStatusResponse) => void
@@ -41,44 +47,119 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
 
   const unsubRef = useRef<(() => void) | null>(null)
   const forgeIdRef = useRef<string | null>(null)
+  const recoveryAbortRef = useRef<AbortController | null>(null)
+  const completionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const terminalSettledRef = useRef(false)
+  const mountedRef = useRef(true)
 
-  useEffect(() => () => { unsubRef.current?.() }, [])
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      unsubRef.current?.()
+      unsubRef.current = null
+      recoveryAbortRef.current?.abort()
+      recoveryAbortRef.current = null
+      if (completionTimerRef.current !== null) {
+        clearTimeout(completionTimerRef.current)
+        completionTimerRef.current = null
+      }
+    }
+  }, [])
 
-  // P1-5: drive stage updates off WS pushes instead of a 3s poll. Each
-  // forge_progress advances the stage indicator; on the terminal signal we do a
-  // single status fetch to pull the full result (resident_id, rating, error).
+  // WS keeps the stage indicator responsive. Durable bounded polling is the
+  // convergence path when a terminal frame is lost; a terminal frame also starts
+  // a short retry sequence so one cross-worker 404/network race cannot strand the
+  // UI. Both paths share one AbortController and a 20-minute safety deadline.
   const subscribeStatus = useCallback((forgeId: string) => {
     const token = localStorage.getItem('token') ?? ''
+    let recoveryInFlight: Promise<void> | null = null
+    let wsFallbackError: string | null = null
 
-    const finalize = async () => {
-      try {
-        const status = await deepForgeStatus(token, forgeId)
-        onStateUpdate?.(status)
-        const stage = status.stage ?? status.status
-        setCurrentStage(stage)
+    terminalSettledRef.current = false
+    recoveryAbortRef.current?.abort()
+    unsubRef.current?.()
+    const sessionController = new AbortController()
+    recoveryAbortRef.current = sessionController
 
-        if (stage === 'done') {
-          unsubRef.current?.(); unsubRef.current = null
-          setUiStatus('done')
-          setResult(status)
-          // Refresh balance (forge reward was added server-side)
-          const t = useGameStore.getState().token
-          if (t) {
-            apiFetch<{ soul_coin_balance: number }>('/users/me', {
-              headers: { Authorization: `Bearer ${t}` },
-            }).then((u) => useGameStore.getState().updateBalance(u.soul_coin_balance)).catch(() => {})
-          }
-          if (status.resident_id) {
-            setTimeout(() => onComplete?.(status.resident_id!), 300)
-          }
-        } else if (stage === 'error') {
-          unsubRef.current?.(); unsubRef.current = null
-          setUiStatus('error')
-          setError(status.error ?? '深度蒸馏过程中出现错误')
+    const fetchStatus = (signal: AbortSignal) => deepForgeStatus(token, forgeId, signal)
+    const stopWatching = () => {
+      unsubRef.current?.()
+      unsubRef.current = null
+    }
+
+    const applyPending = (status: DeepForgeStatusResponse) => {
+      if (!mountedRef.current || terminalSettledRef.current) return
+      onStateUpdate?.(status)
+      setCurrentStage(status.stage ?? status.status)
+    }
+
+    const applyStatus = (status: DeepForgeStatusResponse): boolean => {
+      if (!mountedRef.current || terminalSettledRef.current) return false
+      applyPending(status)
+      const stage = status.stage ?? status.status
+
+      if (stage === 'done') {
+        terminalSettledRef.current = true
+        sessionController.abort()
+        stopWatching()
+        setUiStatus('done')
+        setCurrentStage('done')
+        setResult(status)
+        // Refresh balance (forge reward was added server-side).
+        const gameToken = useGameStore.getState().token
+        if (gameToken) {
+          apiFetch<{ soul_coin_balance: number }>('/users/me', {
+            headers: { Authorization: `Bearer ${gameToken}` },
+          }).then((user) => {
+            useGameStore.getState().updateBalance(user.soul_coin_balance)
+          }).catch(() => {})
         }
-      } catch {
-        // Transient fetch failure — a later WS event (or the terminal one) retriggers.
+        if (status.resident_id) {
+          completionTimerRef.current = setTimeout(() => {
+            completionTimerRef.current = null
+            if (mountedRef.current) onComplete?.(status.resident_id!)
+          }, 300)
+        }
+        return true
       }
+
+      if (stage === 'error') {
+        terminalSettledRef.current = true
+        sessionController.abort()
+        stopWatching()
+        setUiStatus('error')
+        setCurrentStage('error')
+        setError(status.error ?? wsFallbackError ?? '深度蒸馏过程中出现错误')
+        return true
+      }
+      return false
+    }
+
+    const showRecoveryFailure = () => {
+      if (!mountedRef.current || terminalSettledRef.current) return
+      terminalSettledRef.current = true
+      sessionController.abort()
+      stopWatching()
+      setUiStatus('error')
+      setError(wsFallbackError ?? DEEP_FORGE_TERMINAL_RECOVERY_MESSAGE)
+    }
+
+    const recoverTerminal = () => {
+      if (terminalSettledRef.current || recoveryInFlight !== null) return
+      recoveryInFlight = (async () => {
+        try {
+          applyStatus(await recoverTerminalStatus(
+            fetchStatus,
+            sessionController.signal,
+            DEEP_FORGE_TERMINAL_RECOVERY_MESSAGE,
+          ))
+        } catch (recoveryError) {
+          if (!isForgeRecoveryAbort(recoveryError)) showRecoveryFailure()
+        } finally {
+          recoveryInFlight = null
+        }
+      })()
     }
 
     unsubRef.current = onWSMessage((data) => {
@@ -87,12 +168,21 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
         // status field mirrors the DeepForge STAGES keys (researching, …).
         if (typeof data.status === 'string') setCurrentStage(data.status as DeepForgeStage)
       } else if (data.type === 'forge_done' || data.type === 'forge_error') {
-        void finalize()
+        if (data.type === 'forge_error' && typeof data.error === 'string') {
+          wsFallbackError = data.error
+        }
+        recoverTerminal()
       }
     })
 
-    // Catch-up: the pipeline may have advanced before we subscribed.
-    void finalize()
+    void pollTerminalStatus(
+      fetchStatus,
+      sessionController.signal,
+      applyPending,
+      DEEP_FORGE_TERMINAL_RECOVERY_MESSAGE,
+    ).then(applyStatus).catch((pollError: unknown) => {
+      if (!isForgeRecoveryAbort(pollError)) showRecoveryFailure()
+    })
   }, [onStateUpdate, onComplete])
 
   const handleStart = async () => {
@@ -108,9 +198,11 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
         character_name: characterName.trim(),
         user_material: userMaterial.trim() || undefined,
       })
+      if (!mountedRef.current) return
       forgeIdRef.current = resp.forge_id
       subscribeStatus(resp.forge_id)
     } catch (e) {
+      if (!mountedRef.current) return
       setUiStatus('error')
       setError(e instanceof Error ? e.message : '请求失败，请重试')
     }
@@ -118,6 +210,12 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
 
   const handleRetry = () => {
     unsubRef.current?.(); unsubRef.current = null
+    recoveryAbortRef.current?.abort(); recoveryAbortRef.current = null
+    terminalSettledRef.current = false
+    if (completionTimerRef.current !== null) {
+      clearTimeout(completionTimerRef.current)
+      completionTimerRef.current = null
+    }
     setUiStatus('idle')
     setCurrentStage(null)
     setResult(null)

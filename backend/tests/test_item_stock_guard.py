@@ -10,8 +10,10 @@ session 共用一条连接、读得到尚未 commit 的改动,事务边界会假
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import settings
@@ -187,6 +189,22 @@ async def test_guard_off_never_touches_the_new_column(sessions, guard_off):
     assert (await _row(sessions)).stock == 3    # 列没被碰过
 
 
+async def test_lifecycle_gate_forces_the_column_guard_when_stock_flag_is_off(
+    sessions, guard_off, monkeypatch,
+):
+    """错误开闸组合也只能有一个账本，不能让 lifecycle 与玩家各扣各的。"""
+    monkeypatch.setattr(settings, "caravan_lifecycle_enabled", True)
+    await _seed(sessions, _work(stock=3))
+
+    async with sessions() as db:
+        assert await item_stock.take_stock(db, await _load(db), 1) == 2
+        await db.commit()
+
+    row = await _row(sessions)
+    assert row.stock == 2
+    assert row.payload_json["stock"] == 2
+
+
 # --------------------------------------------------------------------------- #
 # 3. 超卖复现:双 session                                                        #
 # --------------------------------------------------------------------------- #
@@ -302,6 +320,83 @@ async def test_caravan_and_player_cannot_oversell_the_last_copy(
     assert row.stock == 0
     assert row.active is False
     assert player.soul_coin_balance == 15          # 退款落库
+
+
+async def test_lifecycle_and_real_player_path_cannot_sell_three_copies_four_times(
+    sessions, guard_off, caravan_on, monkeypatch,
+):
+    """生命周期闸开但独立库存闸误关时，玩家→商队→玩家仍只成交三次。
+
+    旧组合会先把 payload 3→2，再让 lifecycle 把 column 3→2 并覆盖 payload，
+    相当于重新放出玩家已经买走的那一件，最终 3 件可成交 4/5 次。
+    """
+    from app.models.caravan_visit import CaravanVisit, CaravanVisitPurchase
+    from app.models.resident_treasury import ResidentTreasury
+    from app.models.shop import Purchase
+    from app.models.user import User
+    from app.models.world_event import WorldEvent
+    from app.services import caravan_service, coin_service, shop_service
+
+    monkeypatch.setattr(settings, "caravan_lifecycle_enabled", True)
+
+    async def _no_discount(_db):
+        return 1.0
+
+    monkeypatch.setattr(shop_service, "_market_discount", _no_discount)
+    now = datetime.now(UTC).replace(microsecond=0)
+    event = WorldEvent(
+        id="stock-ledger-market", type="festival", title="集市日", description="",
+        payload_json={"market_day": True, "location_id": "market_hall"},
+        starts_at=now - timedelta(minutes=1), ends_at=now + timedelta(hours=1),
+        is_active=True,
+    )
+    visit = CaravanVisit(
+        id="stock-ledger-visit", world_event_id=event.id, phase="trading",
+        visibility_slot="world", version=1, next_action_at=event.ends_at,
+        tile_x=109, tile_y=94, summary_json={}, lease_owner="stock-worker",
+        lease_expires_at=now + timedelta(minutes=1),
+    )
+    await _seed(
+        sessions,
+        _work(stock=3), _maker(),
+        ResidentTreasury(resident_slug="maker", balance_sc=0),
+        _player(balance=100), event, visit,
+    )
+
+    async with sessions() as db:
+        first = await shop_service.purchase(db, "u-1", "work_a", 1)
+        assert first["effect"]["stock"] == 2
+
+    async with sessions() as db:
+        assert await caravan_service._buy_one_for_visit(
+            db, visit.id, "stock-worker", "work_a", now=now,
+        ) is True
+
+    async with sessions() as db:
+        third = await shop_service.purchase(db, "u-1", "work_a", 1)
+        assert third["effect"]["stock"] == 0
+        with pytest.raises(shop_service.ShopError, match="not available"):
+            await shop_service.purchase(db, "u-1", "work_a", 1)
+
+    async with sessions() as db:
+        row = await _load(db)
+        user = (await db.execute(select(User).where(User.id == "u-1"))).scalar_one()
+        player_sales = (await db.execute(
+            select(func.count()).select_from(Purchase).where(Purchase.item_code == "work_a")
+        )).scalar_one()
+        caravan_sales = (await db.execute(
+            select(func.count()).select_from(CaravanVisitPurchase).where(
+                CaravanVisitPurchase.visit_id == visit.id,
+            )
+        )).scalar_one()
+        maker_balance = await coin_service.treasury_balance(db, "maker")
+
+    assert row.stock == row.payload_json["stock"] == 0
+    assert row.active is False
+    assert player_sales == 2
+    assert caravan_sales == 1
+    assert maker_balance == 45
+    assert user.soul_coin_balance == 70
 
 
 async def test_player_refund_returns_the_paid_price_not_the_list_price(

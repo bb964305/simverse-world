@@ -350,10 +350,17 @@ class BasicDecidePlugin:
     async def _maybe_crowd_draw(self, ctx: TickContext, rng=random) -> ActionResult | None:
         """Realism P2-7: during an active festival/script event, the event location
         gets a ×realism_festival_weight pull in the VISIT_DISTRICT draw.  An
-        active market day additionally gives a deterministic cohort of at most
-        four real residents a direct pull to the market hall. Gated on the crowd
-        flag; high-priority/urgent/active-trip behavior is handled before here."""
-        if not settings.realism_crowd_enabled:
+        active market day additionally gives its persisted cohort of at most
+        four real residents a direct pull to the market hall. Generic festival
+        crowd draws are gated on the crowd flag; durable caravan invitations are
+        not. High-priority/urgent/active-trip behavior is handled before here."""
+        # A durable caravan invitation is gameplay authority, not a cosmetic
+        # realism effect. Generic festival crowds may stay disabled while the
+        # four persisted buyers still need a complete route to their purchase
+        # slots. Without either feature there is no reason to query a cohort.
+        crowd_enabled = settings.realism_crowd_enabled
+        lifecycle_market_enabled = settings.caravan_lifecycle_enabled
+        if not crowd_enabled and not lifecycle_market_enabled:
             return None
         if ActionType.VISIT_DISTRICT not in ctx.available_actions:
             return None
@@ -375,7 +382,11 @@ class BasicDecidePlugin:
         from app.services import crowd_service
         here = get_location_id_at(ctx.resident.tile_x, ctx.resident.tile_y)
         world_events = getattr(ctx, "world_events", None)
-        cohort = await crowd_service.market_day_crowd_cohort(ctx.db, world_events)
+        cohort = await crowd_service.market_day_crowd_cohort(
+            ctx.db,
+            world_events,
+            persisted_only=not crowd_enabled,
+        )
         if ctx.resident.id in cohort and here != "market_hall":
             target = "market_hall"
             target_tile = crowd_service.market_day_visitor_tile(
@@ -383,6 +394,8 @@ class BasicDecidePlugin:
             )
             ctx.market_trip_event_id = crowd_service.active_market_day_id(world_events)
         else:
+            if not crowd_enabled:
+                return None
             # Keep the established ×3 draw for non-market festivals and for
             # residents outside the bounded deterministic market cohort.
             target = crowd_service.festival_draw_target(world_events, here, rng)

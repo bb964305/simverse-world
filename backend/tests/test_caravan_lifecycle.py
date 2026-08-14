@@ -280,6 +280,58 @@ async def test_policy_close_wakes_inbound_and_animates_safe_return(
     assert outbound[-1]["motion"]["path"][-1] == list(outside)
 
 
+async def test_market_window_can_admit_after_policy_reopens(
+    db_session, monkeypatch,
+):
+    """A start-time policy pause is retryable until the market really closes."""
+    opens = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=1)
+    closes = opens + timedelta(hours=1)
+    event = market_event(
+        event_id="market-policy-recovery", starts_at=opens, ends_at=closes,
+    )
+    db_session.add(event)
+    await db_session.commit()
+    monkeypatch.setattr(settings, "caravan_enabled", False)
+    visit = await lifecycle.ensure_visit_for_event(db_session, event, now=opens)
+
+    # First due pass observes closed admission after the market has begun. The
+    # visit remains a hidden durable fence instead of becoming terminal.
+    assert await lifecycle.drive_due_visits(
+        db_session, owner="paused-worker", now=opens,
+    ) == []
+    paused = await db_session.get(CaravanVisit, visit.id, populate_existing=True)
+    assert paused.phase == "scheduled"
+    assert paused.error_code == lifecycle.ADMISSION_PENDING_ERROR
+    assert lifecycle._aware(paused.next_action_at) == closes
+
+    # A still-closed reconciliation must not turn the parked row into a hot
+    # five-second retry loop; the window close remains its only deadline.
+    await lifecycle.reconcile_market_events(
+        db_session, now=opens + timedelta(minutes=1),
+    )
+    still_paused = await db_session.get(
+        CaravanVisit, visit.id, populate_existing=True,
+    )
+    assert lifecycle._aware(still_paused.next_action_at) == closes
+
+    # Reconcile is the policy-change detector. It wakes only the marked row and
+    # the ordinary leased driver resumes the exact same visit id.
+    reopened = opens + timedelta(minutes=5)
+    monkeypatch.setattr(settings, "caravan_enabled", True)
+    await lifecycle.reconcile_market_events(db_session, now=reopened)
+    states = await lifecycle.drive_due_visits(
+        db_session, owner="recovery-worker", now=reopened,
+    )
+
+    assert states[-1]["visit_id"] == visit.id
+    assert states[-1]["phase"] == "inbound"
+    resumed = await db_session.get(CaravanVisit, visit.id, populate_existing=True)
+    assert resumed.error_code is None
+    assert await treasury_service.kv_read(
+        db_session, caravan_service.LAST_VISIT_KEY,
+    ) == event.id
+
+
 async def test_expired_lease_is_reclaimed_with_higher_version(db_session):
     now = datetime.now(UTC).replace(microsecond=0)
     event = market_event(starts_at=now + timedelta(hours=1), ends_at=now + timedelta(hours=2))

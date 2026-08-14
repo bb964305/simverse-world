@@ -1,8 +1,7 @@
-import io
-import json
-import re
+import asyncio
+import logging
 import random
-import zipfile
+from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form, Query
 from pydantic import BaseModel
@@ -10,6 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.config import settings
+from app.rate_limit import limiter
 from app.models.resident import Resident
 from app.models.user import User
 from app.schemas.resident import ResidentListItem, ResidentDetail, ResidentEditRequest, VersionSnapshot, ResidentImportResponse, PlayerPositionUpdate
@@ -18,10 +19,34 @@ from app.services.version_service import create_version_snapshot, get_versions
 from app.services.auth_service import get_current_user
 from app.services.scoring_service import compute_star_rating
 from app.services.sbti_service import compute_sbti, update_meta_with_sbti
+from app.services.skill_import_service import (
+    IMPORT_MAX_UPLOAD_BYTES,
+    SkillFormat,
+    SkillImportValidationError,
+    convert_to_standard,
+    detect_skill_format,
+    parse_skill_zip,
+    validate_import_identity,
+    validate_import_layers,
+)
 from app.services.resident_placement import allocate_resident_location, _generate_slug, SPRITE_KEYS
 from app.services.civic_membership import UGC_RESIDENT_TYPE
+from app.services.ugc_creation_quota import (
+    DailyCreationLimitExceeded,
+    claim_creation_slot,
+    error_detail as creation_limit_detail,
+)
+from app.services.slug_reservation import (
+    SlugReservationConflict,
+    consume_slug_reservation,
+    import_work_timeout_seconds,
+    release_slug_reservation,
+    reserve_slug,
+)
+from app.llm.budget import forge_blocked
 
 router = APIRouter(prefix="/residents", tags=["residents"])
+logger = logging.getLogger(__name__)
 
 
 async def _require_user_auth(request: Request, db: AsyncSession = Depends(get_db)):
@@ -33,28 +58,6 @@ async def _require_user_auth(request: Request, db: AsyncSession = Depends(get_db
     if not user:
         raise HTTPException(status_code=401, detail="Invalid token")
     return user
-
-
-def _parse_skill_md(content: str) -> dict:
-    """Parse combined SKILL.md into separate layers."""
-    sections = {"ability_md": "", "persona_md": "", "soul_md": ""}
-    current_key = None
-
-    for line in content.split("\n"):
-        stripped = line.strip().lower()
-        if re.match(r'^#\s*(ability|能力)', stripped):
-            current_key = "ability_md"
-            sections[current_key] = line + "\n"
-        elif re.match(r'^#\s*(persona|人格)', stripped):
-            current_key = "persona_md"
-            sections[current_key] = line + "\n"
-        elif re.match(r'^#\s*(soul|灵魂)', stripped):
-            current_key = "soul_md"
-            sections[current_key] = line + "\n"
-        elif current_key:
-            sections[current_key] += line + "\n"
-
-    return sections
 
 
 @router.get("", response_model=list[ResidentListItem])
@@ -82,7 +85,113 @@ async def resident_goals(slug: str, db: AsyncSession = Depends(get_db)):
 # ── C1 soul card: card / export / import ─────────────────────────────
 
 CARD_SCHEMA_VERSION = 1
-IMPORT_DAILY_CAP = 3
+
+
+def _raise_import_validation(exc: SkillImportValidationError) -> None:
+    raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+async def _claim_import_slot(db: AsyncSession, user_id: str) -> None:
+    try:
+        await claim_creation_slot(db, user_id)
+    except DailyCreationLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=creation_limit_detail(exc)) from exc
+
+
+async def _reserve_import_slug(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    name: str,
+    slug: str,
+    owner_kind: str,
+    allow_suffix: bool,
+):
+    """Persist a cross-worker slug claim before any paid/placement work."""
+    try:
+        reservation = await reserve_slug(
+            db,
+            user_id=user_id,
+            character_name=name,
+            requested_slug=slug,
+            owner_kind=owner_kind,
+            allow_suffix=allow_suffix,
+        )
+        # The reservation must be visible to other workers while this request
+        # performs conversion/SBTI. UGC quota is deliberately claimed only in
+        # the following transaction so a failed import does not consume it.
+        await db.commit()
+        return reservation
+    except SlugReservationConflict as exc:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except BaseException:
+        try:
+            await db.rollback()
+        except BaseException:
+            # Preserve cancellation/the original failure. No committed
+            # reservation exists on this path.
+            pass
+        raise
+
+
+async def _release_import_slug_after_failure(
+    db: AsyncSession, reservation_id: str, user_id: str
+) -> None:
+    """Best-effort release after rolling back quota/Resident work.
+
+    Cancellation and connection failures may still interrupt cleanup; the
+    reservation service's stale sweep is the durable fallback for that case.
+    """
+    try:
+        await db.rollback()
+    except BaseException:
+        logger.warning("failed to roll back import before slug release", exc_info=True)
+    try:
+        await release_slug_reservation(db, reservation_id, user_id=user_id)
+        await db.commit()
+    except BaseException:
+        try:
+            await db.rollback()
+        except BaseException:
+            pass
+        logger.warning(
+            "failed to release import slug reservation %s; stale sweep will recover it",
+            reservation_id,
+            exc_info=True,
+        )
+
+
+@asynccontextmanager
+async def _bounded_import_work(
+    db: AsyncSession, reservation_id: str, user_id: str
+):
+    """Run all post-reservation work inside one hard, cleanup-safe deadline."""
+    try:
+        async with asyncio.timeout(import_work_timeout_seconds()):
+            yield
+    except TimeoutError as exc:
+        # The timeout context has already converted its cancellation into a
+        # normal exception, so cleanup runs outside the expired deadline.
+        await _release_import_slug_after_failure(db, reservation_id, user_id)
+        raise HTTPException(
+            status_code=504,
+            detail="Resident import timed out; pending creation was rolled back",
+        ) from exc
+    except BaseException:
+        await _release_import_slug_after_failure(db, reservation_id, user_id)
+        raise
+
+
+async def _read_upload_limited(file: UploadFile) -> bytes:
+    """Read at most one bounded upload, independent of client headers."""
+    reported_size = getattr(file, "size", None)
+    if reported_size is not None and reported_size > IMPORT_MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Import file exceeds the upload size limit")
+    content = await file.read(IMPORT_MAX_UPLOAD_BYTES + 1)
+    if len(content) > IMPORT_MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Import file exceeds the upload size limit")
+    return content
 
 
 @router.get("/{slug}/card")
@@ -146,9 +255,6 @@ class ImportBody(BaseModel):
 @router.post("/import-card")
 async def resident_import(body: ImportBody, request: Request, db: AsyncSession = Depends(get_db)):
     from fastapi import HTTPException
-    from datetime import datetime, UTC
-    from sqlalchemy import select as _select, func as _func
-    from app.services.resident_placement import allocate_resident_location, _generate_slug, SPRITE_KEYS
     from app.services.content_guard import assert_resident_content_clean
     import random as _random
 
@@ -161,42 +267,54 @@ async def resident_import(body: ImportBody, request: Request, db: AsyncSession =
         name=body.name, ability_md=body.ability_md,
         persona_md=body.persona_md, soul_md=body.soul_md)
 
-    # Daily cap (shared with forge creations for this user today).
-    today = datetime.now(UTC).date()
-    made_today = (await db.execute(
-        _select(_func.count()).select_from(Resident).where(
-            Resident.creator_id == user.id, _func.date(Resident.created_at) == today,
-        )
-    )).scalar() or 0
-    if made_today >= IMPORT_DAILY_CAP:
-        raise HTTPException(status_code=429, detail="Daily creation limit reached")
+    requested_slug = _generate_slug(body.name)
+    reservation = await _reserve_import_slug(
+        db,
+        user_id=user.id,
+        name=body.name.strip(),
+        slug=requested_slug,
+        owner_kind="import_card",
+        allow_suffix=True,
+    )
+    reservation_id = reservation.id
+    reserved_slug = str(reservation.target_slug)
 
-    slug = _generate_slug(body.name)
-    if await get_resident_by_slug(db, slug):
-        slug = f"{slug}-{_random.randbytes(3).hex()}"
-    district, tx, ty, home = await allocate_resident_location(
-        db, ability_text=body.ability_md, persona_text=body.persona_md, soul_text=body.soul_md,
-    )
-    meta = {"origin": "import"}
-    if body.sbti:
-        meta["sbti"] = body.sbti
-    # UGC type: an imported card is a player-authored character (creator_id +
-    # origin="import"), not the player's avatar — it inhabits the town but
-    # holds no political rights. Never rely on the model default here.
-    resident = Resident(
-        slug=slug, name=body.name.strip(), district=district, status="idle", heat=0,
-        creator_id=user.id, resident_type=UGC_RESIDENT_TYPE,
-        ability_md=body.ability_md, persona_md=body.persona_md,
-        soul_md=body.soul_md, meta_json=meta, sprite_key=_random.choice(SPRITE_KEYS),
-        tile_x=tx, tile_y=ty, home_location_id=home,
-    )
-    db.add(resident)
-    await db.commit()
+    async with _bounded_import_work(db, reservation_id, user.id):
+        # Quota remains uncommitted until the Resident insert succeeds.
+        await _claim_import_slot(db, user.id)
+        district, tx, ty, home = await allocate_resident_location(
+            db, ability_text=body.ability_md, persona_text=body.persona_md,
+            soul_text=body.soul_md,
+        )
+        meta = {"origin": "import"}
+        if body.sbti:
+            meta["sbti"] = body.sbti
+        # UGC type: an imported card is a player-authored character (creator_id
+        # + origin="import"), not the player's avatar.
+        resident = Resident(
+            slug=reserved_slug, name=body.name.strip(), district=district,
+            status="idle", heat=0, creator_id=user.id,
+            resident_type=UGC_RESIDENT_TYPE,
+            ability_md=body.ability_md, persona_md=body.persona_md,
+            soul_md=body.soul_md, meta_json=meta,
+            sprite_key=_random.choice(SPRITE_KEYS), tile_x=tx, tile_y=ty,
+            home_location_id=home,
+        )
+        db.add(resident)
+        await db.flush()
+        consumed_slug = await consume_slug_reservation(
+            db, reservation_id, user_id=user.id
+        )
+        if consumed_slug != reserved_slug:
+            raise SlugReservationConflict("Slug reservation changed during import")
+        # Resident insert, quota claim, and reservation release are atomic.
+        await db.commit()
     await db.refresh(resident)
     return {"slug": resident.slug, "name": resident.name}
 
 
 @router.post("/import", response_model=ResidentImportResponse)
+@limiter.limit(lambda: f"{settings.rest_rate_limit_import_per_minute}/minute")
 async def import_resident(
     request: Request,
     file: UploadFile = File(...),
@@ -207,108 +325,167 @@ async def import_resident(
     """Import a resident from SKILL.md or zip file."""
     user = await _require_user_auth(request, db)
 
+    try:
+        name, slug = validate_import_identity(name, slug)
+    except SkillImportValidationError as exc:
+        _raise_import_validation(exc)
+
     # Check slug uniqueness
     existing = await get_resident_by_slug(db, slug)
     if existing:
         raise HTTPException(status_code=409, detail="Slug already exists")
 
-    content = await file.read()
-    filename = file.filename or ""
+    content = await _read_upload_limited(file)
+    filename = (file.filename or "").lower()
 
     # Parse based on file type
-    ability_md, persona_md, soul_md = "", "", ""
+    layers: dict[str, str] | None = None
+    combined_text: str | None = None
     meta_json: dict = {}
 
-    if filename.endswith(".md") or filename.endswith(".txt"):
-        # Single SKILL.md
-        text = content.decode("utf-8", errors="replace")
-        layers = _parse_skill_md(text)
+    try:
+        if filename.endswith(".md") or filename.endswith(".txt"):
+            combined_text = content.decode("utf-8", errors="replace")
+            if not combined_text.strip():
+                raise SkillImportValidationError("Imported Skill file is empty")
+        elif filename.endswith(".zip"):
+            layers, combined_text, meta_json = parse_skill_zip(content)
+        else:
+            raise SkillImportValidationError("Unsupported file format. Use .md, .txt, or .zip")
+    except SkillImportValidationError as exc:
+        _raise_import_validation(exc)
+
+    detected_format: SkillFormat | None = None
+    if combined_text is not None:
+        detected_format = detect_skill_format(combined_text)
+        if detected_format == SkillFormat.STANDARD_3LAYER:
+            # This branch is a deterministic parser, not an LLM call. Parse and
+            # size-check it before reserving quota or consulting cost gates.
+            try:
+                layers = validate_import_layers(
+                    await convert_to_standard(combined_text, detected_format)
+                )
+            except SkillImportValidationError as exc:
+                _raise_import_validation(exc)
+            combined_text = None
+
+    # Standard layer files still run SBTI when they contain enough text;
+    # non-standard combined files always require conversion. Gate before any
+    # user-triggered LLM request.
+    needs_conversion = combined_text is not None
+    candidate_length = (
+        len(combined_text or "")
+        if layers is None
+        else sum(len(value) for value in layers.values())
+    )
+    if (needs_conversion or candidate_length >= 50) and await forge_blocked(db, user.id):
+        raise HTTPException(status_code=402, detail="Daily LLM budget reached — try again later")
+
+    reservation = await _reserve_import_slug(
+        db,
+        user_id=user.id,
+        name=name,
+        slug=slug,
+        owner_kind="skill_import",
+        allow_suffix=False,
+    )
+    reservation_id = reservation.id
+    reserved_slug = str(reservation.target_slug)
+
+    async with _bounded_import_work(db, reservation_id, user.id):
+        # Atomic with the Resident insert below. Keeping the quota claim ahead
+        # of LLM calls prevents concurrent requests from bypassing admission,
+        # while failure still rolls the claim back.
+        await _claim_import_slot(db, user.id)
+
+        if combined_text is not None:
+            try:
+                layers = await convert_to_standard(
+                    combined_text,
+                    detected_format or SkillFormat.PLAIN_TEXT,
+                    user_id=user.id,
+                )
+            except SkillImportValidationError as exc:
+                _raise_import_validation(exc)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=502, detail="Unable to convert imported Skill"
+                ) from exc
+
+        try:
+            layers = validate_import_layers(layers or {})
+        except SkillImportValidationError as exc:
+            _raise_import_validation(exc)
         ability_md = layers["ability_md"]
         persona_md = layers["persona_md"]
         soul_md = layers["soul_md"]
 
-    elif filename.endswith(".zip"):
-        try:
-            with zipfile.ZipFile(io.BytesIO(content)) as zf:
-                names = zf.namelist()
+        from app.services.content_guard import assert_resident_content_clean
+        assert_resident_content_clean(
+            name=name, ability_md=ability_md,
+            persona_md=persona_md, soul_md=soul_md)
 
-                # Try ability.md (or work.md for colleague-skill format)
-                if "ability.md" in names:
-                    ability_md = zf.read("ability.md").decode("utf-8", errors="replace")
-                elif "work.md" in names:
-                    # colleague-skill format
-                    ability_md = zf.read("work.md").decode("utf-8", errors="replace")
+        # Create a mock-like object for scoring
+        class _ResidentForScoring:
+            pass
+        r_score = _ResidentForScoring()
+        r_score.ability_md = ability_md
+        r_score.persona_md = persona_md
+        r_score.soul_md = soul_md
+        r_score.total_conversations = 0
+        r_score.avg_rating = 0.0
 
-                if "persona.md" in names:
-                    persona_md = zf.read("persona.md").decode("utf-8", errors="replace")
+        star_rating = compute_star_rating(r_score)
 
-                # soul.md optional — empty string if not present (colleague-skill)
-                if "soul.md" in names:
-                    soul_md = zf.read("soul.md").decode("utf-8", errors="replace")
+        district, tile_x, tile_y, home_loc_id = await allocate_resident_location(
+            db,
+            ability_text=ability_md,
+            persona_text=persona_md,
+            soul_text=soul_md,
+        )
 
-                if "meta.json" in names:
-                    try:
-                        meta_json = json.loads(zf.read("meta.json").decode("utf-8"))
-                    except Exception:
-                        meta_json = {}
-        except zipfile.BadZipFile:
-            raise HTTPException(status_code=400, detail="Invalid zip file")
-    else:
-        raise HTTPException(status_code=400, detail="Unsupported file format. Use .md or .zip")
+        # Compute SBTI personality (non-blocking: skip if fails). Conversion is
+        # separately metered, so consult the breaker again after it.
+        final_meta = {**meta_json, "origin": "import"}
+        sbti = None
+        sbti_input_length = len(ability_md) + len(persona_md) + len(soul_md) + 2
+        if sbti_input_length >= 50 and not await forge_blocked(db, user.id):
+            sbti = await compute_sbti(
+                name, ability_md, persona_md, soul_md, user_id=user.id
+            )
+        if sbti:
+            final_meta = update_meta_with_sbti(final_meta, sbti)
 
-    from app.services.content_guard import assert_resident_content_clean
-    assert_resident_content_clean(
-        name=name, ability_md=ability_md,
-        persona_md=persona_md, soul_md=soul_md)
-
-    # Create a mock-like object for scoring
-    class _ResidentForScoring:
-        pass
-    r_score = _ResidentForScoring()
-    r_score.ability_md = ability_md
-    r_score.persona_md = persona_md
-    r_score.soul_md = soul_md
-    r_score.total_conversations = 0
-    r_score.avg_rating = 0.0
-
-    star_rating = compute_star_rating(r_score)
-
-    district, tile_x, tile_y, home_loc_id = await allocate_resident_location(
-        db,
-        ability_text=ability_md,
-        persona_text=persona_md,
-        soul_text=soul_md,
-    )
-
-    # Compute SBTI personality (non-blocking: skip if fails)
-    final_meta = {**meta_json, "origin": "import"}
-    sbti = await compute_sbti(name, ability_md, persona_md, soul_md)
-    if sbti:
-        final_meta = update_meta_with_sbti(final_meta, sbti)
-
-    # UGC type: same creation act as import-card, just a file upload.
-    resident = Resident(
-        slug=slug,
-        name=name,
-        district=district,
-        status="idle",
-        heat=0,
-        model_tier="standard",
-        token_cost_per_turn=1,
-        creator_id=user.id,
-        resident_type=UGC_RESIDENT_TYPE,
-        ability_md=ability_md,
-        persona_md=persona_md,
-        soul_md=soul_md,
-        meta_json=final_meta,
-        sprite_key=random.choice(SPRITE_KEYS),
-        tile_x=tile_x,
-        tile_y=tile_y,
-        star_rating=star_rating,
-        home_location_id=home_loc_id,
-    )
-    db.add(resident)
-    await db.commit()
+        # UGC type: same creation act as import-card, just a file upload.
+        resident = Resident(
+            slug=reserved_slug,
+            name=name,
+            district=district,
+            status="idle",
+            heat=0,
+            model_tier="standard",
+            token_cost_per_turn=1,
+            creator_id=user.id,
+            resident_type=UGC_RESIDENT_TYPE,
+            ability_md=ability_md,
+            persona_md=persona_md,
+            soul_md=soul_md,
+            meta_json=final_meta,
+            sprite_key=random.choice(SPRITE_KEYS),
+            tile_x=tile_x,
+            tile_y=tile_y,
+            star_rating=star_rating,
+            home_location_id=home_loc_id,
+        )
+        db.add(resident)
+        await db.flush()
+        consumed_slug = await consume_slug_reservation(
+            db, reservation_id, user_id=user.id
+        )
+        if consumed_slug != reserved_slug:
+            raise SlugReservationConflict("Slug reservation changed during import")
+        # Resident, quota, and reservation release become visible atomically.
+        await db.commit()
     await db.refresh(resident)
 
     return ResidentImportResponse(
@@ -356,6 +533,7 @@ async def get_one(slug: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.put("/{slug}", response_model=ResidentDetail)
+@limiter.limit(lambda: f"{settings.rest_rate_limit_resident_edit_per_minute}/minute")
 async def edit_resident(
     slug: str,
     req: ResidentEditRequest,
@@ -397,9 +575,14 @@ async def edit_resident(
 
     # Recalculate SBTI when personality layers change
     if req.ability_md is not None or req.persona_md is not None or req.soul_md is not None:
-        sbti = await compute_sbti(r.name, r.ability_md, r.persona_md, r.soul_md)
-        if sbti:
-            r.meta_json = update_meta_with_sbti(r.meta_json, sbti)
+        # Editing remains available after the user's LLM budget is exhausted;
+        # only the derived, paid SBTI refresh is skipped.
+        if not await forge_blocked(db, user.id):
+            sbti = await compute_sbti(
+                r.name, r.ability_md, r.persona_md, r.soul_md, user_id=user.id
+            )
+            if sbti:
+                r.meta_json = update_meta_with_sbti(r.meta_json, sbti)
 
     await db.commit()
     await db.refresh(r)

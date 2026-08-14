@@ -63,3 +63,15 @@ class DeepStatusResponse(BaseModel):
     current_stage: str
     mode: str
     character_name: str
+    # Stable frontend-facing aliases/result fields. The legacy names above stay
+    # for API compatibility with existing callers and admin tooling.
+    stage: str
+    progress: int
+    name: str
+    ability_md: str | None = None
+    persona_md: str | None = None
+    soul_md: str | None = None
+    star_rating: int = 0
+    district: str = ""
+    resident_id: str | None = None
+    error: str | None = None

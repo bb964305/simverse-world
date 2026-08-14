@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from app.llm.json_extract import extract_json_object
@@ -9,15 +10,21 @@ RESEARCH_INPUT_MAX_CHARS = 8000
 
 
 class ExtractionStage:
-    def __init__(self, llm_client, model: str, session_id: str | None = None):
+    def __init__(self, llm_client, model: str, session_id: str | None = None,
+                 user_id: str | None = None,
+                 budget_check: Callable[[], Awaitable[None]] | None = None):
         self._client = llm_client
         self._model = model
         self._session_id = session_id
+        self._user_id = user_id
+        self._budget_check = budget_check
 
     async def run(self, research_text: str, character_name: str) -> dict[str, Any]:
         from app.forge.prompts import EXTRACTION_SYSTEM_PROMPT, EXTRACTION_USER_TEMPLATE
 
         research_text = (research_text or "")[:RESEARCH_INPUT_MAX_CHARS]
+        if self._budget_check is not None:
+            await self._budget_check()
         response = await self._client.messages.create(
             model=self._model,
             max_tokens=3000,
@@ -41,7 +48,10 @@ class ExtractionStage:
             "forge_extract", model=self._model, owner="user", response=response,
             parse_ok=extract_json_object(text) is not None,
             conversation_id=self._session_id,
+            user_id=self._user_id,
         )
+        if self._budget_check is not None:
+            await self._budget_check()
         return self._parse(text)
 
     def _parse(self, text: str) -> dict[str, Any]:

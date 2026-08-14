@@ -19,6 +19,7 @@ let socketToken: string | null = null
 let worldConvergence: WorldConvergence = INITIAL_CONVERGENCE
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let caravanStaleTimer: ReturnType<typeof setTimeout> | null = null
+let caravanResyncTimer: ReturnType<typeof setInterval> | null = null
 // Consecutive failed-connection counter driving the exponential backoff.
 // Reset to 0 when the server confirms auth (auth_ok) — that is the only
 // point where we know the connection is genuinely usable (a socket that
@@ -28,12 +29,31 @@ let reconnectAttempt = 0
 const RECONNECT_BASE_MS = 3000
 const RECONNECT_MAX_MS = 30000
 export const CARAVAN_DISCONNECT_STALE_MS = 30000
+export const CARAVAN_RESYNC_INTERVAL_MS = 30000
 
 function clearCaravanStaleTimer(): void {
   if (caravanStaleTimer !== null) {
     clearTimeout(caravanStaleTimer)
     caravanStaleTimer = null
   }
+}
+
+function clearCaravanResyncTimer(): void {
+  if (caravanResyncTimer !== null) {
+    clearInterval(caravanResyncTimer)
+    caravanResyncTimer = null
+  }
+}
+
+function startCaravanResyncTimer(): void {
+  clearCaravanResyncTimer()
+  // Redis pub/sub is intentionally non-durable: an API subscriber can miss one
+  // terminal frame while the browser WebSocket itself remains open. Keep one
+  // bounded REST convergence request in flight via refreshCaravanProjection's
+  // shared promise so a missed departed/cancelled frame self-heals.
+  caravanResyncTimer = setInterval(() => {
+    void refreshCaravanProjection().catch(() => { /* optional projection */ })
+  }, CARAVAN_RESYNC_INTERVAL_MS)
 }
 
 /**
@@ -71,6 +91,7 @@ export function connectWS(): void {
     // through to build a fresh socket with the current token.
     const stale = socket
     socket = null
+    clearCaravanResyncTimer()
     stale.close()
   }
 
@@ -99,6 +120,7 @@ export function connectWS(): void {
         // snapshot. The shared reducer prevents a slow, older GET from replacing
         // a newer caravan_state frame that arrived while it was in flight.
         void refreshCaravanProjection().catch(() => { /* optional projection */ })
+        startCaravanResyncTimer()
       }
       if (data.type === 'caravan_state') convergeCaravanState(data)
       if (data.type === 'coin_update' && typeof data.balance === 'number') {
@@ -279,6 +301,7 @@ export function connectWS(): void {
     // `socket` before close fires, so we neither reconnect nor show the banner.
     if (socket !== ws) return
     socket = null
+    clearCaravanResyncTimer()
     useGameStore.getState().clearOnlinePlayers()
     // Passive drop: tell the UI and schedule a reconnect with exponential backoff.
     useGameStore.getState().setWsStatus('reconnecting')
@@ -328,6 +351,7 @@ export function disconnectWS(): void {
   }
   reconnectAttempt = 0
   clearCaravanStaleTimer()
+  clearCaravanResyncTimer()
   // Deliberate disconnect (logout / page unmount): null the module `socket`
   // BEFORE closing so the socket's onclose sees `socket !== ws` and skips both
   // the reconnect and the 'reconnecting' status.

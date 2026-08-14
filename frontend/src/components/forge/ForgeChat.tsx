@@ -2,6 +2,12 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { forgeStart, forgeAnswer, forgeStatus } from '../../services/api'
 import type { ForgeStatusResponse } from '../../services/api'
 import { onWSMessage } from '../../services/ws'
+import {
+  FORGE_TERMINAL_RECOVERY_MESSAGE,
+  isForgeRecoveryAbort,
+  pollForgeTerminalStatus,
+  recoverForgeTerminalStatus,
+} from './terminalRecovery'
 
 interface ForgeChatProps {
   onStateUpdate: (state: ForgeStatusResponse) => void
@@ -31,6 +37,10 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const unsubRef = useRef<(() => void) | null>(null)
+  const recoveryAbortRef = useRef<AbortController | null>(null)
+  const completionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const terminalSettledRef = useRef(false)
+  const mountedRef = useRef(true)
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -41,13 +51,23 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
   }, [isGenerating, isDone, currentStep])
 
   useEffect(() => {
+    mountedRef.current = true
     return () => {
+      mountedRef.current = false
       unsubRef.current?.()
+      unsubRef.current = null
+      recoveryAbortRef.current?.abort()
+      recoveryAbortRef.current = null
+      if (completionTimerRef.current !== null) {
+        clearTimeout(completionTimerRef.current)
+        completionTimerRef.current = null
+      }
     }
   }, [])
 
   // P1-5: WS-driven generation status. Each forge_progress advances the caption;
-  // the terminal signal triggers one status fetch to render the final result.
+  // a terminal signal starts a bounded status convergence sequence. A single
+  // terminal frame is enough even if its first API worker returns 400/404.
   const subscribeStatus = useCallback((fid: string) => {
     const STAGES = [
       '正在分析能力描述...',
@@ -57,46 +77,94 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
       '正在分配街区...',
     ]
     let stageIdx = 0
+    let recoveryInFlight: Promise<void> | null = null
+    let wsFallbackError: string | null = null
 
-    const finalize = async () => {
-      try {
-        const status = await forgeStatus(fid)
-        onStateUpdate(status)
+    terminalSettledRef.current = false
+    recoveryAbortRef.current?.abort()
+    unsubRef.current?.()
+    const sessionController = new AbortController()
+    recoveryAbortRef.current = sessionController
 
-        if (status.status === 'done') {
-          unsubRef.current?.(); unsubRef.current = null
-          setIsGenerating(false)
-          setIsDone(true)
-          setGeneratingProgress('')
+    const stopWatching = () => {
+      unsubRef.current?.()
+      unsubRef.current = null
+    }
 
-          const stars = '⭐'.repeat(status.star_rating)
-          const districtMap: Record<string, string> = {
-            engineering: '工程街区', product: '产品街区',
-            academy: '学院区', free: '自由区',
-          }
-          setMessages(prev => [...prev, {
-            role: 'bot',
-            text: `炼化完成！${status.name} 已成功入住 Simverse World！\n\n` +
-                  `评级：${stars}\n` +
-                  `街区：${districtMap[status.district] ?? status.district}\n\n` +
-                  `你获得了 50 🪙 Soul Coin 奖励！`,
-          }])
+    const applyStatus = (status: ForgeStatusResponse): boolean => {
+      if (!mountedRef.current || terminalSettledRef.current) return false
+      onStateUpdate(status)
 
-          if (status.resident_id) {
-            setTimeout(() => onComplete(status.resident_id!), 100)
-          }
-        } else if (status.status === 'error') {
-          unsubRef.current?.(); unsubRef.current = null
-          setIsGenerating(false)
-          setError(status.error ?? '生成过程中出现错误')
-          setMessages(prev => [...prev, {
-            role: 'bot',
-            text: `抱歉，炼化过程出现了问题：${status.error ?? '未知错误'}。请刷新页面重试。`,
-          }])
+      if (status.status === 'done') {
+        terminalSettledRef.current = true
+        recoveryAbortRef.current?.abort()
+        stopWatching()
+        setIsGenerating(false)
+        setIsDone(true)
+        setGeneratingProgress('')
+
+        const stars = '⭐'.repeat(status.star_rating)
+        const districtMap: Record<string, string> = {
+          engineering: '工程街区', product: '产品街区',
+          academy: '学院区', free: '自由区',
         }
-      } catch {
-        // Transient fetch failure — a later WS event retriggers.
+        setMessages(prev => [...prev, {
+          role: 'bot',
+          text: `炼化完成！${status.name} 已成功入住 Simverse World！\n\n` +
+                `评级：${stars}\n` +
+                `街区：${districtMap[status.district] ?? status.district}\n\n` +
+                `你获得了 50 🪙 Soul Coin 奖励！`,
+        }])
+
+        if (status.resident_id) {
+          completionTimerRef.current = setTimeout(() => {
+            completionTimerRef.current = null
+            if (mountedRef.current) onComplete(status.resident_id!)
+          }, 100)
+        }
+        return true
       }
+
+      if (status.status === 'error') {
+        terminalSettledRef.current = true
+        recoveryAbortRef.current?.abort()
+        stopWatching()
+        setIsGenerating(false)
+        setGeneratingProgress('')
+        const message = status.error ?? '生成过程中出现错误'
+        setError(message)
+        setMessages(prev => [...prev, {
+          role: 'bot',
+          text: `抱歉，炼化过程出现了问题：${message}。`,
+        }])
+        return true
+      }
+      return false
+    }
+
+    const showRecoveryFailure = () => {
+      if (!mountedRef.current || terminalSettledRef.current) return
+      terminalSettledRef.current = true
+      sessionController.abort()
+      stopWatching()
+      setIsGenerating(false)
+      setGeneratingProgress('')
+      const message = wsFallbackError ?? FORGE_TERMINAL_RECOVERY_MESSAGE
+      setError(message)
+      setMessages(prev => [...prev, { role: 'bot', text: `出错了：${message}` }])
+    }
+
+    const recoverTerminal = () => {
+      if (terminalSettledRef.current || recoveryInFlight !== null) return
+      recoveryInFlight = (async () => {
+        try {
+          applyStatus(await recoverForgeTerminalStatus(fid, sessionController.signal))
+        } catch (recoveryError) {
+          if (!isForgeRecoveryAbort(recoveryError)) showRecoveryFailure()
+        } finally {
+          recoveryInFlight = null
+        }
+      })()
     }
 
     unsubRef.current = onWSMessage((data) => {
@@ -107,12 +175,24 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
           stageIdx++
         }
       } else if (data.type === 'forge_done' || data.type === 'forge_error') {
-        void finalize()
+        if (data.type === 'forge_error' && typeof data.error === 'string') {
+          wsFallbackError = data.error
+        }
+        recoverTerminal()
       }
     })
 
-    // Catch-up in case generation already advanced before we subscribed.
-    void finalize()
+    // Durable fallback: catches a terminal state even when the one-shot WS frame
+    // is lost entirely (Redis subscriber restart, worker churn, tab suspension).
+    void pollForgeTerminalStatus(
+      fid,
+      sessionController.signal,
+      (status) => {
+        if (mountedRef.current && !terminalSettledRef.current) onStateUpdate(status)
+      },
+    ).then(applyStatus).catch((pollError: unknown) => {
+      if (!isForgeRecoveryAbort(pollError)) showRecoveryFailure()
+    })
   }, [onStateUpdate, onComplete])
 
   const send = async () => {

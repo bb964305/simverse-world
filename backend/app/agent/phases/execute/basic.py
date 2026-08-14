@@ -210,8 +210,10 @@ class BasicExecutePlugin:
                 # the world sees "XX 正在实验楼做研究". The real sandbox work is
                 # driven entirely by the Lab Runner (spec §5.4) — zero external
                 # I/O on the tick.
+                from app.services.resident_privilege_policy import has_trusted_lab_access
+                lab_authorized = has_trusted_lab_access(ctx.resident)
                 if ctx.resident.status not in ("chatting", "socializing"):
-                    ctx.resident.status = "researching"
+                    ctx.resident.status = "researching" if lab_authorized else "idle"
                     await ctx.db.commit()
             elif action == ActionType.WORK:
                 # Duty system: WORK at one's job produces the duty's real output

@@ -13,8 +13,11 @@ stock >= qty``。判据与写入在同一条语句里,互斥交给数据库,零�
 
 **两条路径。** ``ITEM_STOCK_GUARD_ENABLED`` 关 = 逐字节旧路径(且**永不返回
 None**,旧行为里没有"抢不到"这回事),所以迁移可以先暗上、开闸是另一次变更
-(红线:迁移与行为变更不同车)。闸开时 ``payload_json['stock']`` 仍被同步更新
-—— 它退化成镜像(真相在列上),但这让闸翻回去不丢账。
+(红线:迁移与行为变更不同车)。唯一例外是 durable 商队生命周期已经开启时：它
+自身必须用列 CAS，玩家/NPC 若仍走 payload 就会形成两个互相覆盖的库存账本。因此
+``CARAVAN_LIFECYCLE_ENABLED`` 同时作为安全背板，强制所有消费者走列真相；部署仍应
+先显式打开库存守卫，安全不能只靠运维顺序。列路径里
+``payload_json['stock']`` 仍被同步更新——它退化成镜像，但回滚开关也不会丢账。
 
 **事务纪律。** flush-owned:不 commit(调用方拥有事务);守卫零行时**不
 rollback** —— 什么都没写,而 rollback 会 expire 调用方 session 里的所有 ORM 对象
@@ -47,16 +50,16 @@ def _legacy_take(item: Item, qty: int) -> int:
     return max(0, stock)
 
 
-async def take_stock(db: AsyncSession, item: Item, qty: int = 1) -> int | None:
-    """扣 ``qty`` 件库存。返回扣完剩余;守卫零行返回 ``None``。
+async def take_authoritative_stock(
+    db: AsyncSession, item: Item, qty: int = 1,
+) -> int | None:
+    """始终从 ``items.stock`` 原子扣减；payload 只作为兼容镜像。
 
-    返回 ``None`` 的情形:售罄(``stock < qty``)、已下架(``active`` 为假)、行没
-    了、``qty < 1``。
+    lifecycle settlement 与普通玩家/NPC路径共用这一实现，避免两个列 CAS
+    版本在 NULL 自愈、active 切换或镜像写回上再次漂移。调用方拥有事务。
     """
     if qty < 1:
         return None
-    if not settings.item_stock_guard_enabled:
-        return _legacy_take(item, qty)
 
     row = (await db.execute(
         select(Item.stock, Item.payload_json).where(Item.code == item.code)
@@ -96,3 +99,21 @@ async def take_stock(db: AsyncSession, item: Item, qty: int = 1) -> int | None:
         item.active = False
     await db.flush()
     return remaining
+
+
+async def take_stock(db: AsyncSession, item: Item, qty: int = 1) -> int | None:
+    """扣 ``qty`` 件库存。返回扣完剩余；守卫零行返回 ``None``。
+
+    返回 ``None`` 的情形：售罄(``stock < qty``)、已下架(``active`` 为假)、行没
+    了、``qty < 1``。durable 商队开启时，即使独立库存闸因错误配置仍为 false，
+    也必须走 authoritative 列路径；否则 lifecycle 会把玩家刚写的 payload 扣减
+    用旧列值覆盖，重新放出已售库存。
+    """
+    if qty < 1:
+        return None
+    if not (
+        settings.item_stock_guard_enabled
+        or settings.caravan_lifecycle_enabled
+    ):
+        return _legacy_take(item, qty)
+    return await take_authoritative_stock(db, item, qty)

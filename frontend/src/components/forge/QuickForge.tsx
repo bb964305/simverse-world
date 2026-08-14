@@ -1,7 +1,13 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { forgeQuick, forgeStatus } from '../../services/api'
+import { forgeQuick } from '../../services/api'
 import type { ForgeStatusResponse } from '../../services/api'
 import { onWSMessage } from '../../services/ws'
+import {
+  FORGE_TERMINAL_RECOVERY_MESSAGE,
+  isForgeRecoveryAbort,
+  pollForgeTerminalStatus,
+  recoverForgeTerminalStatus,
+} from './terminalRecovery'
 
 interface QuickForgeProps {
   onStateUpdate: (state: ForgeStatusResponse) => void
@@ -38,31 +44,97 @@ export function QuickForge({ onStateUpdate, onComplete }: QuickForgeProps) {
 
   const unsubRef = useRef<(() => void) | null>(null)
   const stageRef = useRef(0)
+  const recoveryAbortRef = useRef<AbortController | null>(null)
+  const completionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const terminalSettledRef = useRef(false)
+  const mountedRef = useRef(true)
 
-  useEffect(() => () => { unsubRef.current?.() }, [])
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      unsubRef.current?.()
+      unsubRef.current = null
+      recoveryAbortRef.current?.abort()
+      recoveryAbortRef.current = null
+      if (completionTimerRef.current !== null) {
+        clearTimeout(completionTimerRef.current)
+        completionTimerRef.current = null
+      }
+    }
+  }, [])
 
-  // P1-5: WS-driven instead of a 3s poll. forge_progress advances the rolling
-  // stage caption; the terminal signal triggers one status fetch for the result.
+  // P1-5: WS-driven instead of an open-ended poll. forge_progress advances the
+  // caption; one terminal signal starts bounded status convergence with a
+  // visible failure state if every API attempt fails.
   const subscribeStatus = useCallback((forgeId: string) => {
     stageRef.current = 0
+    let recoveryInFlight: Promise<void> | null = null
+    let wsFallbackError: string | null = null
 
-    const finalize = async () => {
-      try {
-        const status = await forgeStatus(forgeId)
-        onStateUpdate(status)
-        if (status.status === 'done') {
-          unsubRef.current?.(); unsubRef.current = null
-          setIsGenerating(false)
-          setIsDone(true)
-          setProgress('')
-          setResult(status)
-          if (status.resident_id) setTimeout(() => onComplete(status.resident_id!), 300)
-        } else if (status.status === 'error') {
-          unsubRef.current?.(); unsubRef.current = null
-          setIsGenerating(false)
-          setError(status.error ?? '生成失败，请重试')
+    terminalSettledRef.current = false
+    recoveryAbortRef.current?.abort()
+    unsubRef.current?.()
+    const sessionController = new AbortController()
+    recoveryAbortRef.current = sessionController
+
+    const stopWatching = () => {
+      unsubRef.current?.()
+      unsubRef.current = null
+    }
+
+    const applyStatus = (status: ForgeStatusResponse): boolean => {
+      if (!mountedRef.current || terminalSettledRef.current) return false
+      onStateUpdate(status)
+      if (status.status === 'done') {
+        terminalSettledRef.current = true
+        recoveryAbortRef.current?.abort()
+        stopWatching()
+        setIsGenerating(false)
+        setIsDone(true)
+        setProgress('')
+        setResult(status)
+        if (status.resident_id) {
+          completionTimerRef.current = setTimeout(() => {
+            completionTimerRef.current = null
+            if (mountedRef.current) onComplete(status.resident_id!)
+          }, 300)
         }
-      } catch { /* transient — a later WS event retriggers */ }
+        return true
+      }
+      if (status.status === 'error') {
+        terminalSettledRef.current = true
+        recoveryAbortRef.current?.abort()
+        stopWatching()
+        setIsGenerating(false)
+        setProgress('')
+        setError(status.error ?? '生成失败，请重试')
+        return true
+      }
+      return false
+    }
+
+    const showRecoveryFailure = () => {
+      if (!mountedRef.current || terminalSettledRef.current) return
+      terminalSettledRef.current = true
+      sessionController.abort()
+      stopWatching()
+      setIsGenerating(false)
+      setProgress('')
+      setError(wsFallbackError ?? FORGE_TERMINAL_RECOVERY_MESSAGE)
+    }
+
+    const recoverTerminal = () => {
+      if (terminalSettledRef.current || recoveryInFlight !== null) return
+      recoveryInFlight = (async () => {
+        try {
+          applyStatus(await recoverForgeTerminalStatus(forgeId, sessionController.signal))
+        } catch (recoveryError) {
+          if (!isForgeRecoveryAbort(recoveryError)) showRecoveryFailure()
+        } finally {
+          recoveryInFlight = null
+        }
+      })()
     }
 
     unsubRef.current = onWSMessage((data) => {
@@ -73,12 +145,22 @@ export function QuickForge({ onStateUpdate, onComplete }: QuickForgeProps) {
           stageRef.current++
         }
       } else if (data.type === 'forge_done' || data.type === 'forge_error') {
-        void finalize()
+        if (data.type === 'forge_error' && typeof data.error === 'string') {
+          wsFallbackError = data.error
+        }
+        recoverTerminal()
       }
     })
 
-    // Catch-up in case the pipeline already finished before we subscribed.
-    void finalize()
+    void pollForgeTerminalStatus(
+      forgeId,
+      sessionController.signal,
+      (status) => {
+        if (mountedRef.current && !terminalSettledRef.current) onStateUpdate(status)
+      },
+    ).then(applyStatus).catch((pollError: unknown) => {
+      if (!isForgeRecoveryAbort(pollError)) showRecoveryFailure()
+    })
   }, [onStateUpdate, onComplete])
 
   const handleSubmit = async () => {

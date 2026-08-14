@@ -1,4 +1,6 @@
 import pytest
+from unittest.mock import AsyncMock, patch
+
 from app.models.resident import Resident
 from app.models.user import User
 
@@ -72,6 +74,25 @@ async def test_edit_resident_not_found(client, auth_headers):
     resp = await client.put("/residents/nonexistent", headers=auth_headers,
                             json={"ability_md": "# Test"})
     assert resp.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_edit_resident_skips_sbti_when_user_budget_is_exhausted(
+    client, auth_headers, seeded_user_residents,
+):
+    slug = seeded_user_residents[0].slug
+    with patch("app.routers.residents.forge_blocked", AsyncMock(return_value=True)) as budget, \
+         patch("app.routers.residents.compute_sbti", new_callable=AsyncMock) as sbti:
+        resp = await client.put(
+            f"/residents/{slug}",
+            headers=auth_headers,
+            json={"ability_md": "# Updated Ability\n" + "useful content " * 10},
+        )
+
+    assert resp.status_code == 200
+    assert "useful content" in resp.json()["ability_md"]
+    budget.assert_awaited_once()
+    sbti.assert_not_awaited()
 
 
 @pytest.mark.anyio

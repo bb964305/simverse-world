@@ -185,6 +185,7 @@ async def test_forge_main_path_types_resident_as_ugc(db_session, _offline_sbti):
     owner = await _make_user(db_session, "forge-ugc@t.com")
     fs = ForgeSession(
         user_id=owner.id, character_name="锻造居民", mode="quick", status="building",
+        target_slug="锻造居民",
         build_output={"ability_md": "# 能力", "persona_md": "# 人格", "soul_md": "# 灵魂"},
     )
     db_session.add(fs)
@@ -273,15 +274,18 @@ async def test_ugc_resident_stays_on_the_townhall_roster(db_session):
 
 
 @pytest.mark.anyio
-async def test_ugc_resident_can_still_hold_a_duty(db_session):
-    """B class: duty_service.py:105. A UGC duty holder that fails to resolve
-    silently stops working and stops being paid."""
+async def test_ugc_resident_cannot_self_sign_a_duty(db_session):
+    """Imported/forged UGC metadata is not an authorization source.
+
+    Duties can mint wages and run real-world side effects, so a player-authored
+    resident needs a future audited server grant rather than a JSON flag.
+    """
     from app.services import duty_service
 
     db_session.add(_ugc("ugc-1", meta_json={"duty": {"key": "postman"}}))
     await db_session.commit()
     found = await duty_service.find_duty_resident(db_session, "postman")
-    assert found is not None and found.slug == "ugc-1"
+    assert found is None
 
 
 @pytest.mark.anyio

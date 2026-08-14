@@ -386,10 +386,12 @@ def test_decide_side_still_gets_the_verbatim_hint_with_action_codes():
 
     r = MagicMock()
     r.name = "伊莎贝拉"
+    r.resident_type = "npc"
     r.persona_md = "p"
     r.tile_x, r.tile_y, r.status = 1, 1, "idle"
     r.mood_json = None
-    r.meta_json = {"duty": {"key": "cafe_host", "title": "客厅主理人",
+    r.meta_json = {"origin": "preset",
+                   "duty": {"key": "cafe_host", "title": "客厅主理人",
                             "prompt_hint": _HINT_BRACKETED}}
 
     system, user = build_decision_prompt(
