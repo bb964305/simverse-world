@@ -37,7 +37,11 @@ def test_agent_player_migrations_extend_market_visitors_and_are_head():
 
     agent_players = script.get_revision("062_add_agent_players")
     npc_turns = script.get_revision("063_agent_npc_chat_turns")
+    quota_counters = script.get_revision("064_forge_quota_counters")
+    ugc_privileges = script.get_revision("065_sanitize_ugc_privileges")
 
     assert agent_players.down_revision == "061_add_caravan_market_visitors"
     assert npc_turns.down_revision == "062_add_agent_players"
-    assert script.get_heads() == ["063_agent_npc_chat_turns"]
+    assert quota_counters.down_revision == "063_agent_npc_chat_turns"
+    assert ugc_privileges.down_revision == "064_forge_quota_counters"
+    assert script.get_heads() == ["065_sanitize_ugc_privileges"]

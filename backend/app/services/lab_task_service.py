@@ -28,6 +28,7 @@ from app.models.resident import Resident
 from app.models.user import User
 from app.services import coin_service
 from app.services import lab_terminalization_service
+from app.services.resident_privilege_policy import has_trusted_lab_access
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +202,7 @@ async def _require_required_artifacts_releasable(db, task: LabTask) -> None:
 # ── researcher selection (auto-dispatch) ──────────────────────────────
 
 def _is_researcher(r: Resident) -> bool:
-    return bool(((r.meta_json or {}).get("lab") or {}).get("access"))
+    return has_trusted_lab_access(r)
 
 
 async def list_researchers(db) -> list[Resident]:

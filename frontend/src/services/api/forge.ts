@@ -39,8 +39,11 @@ export function forgeAnswer(forge_id: string, answer: string): Promise<ForgeAnsw
   return apiFetch('/forge/answer', { method: 'POST', body: JSON.stringify({ forge_id, answer }) })
 }
 
-export function forgeStatus(forge_id: string): Promise<ForgeStatusResponse> {
-  return apiFetch(`/forge/status/${forge_id}`)
+export function forgeStatus(
+  forge_id: string,
+  signal?: AbortSignal,
+): Promise<ForgeStatusResponse> {
+  return apiFetch(`/forge/status/${forge_id}`, { signal })
 }
 
 export function forgeQuick(name: string, raw_text: string): Promise<{ forge_id: string; status: string }> {
@@ -88,9 +91,14 @@ export function deepForgeStart(
   })
 }
 
-export function deepForgeStatus(token: string, forgeId: string): Promise<DeepForgeStatusResponse> {
+export function deepForgeStatus(
+  token: string,
+  forgeId: string,
+  signal?: AbortSignal,
+): Promise<DeepForgeStatusResponse> {
   return apiFetch(`/forge/deep-status/${forgeId}`, {
     headers: { Authorization: `Bearer ${token}` },
+    signal,
   })
 }
 

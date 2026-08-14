@@ -124,8 +124,8 @@ def get_available_actions(resident, nearby_residents: list) -> list[ActionType]:
     # experiment building. meta_json["lab"]["access"] is the admin-granted
     # whitelist flag (spec §14 "研究员资格：先手动授权"). This keeps the real
     # sandbox entirely off the tick — RESEARCH is narrative-only.
-    lab_meta = (getattr(resident, "meta_json", None) or {}).get("lab") or {}
-    if lab_meta.get("access"):
+    from app.services.resident_privilege_policy import has_trusted_lab_access
+    if has_trusted_lab_access(resident):
         from app.agent.map_data import get_location_id_at
         if get_location_id_at(resident.tile_x, resident.tile_y) == "experiment_building":
             available.append(ActionType.RESEARCH)

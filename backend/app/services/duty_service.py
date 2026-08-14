@@ -49,6 +49,9 @@ from sqlalchemy import select
 
 from app.models.resident import Resident
 from app.redis_client import get_redis
+from app.services.resident_privilege_policy import (
+    trusted_duty,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +79,7 @@ DUTY_FUNDING_DEFAULTS: dict[str, str] = {
 # ── meta_json accessors ────────────────────────────────────────────────
 
 def get_duty(resident) -> dict:
-    return ((getattr(resident, "meta_json", None) or {}).get("duty")) or {}
+    return trusted_duty(resident)
 
 
 def duty_key(resident) -> str | None:
@@ -238,9 +241,13 @@ async def _pay_wage(db, resident) -> None:
         # Legacy bonus stays behind the old funding mode.  Once sustainable
         # payroll is enabled, mayor compensation must be a separately-budgeted
         # stipend rather than a multiplier on an unrelated private duty.
-        if (settings.election_enabled
-                and (getattr(resident, "meta_json", None) or {}).get("mayor")):
-            wage = int(round(wage * settings.election_mayor_wage_bonus))
+        if settings.election_enabled:
+            # Mayor identity is authoritative in offices/system_config, not in
+            # user-writable resident metadata. This also preserves the bonus for
+            # a legitimately promoted UGC resident elected by the town.
+            from app.services.election_service import current_mayor
+            if await current_mayor(db) == resident.slug:
+                wage = int(round(wage * settings.election_mayor_wage_bonus))
     if wage <= 0:
         return
     # F8: 进 try 前取好——town_to_resident 做死锁牺牲者被 abort 时会 rollback 后

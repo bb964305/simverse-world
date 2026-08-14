@@ -2,7 +2,8 @@
 
 import asyncio
 
-from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,12 +17,40 @@ from app.schemas.forge import (
     DeepStartRequest, DeepStartResponse, DeepStatusResponse,
 )
 from app.services.auth_service import get_current_user
-from app.forge.legacy_sessions import start_forge, submit_answer, get_status
+from app.forge.legacy_sessions import (
+    ForgeSessionNotFound,
+    ForgeSessionStateError,
+    get_status,
+    start_forge,
+    start_quick_forge,
+    submit_answer,
+    will_generate,
+)
 from app.forge.legacy_pipeline import run_generation_pipeline, run_quick_pipeline
-from app.forge.pipeline import ForgePipeline, TERMINAL_STATUSES as _TERMINAL_STATUSES
+from app.forge.runtime_limits import (
+    FORGE_GENERATION_STALE_AFTER,
+    FORGE_PIPELINE_TIMEOUT_S,
+)
+from app.forge.pipeline import (
+    ForgeBudgetExceeded,
+    ForgeInputError,
+    FORGE_INPUT_MAX_CHARS,
+    ForgePipeline,
+    ForgeSlugConflict,
+    TERMINAL_STATUSES as _TERMINAL_STATUSES,
+    validate_inputs,
+)
 from app.llm.client import get_client as get_llm_client
 from app.llm.budget import forge_blocked
 from app.models.forge_session import ForgeSession
+from app.services.ugc_creation_quota import (
+    DailyCreationLimitExceeded,
+    error_detail as quota_error_detail,
+)
+from app.services.slug_reservation import (
+    SlugReservationConflict,
+    release_session_slug,
+)
 
 router = APIRouter(prefix="/forge", tags=["forge"])
 
@@ -48,37 +77,51 @@ async def forge_start(
         raise HTTPException(status_code=400, detail="Name cannot be empty")
     if len(req.name) > 100:
         raise HTTPException(status_code=400, detail="Name too long (max 100 chars)")
-    result = start_forge(user.id, req.name.strip())
+    if await forge_blocked(db, user.id):
+        raise HTTPException(status_code=402, detail="Daily LLM budget reached — try again later")
+    try:
+        result = await start_forge(db, user.id, req.name.strip())
+    except DailyCreationLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=quota_error_detail(exc)) from exc
+    except SlugReservationConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return ForgeStartResponse(**result)
 
 
 @router.post("/answer", response_model=ForgeAnswerResponse)
+@limiter.limit(lambda: f"{settings.rest_rate_limit_forge_per_minute}/minute")
 async def forge_answer(
     req: ForgeAnswerRequest,
     request: Request,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     user = await _require_auth(request, db)
     if not req.answer.strip():
         raise HTTPException(status_code=400, detail="Answer cannot be empty")
+    if len(req.answer) > FORGE_INPUT_MAX_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Answer too long (max {FORGE_INPUT_MAX_CHARS} chars)",
+        )
     try:
-        result = submit_answer(req.forge_id, req.answer.strip())
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        if await will_generate(db, req.forge_id, user.id):
+            if await forge_blocked(db, user.id):
+                raise HTTPException(
+                    status_code=402,
+                    detail="Daily LLM budget reached — try again later",
+                )
+        result = await submit_answer(db, req.forge_id, user.id, req.answer.strip())
+    except ForgeSessionNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ForgeSessionStateError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # Trigger LLM generation in background after final answer
     if result["next_step"] is None:
-        async def _run_pipeline():
-            async with async_session() as session:
-                await run_generation_pipeline(req.forge_id, session)
-
-        _spawn_bg(_run_pipeline())
+        _spawn_bg(_run_legacy_pipeline_bg(req.forge_id, run_generation_pipeline))
 
     return ForgeAnswerResponse(**result)
 
-
-from pydantic import BaseModel
 
 class QuickForgeRequest(BaseModel):
     name: str
@@ -94,24 +137,29 @@ async def forge_quick(
 ):
     """
     One-shot forge: provide a name + raw text, the system extracts all three layers.
-    Runs synchronously (blocks until LLM responds) — typically 20-60s.
+    Persists the session and runs generation after the response is sent.
     """
     user = await _require_auth(request, db)
     if not req.name.strip():
         raise HTTPException(status_code=400, detail="Name cannot be empty")
     if not req.raw_text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
+    try:
+        validate_inputs(req.name, req.raw_text)
+    except ForgeInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if await forge_blocked(db, user.id):
         raise HTTPException(status_code=402, detail="Daily LLM budget reached — try again later")
 
-    forge_id_data = start_forge(user.id, req.name.strip())
-    forge_id = forge_id_data["forge_id"]
-
-    from app.forge.legacy_sessions import _sessions
-    forge_session = _sessions[forge_id]
-    forge_session["answers"]["2"] = req.raw_text
-    forge_session["step"] = 5
-    forge_session["status"] = "generating"
+    try:
+        forge_session = await start_quick_forge(
+            db, user.id, req.name.strip(), req.raw_text.strip()
+        )
+    except DailyCreationLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=quota_error_detail(exc)) from exc
+    except SlugReservationConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    forge_id = forge_session.id
 
     # Use starlette Response + background to ensure task runs after response
     from starlette.responses import JSONResponse
@@ -120,14 +168,8 @@ async def forge_quick(
 
     async def _run():
         logging.warning(f"[FORGE] Background task STARTED for {forge_id}")
-        try:
-            async with async_session() as db_sess:
-                await run_quick_pipeline(forge_id, db_sess)
-            logging.warning(f"[FORGE] Background task COMPLETED for {forge_id}")
-        except Exception as e:
-            logging.error(f"[FORGE] Background task FAILED: {e}")
-            forge_session["status"] = "error"
-            forge_session["error"] = str(e)
+        await _run_legacy_pipeline_bg(forge_id, run_quick_pipeline)
+        logging.warning(f"[FORGE] Background task COMPLETED for {forge_id}")
 
     return JSONResponse(
         content={"forge_id": forge_id, "status": "generating"},
@@ -141,27 +183,61 @@ async def forge_status(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    await _require_auth(request, db)
+    user = await _require_auth(request, db)
     try:
-        result = get_status(forge_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        result = await get_status(db, forge_id, user.id)
+    except ForgeSessionNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return ForgeStatusResponse(**result)
 
 
 # ── Deep forge (pipeline) endpoints ──────────────────────────────────
 
 import logging
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, UTC
 
 logger = logging.getLogger(__name__)
 
-# Hard ceiling for one pipeline run. Generous vs the per-call LLM timeout so it
-# only fires on true pathologies; keeps sessions from sitting non-terminal forever.
-FORGE_PIPELINE_TIMEOUT_S = 15 * 60
-# deep-status lazy sweep: a non-terminal session not updated for this long is
-# considered dead (its background task was lost, e.g. worker restart) → error.
-FORGE_STALE_AFTER = timedelta(minutes=20)
+_DEEP_STAGE_ALIASES = {
+    "pending": "routing",
+    "router": "routing",
+    "routing": "routing",
+    "routed": "routing",
+    "running": "routing",
+    "research": "researching",
+    "researching": "researching",
+    "extraction": "extracting",
+    "extracting": "extracting",
+    "build": "building",
+    "building": "building",
+    "validation": "validating",
+    "validating": "validating",
+    "refinement": "refining",
+    "refining": "refining",
+    "done": "done",
+    "error": "error",
+}
+_DEEP_STAGE_PROGRESS = {
+    "routing": 10,
+    "researching": 25,
+    "extracting": 45,
+    "building": 60,
+    "validating": 75,
+    "refining": 90,
+    "done": 100,
+    "error": 100,
+}
+
+
+def _deep_stage(session: ForgeSession) -> str:
+    """Return one stable UI stage while preserving raw status separately."""
+    if session.status in _TERMINAL_STATUSES:
+        return session.status
+    return (
+        _DEEP_STAGE_ALIASES.get(session.status)
+        or _DEEP_STAGE_ALIASES.get(session.current_stage)
+        or "routing"
+    )
 
 # Strong references to fire-and-forget tasks: asyncio only keeps weak refs, so
 # an unreferenced task can be garbage-collected mid-await and silently vanish —
@@ -185,6 +261,7 @@ async def _mark_session_error(session_id: str, message: str) -> None:
             session = result.scalar_one_or_none()
             if session and session.status not in _TERMINAL_STATUSES:
                 session.status = "error"
+                release_session_slug(session)
                 session.refinement_log = {
                     **(session.refinement_log or {}), "error": message,
                 }
@@ -219,7 +296,31 @@ async def _run_pipeline_bg(session_id: str):
         await _mark_session_error(session_id, str(e))
 
 
+async def _run_legacy_pipeline_bg(session_id: str, runner) -> None:
+    """Give legacy guided/quick runs the same hard terminal timeout as deep."""
+    try:
+        async with async_session() as bg_db:
+            await asyncio.wait_for(
+                runner(session_id, bg_db), timeout=FORGE_PIPELINE_TIMEOUT_S
+            )
+    except asyncio.TimeoutError:
+        logger.error(
+            "legacy forge pipeline %s timed out after %ss",
+            session_id,
+            FORGE_PIPELINE_TIMEOUT_S,
+        )
+        await _mark_session_error(
+            session_id, f"pipeline timed out after {FORGE_PIPELINE_TIMEOUT_S}s"
+        )
+    except Exception as exc:
+        logger.error(
+            "legacy forge pipeline %s crashed: %s", session_id, exc, exc_info=True
+        )
+        await _mark_session_error(session_id, str(exc))
+
+
 @router.post("/deep-start", response_model=DeepStartResponse)
+@limiter.limit(lambda: f"{settings.rest_rate_limit_forge_per_minute}/minute")
 async def deep_start(
     req: DeepStartRequest,
     request: Request,
@@ -238,12 +339,21 @@ async def deep_start(
     pipeline = ForgePipeline(
         db=db, system_client=system_client, user_client=user_client,
     )
-    session = await pipeline.start(
-        user_id=user.id,
-        character_name=req.character_name.strip(),
-        raw_text=req.raw_text,
-        user_material=req.user_material,
-    )
+    try:
+        session = await pipeline.start(
+            user_id=user.id,
+            character_name=req.character_name.strip(),
+            raw_text=req.raw_text,
+            user_material=req.user_material,
+        )
+    except ForgeSlugConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ForgeInputError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except DailyCreationLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=quota_error_detail(exc)) from exc
+    except ForgeBudgetExceeded as exc:
+        raise HTTPException(status_code=402, detail=str(exc)) from exc
 
     # Launch the remainder of the pipeline in a background task (strong ref —
     # a bare create_task can be GC'd mid-flight and silently die)
@@ -263,10 +373,14 @@ async def deep_status(
     db: AsyncSession = Depends(get_db),
 ):
     """Check the status of a deep-forge pipeline session."""
-    await _require_auth(request, db)
+    user = await _require_auth(request, db)
 
     result = await db.execute(
-        select(ForgeSession).where(ForgeSession.id == forge_id)
+        select(ForgeSession).where(
+            ForgeSession.id == forge_id,
+            ForgeSession.user_id == user.id,
+            ForgeSession.mode.in_(("pending", "quick", "deep")),
+        )
     )
     session = result.scalar_one_or_none()
     if not session:
@@ -279,8 +393,9 @@ async def deep_status(
         updated_at = session.updated_at
         if updated_at.tzinfo is None:
             updated_at = updated_at.replace(tzinfo=UTC)
-        if datetime.now(UTC) - updated_at > FORGE_STALE_AFTER:
+        if datetime.now(UTC) - updated_at > FORGE_GENERATION_STALE_AFTER:
             session.status = "error"
+            release_session_slug(session)
             session.refinement_log = {
                 **(session.refinement_log or {}),
                 "error": f"session stalled in '{session.current_stage}' — swept by staleness check",
@@ -288,10 +403,24 @@ async def deep_status(
             await db.commit()
             await db.refresh(session)
 
+    stage = _deep_stage(session)
+    build = session.build_output or {}
+    result_data = session.validation_report or {}
+    error = (session.refinement_log or {}).get("error")
     return DeepStatusResponse(
         forge_id=session.id,
         status=session.status,
         current_stage=session.current_stage,
         mode=session.mode,
         character_name=session.character_name,
+        stage=stage,
+        progress=_DEEP_STAGE_PROGRESS[stage],
+        name=session.character_name,
+        ability_md=build.get("ability_md"),
+        persona_md=build.get("persona_md"),
+        soul_md=build.get("soul_md"),
+        star_rating=int(result_data.get("star_rating") or 0),
+        district=str(result_data.get("district") or ""),
+        resident_id=result_data.get("resident_id"),
+        error=str(error) if error else None,
     )

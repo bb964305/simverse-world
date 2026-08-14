@@ -98,6 +98,10 @@ async def _edit_resident(
     status: str | None = None,
     resident_type: str | None = None,
     reply_mode: str | None = None,
+    duty_meta: dict | None = None,
+    lab_meta: dict | None = None,
+    duty_supplied: bool = False,
+    lab_supplied: bool = False,
     *,
     actor: str = "admin",
 ) -> Resident:
@@ -159,6 +163,15 @@ async def _edit_resident(
     # resident_type 已在函数开头经两个写入口处理，这里刻意不再赋值
     if reply_mode is not None:
         resident.reply_mode = reply_mode
+
+    # Privilege-bearing metadata never comes from the public import boundary.
+    # Admin writes carry a resident-bound HMAC marker checked by duty/Lab
+    # consumers, so a stored legacy UGC payload cannot impersonate this path.
+    from app.services.resident_privilege_policy import set_server_grant
+    if duty_supplied:
+        set_server_grant(resident, "duty", duty_meta)
+    if lab_supplied:
+        set_server_grant(resident, "lab", lab_meta)
 
     # Recalculate star rating if persona changed
     if any(x is not None for x in [ability_md, persona_md, soul_md]):
@@ -301,6 +314,9 @@ async def edit_resident(
             ability_md=req.ability_md, persona_md=req.persona_md, soul_md=req.soul_md,
             district=req.district, status=req.status,
             resident_type=req.resident_type, reply_mode=req.reply_mode,
+            duty_meta=req.duty, lab_meta=req.lab,
+            duty_supplied="duty" in req.model_fields_set,
+            lab_supplied="lab" in req.model_fields_set,
             actor=f"admin:{admin.id}",
         )
     except CivicStandingRefused as e:

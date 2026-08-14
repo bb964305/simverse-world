@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from app.llm.json_extract import extract_json_object
@@ -5,9 +6,19 @@ from app.llm.metering import record_usage
 
 
 class InputRouter:
-    def __init__(self, llm_client, model: str):
+    def __init__(
+        self,
+        llm_client,
+        model: str,
+        user_id: str | None = None,
+        session_id: str | None = None,
+        budget_check: Callable[[], Awaitable[None]] | None = None,
+    ):
         self._client = llm_client
         self._model = model
+        self._user_id = user_id
+        self._session_id = session_id
+        self._budget_check = budget_check
 
     async def run(
         self, character_name: str, raw_text: str, user_material: str
@@ -15,6 +26,9 @@ class InputRouter:
         from app.forge.prompts import ROUTER_SYSTEM_PROMPT, ROUTER_USER_TEMPLATE
 
         has_material = bool(user_material and user_material.strip())
+
+        if self._budget_check is not None:
+            await self._budget_check()
 
         response = await self._client.messages.create(
             model=self._model,
@@ -41,7 +55,11 @@ class InputRouter:
         await record_usage(
             "forge_router", model=self._model, owner="system", response=response,
             parse_ok=data is not None,
+            user_id=self._user_id,
+            conversation_id=self._session_id,
         )
+        if self._budget_check is not None:
+            await self._budget_check()
         if data:
             route = data.get("route", "quick")
             if route in ("deep", "quick"):

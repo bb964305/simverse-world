@@ -35,6 +35,7 @@ from app.models.world_event import WorldEvent
 from app.services import election_service, town_facts_service as tfs
 from app.services import world_event_service
 from app.services.config_service import ConfigService
+from app.services.resident_privilege_policy import set_server_grant
 
 
 @pytest.fixture(autouse=True)
@@ -142,15 +143,19 @@ async def test_no_mayor_is_none_not_an_exception(db_session, facts_on):
 async def test_duties_list_autonomous_holders_only(db_session, facts_on):
     """收录口径 = ``is_autonomous``(K15:npc + UGC resident,player 不算),
     且只列真的带 title 的人。"""
+    preset = _resident("zhao-qiwen", "赵启文",
+                       duty={"key": "town_clerk", "title": "公告与登记处"})
+    ugc = _resident("bai-xing", "白杏", resident_type="resident",
+                    duty={"key": "healer", "title": "小镇医士"})
     db_session.add_all([
-        _resident("zhao-qiwen", "赵启文",
-                  duty={"key": "town_clerk", "title": "公告与登记处"}),
-        _resident("bai-xing", "白杏", resident_type="resident",
-                  duty={"key": "healer", "title": "小镇医士"}),
+        preset,
+        ugc,
         _resident("p-chen", "陈铁生分身", resident_type="player",
                   duty={"key": "postman", "title": "邮差"}),
         _resident("a-lan", "阿岚"),  # 无营生
     ])
+    await db_session.flush()
+    set_server_grant(ugc, "duty", dict(ugc.meta_json["duty"]))
     await db_session.commit()
 
     duties = (await tfs.get_town_facts_cached(db_session))["duties"]
@@ -415,12 +420,16 @@ async def test_open_polls_are_capped_by_count_and_length(db_session, facts_on):
 @pytest.mark.anyio
 async def test_duties_are_capped_by_count_and_length(db_session, facts_on):
     """营生清单跟着居民数长,而 UGC 居民是玩家造的 —— 名字与 title 都不是我们写的。"""
-    db_session.add_all([
+    residents = [
         # 顶满 Resident.name 的 String(100);title 在 meta_json 里,压根没有列宽。
         _resident(f"ugc-{i:03d}", "名" * 100, resident_type="resident",
                   duty={"key": f"k{i}", "title": "衔" * 200})
         for i in range(40)
-    ])
+    ]
+    db_session.add_all(residents)
+    await db_session.flush()
+    for resident in residents:
+        set_server_grant(resident, "duty", dict(resident.meta_json["duty"]))
     await db_session.commit()
 
     duties = (await tfs.get_town_facts_cached(db_session))["duties"]
@@ -459,6 +468,8 @@ async def test_self_duty_title_and_hint_are_capped(db_session, facts_on):
     r = _resident("ugc-001", "白杏", resident_type="resident",
                   duty={"key": "k", "title": "衔" * 200, "prompt_hint": "岗" * 500})
     db_session.add(r)
+    await db_session.flush()
+    set_server_grant(r, "duty", dict(r.meta_json["duty"]))
     await db_session.commit()
 
     me = (await tfs.build_town_facts(db_session, r))["self"]

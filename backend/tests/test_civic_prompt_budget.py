@@ -36,6 +36,7 @@ from app.models.world_event import WorldEvent
 from app.services import town_facts_service as tfs, world_event_service
 from app.services.civic_memory import MEMORY_SOURCE
 from app.services.config_service import ConfigService
+from app.services.resident_privilege_policy import set_server_grant
 from app.services.town_facts_service import DECIDE_FACT_KEYS
 from tests.test_civic_memory_broadcast import (
     _HISTORY, _SATURATED_HISTORY, _seed_history)
@@ -250,12 +251,20 @@ async def _seed_full_town(db) -> Resident:
                         ability_md=c["ability_md"], meta_json=c["meta_json"],
                         mood_json={"label": "平静"})
                for c in PRESET_CHARACTERS]
+    ugc_residents = [
+        Resident(slug=slug, name=name, resident_type="resident",
+                 district="east_garden", status="idle", tile_x=0, tile_y=0,
+                 meta_json={"duty": {"key": slug, "title": title,
+                                     "prompt_hint": f"你在镇上{title}。"}})
+        for slug, name, title in _UGC
+    ]
     db.add_all(presets)
-    db.add_all([Resident(slug=slug, name=name, resident_type="resident",
-                         district="east_garden", status="idle", tile_x=0, tile_y=0,
-                         meta_json={"duty": {"key": slug, "title": title,
-                                             "prompt_hint": f"你在镇上{title}。"}})
-                for slug, name, title in _UGC])
+    db.add_all(ugc_residents)
+    # UGC duty metadata only counts after an explicit server-side grant.  This
+    # fixture measures prompt capacity, not the rejected self-signing path.
+    await db.flush()
+    for resident in ugc_residents:
+        set_server_grant(resident, "duty", dict(resident.meta_json["duty"]))
     db.add(TownTreasury(key=TOWN_KEY, balance_sc=12345))
     db.add_all([DynamicLocation(slug=slug, active=True,
                                 data_json={"name": name, "type": "public",
@@ -378,7 +387,11 @@ async def _seed_flooded_town(db) -> Resident:
     """
     speaker = await _seed_full_town(db)
     now = datetime.now(UTC)
-    db.add_all(_flood_duty_holders(tfs.DUTIES_LIMIT * _FLOOD_FACTOR))
+    flood_holders = _flood_duty_holders(tfs.DUTIES_LIMIT * _FLOOD_FACTOR)
+    db.add_all(flood_holders)
+    await db.flush()
+    for resident in flood_holders:
+        set_server_grant(resident, "duty", dict(resident.meta_json["duty"]))
     db.add_all([
         Poll(question="议" * _POLL_QUESTION_COL,
              options_json=[{"label": f"{i}号选项" + "项" * _UNBOUNDED}

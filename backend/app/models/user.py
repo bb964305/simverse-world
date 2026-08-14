@@ -19,6 +19,14 @@ class User(Base):
     # --- Daily loop (D3) ---
     login_streak: Mapped[int] = mapped_column(Integer, default=0)
     last_login_date: Mapped[date_type | None] = mapped_column(Date, nullable=True)
+    # Forge quota counters are advanced with conditional UPDATE statements, not
+    # read/modify/write ORM updates.  This makes admission/reward limits safe
+    # across uvicorn workers and concurrent requests on both PostgreSQL and
+    # SQLite. Dates are UTC calendar days.
+    ugc_creation_date: Mapped[date_type | None] = mapped_column(Date, nullable=True)
+    ugc_creation_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    forge_reward_date: Mapped[date_type | None] = mapped_column(Date, nullable=True)
+    forge_reward_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
     # --- New fields (Plan 1: Foundation) ---
     linuxdo_id: Mapped[str | None] = mapped_column(String(50), unique=True, nullable=True)

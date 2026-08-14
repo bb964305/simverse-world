@@ -101,10 +101,9 @@ async def user_over_budget(session: AsyncSession, user_id: str | None) -> bool:
 
 async def forge_blocked(session: AsyncSession, user_id: str | None = None) -> bool:
     """Start-time gate for a forge generation: block when the global budget is
-    fully spent (PLAYER_ONLY) or the user is over their own daily cap. The
-    per-request ceiling (``budget_forge_request_usd``) is the documented budget
-    for one generation; enforcing it mid-pipeline would need per-request tagging
-    in llm_usage and is left to a follow-up."""
+    fully spent (PLAYER_ONLY) or the user is over their own daily cap. Forge
+    pipelines additionally enforce their conversation-tagged per-request ceiling
+    between paid calls in ``app.forge.budget_guard``."""
     if not settings.llm_metering_enabled:
         return False
     if await background_tier(session) == BudgetTier.PLAYER_ONLY:

@@ -10,6 +10,11 @@ class ForgeSession(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), index=True)
     character_name: Mapped[str] = mapped_column(String(200))
+    # Every Forge/import path reserves its final resident slug here. The unique
+    # index closes the cross-worker race before either path spends money.
+    target_slug: Mapped[str | None] = mapped_column(
+        String(100), nullable=True, unique=True, index=True
+    )
     mode: Mapped[str] = mapped_column(String(20))  # "quick" | "deep"
     status: Mapped[str] = mapped_column(String(20), default="routing")
     current_stage: Mapped[str] = mapped_column(String(50), default="")

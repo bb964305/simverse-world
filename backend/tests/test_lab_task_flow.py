@@ -90,11 +90,13 @@ async def test_happy_path_publish_run_accept_settles(lab_env):
     async with factory() as s:
         assert await coin_service.get_balance(s, "creator_user") == 20
         assert await coin_service.treasury_balance(s, "sage") == 80
-        # Artifact now unlocked (task completed).
+        # Artifact metadata now reports releasable. The body is intentionally
+        # available only through the authenticated /download boundary.
         art = await s.get(LabArtifact, art_id)
         task = await s.get(LabTask, task_id)
         view = svc.serialize_artifact(art, task.status == "completed")
-        assert view["unlocked"] is True and view["text_md"]
+        assert view["unlocked"] is True
+        assert "text_md" not in view and "uri" not in view
 
 
 @pytest.mark.anyio

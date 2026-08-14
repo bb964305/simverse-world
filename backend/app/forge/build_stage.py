@@ -1,4 +1,5 @@
 import json
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from app.llm.metering import record_usage
@@ -6,11 +7,14 @@ from app.llm.metering import record_usage
 
 class BuildStage:
     def __init__(self, llm_client, model: str, max_tokens: int = 2000,
-                 session_id: str | None = None):
+                 session_id: str | None = None, user_id: str | None = None,
+                 budget_check: Callable[[], Awaitable[None]] | None = None):
         self._client = llm_client
         self._model = model
         self._max_tokens = max_tokens
         self._session_id = session_id
+        self._user_id = user_id
+        self._budget_check = budget_check
 
     async def run(
         self,
@@ -58,6 +62,8 @@ class BuildStage:
         }
 
     async def _call(self, system: str, user_msg: str) -> str:
+        if self._budget_check is not None:
+            await self._budget_check()
         response = await self._client.messages.create(
             model=self._model,
             max_tokens=self._max_tokens,
@@ -65,7 +71,9 @@ class BuildStage:
             messages=[{"role": "user", "content": user_msg}],
         )
         await record_usage("forge_build", model=self._model, owner="user", response=response,
-                           conversation_id=self._session_id)
+                           conversation_id=self._session_id, user_id=self._user_id)
+        if self._budget_check is not None:
+            await self._budget_check()
         for block in response.content:
             if hasattr(block, "text"):
                 return block.text

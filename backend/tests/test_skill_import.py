@@ -24,6 +24,11 @@ Python 全栈
     assert detect_skill_format(text) == SkillFormat.STANDARD_3LAYER
 
 
+def test_detect_english_standard_3layer():
+    text = "# Ability\nBuild APIs\n# Persona\nCalm\n# Soul\nReliability"
+    assert detect_skill_format(text) == SkillFormat.STANDARD_3LAYER
+
+
 def test_detect_nuwa_skill():
     """Nuwa-skill has 11 numbered sections like 1. 角色定位."""
     text = """1. 角色定位
@@ -109,6 +114,17 @@ async def test_convert_standard_returns_as_is():
 
 
 @pytest.mark.anyio
+async def test_convert_english_standard_skips_llm():
+    text = "# Ability\nBuild APIs\n# Persona\nCalm\n# Soul\nReliability"
+    with patch("app.services.skill_import_service.get_client") as get_client:
+        result = await convert_to_standard(text, SkillFormat.STANDARD_3LAYER)
+    get_client.assert_not_called()
+    assert "Build APIs" in result["ability_md"]
+    assert "Calm" in result["persona_md"]
+    assert "Reliability" in result["soul_md"]
+
+
+@pytest.mark.anyio
 async def test_convert_nuwa_calls_llm():
     """Non-standard formats should call LLM for conversion."""
     mock_response = MagicMock()
@@ -178,3 +194,26 @@ async def test_convert_plain_text_calls_llm():
     assert "ability_md" in result
     assert "persona_md" in result
     assert "soul_md" in result
+
+
+@pytest.mark.anyio
+async def test_convert_failure_is_metered_for_user():
+    client = MagicMock()
+    client.messages.create = AsyncMock(side_effect=RuntimeError("upstream failed"))
+    usage = AsyncMock()
+
+    with patch("app.services.skill_import_service.get_client", return_value=client), \
+         patch("app.services.skill_import_service.record_usage", usage):
+        with pytest.raises(RuntimeError, match="upstream failed"):
+            await convert_to_standard(
+                "plain input",
+                SkillFormat.PLAIN_TEXT,
+                user_id="user-123",
+            )
+
+    usage.assert_awaited_once()
+    kwargs = usage.await_args.kwargs
+    assert kwargs["response"] is None
+    assert kwargs["user_id"] == "user-123"
+    assert kwargs["parse_ok"] is False
+    assert kwargs["est_input_tokens"] > 0

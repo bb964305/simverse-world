@@ -7,7 +7,12 @@ C3 委托接单/结算）、CARAVAN_ENABLED（C4 外来商队）、TAX_CARRY_ENA
 同车（红线 feedback-no-migration-with-flag-flip）。开闸是 deploy/.env 的
 单独变更。
 """
+from pathlib import Path
+
 from app.config import Settings
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_npc_trade_gates_default_off():
@@ -36,6 +41,38 @@ def test_caravan_defaults():
     assert s.caravan_wait_lead_seconds == 600
     assert s.caravan_route_tile_ms == 150
     assert s.caravan_lease_seconds == 30
+
+
+def test_caravan_env_examples_pin_the_safe_enable_order():
+    """Both operator templates must make every prerequisite explicit and ordered."""
+    examples = (
+        REPO_ROOT / "backend" / ".env.example",
+        REPO_ROOT / "deploy" / "backend" / ".env.example",
+    )
+    required_instruction = (
+        "MARKET_DAY_VENUE=market_hall",
+        "ITEM_STOCK_GUARD_ENABLED=true",
+        "CARAVAN_ENABLED=true",
+        "CARAVAN_LIFECYCLE_ENABLED=true",
+    )
+    configured_keys = (
+        "MARKET_DAY_VENUE=",
+        "ITEM_STOCK_GUARD_ENABLED=",
+        "CARAVAN_ENABLED=",
+        "CARAVAN_LIFECYCLE_ENABLED=",
+    )
+
+    for path in examples:
+        text = path.read_text(encoding="utf-8")
+        for instruction in required_instruction:
+            assert instruction in text, f"{path} omits {instruction} from the hard gate"
+        positions = [
+            next(i for i, line in enumerate(text.splitlines()) if line.startswith(key))
+            for key in configured_keys
+        ]
+        assert positions == sorted(positions), f"unsafe caravan key order in {path}"
+        assert "REALISM_CROWD_ENABLED" in text
+        assert "无关" in text or "does not depend" in text
 
 
 def test_npc_trade_env_override(monkeypatch):

@@ -84,6 +84,15 @@ class Settings(BaseSettings):
     budget_user_daily_usd: float = 0.5
     # Per-request ceiling for a single forge generation (deep ≈ $0.15). 0 disables.
     budget_forge_request_usd: float = 0.15
+    # Hard UTC-day limits for all UGC admission and successful Forge rewards. The two
+    # counters are intentionally independent: a session may cross midnight, and
+    # neither yesterday's queued work nor concurrent requests may mint more than
+    # today's reward allowance. 0 disables the corresponding limit.
+    ugc_daily_creation_limit: int = 3
+    forge_daily_reward_limit: int = 3
+    # Legacy guided/quick sessions are durable in forge_sessions; abandoned
+    # collecting/terminal rows stop accepting public reads after this TTL.
+    forge_session_ttl_hours: int = 24
     # Routing (E-18): background/system calls are pinned to this model (locked to
     # the cheap default); player-visible calls use the configurable effective_model.
     background_llm_model: str = ""
@@ -277,7 +286,9 @@ class Settings(BaseSettings):
     # slowapi. Both migrate to Redis once P0-3b lands the cross-process bus.
     ws_rate_limit_per_minute: int = 20          # chat_msg per user per minute
     rest_rate_limit_register_per_minute: int = 5   # auth register/login (by IP)
-    rest_rate_limit_forge_per_minute: int = 10     # forge start/quick (by IP)
+    rest_rate_limit_forge_per_minute: int = 10     # forge start/answer/quick/deep (by IP)
+    rest_rate_limit_import_per_minute: int = 10    # multipart Skill import (by IP)
+    rest_rate_limit_resident_edit_per_minute: int = 10  # creator persona edits/SBTI (by IP)
     rest_rate_limit_llm_test_per_minute: int = 5   # settings/llm/test (by IP)
     rest_rate_limit_propose_per_minute: int = 5    # polls/propose (by IP)
     # External Agent players. Self-registration remains local/debug-only unless
@@ -630,7 +641,8 @@ class Settings(BaseSettings):
     caravan_lease_seconds: int = Field(default=30, ge=5, le=600)
     tax_carry_enabled: bool = False               # C5 分数税账:尾数以整数 milli-SC 累入 town_tax_carry_milli(原子增量);关=旧 int() 截断
     # M-A 加固闸:库存扣减走 items.stock 的 guarded UPDATE(迁移 056 必须先落库)。
-    # 关 = 旧 payload_json 读-改-写,与现状逐字节一致 —— 迁移暗上与开闸分车。
+    # 关 = 旧 payload_json 路径；但 durable caravan 开启时为防双账本会强制列 CAS。
+    # 部署仍须先显式开本闸，安全背板不能替代可观测的正确配置顺序。
     item_stock_guard_enabled: bool = False        # C6 库存守卫:cron 与玩家并发不再超卖
     # M2 story arcs: rule-triggered milestone engine (nightly, zero tick cost).
     arc_engine_enabled: bool = True

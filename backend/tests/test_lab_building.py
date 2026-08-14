@@ -24,6 +24,8 @@ def _make_resident(*, researcher: bool, tile_x: int, tile_y: int, status: str = 
     r = MagicMock(spec=Resident)
     r.id = "res-lab"
     r.slug = "res-lab"
+    r.resident_type = "npc"
+    r.creator_id = "system"
     r.status = status
     r.tile_x = tile_x
     r.tile_y = tile_y

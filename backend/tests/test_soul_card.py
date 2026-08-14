@@ -1,5 +1,8 @@
 """C1 soul card: card (public), export (owner), import (fidelity, sensitive block, cap)."""
 
+import asyncio
+from unittest.mock import patch
+
 import pytest
 
 from app.models.user import User
@@ -78,3 +81,70 @@ async def test_import_sensitive_blocked(client, db_session):
     r = await client.post("/residents/import-card", json={"name": "x", "persona_md": "fuck you", "soul_md": "x"},
                           headers={"Authorization": f"Bearer {create_token(owner.id)}"})
     assert r.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_import_card_never_takes_an_active_forge_slug(client, db_session):
+    from app.services.slug_reservation import create_reserved_forge_session
+
+    owner = await _user(db_session, "card-slug@t.com")
+    forge = await create_reserved_forge_session(
+        db_session,
+        user_id=owner.id,
+        character_name="Reserved Card",
+        requested_slug="reserved-card",
+        mode="deep",
+        status="running",
+        current_stage="build",
+    )
+    await db_session.commit()
+
+    response = await client.post(
+        "/residents/import-card",
+        headers={"Authorization": f"Bearer {create_token(owner.id)}"},
+        json={
+            "name": "Reserved Card",
+            "ability_md": "# Ability\nUseful",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["slug"].startswith("reserved-card-")
+    await db_session.refresh(forge)
+    assert forge.target_slug == "reserved-card"
+
+
+@pytest.mark.anyio
+async def test_import_card_timeout_releases_exact_slug_and_quota(
+    client, db_session, monkeypatch,
+):
+    from app.config import settings
+    from app.routers import residents as residents_router
+
+    owner = await _user(db_session, "card-timeout@t.com")
+    headers = {"Authorization": f"Bearer {create_token(owner.id)}"}
+    payload = {"name": "Timed Card", "ability_md": "# Ability\nUseful"}
+    monkeypatch.setattr(settings, "ugc_daily_creation_limit", 1)
+    monkeypatch.setattr(
+        residents_router, "import_work_timeout_seconds", lambda: 0.01
+    )
+
+    async def never_finishes(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    with patch(
+        "app.routers.residents.allocate_resident_location", new=never_finishes
+    ):
+        timed_out = await client.post(
+            "/residents/import-card", json=payload, headers=headers
+        )
+    assert timed_out.status_code == 504
+
+    monkeypatch.setattr(
+        residents_router, "import_work_timeout_seconds", lambda: 60
+    )
+    retried = await client.post(
+        "/residents/import-card", json=payload, headers=headers
+    )
+    assert retried.status_code == 200
+    assert retried.json()["slug"] == "timed-card"

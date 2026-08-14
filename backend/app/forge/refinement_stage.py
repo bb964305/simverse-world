@@ -1,4 +1,5 @@
 import json
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from app.llm.json_extract import extract_json_object
@@ -6,10 +7,18 @@ from app.llm.metering import record_usage
 
 
 class RefinementStage:
-    def __init__(self, llm_client, model: str, session_id: str | None = None):
+    def __init__(self, llm_client, model: str, session_id: str | None = None,
+                 user_id: str | None = None,
+                 budget_check: Callable[[], Awaitable[None]] | None = None):
         self._client = llm_client
         self._model = model
         self._session_id = session_id
+        self._user_id = user_id
+        self._budget_check = budget_check
+
+    async def _guard_budget(self) -> None:
+        if self._budget_check is not None:
+            await self._budget_check()
 
     async def run(
         self,
@@ -28,23 +37,27 @@ class RefinementStage:
         validation_str = json.dumps(validation_report, ensure_ascii=False)
 
         # Agent 1: Optimizer
+        await self._guard_budget()
         opt_resp = await self._client.messages.create(
             model=self._model, max_tokens=1000,
             system=REFINE_OPTIMIZER_SYSTEM,
             messages=[{"role": "user", "content": f"人物：{character_name}\n验证报告：{validation_str}\n\n{combined}"}],
         )
         await record_usage("forge_refine", model=self._model, owner="user", response=opt_resp,
-                           conversation_id=self._session_id)
+                           conversation_id=self._session_id, user_id=self._user_id)
+        await self._guard_budget()
         opt_log = self._extract_json(opt_resp)
 
         # Agent 2: Creator perspective
+        await self._guard_budget()
         creator_resp = await self._client.messages.create(
             model=self._model, max_tokens=1000,
             system=REFINE_CREATOR_SYSTEM,
             messages=[{"role": "user", "content": f"人物：{character_name}\n\n{combined}"}],
         )
         await record_usage("forge_refine", model=self._model, owner="user", response=creator_resp,
-                           conversation_id=self._session_id)
+                           conversation_id=self._session_id, user_id=self._user_id)
+        await self._guard_budget()
         creator_log = self._extract_json(creator_resp)
 
         # Merge suggestions
@@ -81,6 +94,7 @@ class RefinementStage:
         self, system: str, user_template: str,
         character_name: str, suggestions: str, layer_md: str,
     ) -> str:
+        await self._guard_budget()
         response = await self._client.messages.create(
             model=self._model, max_tokens=2500,
             system=system,
@@ -91,7 +105,8 @@ class RefinementStage:
             )}],
         )
         await record_usage("forge_refine", model=self._model, owner="user", response=response,
-                           conversation_id=self._session_id)
+                           conversation_id=self._session_id, user_id=self._user_id)
+        await self._guard_budget()
         for block in response.content:
             if hasattr(block, "text"):
                 return block.text

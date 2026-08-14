@@ -12,6 +12,7 @@ from app.models.forge_session import ForgeSession
 from app.forge.pipeline import TERMINAL_STATUSES
 from app.routers.admin.middleware import require_admin
 from app.schemas.admin import ForgeSessionListItem, ForgeSessionDetail, ServiceHealthItem
+from app.services.slug_reservation import RESERVATION_MODE
 
 router = APIRouter(prefix="/forge", tags=["admin-forge"])
 
@@ -26,8 +27,13 @@ async def _list_forge_sessions(
     sort_order: str = "desc",
 ) -> tuple[list[ForgeSession], int]:
     """List forge sessions with pagination and filters."""
-    query = select(ForgeSession)
-    count_query = select(func.count(ForgeSession.id))
+    # Standalone import reservations reuse forge_sessions only as a durable
+    # serialization primitive. They are not Forge work and must never pollute
+    # the operator's session/active-run views.
+    query = select(ForgeSession).where(ForgeSession.mode != RESERVATION_MODE)
+    count_query = select(func.count(ForgeSession.id)).where(
+        ForgeSession.mode != RESERVATION_MODE
+    )
 
     if status:
         query = query.where(ForgeSession.status == status)
@@ -53,7 +59,10 @@ async def _list_forge_sessions(
 async def _get_forge_session(db: AsyncSession, session_id: str) -> ForgeSession | None:
     """Get a single forge session by ID."""
     result = await db.execute(
-        select(ForgeSession).where(ForgeSession.id == session_id)
+        select(ForgeSession).where(
+            ForgeSession.id == session_id,
+            ForgeSession.mode != RESERVATION_MODE,
+        )
     )
     return result.scalar_one_or_none()
 
@@ -92,7 +101,10 @@ async def list_active_forge_sessions(
     """List currently in-flight forge sessions (not yet done/error)."""
     result = await db.execute(
         select(ForgeSession)
-        .where(ForgeSession.status.notin_(TERMINAL_STATUSES))
+        .where(
+            ForgeSession.mode != RESERVATION_MODE,
+            ForgeSession.status.notin_(TERMINAL_STATUSES),
+        )
         .order_by(ForgeSession.updated_at.desc())
         .limit(200)
     )

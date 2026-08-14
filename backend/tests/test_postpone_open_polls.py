@@ -29,6 +29,7 @@ from scripts.postpone_open_polls import (
 
 FAR = datetime(2026, 7, 31, 23, 29, 43, tzinfo=UTC)
 SOON = datetime(2026, 7, 27, 23, 29, 43, tzinfo=UTC)
+INCIDENT_NOW = datetime(2026, 7, 27, 12, 0, 0, tzinfo=UTC)
 
 
 def _poll(question: str, *, status: str = "open", closes_at: datetime = SOON) -> Poll:
@@ -58,7 +59,7 @@ async def test_dry_run_writes_nothing(db_session):
     db_session.add(_poll("在途议题"))
     await db_session.commit()
 
-    report = await postpone(db_session, until=FAR)
+    report = await postpone(db_session, until=FAR, now=INCIDENT_NOW)
 
     assert [e["action"] for e in report] == ["would_postpone"]
     poll = (await db_session.execute(select(Poll))).scalar_one()
@@ -75,8 +76,8 @@ async def test_apply_is_idempotent_for_the_same_until(db_session):
     db_session.add(_poll("在途议题"))
     await db_session.commit()
 
-    first = await postpone(db_session, until=FAR, apply=True)
-    second = await postpone(db_session, until=FAR, apply=True)
+    first = await postpone(db_session, until=FAR, apply=True, now=INCIDENT_NOW)
+    second = await postpone(db_session, until=FAR, apply=True, now=INCIDENT_NOW)
 
     assert [e["action"] for e in first] == ["postponed"]
     assert [e["action"] for e in second] == ["already_at_target"]
@@ -91,11 +92,11 @@ async def test_a_different_until_is_refused_without_force_rerun(db_session):
     """标记已存在而 until 变了 → 抛 PostponeRefused，且一行都没改。"""
     db_session.add(_poll("在途议题"))
     await db_session.commit()
-    await postpone(db_session, until=FAR, apply=True)
+    await postpone(db_session, until=FAR, apply=True, now=INCIDENT_NOW)
 
     later = FAR + timedelta(days=1)
     with pytest.raises(PostponeRefused):
-        await postpone(db_session, until=later, apply=True)
+        await postpone(db_session, until=later, apply=True, now=INCIDENT_NOW)
 
     poll = (await db_session.execute(select(Poll))).scalar_one()
     assert poll.closes_at.replace(tzinfo=UTC) == FAR, \
@@ -106,10 +107,16 @@ async def test_a_different_until_is_refused_without_force_rerun(db_session):
 async def test_force_rerun_allows_a_new_until(db_session):
     db_session.add(_poll("在途议题"))
     await db_session.commit()
-    await postpone(db_session, until=FAR, apply=True)
+    await postpone(db_session, until=FAR, apply=True, now=INCIDENT_NOW)
 
     later = FAR + timedelta(days=1)
-    report = await postpone(db_session, until=later, apply=True, force_rerun=True)
+    report = await postpone(
+        db_session,
+        until=later,
+        apply=True,
+        force_rerun=True,
+        now=INCIDENT_NOW,
+    )
 
     assert [e["action"] for e in report] == ["postponed"]
     poll = (await db_session.execute(select(Poll))).scalar_one()
@@ -152,7 +159,9 @@ async def test_render_distinguishes_dry_run_from_apply(db_session):
     db_session.add(_poll("在途议题"))
     await db_session.commit()
 
-    text = render(await postpone(db_session, until=FAR), apply=False)
+    text = render(
+        await postpone(db_session, until=FAR, now=INCIDENT_NOW), apply=False
+    )
 
     assert "DRY-RUN" in text and "未写库" in text
     assert "APPLY" not in text

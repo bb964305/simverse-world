@@ -171,6 +171,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Multipart parsing happens before the residents route body runs.  Bound the
+# wire body at the ASGI receive layer as well as bounding the extracted file,
+# covering chunked requests and dishonest/missing Content-Length headers.
+from app.http_body_limit import RouteBodyLimitMiddleware  # noqa: E402
+from app.services.skill_import_service import IMPORT_MAX_MULTIPART_BODY_BYTES  # noqa: E402
+
+app.add_middleware(
+    RouteBodyLimitMiddleware,
+    limits={("POST", "/residents/import"): IMPORT_MAX_MULTIPART_BODY_BYTES},
+    detail="Import request exceeds the multipart body size limit",
+)
+
 # --- REST rate limiting (OPTIMIZATION_PLAN P1-1, limit sub-item) ---
 # The Limiter instance lives in app.rate_limit so routers can import the
 # decorator without a circular dependency on this module. Here we only wire

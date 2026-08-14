@@ -47,7 +47,9 @@ async def test_forge_status_returns_session(client, auth_headers):
     assert data["name"] == "测试居民"
 
 @pytest.mark.anyio
-async def test_forge_answers_advance_to_generating(client, auth_headers):
+async def test_forge_answers_advance_to_generating(
+    client, auth_headers, db_engine
+):
     # The final answer schedules the background LLM pipeline
     # (run_generation_pipeline). Offline, the real Anthropic client hangs into
     # teardown ("task pending" error). Mock the LLM at the client boundary:
@@ -55,6 +57,7 @@ async def test_forge_answers_advance_to_generating(client, auth_headers):
     # "generating", then raises so the background task drains before teardown.
     import asyncio
     from unittest.mock import MagicMock, patch
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     release = asyncio.Event()
     llm_calls: list[dict] = []
@@ -67,7 +70,13 @@ async def test_forge_answers_advance_to_generating(client, auth_headers):
     mock_llm = MagicMock()
     mock_llm.messages.create = fake_create
 
-    with patch("app.forge.legacy_pipeline.get_client", return_value=mock_llm):
+    session_factory = async_sessionmaker(
+        db_engine, class_=AsyncSession, expire_on_commit=False
+    )
+    with (
+        patch("app.forge.legacy_pipeline.get_client", return_value=mock_llm),
+        patch("app.routers.forge.async_session", session_factory),
+    ):
         start = await client.post("/forge/start", json={"name": "张三"},
                                   headers=auth_headers)
         forge_id = start.json()["forge_id"]
@@ -87,17 +96,19 @@ async def test_forge_answers_advance_to_generating(client, auth_headers):
         # After Q5, status should be "generating" (pipeline parked at the LLM)
         resp = await client.get(f"/forge/status/{forge_id}", headers=auth_headers)
         data = resp.json()
-        assert data["status"] == "generating"
+        assert data["status"] in {"generating", "running"}
 
         # Drain the background task before teardown: unblock the mocked LLM,
         # let the injected error surface, and wait for the terminal state.
         release.set()
-        from app.forge.legacy_sessions import _sessions
         for _ in range(500):
-            if _sessions[forge_id]["status"] != "generating":
+            status_resp = await client.get(
+                f"/forge/status/{forge_id}", headers=auth_headers
+            )
+            if status_resp.json()["status"] == "error":
                 break
             await asyncio.sleep(0.01)
-        assert _sessions[forge_id]["status"] == "error"
+        assert status_resp.json()["status"] == "error"
         assert llm_calls, "background pipeline never reached the (mocked) LLM"
         await asyncio.sleep(0)  # let the task object finish before teardown
 

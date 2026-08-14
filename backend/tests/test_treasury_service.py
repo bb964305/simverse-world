@@ -561,19 +561,22 @@ async def test_pay_wage_unfunded_policy_mint(db_session, monkeypatch):
 
 @pytest.mark.anyio
 async def test_mayor_bonus_funded_from_town(db_session, monkeypatch):
-    """S2-1 regression gate: the mayor bonus semantics (meta_json['mayor'] ×
-    election_mayor_wage_bonus) are untouched — S1-5 only changes WHO pays, so the
-    town funds the bonused amount too."""
+    """S2-1 regression gate: the authoritative current mayor receives the
+    configured bonus, and the town funds the bonused amount too."""
     from app.services import coin_service, duty_service
+    from app.services.config_service import ConfigService
 
     monkeypatch.setattr(settings, "town_treasury_enabled", True)
     monkeypatch.setattr(settings, "election_enabled", True)
+    monkeypatch.setattr(settings, "polis_office_enabled", False)
     monkeypatch.setattr(settings, "election_mayor_wage_bonus", 1.5)
     await treasury_service.tax(db_session, 100, reason="seed")
     r = _npc("mayor", "镇长", {"key": "workshop_fixer", "perks": {"wage_sc": 8}})
-    r.meta_json = {**(r.meta_json or {}), "mayor": True}
     db_session.add(r)
     await db_session.commit()
+    await ConfigService(db_session).set(
+        "current_mayor", r.slug, group="civic", updated_by="test",
+    )
 
     await duty_service._pay_wage(db_session, r)
     assert await coin_service.treasury_balance(db_session, "mayor") == 12   # 8 × 1.5

@@ -105,7 +105,7 @@ class AdminResidentListItem(BaseModel):
 
 
 class ResidentPersonaEditRequest(BaseModel):
-    """Admin can edit any resident's persona layers."""
+    """Admin can edit persona fields and issue authenticated server grants."""
     ability_md: str | None = None
     persona_md: str | None = None
     soul_md: str | None = None
@@ -113,6 +113,10 @@ class ResidentPersonaEditRequest(BaseModel):
     status: str | None = None
     resident_type: str | None = None
     reply_mode: str | None = None
+    # Omitted = unchanged; explicit null = revoke. These namespaces are signed
+    # by the backend and cannot be self-issued through the public import route.
+    duty: dict | None = None
+    lab: dict | None = None
 
 
 class PresetResidentRequest(BaseModel):
