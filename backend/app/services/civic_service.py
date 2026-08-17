@@ -974,6 +974,40 @@ async def _execute_outcome(db, effect: dict, *, poll_id: int | None = None,
     return False
 
 
+_OPENING_EVENT_MAX_DAYS = 7
+
+
+def _maybe_stage_opening_event(db, slug: str, data: dict) -> int:
+    """新楼落成庆典(P3 ④a):一条 ``type="festival"`` 的世界事件。
+
+    为什么必须是 festival —— ``crowd_service._EVENT_TYPES_WITH_CROWD``
+    (crowd_service.py:28) 是 ("festival", "script") 的闭集,只有这两种能被
+    ``active_event_location`` 看见并拿到 ``realism_festival_weight``(×3) 的抽签
+    偏置。衰减是天然的:×3 是有界偏置不是硬拉,到期由 ``refresh_active_events``
+    翻 ``is_active=False`` —— **不再造第二套衰减权重**。
+
+    只 ``db.add``,由调用方那一次 commit 落盘(同一事务,不新增提交点)。
+    返回实际天数(0 = 没开)。
+    """
+    if not settings.civic_build_opening_event_enabled:
+        return 0
+    raw = data.get("opening_event_days")
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        return 0
+    days = min(raw, _OPENING_EVENT_MAX_DAYS)
+    from app.models.world_event import WorldEvent
+    now = datetime.now(UTC)
+    name = data.get("name") or slug
+    db.add(WorldEvent(
+        type="festival", title=f"{name}落成",
+        description=f"{name}今天开门,镇上的人陆续过去看热闹。",
+        payload_json={"location_id": slug, "opening": True},
+        starts_at=now, ends_at=now + timedelta(days=days),
+        is_active=False,
+    ))
+    return days
+
+
 async def _add_dynamic_location(db, data: dict, *,
                                 audit: dict | None = None) -> bool:
     """Insert a dynamic_locations overlay row + trigger the world reload so the
@@ -1025,6 +1059,7 @@ async def _add_dynamic_location(db, data: dict, *,
     else:
         existing.data_json = payload
         existing.active = True
+    _maybe_stage_opening_event(db, slug, data)
     await db.commit()
     try:
         from app.lab.apply import reload_world, publish_world_reload

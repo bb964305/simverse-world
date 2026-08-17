@@ -589,6 +589,10 @@ class Settings(BaseSettings):
     # 关 = 失败原因只剩一句中文公告 + 一行 warning。
     civic_effect_audit_enabled: bool = False
 
+    # 新楼落成庆典(effect.data 的 opening_event_days 控制天数,0/缺省=不开)。
+    # 注意:真要产生位移拉力还须 REALISM_CROWD_ENABLED —— 那道闸生产默认 False。
+    civic_build_opening_event_enabled: bool = False
+
     # P2 Task 1 — relation write deltas (reused, zero new LLM calls) + decay.
     realism_rel_familiarity_chat: float = 0.05
     realism_rel_affinity_chat: float = 0.03      # ± by wrapup mood (positive/negative)
