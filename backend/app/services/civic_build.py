@@ -33,7 +33,9 @@ ALLOWED_KEYS = frozenset({
 LOCATION_TYPES = ("public", "private", "apartment", "outdoor")
 DEFAULT_TYPE = "public"
 MAX_NAME_CHARS = 20
-MAX_DESCRIPTION_CHARS = 200
+# 与 map_data.LOCATION_LIST_DESC_CHARS 对齐:库里存 200、prompt 里砍 40 会让
+# 两处口径漂移,公投作者写的后半段永远不会被任何居民看到。
+MAX_DESCRIPTION_CHARS = 40
 MAX_LIST_ITEMS = 6
 
 

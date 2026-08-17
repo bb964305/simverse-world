@@ -691,6 +691,15 @@ def find_nearest_location(x: int, y: int, loc_type: str | None = None) -> tuple[
     return best_id, best_loc
 
 
+#: 计划 prompt 里地点清单的预算(P3)。本机实测今天 15 行 / 915 字符、最长
+#: description 36 字 —— 两个上限都取在当前值之上,所以落地时输出逐字节不变;
+#: 它们是给「公投可以无限建楼」兜底的。口径抄 town_facts 的
+#: PLACES_LIMIT/PLACE_MAX_CHARS:静态在前占满,动态最多占 RESERVE 个坑。
+LOCATION_LIST_LIMIT = 24
+LOCATION_LIST_DYNAMIC_RESERVE = 4
+LOCATION_LIST_DESC_CHARS = 40
+
+
 def format_location_list_for_prompt(from_tile: tuple[int, int] | None = None) -> str:
     """Format public locations + outdoor areas into a string for LLM prompts.
 
@@ -702,10 +711,17 @@ def format_location_list_for_prompt(from_tile: tuple[int, int] | None = None) ->
     show_commute = settings.realism_enabled and from_tile is not None
     speed = max(1, settings.realism_move_speed)
     lines = []
-    for loc_id, loc in LOCATIONS.items():
-        if loc["type"] in ("private", "apartment"):
-            continue
-        desc = loc.get("description", "")
+    items = [(lid, loc) for lid, loc in LOCATIONS.items()
+             if loc["type"] not in ("private", "apartment")]
+    dyn_ids = [lid for lid, _ in items
+               if lid in _dynamic_slugs][-LOCATION_LIST_DYNAMIC_RESERVE:]
+    static = [it for it in items if it[0] not in dyn_ids]
+    static = static[:max(0, LOCATION_LIST_LIMIT - len(dyn_ids))]
+    # 渲染顺序:静态在前(prompt 前缀不抖),动态排尾;名额分配才先给动态。
+    for loc_id, loc in static + [it for it in items if it[0] in dyn_ids]:
+        desc = loc.get("description", "") or ""
+        if len(desc) > LOCATION_LIST_DESC_CHARS:
+            desc = desc[:LOCATION_LIST_DESC_CHARS] + "…"
         boosted = loc.get("boosted_actions", [])
         # The stable id is the only movement target accepted from new plans.
         # Display names remain for prose and for legacy-plan fallback.
