@@ -124,17 +124,41 @@ def get_available_actions(resident, nearby_residents: list) -> list[ActionType]:
     # experiment building. meta_json["lab"]["access"] is the admin-granted
     # whitelist flag (spec §14 "研究员资格：先手动授权"). This keeps the real
     # sandbox entirely off the tick — RESEARCH is narrative-only.
+    #
+    # P1: 只有「站在哪」这一半改成读地点能力声明;身份门 has_trusted_lab_access
+    # 原样保留,能力永远不能替代它(research 的 civic_grantable=False,公投也授不出
+    # 这项能力)。闸关 = 逐字节的字面量比较。
     from app.services.resident_privilege_policy import has_trusted_lab_access
     if has_trusted_lab_access(resident):
-        from app.agent.map_data import get_location_id_at
-        if get_location_id_at(resident.tile_x, resident.tile_y) == "experiment_building":
+        from app.config import settings as _cap_settings
+        if _cap_settings.location_capabilities_enabled:
+            from app.agent.location_caps import CAP_RESEARCH
+            from app.agent.map_data import capability_location_at
+            _research_here = capability_location_at(
+                resident.tile_x, resident.tile_y, CAP_RESEARCH) is not None
+        else:
+            from app.agent.map_data import get_location_id_at
+            _research_here = (
+                get_location_id_at(resident.tile_x, resident.tile_y)
+                == "experiment_building")
+        if _research_here:
             available.append(ActionType.RESEARCH)
 
     # EAT (realism P1-10): only inside a dining-category location.
+    # P1: 闸开时改走能力反查 —— 除了收编白名单,还顺带绕开 outdoor 街区遮蔽
+    # (get_location_id_at 首命中即返,公投楼落在大街区里就永远查不出来)。
     from app.config import settings as _settings
     if _settings.realism_enabled:
-        from app.agent.map_data import location_category, get_location_id_at
-        if location_category(get_location_id_at(resident.tile_x, resident.tile_y)) == "dining":
+        if _settings.location_capabilities_enabled:
+            from app.agent.location_caps import CAP_DINING
+            from app.agent.map_data import capability_location_at
+            _dining_here = capability_location_at(
+                resident.tile_x, resident.tile_y, CAP_DINING) is not None
+        else:
+            from app.agent.map_data import location_category, get_location_id_at
+            _dining_here = (location_category(
+                get_location_id_at(resident.tile_x, resident.tile_y)) == "dining")
+        if _dining_here:
             available.append(ActionType.EAT)
 
     # Deduplicate while preserving order

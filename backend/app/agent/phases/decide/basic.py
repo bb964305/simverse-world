@@ -312,8 +312,22 @@ class BasicDecidePlugin:
                 return ActionResult(ActionType.GO_HOME, None, None, "精力耗尽，回家休息")
             return None
         # satiety
-        here = get_location_id_at(ctx.resident.tile_x, ctx.resident.tile_y)
-        if location_category(here) == "dining" and ActionType.EAT in ctx.available_actions:
+        # P1: 与 actions.py 的 EAT 门挂同一道闸、用同一个 resolver。口径分叉 =
+        # 「EAT 已解锁,_maybe_needs_action 却判此处不是餐馆」→ 走
+        # nearest_dining_location → 目标恰是脚下这栋楼 → VISIT_DISTRICT 到自己的
+        # entrance → execute already-at-destination → 不进食 → satiety 单调到 0,
+        # 而 most_critical 取 min 后恒返 satiety,GO_HOME 被永久挡在门外。这就是
+        # 0809「7/11 居民饿死在自家门口」的同型链。
+        if settings.location_capabilities_enabled:
+            from app.agent.location_caps import CAP_DINING
+            from app.agent.map_data import capability_location_at
+            here = capability_location_at(
+                ctx.resident.tile_x, ctx.resident.tile_y, CAP_DINING)
+            dining_here = here is not None
+        else:
+            here = get_location_id_at(ctx.resident.tile_x, ctx.resident.tile_y)
+            dining_here = location_category(here) == "dining"
+        if dining_here and ActionType.EAT in ctx.available_actions:
             return ActionResult(ActionType.EAT, here, None, "饿了，吃点东西")
         target = nearest_dining_location((ctx.resident.tile_x, ctx.resident.tile_y))
         if target and ActionType.VISIT_DISTRICT in ctx.available_actions:
