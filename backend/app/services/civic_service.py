@@ -199,6 +199,17 @@ CIVIC_AGENDA: list[dict] = [
                 "bounds": [172, 40, 178, 50], "center": [175, 45], "entrance": [172, 45],
                 "description": "小镇剧院:说书、演展、故事会的舞台",
                 "boosted_actions": ["CHAT_RESIDENT", "OBSERVE"],
+                # P2 #7:剧院是「上演场地」。规范形态是 dict[str, dict]
+                # (location_caps.normalize_capabilities 的不动点);effect.data 除
+                # slug 外整包落进 dynamic_locations.data_json(:923),再整包进
+                # LOCATIONS(map_data.py:386)—— 零迁移、零模型改动。
+                # 只改 data:topic 一个字符都不能动,seed_civic_agenda 的幂等键是
+                # Poll.question 精确匹配(:208-210),改字就重开票,而同 slug 再建走的
+                # 是整包覆盖分支(existing.data_json = payload),旧键全丢。
+                # 上面那三行几何坐标越界(x2=178 > WALKABLE_X_RANGE 上限 173),归
+                # P3-c 的迁移批次改,本批一个数字都不动、也不与它同车。
+                # 存量那行的回填是纯数据变更,属独立批次。
+                "capabilities": {"stage": {}},
             }}},
             {"label": "暂缓,维持现状", "effect": None},
         ],
