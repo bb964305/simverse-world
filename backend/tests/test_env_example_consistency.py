@@ -502,3 +502,37 @@ def test_deploy_env_states_the_duty_venue_prerequisites_and_rollback():
     assert "LOCATION_CAPABILITIES_ENABLED" in text and "不依赖" in text
     assert "独立批次" in text
     assert "sealed" in text          # 回滚护栏 SQL
+
+
+#: 剧院/舞台事件的旋钮前缀。和 ``EVENT_MEMORY_TIER_PREFIX`` / ``POOL_RESERVE_PREFIX``
+#: 一个道理:``STAGE_`` **不在** ``GOVERNANCE_PREFIXES``(政治层三条线)里,上面那条
+#: parity 扫不到本批的键 —— 而「扫不到」的表现和「deploy 模板里根本没这个键」一模
+#: 一样,全绿(07-27B 审计 H2 把「多份 env 真值互相漂移」定为事故级问题类)。
+#:
+#: 前缀取到 ``STAGE_EVENT_`` 而不是钉死 ``STAGE_EVENT_ENABLED``:P2 #9 还要落一个
+#: ``STAGE_EVENT_CROWD_ENABLED``,钉死单键的话第二个旋钮落地时这条 parity 会静默
+#: 扫不到它。
+STAGE_EVENT_PREFIX = "STAGE_EVENT_"
+
+
+def test_stage_event_knobs_exist_in_deploy_env_example_too():
+    """剧院/舞台事件的旋钮必须同时出现在两份 env 参考里。"""
+    backend_keys = {k for k in _raw_keys(ENV_EXAMPLE)
+                    if k.startswith(STAGE_EVENT_PREFIX)}
+    assert backend_keys, "backend/.env.example 里没有任何舞台事件旋钮?基线认知错误"
+    missing = sorted(backend_keys - _raw_keys(DEPLOY_ENV_EXAMPLE))
+    assert not missing, (
+        f"deploy/backend/.env.example 缺舞台事件旋钮(补上并保持默认关): {missing}")
+
+
+def test_stage_event_knobs_default_to_off_everywhere():
+    """三处默认必须一致地关:Settings 一处、两份模板各一处。"""
+    backend_keys = {k for k in _raw_keys(ENV_EXAMPLE)
+                    if k.startswith(STAGE_EVENT_PREFIX)}
+    for env_key in sorted(backend_keys):
+        field = env_key.lower()
+        assert Settings.model_fields[field].default is False, \
+            f"Settings 里 {field} 的默认不是 False —— 新闸必须默认关"
+        for path in (ENV_EXAMPLE, DEPLOY_ENV_EXAMPLE):
+            assert f"{env_key}=false" in path.read_text(encoding="utf-8"), \
+                f"{path} 里 {env_key} 的默认不是 false"

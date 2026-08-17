@@ -44,6 +44,16 @@ _VOTERS_KEY = "sv:debate_voters:{id}"
 _VOTING_SINCE_KEY = "sv:debate_voting_since:{id}"
 _VOTING_SINCE_TTL = 7 * 86400
 
+#: 辩论的上演场地。debates 表 13 列无 location,而本批次不动 schema(红线:迁移与
+#: 行为变更不得同一次变更),所以 create_debate 收到的 venue 走 Redis 传给 run_live
+#: —— 与上面 _VOTING_SINCE_KEY 同一条思路、同一个失败姿势。
+#: 读不到 = **不建事件**(fail-closed),绝不臆造场地:announced → live 只隔
+#: debate_stake_window_min(默认 30 分钟),要在这个窗口里丢 Redis 才会漏掉一场的
+#: 人流拉力,代价上限是一场辩论没观众;而回落到「随便挑一个 stage 地点」会把全镇
+#: 往错的楼里拉。
+_VENUE_KEY = "sv:debate_venue:{id}"
+_VENUE_TTL = 7 * 86400
+
 DEBATE_SYSTEM = (
     "你正在参加一场辩论擂台。你要为自己的立场辩护，语气鲜明、有理有据，"
     "针对上一位发言者的观点回应。60 字以内，只输出你的发言。"
@@ -57,11 +67,16 @@ class DebateError(Exception):
 # --------------------------------------------------------------------------- #
 # Setup / staking                                                             #
 # --------------------------------------------------------------------------- #
-async def create_debate(db, topic: str, a_slug: str, b_slug: str) -> Debate:
+async def create_debate(db, topic: str, a_slug: str, b_slug: str,
+                        *, venue: str | None = None) -> Debate:
     d = Debate(topic=topic, resident_a_slug=a_slug, resident_b_slug=b_slug, status="announced")
     db.add(d)
     await db.commit()
     await db.refresh(d)
+    # P2 #7:上演场地。venue 为 None(今天所有调用方的默认)时整段跳过,与改前逐字节
+    # 相同。场地不进 schema —— 见 _VENUE_KEY 的说明。
+    if venue:
+        await _remember_venue(d.id, venue)
     # S1-3: seed opposing issue stances for the two debaters. `announced` is
     # the reliable first-hand signal — the debate lifecycle stops here today
     # (no live/settle driver in app code). Best-effort + gated: an opinion
@@ -74,6 +89,45 @@ async def create_debate(db, topic: str, a_slug: str, b_slug: str) -> Debate:
     except Exception:
         logger.warning("opinion seed from create_debate failed", exc_info=True)
     return d
+
+
+async def _remember_venue(debate_id: str, venue: str) -> None:
+    """记下这场辩论的上演场地。只有声明了 stage 能力的地点才算数。
+
+    校验放在写入侧:写入侧知道调用方是谁(civic_service 的公开课链),读取侧只拿得到
+    一个字符串。地点没声明 stage 就当没给场地 —— 存量 dynamic_locations 行没有
+    capabilities 键时天然走这条路,缺省安全。
+    """
+    from app.agent.location_caps import CAP_STAGE
+    from app.agent.map_data import has_capability
+    if not has_capability(venue, CAP_STAGE):
+        logger.debug("debate venue %r does not declare stage; ignored", venue)
+        return
+    try:
+        from app.redis_client import get_redis
+        await get_redis().set(_VENUE_KEY.format(id=debate_id), venue, ex=_VENUE_TTL)
+    except Exception:
+        # 场地是叙事装饰;辩论本体(玩家能押注的那个对象)不能因它建不出来。
+        logger.warning("debate venue mark failed for %s", debate_id, exc_info=True)
+
+
+async def _debate_venue(debate_id: str) -> str | None:
+    """读回上演场地;没记过 / 读不出来 / 地点已不再声明 stage → None。
+
+    读取侧**再校验一次**:Redis 里的值可能是几天前写的,而能力声明是公投随时能改的
+    数据。两侧都判,任一侧不成立就退化成「没有场地」= 今天的行为。
+    """
+    try:
+        from app.redis_client import get_redis
+        raw = await get_redis().get(_VENUE_KEY.format(id=debate_id))
+    except Exception:
+        logger.warning("debate venue read failed for %s", debate_id, exc_info=True)
+        return None
+    if not raw:
+        return None
+    from app.agent.location_caps import CAP_STAGE
+    from app.agent.map_data import has_capability
+    return raw if has_capability(raw, CAP_STAGE) else None
 
 
 async def stake(db, debate_id: str, user_id: str, side: str, amount: int) -> DebateStake:

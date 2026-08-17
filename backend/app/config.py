@@ -590,6 +590,16 @@ class Settings(BaseSettings):
     # 派生层与 RESEARCH/EAT 两个门。
     duty_venue_enabled: bool = False
 
+    # --- P2 剧院/舞台事件 (STAGE_EVENT_*) ---
+    # 「上演场地」语义:辩论开票时在声明了 stage 能力的地点挂一条 type="script" 的
+    # 世界事件,讲师的公开课也从 "news" 改成 "script"。关键在 type ——
+    # crowd_service._EVENT_TYPES_WITH_CROWD 是 ("festival","script"),"news" 不在
+    # 里面,所以公开课的 ×realism_festival_weight 人流拉力**从来没生效过**。
+    # 关 = 逐字节旧行为:不建任何舞台事件、公开课仍是 "news"、辩论生命周期一步不变。
+    # 零新增 ActionType、零新增经济出口(观众收益只走记忆/心情/social/关系,
+    # debate settle 的 5% burn 是唯一真金出口,不得双花)。
+    stage_event_enabled: bool = False
+
     # P2 Task 1 — relation write deltas (reused, zero new LLM calls) + decay.
     realism_rel_familiarity_chat: float = 0.05
     realism_rel_affinity_chat: float = 0.03      # ± by wrapup mood (positive/negative)
