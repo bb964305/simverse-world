@@ -385,3 +385,58 @@ def test_governance_knobs_exist_in_deploy_env_example_too():
     missing = sorted(backend_keys - _raw_keys(DEPLOY_ENV_EXAMPLE))
     assert not missing, (
         f"deploy/backend/.env.example 缺治理旋钮（补上并保持默认关/保守）: {missing}")
+
+
+#: P1 地点能力声明的旋钮前缀。必须单开一条:LOCATION_ 既不在 GOVERNANCE_PREFIXES
+#: (CIVIC_/REP_/POLIS_OFFICE_)里,也不在 REALISM_POOL_ / REALISM_PLAN_ /
+#: REALISM_EVENT_MEMORY_ 任何一条现成 parity 的前缀内 —— 四条现成的 parity 全都
+#: 扫不到它。而「扫不到」的表现与「deploy 模板里根本没有这个键」一模一样:全绿,
+#: 运维照 deploy 模板起的环境里这个旋钮不存在(07-27B 审计 H2 把「多份 env 真值
+#: 互相漂移」定为事故级问题类)。
+#:
+#: 前缀取到 LOCATION_ 而不是这一个键的全名:P2/P3 再加地点侧旋钮时自动被覆盖。
+LOCATION_CAPABILITY_PREFIX = "LOCATION_"
+
+#: (Settings 字段, env 键)。默认必须都是 false = 逐字节旧行为。
+LOCATION_CAPABILITY_KNOBS = [
+    ("location_capabilities_enabled", "LOCATION_CAPABILITIES_ENABLED"),
+]
+
+
+def test_location_capability_knobs_exist_in_deploy_env_example_too():
+    """地点能力声明的旋钮必须同时出现在两份 env 参考里。"""
+    backend_keys = {k for k in _raw_keys(ENV_EXAMPLE)
+                    if k.startswith(LOCATION_CAPABILITY_PREFIX)}
+    assert backend_keys, "backend/.env.example 里没有任何地点能力旋钮?基线认知错误"
+    assert backend_keys >= {env for _, env in LOCATION_CAPABILITY_KNOBS}, (
+        f"backend/.env.example 缺地点能力旋钮: "
+        f"{sorted({env for _, env in LOCATION_CAPABILITY_KNOBS} - backend_keys)}")
+    missing = sorted(backend_keys - _raw_keys(DEPLOY_ENV_EXAMPLE))
+    assert not missing, (
+        f"deploy/backend/.env.example 缺地点能力旋钮(补上并保持默认关): {missing}")
+
+
+def test_location_capability_knobs_default_to_false_everywhere():
+    """false = 逐字节旧行为,所以三处默认必须都是 false。
+
+    任何一处模板写成 true,运维照它起的环境就是默认开闸 —— 而开闸会同时改写
+    RESEARCH/EAT 的可用性判据与餐费分账的收款人。
+    """
+    for field, env_key in LOCATION_CAPABILITY_KNOBS:
+        assert Settings.model_fields[field].default is False, \
+            f"Settings 里 {field} 的默认不是 False —— 新行为必须默认关"
+        for path in (ENV_EXAMPLE, DEPLOY_ENV_EXAMPLE):
+            assert f"{env_key}=false" in path.read_text(encoding="utf-8"), \
+                f"{path} 里 {env_key} 的默认不是 false"
+
+
+def test_deploy_env_states_the_capability_gate_ordering():
+    """开闸硬顺序必须写在运维照着操作的那份模板里(同 TOWN_DUTY_FUNDING 先例)。
+
+    P1 的闸本身无前置,但它是 P2/P3 的前置:P2 的邮局/剧院接线全部经
+    capability_location_at,闸不开时那两栋楼的能力门恒判 False,会假报「P2 接线
+    失败」。这句话不写进模板,开闸顺序就只活在某个人的记忆里。
+    """
+    text = _deploy_env_text()
+    assert "LOCATION_CAPABILITIES_ENABLED" in text
+    assert "P2" in text and "前置" in text
