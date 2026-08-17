@@ -270,6 +270,18 @@ class BasicExecutePlugin:
                 # to the shopkeeper (gossip fodder). Fail-open, gated on economy.
                 if settings.npc_economy_enabled:
                     await _charge_meal(ctx.db, ctx.resident)
+            elif action == ActionType.OBSERVE and settings.stage_event_enabled:
+                # P2 #11:OBSERVE 今天在这条 switch 里没有任何分支 —— 选了它等于
+                # 什么都没发生,status 还停在上一 tick 的 "walking"(这人对别人来说
+                # 仍算 idle_nearby,自己看上去却在赶路)。观察是一个「停下来」的动作。
+                #
+                # **不在这里写记忆**:memorize 已经为 OBSERVE 写了一条
+                # (memorize/basic.py:135-136「在X静静地观察着周围的情况」),再写一条
+                # 就是同一 tick 双份记忆,污染检索与 _normalize_importance 的分位。
+                # 「在哪观察的」由同批的 metadata["act"] 结构化记录。
+                if ctx.resident.status not in ("chatting", "socializing"):
+                    ctx.resident.status = "idle"
+                    await ctx.db.commit()
         except Exception as e:
             logger.warning("Execute failed for %s: %s", ctx.resident.slug, e)
 

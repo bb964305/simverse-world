@@ -118,6 +118,31 @@ def _plan_memory(ctx) -> dict | None:
     }
 
 
+def _act_metadata(ctx) -> dict:
+    """非移动动作的「做了什么 / 在哪做的」结构化痕迹(P2 #11)。
+
+    今天 metadata_json 只有 move / plan / raw_importance 三个键,「某栋楼里到底
+    发生了什么」在 SQL 上完全不可见 —— 这条就是那半份数据。
+
+    ``loc`` 必须是**具体**地点 id 而不是遮蔽它的 outdoor 街区:
+    theater(172,40,178,50) 完全落在 east_gardens(140,35,179,58) 内部,而
+    get_location_id_at 首命中即返(map_data.py:243-249),生产实测
+    get_location_id_at(175,45) 返 "east_gardens"。照粗查写,验收 SQL 的
+    ``metadata_json->'act'->>'loc' = 'theater'`` 恒查不到一行。
+
+    先用 stage 能力反查穿透遮蔽,查不到再回落粗查。等 P3 的具体性排序闸
+    (LOCATION_SPECIFIC_FIRST_ENABLED)开了,回落项自己就返回 theater,两项等价 ——
+    所以这里不是第二份真相源,只是它到位之前的剧院专用穿透。
+    """
+    from app.agent.location_caps import CAP_STAGE
+    from app.agent.map_data import capability_location_at, get_location_id_at
+
+    res = ctx.resident
+    x, y = res.tile_x or 0, res.tile_y or 0
+    loc_id = capability_location_at(x, y, CAP_STAGE) or get_location_id_at(x, y)
+    return {"action": ctx.action_result.action.value, "loc": loc_id}
+
+
 def format_action_memory(action_result, resident) -> str:
     """Format an action into a human-readable memory string with location."""
     loc = get_location_at(resident.tile_x, resident.tile_y)
@@ -187,6 +212,10 @@ class BasicMemorizePlugin:
             metadata = {}
             if move_meta:
                 metadata["move"] = move_meta
+            # P2 #11:非移动动作补一条 act 痕迹。与 move 互斥 —— 移动动作的落点
+            # 已由 move 记录(:87-95),重复写会让同一行出现两套地点口径。
+            if settings.stage_event_enabled and action not in _MOVEMENT_ACTIONS:
+                metadata["act"] = _act_metadata(ctx)
             plan_meta = _plan_memory(ctx)
             if plan_meta:
                 metadata["plan"] = plan_meta
