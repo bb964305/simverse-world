@@ -20,7 +20,9 @@ from app.models.dynamic_location import DynamicLocation
 from app.models.dynamic_mechanic import DynamicMechanic
 from app.models.world_change_proposal import WorldChangeProposal
 from app.agent.map_data import LOCATIONS
-from app.world_geometry import MAP_HEIGHT_TILES, MAP_WIDTH_TILES
+from app.world_geometry import (
+    MAP_HEIGHT_TILES, MAP_WIDTH_TILES, WALKABLE_X_RANGE, WALKABLE_Y_RANGE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,7 @@ def validate_location_patch(
     *,
     allow_existing_slug: bool = False,
     outdoor_overlap_is_warning: bool = False,
+    require_walkable_range: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Structural + conflict checks for an add_location patch.
 
@@ -69,6 +72,11 @@ def validate_location_patch(
     ``allow_existing_slug`` — the civic path is an upsert
     (civic_service.py:927 overwrites data_json for a known slug), so a known
     slug is neither fatal nor an overlap with itself.
+
+    ``require_walkable_range`` — the pre-P3 range check only compared against
+    MAP_WIDTH_TILES/MAP_HEIGHT_TILES, so theater (x2=178 < 180) passed while
+    WALKABLE_X_RANGE tops out at 173. Off by default: the pre-P3 fixtures
+    (tests/test_world_governance.py:36) legitimately sit outside that band.
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -110,6 +118,19 @@ def validate_location_patch(
                 ex, ey = int(entrance[0]), int(entrance[1])
                 if not (x1 <= ex <= x2 and y1 <= ey <= y2):
                     errors.append("entrance/center must lie within bounds")
+            if require_walkable_range:
+                wx1, wx2 = min(WALKABLE_X_RANGE), max(WALKABLE_X_RANGE)
+                wy1, wy2 = min(WALKABLE_Y_RANGE), max(WALKABLE_Y_RANGE)
+                probes = [(x1, y1), (x2, y2)]
+                ent = data.get("entrance") or data.get("center")
+                if ent and len(ent) == 2:
+                    probes.append((int(ent[0]), int(ent[1])))
+                for px, py in probes:
+                    if not (wx1 <= px <= wx2 and wy1 <= py <= wy2):
+                        errors.append(
+                            "bounds/entrance leave the walkable area "
+                            f"[{wx1},{wx2}]x[{wy1},{wy2}]: ({px},{py})")
+                        break
     if not data.get("name"):
         errors.append("missing name")
     return errors, warnings

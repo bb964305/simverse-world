@@ -85,3 +85,32 @@ def test_existing_slug_is_an_upsert_when_allowed(locations_snapshot):
         THEATER, allow_existing_slug=True, outdoor_overlap_is_warning=True)
     assert errors == []
     assert warnings == ["bounds sit inside outdoor block 'east_gardens'"]
+
+
+# ── walkable 域越界(S2) ────────────────────────────────────────────────
+
+def test_walkable_range_check_is_opt_in():
+    """默认关 = 旧行为:天文台 bounds x1=5 在 walkable 域外,旧入口照样放行。"""
+    good = {"slug": "observatory", "data": {
+        "name": "天文台", "bounds": [5, 88, 15, 96], "entrance": [10, 88]}}
+    assert validate_add_location(good) == []
+    errors, _ = validate_location_patch(good, require_walkable_range=True)
+    assert errors == [
+        "bounds/entrance leave the walkable area [14,173]x[12,123]: (5,88)"]
+
+
+def test_theater_is_rejected_by_walkable_range():
+    """WALKABLE_X_RANGE 上限 173,而剧院 bounds x2=178 / center x=175。
+    只比 MAP_WIDTH_TILES=180 的旧规则放行了它 —— 这条就是那道缺口。"""
+    errors, _ = validate_location_patch(
+        THEATER, allow_existing_slug=True, outdoor_overlap_is_warning=True,
+        require_walkable_range=True)
+    assert errors == [
+        "bounds/entrance leave the walkable area [14,173]x[12,123]: (178,50)"]
+
+
+def test_post_office_passes_walkable_range():
+    errors, warnings = validate_location_patch(
+        POST_OFFICE, outdoor_overlap_is_warning=True, require_walkable_range=True)
+    assert errors == []
+    assert warnings == ["bounds sit inside outdoor block 'south_quarter'"]
