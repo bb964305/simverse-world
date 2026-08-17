@@ -22,7 +22,10 @@ import logging
 import time
 
 from app.config import settings
-from app.agent.map_data import LOCATIONS, get_location_id_at
+from app.agent.location_caps import CAP_STAGE
+from app.agent.map_data import (
+    LOCATIONS, get_location_id_at, location_capabilities,
+)
 from app.services.event_location import resolve_event_location_id
 
 _EVENT_TYPES_WITH_CROWD = ("festival", "script")
@@ -99,9 +102,99 @@ def active_market_day_id(world_events) -> str | None:
     return key[0] if key is not None else None
 
 
-def _stable_market_rank(event_key: tuple[str, str, str], resident_id: str) -> bytes:
-    material = "\x1f".join((*event_key, resident_id)).encode("utf-8")
+def _stable_rank(parts: tuple[str, ...], resident_id: str) -> bytes:
+    """每个 (事件, 居民) 对的确定性排序材料。
+
+    集市与舞台两条 cohort 共用同一条哈希规则:同一场事件在任何进程、任何重启后都选
+    出同一批人(名单不能随 PYTHONHASHSEED 漂),这是 cohort 能被缓存与复算的前提。
+    """
+    material = "\x1f".join((*parts, resident_id)).encode("utf-8")
     return hashlib.sha256(material).digest()
+
+
+def _stable_market_rank(event_key: tuple[str, str, str], resident_id: str) -> bytes:
+    return _stable_rank(event_key, resident_id)
+
+
+# ── P2 #9 舞台事件 (stage event) ──────────────────────────────────────
+# 「哪场事件算演出」= 事件类型 ∈ _EVENT_TYPES_WITH_CROWD;「演在哪」= 事件 payload
+# 指的那栋楼自己声明了 stage 能力。场地资格**不看在场人数、也不看 slug 字面量** ——
+# 这正是 design_P2.md §③ 路 B「地点吸引力与在场人数解耦」的机器表述:拉力全部来自
+# 事件 + 能力声明,actions.py 的 CHAT_RESIDENT 判据一个字不改。
+
+
+def _stage_venue_is_reachable(venue: str) -> bool:
+    """该场地的目的地 tile 是否与镇区连通。
+
+    必须用 get_reachable_tiles 而不是 get_walkable_tiles:后者被
+    pathfinder._get_forced_walkable(:60-68)无边界检查地塞进每个地点的 entrance 与
+    center,会自证成功(实测 theater center(175,45)walkable=True / reachable=False)。
+    孤岛场地一旦被认下,名单里的人会每 tick 走一条 find_path 恒返 None 的路线 ——
+    arrivals 永远 0,而每 tick 照吃一格日行动 cap。
+
+    fail-**closed**:探测异常时返回 False(不认场地、不导流)。宁可少一场戏,也不能把
+    人往走不到的地方赶。剧院 bounds 越界的修复归 P3-c(独立迁移批次),本函数是它落地
+    前的自保,不是它的替代品。
+    """
+    from app.agent.map_data import get_valid_target_tile
+    from app.agent.pathfinder import get_reachable_tiles
+    try:
+        tile = get_valid_target_tile(venue)
+        if not tile:
+            return False
+        return (int(tile[0]), int(tile[1])) in get_reachable_tiles()
+    except Exception:
+        logger.warning("stage venue reachability probe failed: %s", venue,
+                       exc_info=True)
+        return False
+
+
+def _active_stage_event_key(world_events) -> tuple[str, str, str, str] | None:
+    """活跃舞台事件的稳定缓存/选人键 (marker, starts, ends, venue)。
+
+    venue 进键:同一栋楼换一场戏要重开名单,同一场戏挪了地方也要重开。
+    """
+    for event in world_events or []:
+        if event.get("type") not in _EVENT_TYPES_WITH_CROWD:
+            continue
+        venue = resolve_event_location_id(event.get("payload_json"))
+        if not isinstance(venue, str) or venue not in LOCATIONS:
+            continue
+        if CAP_STAGE not in location_capabilities(venue):
+            continue
+        if not _stage_venue_is_reachable(venue):
+            logger.debug("stage event venue is not reachable, ignored: %s", venue)
+            continue
+        # id 有就以 id 为准;starts/ends 区分畸形或合成夹具,并让改期的同一行成为新名单。
+        marker = event.get("id") or event.get("title") or "stage_event"
+        return (str(marker), str(event.get("starts_at") or ""),
+                str(event.get("ends_at") or ""), venue)
+    return None
+
+
+def stage_event_venue(world_events) -> str | None:
+    """正在演出的场地 id;没有合格演出则 None。纯函数、零查询。"""
+    key = _active_stage_event_key(world_events)
+    return key[3] if key is not None else None
+
+
+def active_stage_event_id(world_events) -> str | None:
+    """该场演出的公开身份(用于日志与归因)。"""
+    key = _active_stage_event_key(world_events)
+    return key[0] if key is not None else None
+
+
+def stage_venue_at(x: int, y: int) -> str | None:
+    """居民此刻脚下、且声明了 stage 能力的地点 id;不在任何场地里则 None。
+
+    用 capability_location_at 而**不是** get_location_id_at:后者首命中即返,命中序 =
+    dict 插入序 = 静态在前、动态追加在尾,而 theater(172,40,178,50)完全落在 outdoor
+    街区 east_gardens(140,35,179,58)内部 —— 实测 get_location_id_at(174,45) 返
+    "east_gardens"。照它写,人站在剧院正中也判不出「已在场」,于是每 tick 都会被再拉
+    一次。
+    """
+    from app.agent.map_data import capability_location_at
+    return capability_location_at(x or 0, y or 0, CAP_STAGE)
 
 
 def market_day_visitor_tile(
