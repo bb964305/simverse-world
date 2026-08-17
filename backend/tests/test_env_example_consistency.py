@@ -440,3 +440,65 @@ def test_deploy_env_states_the_capability_gate_ordering():
     text = _deploy_env_text()
     assert "LOCATION_CAPABILITIES_ENABLED" in text
     assert "P2" in text and "前置" in text
+
+
+#: P2 营生场所的旋钮前缀。**必须单开一条**:DUTY_VENUE_ 既不在
+#: GOVERNANCE_PREFIXES(CIVIC_/REP_/POLIS_OFFICE_)里,也不在 REALISM_POOL_ /
+#: REALISM_PLAN_ / REALISM_EVENT_MEMORY_ / LOCATION_ 任何一条现成 parity 的前缀内
+#: —— 五条现成的 parity 全都扫不到它(TOWN_DUTY_FUNDING_ENABLED 是 TOWN_ 前缀,
+#: 不沾边)。而「扫不到」的表现与「deploy 模板里根本没有这个键」一模一样:全绿,
+#: 运维照 deploy 模板起的环境里这个旋钮不存在(07-27B 审计 H2 把「多份 env 真值
+#: 互相漂移」定为事故级问题类)。
+#:
+#: 前缀取到 DUTY_VENUE_ 而不是这一个键的全名:剧院侧(#7-#9)再加场所旋钮时自动
+#: 被覆盖。
+DUTY_VENUE_PREFIX = "DUTY_VENUE_"
+
+#: (Settings 字段, env 键)。默认必须都是 false = 逐字节旧行为。
+DUTY_VENUE_KNOBS = [
+    ("duty_venue_enabled", "DUTY_VENUE_ENABLED"),
+]
+
+
+def test_duty_venue_knobs_exist_in_deploy_env_example_too():
+    """营生场所的旋钮必须同时出现在两份 env 参考里。"""
+    backend_keys = {k for k in _raw_keys(ENV_EXAMPLE)
+                    if k.startswith(DUTY_VENUE_PREFIX)}
+    assert backend_keys, "backend/.env.example 里没有任何营生场所旋钮?基线认知错误"
+    assert backend_keys >= {env for _, env in DUTY_VENUE_KNOBS}, (
+        f"backend/.env.example 缺营生场所旋钮: "
+        f"{sorted({env for _, env in DUTY_VENUE_KNOBS} - backend_keys)}")
+    missing = sorted(backend_keys - _raw_keys(DEPLOY_ENV_EXAMPLE))
+    assert not missing, (
+        f"deploy/backend/.env.example 缺营生场所旋钮(补上并保持默认关): {missing}")
+
+
+def test_duty_venue_knobs_default_to_false_everywhere():
+    """false = 逐字节旧行为,所以三处默认必须都是 false。
+
+    任何一处模板写成 true,运维照它起的环境就是默认开闸 —— 而开闸会同时改写邮差
+    WORK 的记忆内容与 decide 的目的地选择。
+    """
+    for field, env_key in DUTY_VENUE_KNOBS:
+        assert Settings.model_fields[field].default is False, \
+            f"Settings 里 {field} 的默认不是 False —— 新行为必须默认关"
+        for path in (ENV_EXAMPLE, DEPLOY_ENV_EXAMPLE):
+            assert f"{env_key}=false" in path.read_text(encoding="utf-8"), \
+                f"{path} 里 {env_key} 的默认不是 false"
+
+
+def test_deploy_env_states_the_duty_venue_prerequisites_and_rollback():
+    """开闸硬前置与回滚保证必须写在运维照着操作的那份模板里。
+
+    两条最容易凭记忆搞错的:
+      · 本闸**不**依赖 LOCATION_CAPABILITIES_ENABLED(location_capabilities 与
+        capability_location_at 都是不读闸的纯查询);
+      · 真正的硬前置是数据侧的 post_office.data_json 回填,且必须独立批次。
+    以及回滚保证:胶囊的封存/投递都不要求在邮局,闸翻回去不会让胶囊积压。
+    """
+    text = _deploy_env_text()
+    assert "DUTY_VENUE_ENABLED" in text
+    assert "postal" in text and "capabilities" in text
+    assert "LOCATION_CAPABILITIES_ENABLED" in text and "不依赖" in text
+    assert "独立批次" in text
+    assert "sealed" in text          # 回滚护栏 SQL
