@@ -47,6 +47,7 @@ from datetime import datetime, timedelta, UTC
 
 from sqlalchemy import select
 
+from app.agent.location_caps import CAP_POSTAL
 from app.models.resident import Resident
 from app.redis_client import get_redis
 from app.services.resident_privilege_policy import (
@@ -118,6 +119,86 @@ def max_perk(residents, key: str, default: float = 1.0) -> float:
     return max([default, *values])
 
 
+# ── P2 营生场所 (duty venue) ───────────────────────────────────────────
+# 「营生有没有现场」是营生自己的属性(下面这张表),「哪栋楼是那个现场」是地点自己
+# 的能力声明(dynamic_locations.data_json / LOCATIONS 的 capabilities)。两侧用能力名
+# 对接,谁都不硬编码对方的 slug。
+#
+# 今天只登记邮差(投递现场 = postal)。讲师的 stage/academy 归 design_P2.md 的 #8,
+# 不在本段;没有 WORK 产出的营生谈不上现场,所以键必须是 _WORK_HANDLERS 的子集。
+DUTY_VENUE_CAPABILITY: dict[str, str] = {
+    "postman": CAP_POSTAL,
+}
+
+
+def _duty_work_cooldown_key(resident_id: str) -> str:
+    """WORK 冷却键的唯一真相源。
+
+    decide 侧的「今天还没上工」判据必须与 on_work 写的是同一个键 —— 两处手写同一
+    字符串迟早漂移,漂移的表现是「人走到了现场但冷却还没过」的空跑(白花一格日行动
+    cap,tick.py:108-117)。
+    """
+    return f"sv:duty_work:{resident_id}"
+
+
+def duty_venue_capability(resident) -> str | None:
+    """该居民营生声明的「现场」能力名;无营生 / 无现场语义 → None。纯函数。
+
+    走 duty_key() 而不是裸读 meta_json:UGC 居民自己往 meta_json 里塞 duty 不算数
+    (trusted_duty 的 provenance 门,resident_privilege_policy.py:105-110)。
+    """
+    return DUTY_VENUE_CAPABILITY.get(duty_key(resident) or "")
+
+
+def duty_venue_location_at(resident) -> str | None:
+    """居民此刻脚下、且提供其营生现场能力的地点 id;不在现场则 None。
+
+    用 map_data.capability_location_at 而**不是** get_location_id_at:后者首命中即返
+    (map_data.py:243-249),命中序 = dict 插入序 = 静态在前、动态追加在尾(:386),而
+    post_office(44,100,48,106) 完全落在 outdoor 街区 south_quarter(42,100,135,109)
+    内部 —— 生产实测 get_location_id_at(46,103) 返 "south_quarter"。照 get_location_id_at
+    写,邮差站在邮局正中也判不出「在现场」,命中率恒 0。
+
+    存量 dynamic_locations 行没有 capabilities 键 → 归一成空 dict → 这里返 None →
+    调用方走老行为。缺省安全,回填前后都不炸。
+    """
+    cap = duty_venue_capability(resident)
+    if not cap:
+        return None
+    from app.agent.map_data import capability_location_at
+    return capability_location_at(resident.tile_x, resident.tile_y, cap)
+
+
+def nearest_duty_venue(resident) -> str | None:
+    """离居民最近的、提供其营生现场能力的地点 id(无营生现场 / 全镇没有这样的地点
+    → None)。decide 侧的导流目的地由它给出。
+
+    返回值必须是 map_data.LOCATIONS 的合法 key —— 下游 memorize 的
+    metadata['move']['target'] 与生产的到访统计口径都吃它
+    (memorize/basic.py:62-63 经 resolve_location_id)。
+    """
+    cap = duty_venue_capability(resident)
+    if not cap:
+        return None
+    from app.agent.map_data import nearest_capability_location
+    return nearest_capability_location((resident.tile_x, resident.tile_y), cap)
+
+
+async def duty_work_done(resident) -> bool:
+    """本冷却窗内是否已经上过工(与 on_work 同一个 Redis 键)。
+
+    fail-**closed**:Redis 抖动时返回 True(视为已上工)。宁可少一次导流,也不能因为
+    Redis 挂了把全镇有现场的营生持有人整齐赶去同一栋楼 —— 这与本模块其余部分的
+    fail-open 方向相反,是刻意的。
+    """
+    try:
+        return bool(await get_redis().exists(_duty_work_cooldown_key(resident.id)))
+    except Exception:
+        logger.debug("duty work cooldown probe failed for %s",
+                     getattr(resident, "slug", "?"), exc_info=True)
+        return True
+
+
 async def find_duty_resident(db, key: str) -> Resident | None:
     """First NPC holding the given duty key. Town-scale linear scan (the
     resident table is small and meta_json JSON operators are not portable
@@ -180,7 +261,7 @@ async def on_work(db, resident, *, market_day: bool = False) -> str | None:
     slug = resident.slug
     try:
         r = get_redis()
-        cd_key = f"sv:duty_work:{resident.id}"
+        cd_key = _duty_work_cooldown_key(resident.id)
         if await r.exists(cd_key):
             return None
         result = await handler(db, resident)
