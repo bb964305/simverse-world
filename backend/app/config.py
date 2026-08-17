@@ -577,6 +577,10 @@ class Settings(BaseSettings):
     # 声明随代码先落地,与开闸分属不同批次(07-25 事故红线)。
     location_capabilities_enabled: bool = False
 
+    # reload_world 顺带清 pathfinder/caravan 路网缓存。关 = 运行中新建的楼要等
+    # 进程重启才走得到(find_path 的 to_tile not in walkable 直接 return None)。
+    world_reload_reset_path_cache: bool = False
+
     # P2 Task 1 — relation write deltas (reused, zero new LLM calls) + decay.
     realism_rel_familiarity_chat: float = 0.05
     realism_rel_affinity_chat: float = 0.03      # ± by wrapup mood (positive/negative)

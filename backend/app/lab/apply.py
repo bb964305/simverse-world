@@ -15,6 +15,7 @@ from datetime import datetime, UTC
 
 from sqlalchemy import select
 
+from app.config import settings
 from app.redis_client import get_redis
 from app.models.dynamic_location import DynamicLocation
 from app.models.dynamic_mechanic import DynamicMechanic
@@ -295,6 +296,19 @@ async def reload_world() -> int:
     from app.services import location_tracker
 
     n = await load_dynamic_locations()
+    if settings.world_reload_reset_path_cache:
+        # 必须晚于 merge:_get_forced_walkable 读的是 LOCATIONS(pathfinder.py:60),
+        # 先清后 merge 等于白清。清完后下一次 get_walkable_tiles() 会重读
+        # tilemap.json 全量重算 —— reload_world 的调用点(world_reload_subscriber
+        # 与 civic 落库后那次)都不在请求热路径上,routers/world.py:19 走的是
+        # load_dynamic_locations 不经本函数。
+        from app.agent import pathfinder
+        pathfinder.reset_walkable_cache()
+        try:
+            from app.services.caravan_route import build_caravan_route
+            build_caravan_route.cache_clear()
+        except Exception:
+            logger.warning("caravan route cache clear failed", exc_info=True)
     location_tracker.rebuild_lookup()
     try:
         from app.agent.location_lore import load_dynamic_lore
