@@ -569,6 +569,14 @@ class Settings(BaseSettings):
     realism_info_gradient_enabled: bool = False
     realism_crowd_enabled: bool = False
     realism_gossip_event_lane_enabled: bool = False
+
+    # --- P1 地点能力声明 (LOCATION_CAPABILITIES_*) ---
+    # 把 dining/research 的硬编码 slug 门改成读地点自己的 capabilities 声明。
+    # 关 = 逐字节旧行为(字面量 "experiment_building" / _DINING_LOCATIONS 白名单)。
+    # 与 realism_enabled 正交:EAT 门本来就在 realism 内层,本闸是内层再套一层。
+    # 声明随代码先落地,与开闸分属不同批次(07-25 事故红线)。
+    location_capabilities_enabled: bool = False
+
     # P2 Task 1 — relation write deltas (reused, zero new LLM calls) + decay.
     realism_rel_familiarity_chat: float = 0.05
     realism_rel_affinity_chat: float = 0.03      # ± by wrapup mood (positive/negative)

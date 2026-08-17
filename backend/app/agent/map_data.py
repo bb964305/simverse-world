@@ -273,15 +273,28 @@ _DINING_LOCATIONS = {"cafe", "tavern"}
 
 
 def location_category(loc_id: str | None) -> str | None:
-    """Realism P1-10: coarse location category (e.g. "dining"). Reads an explicit
-    ``category`` key if present, else a small dining allowlist (cafe/tavern).
-    Deviation: allowlist instead of hand-tagging every location dict — same
-    behavior, and an explicit ``category`` key still wins."""
+    """Realism P1-10: coarse location category (e.g. "dining").
+
+    三级优先级:显式 category 键 → (P1 闸开时)从 capabilities 声明派生 →
+    _DINING_LOCATIONS 白名单。白名单保留为最后一级 fallback —— 删掉它,一旦某处
+    声明没落地就会静默失去 dining,纯负收益。
+
+    闸关时中间那一级整块跳过,返回值域与顺序与改前逐字相同。
+    """
     if not loc_id:
         return None
     loc = get_location_by_id(loc_id)
     if loc and loc.get("category"):
         return loc["category"]
+    from app.config import settings as _cap_settings
+    if _cap_settings.location_capabilities_enabled:
+        from app.agent.location_caps import CAPABILITIES
+        # sorted: 今天只有 dining 带 category,排序保证将来加第二个带 category 的
+        # 能力时结果确定,不受 dict 顺序影响。
+        for cap in sorted(_declared_capabilities(loc, loc_id)):
+            spec = CAPABILITIES.get(cap)
+            if spec and spec.category:
+                return spec.category
     return "dining" if loc_id in _DINING_LOCATIONS else None
 
 
