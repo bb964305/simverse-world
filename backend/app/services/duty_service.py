@@ -538,18 +538,57 @@ async def _work_chronicle_editor(db, resident) -> str | None:
 
 
 async def _work_postman(db, resident) -> str | None:
-    """骆小舟:跑一趟投递——把到期的时间胶囊送到,并留一条投递记忆。"""
+    """骆小舟:跑一趟投递——把到期的时间胶囊送到,并留一条投递记忆。
+
+    P2 #5(DUTY_VENUE_ENABLED):闸开时多做两件事——解析「投递现场」(人是否站在提供
+    postal 能力的地点里),并给这条记忆写 metadata['duty'] = {key, at, delivered}
+    作为 M2 口径的数据源。**两个分支都写**:M2 的比值是 on_site / work_runs,只在
+    现场写会让分母塌成分子,比值恒 1.0、指标失效;不在现场时 at 为 None。
+
+    **投递本身与地点无关,这是硬约束**:deliver_due_capsules 的 WHERE 不带任何
+    location 条件(capsule_service.py:87),nightly_cron.py:173-179 的无条件兜底也原样
+    保留 —— 邮局是「投递现场」不是「准入条件」。不在现场 = 老行为、功能不减,只少了
+    现场叙事与统计标记;任何时刻把闸翻回 false 都不会让胶囊积压。
+
+    闸关 = 逐字节旧行为:不解析地点、不写 metadata、feed payload 不多键、记忆文本
+    走原字符串。
+    """
     delivered = 0
     try:
         from app.services.capsule_service import deliver_due_capsules
         delivered = await deliver_due_capsules(db)
     except Exception:
         logger.warning("postman capsule delivery failed", exc_info=True)
+
+    from app.config import settings
+    venue: str | None = None
+    if settings.duty_venue_enabled:
+        try:
+            venue = duty_venue_location_at(resident)
+        except Exception:
+            # 地点解析永远不能拖垮投递:胶囊已经送出去了。
+            logger.warning("postman venue resolve failed", exc_info=True)
+
+    if venue:
+        from app.agent.map_data import get_location_by_id
+        where = (get_location_by_id(venue) or {}).get("name") or "投递点"
+        note = (f"今天在{where}把 {delivered} 封到期的信分拣出来送走了,看着收信的人拆开,值了。"
+                if delivered else f"今天在{where}把该走的路线跑了一遍,没有迟到的信。")
+    else:
+        note = (f"今天送到了 {delivered} 封到期的信,看着收信的人拆开,值了。"
+                if delivered else "今天把该走的路线跑了一遍,没有迟到的信。")
+
+    metadata = None
+    if settings.duty_venue_enabled:
+        metadata = {"duty": {"key": "postman", "at": venue, "delivered": delivered}}
     from app.memory.service import MemoryService
-    note = (f"今天送到了 {delivered} 封到期的信,看着收信的人拆开,值了。"
-            if delivered else "今天把该走的路线跑了一遍,没有迟到的信。")
-    await MemoryService(db).add_memory(resident.id, "event", note, 0.5, "observation")
-    await _feed(resident.slug, "duty_output", {"duty": "postman", "delivered": delivered})
+    await MemoryService(db).add_memory(
+        resident.id, "event", note, 0.5, "observation", metadata_json=metadata)
+
+    payload = {"duty": "postman", "delivered": delivered}
+    if settings.duty_venue_enabled:
+        payload["at"] = venue
+    await _feed(resident.slug, "duty_output", payload)
     return f"{resident.name}跑完了今天的投递(送达 {delivered} 封)"
 
 

@@ -577,6 +577,19 @@ class Settings(BaseSettings):
     # 声明随代码先落地,与开闸分属不同批次(07-25 事故红线)。
     location_capabilities_enabled: bool = False
 
+    # --- P2 营生场所 (DUTY_VENUE_*) ---
+    # 营生的「现场」语义:邮差在提供 postal 能力的地点上工时走现场分支(写
+    # metadata['duty'] 供 M2 口径统计 + 现场叙事),并让 decide 在还没上工时先把人
+    # 导流过去。关 = 逐字节旧行为:投递照旧发生、记忆文本逐字相同、metadata 不写、
+    # feed payload 不多键、decide 零新分支。
+    # **投递的合法性与地点无关**:deliver_due_capsules 的 WHERE 与 nightly_cron 的
+    # 无条件兜底都不得因本闸改变(存量胶囊不得失效)。邮局是「投递现场」不是「准入
+    # 条件」,所以任何时刻把闸翻回去都不会让胶囊积压。
+    # 与 LOCATION_CAPABILITIES_ENABLED 无依赖关系:location_capabilities 与
+    # capability_location_at 都是不读闸的纯查询,那道闸只管 location_category 的能力
+    # 派生层与 RESEARCH/EAT 两个门。
+    duty_venue_enabled: bool = False
+
     # P2 Task 1 — relation write deltas (reused, zero new LLM calls) + decay.
     realism_rel_familiarity_chat: float = 0.05
     realism_rel_affinity_chat: float = 0.03      # ± by wrapup mood (positive/negative)
