@@ -19,7 +19,12 @@ from dataclasses import dataclass
 from functools import lru_cache
 from math import ceil
 
-from app.agent.map_data import LOCATIONS, get_location_id_at, get_valid_target_tile
+from app.agent.map_data import (
+    LOCATIONS,
+    get_location_id_at,
+    get_valid_target_tile,
+    outdoor_container_at,
+)
 from app.agent.pathfinder import (
     _load_collision_tiles,
     find_path,
@@ -315,10 +320,15 @@ def _semantic_open_tiles(physical_open: set[Tile]) -> set[Tile]:
 
 
 def _caravan_tile_allowed(tile: Tile) -> bool:
-    loc_id = get_location_id_at(*tile)
-    if loc_id is None:
+    """路面判据:地面(outdoor 容器)+ 集市大厅的装卸道,建筑一律不通。
+
+    刻意**不**走 get_location_id_at —— 那是「站在哪个地点」的语义,
+    LOCATION_SPECIFIC_FIRST_ENABLED 会改写它,而路面不该随之变。
+    """
+    if outdoor_container_at(*tile) is not None:
         return True
-    return loc_id == _MARKET_HALL_ID or LOCATIONS.get(loc_id, {}).get("type") == "outdoor"
+    loc_id = get_location_id_at(*tile)
+    return loc_id is None or loc_id == _MARKET_HALL_ID
 
 
 def _on_market_road(tile: Tile) -> bool:

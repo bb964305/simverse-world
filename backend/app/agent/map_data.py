@@ -322,6 +322,25 @@ def _find_location_in_bounds(x: int, y: int) -> tuple[str | None, dict | None]:
     return None, None
 
 
+def outdoor_container_at(x: int, y: int) -> str | None:
+    """只看 outdoor 街区的坐标反查:「这格属于哪块地面」。
+
+    与 ``get_location_id_at``(「站在哪个具体地点」)是两套语义,故意分开:
+    ``caravan_route._caravan_tile_allowed`` 判的是路面,不是地点。集市大道
+    (x∈[100,104]) 穿过 south_quarter,今天走廊安全全靠遮蔽 —— 具体性优先一开,
+    走廊里的新楼会把那几格翻成 public,路网当场断链。本函数永远只认 outdoor,
+    不读任何 flag,因此闸的两种状态下商队路网逐字节相同。
+    outdoor 只有 6 条,扫描比 28 条建筑更省。
+    """
+    for loc_id, loc in LOCATIONS.items():
+        if loc.get("type") != "outdoor":
+            continue
+        b = loc.get("bounds")
+        if b and len(b) == 4 and b[0] <= x <= b[2] and b[1] <= y <= b[3]:
+            return loc_id
+    return None
+
+
 def get_location_at(x: int, y: int) -> dict | None:
     """Return location dict if (x,y) falls within any location's bounds."""
     _, loc = _find_location_in_bounds(x, y)
