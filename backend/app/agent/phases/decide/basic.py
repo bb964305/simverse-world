@@ -116,6 +116,22 @@ class BasicDecidePlugin:
                 plan.status = "interrupted"
             return ctx
 
+        # ── P2 座位:_maybe_capability_errand ──────────────────────────
+        # 「按地点能力挑目的地」的规则分支要插在这里 —— crowd 之后、Case 2 之前,
+        # 做成 _maybe_crowd_draw 的同级 peer。
+        #   · 不能更靠下:三份出厂 YAML 全设 skip_decide_when_planned: true,下面的
+        #     Case 2 一旦有计划就无条件 return,插在它之后 = 死码。
+        #   · 不能更靠上:越过 _maybe_needs_action 就是复现 0809 生产死锁;
+        #     tests/test_realism_needs.py 的
+        #     test_critical_need_remains_ahead_of_market_pull 钉死这条排序。
+        #   · 不能越过 crowd:caravan cohort 是 gameplay 权威,不是装饰性效果。
+        # 命中后必须置 ctx.plan_followed = False 并把 plan.status 改成
+        # "interrupted"(照 :112-117),否则 tick.py:127-131 会把这次自由移动误判成
+        # planned_move 写进粘性行程。
+        # P1 只交付反查函数(map_data.capability_locations /
+        # nearest_capability_location);分支本体在 P2(实名 _maybe_duty_venue /
+        # _maybe_stage_draw)—— 没有真实消费者时它是无法做行为验证的死码。
+
         # Case 2 (E-09/E-10): plan-priority skip. Follow the plan without an LLM
         # call when nothing warrants reconsidering. force_plan_only (budget 95%+)
         # hard-disables interrupts — the breaker's rule-based fallback.

@@ -422,9 +422,73 @@ def capability_location_at(x: int, y: int, cap: str) -> str | None:
     return best_id
 
 
-def nearest_dining_location(from_tile: tuple[int, int]) -> str | None:
-    """Nearest dining-category location entrance to ``from_tile``."""
+def capability_locations(
+    cap: str, *, exclude_types: tuple[str, ...] = ("private", "apartment"),
+) -> list[str]:
+    """声明了 cap 的地点 id,按 LOCATIONS 插入序(静态在前、动态追加在尾)。
+
+    默认排除 private/apartment:把居民往别人家门口送不是导流。需要全量候选时显式传
+    exclude_types=() —— 这也是与旧 nearest_dining_location 对拍时的口径。
+    """
+    out: list[str] = []
+    for loc_id, loc in LOCATIONS.items():
+        if loc.get("type") in exclude_types:
+            continue
+        if cap in location_capabilities(loc_id):
+            out.append(loc_id)
+    return out
+
+
+def nearest_capability_location(
+    from_tile: tuple[int, int], cap: str, *,
+    exclude_types: tuple[str, ...] = ("private", "apartment"),
+) -> str | None:
+    """曼哈顿距离最近的 cap 地点入口。
+
+    实现体与 nearest_indoor_location 同构:entrance or center、abs(dx)+abs(dy)、
+    严格 <(并列取插入序先者)。闸开时多一层可达性过滤 —— 这是对既有缺陷的修复,
+    不是复制:不可达目标会让 _maybe_needs_action 把返回值当硬目标 → find_path 返
+    None → movement_failed_reason='unreachable' → status=idle → satiety 单调到 0
+    且每 tick 吃一格日行动配额,更远但可达的 cafe 永远轮不到。闸关时逐字节旧口径。
+    """
     best, best_d = None, None
+    from app.config import settings as _cap_settings
+    reachable = None
+    if _cap_settings.location_capabilities_enabled:
+        from app.agent import pathfinder
+        # 必须 get_reachable_tiles:get_walkable_tiles 被 _get_forced_walkable
+        # (pathfinder.py:60-68)无条件塞入每个地点的 entrance/center,会自证成功
+        # (实测生产 theater center walkable=True 而 reachable=False)。
+        # 惰性 import:pathfinder.py:9 在模块级 import map_data,反向必须惰性。
+        reachable = pathfinder.get_reachable_tiles()
+    for loc_id in capability_locations(cap, exclude_types=exclude_types):
+        loc = LOCATIONS.get(loc_id) or {}
+        entrance = loc.get("entrance") or loc.get("center")
+        if not entrance:
+            continue
+        if reachable is not None and tuple(entrance) not in reachable:
+            continue   # 不可达目标 = find_path 恒 None,satiety 危急者永久空转
+        d = abs(from_tile[0] - entrance[0]) + abs(from_tile[1] - entrance[1])
+        if best_d is None or d < best_d:
+            best, best_d = loc_id, d
+    return best
+
+
+def nearest_dining_location(from_tile: tuple[int, int]) -> str | None:
+    """Nearest dining-category location entrance to ``from_tile``.
+
+    闸开时委托能力反查:与 actions.py / decide 的 capability_location_at 同一份能力
+    口径 + 同一份可达性口径,否则「能不能吃」与「去哪吃」会分叉(location_category
+    是显式 category 键优先,location_capabilities 是取并集)。exclude_types=() 保留
+    旧语义 —— 旧实现不排除 private/apartment(与 nearest_indoor_location 不对称,
+    这是既有事实,不得顺手修)。
+    """
+    from app.config import settings as _cap_settings
+    if _cap_settings.location_capabilities_enabled:
+        from app.agent.location_caps import CAP_DINING
+        return nearest_capability_location(from_tile, CAP_DINING,
+                                           exclude_types=())
+    best, best_d = None, None      # ↓ 以下为原函数体，逐字保留
     for loc_id, loc in LOCATIONS.items():
         if location_category(loc_id) != "dining":
             continue

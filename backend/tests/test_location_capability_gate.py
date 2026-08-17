@@ -88,12 +88,18 @@ def test_capability_without_a_category_derives_nothing(
 
 def test_nearest_dining_location_picks_up_a_declared_diner_when_the_flag_is_on(
         temp_location, monkeypatch):
-    """「顺着 category 长」的红利:nearest_dining_location 一行不改就认新声明。"""
+    """「顺着 category 长」的红利:nearest_dining_location 认新声明。
+
+    坐标必须落在可达域内(实测 (60,60) 与 town hub 连通):P1-S8 起闸开的
+    nearest_dining_location 委托 nearest_capability_location,后者会过滤掉不在
+    pathfinder.get_reachable_tiles() 里的入口 —— 原来的 (1,1) 在 walkable 域
+    (x≥14)之外,只靠 forced-walkable 自证成功,是个孤岛目标。
+    """
     from app.agent.map_data import nearest_dining_location
-    temp_location("t_near", {"bounds": (0, 0, 2, 2), "center": (1, 1),
-                            "entrance": (1, 1),
+    temp_location("t_near", {"bounds": (58, 58, 62, 62), "center": (60, 60),
+                            "entrance": (60, 60),
                             "capabilities": {CAP_DINING: {}}})
     monkeypatch.setattr(settings, "location_capabilities_enabled", False)
-    assert nearest_dining_location((1, 1)) in _DINING_LOCATIONS
+    assert nearest_dining_location((60, 60)) in _DINING_LOCATIONS
     monkeypatch.setattr(settings, "location_capabilities_enabled", True)
-    assert nearest_dining_location((1, 1)) == "t_near"
+    assert nearest_dining_location((60, 60)) == "t_near"
