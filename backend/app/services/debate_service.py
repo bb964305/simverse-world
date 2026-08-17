@@ -17,6 +17,7 @@ cached ``pool_a``/``pool_b`` counters, so a lost counter update can never
 mint or destroy coins.
 """
 
+import hashlib
 import logging
 from datetime import datetime, timedelta, UTC
 
@@ -32,6 +33,16 @@ STAKE_MIN = 10
 STAKE_MAX = 200
 BURN_RATE = 0.05  # 5% of the losing pool is burned on payout
 ROUNDS = 6
+
+#: 观众收益的人数上限。关系 bump 是两两 O(n²)(8 人 = 28 次带 commit 的 UPDATE),
+#: 但这条路径每场辩论只在 settle 时跑一次、不在 tick 热路径上,所以不需要
+#: market_day_crowd_cohort 那套 TTL 缓存 + 单飞锁。
+AUDIENCE_LIMIT = 8
+
+#: 反查场地时扫描的 script 事件行数上限。script 事件只有两个产地(#7 的 live 辩论、
+#: #8 的公开课),而 settle 发生在 run_live 之后 debate_vote_window_min 内,目标行
+#: 必在最新的一批里。上限存在只是为了让这条查询恒定代价。
+_VENUE_SCAN_LIMIT = 200
 
 _VOTERS_KEY = "sv:debate_voters:{id}"
 
@@ -581,3 +592,83 @@ async def _resident_aftermath(db, d: Debate, winner: str) -> None:
 # --------------------------------------------------------------------------- #
 async def _resident(db, slug: str) -> Resident | None:
     return (await db.execute(select(Resident).where(Resident.slug == slug))).scalar_one_or_none()
+
+
+def _stable_audience_rank(seed: str, resident_id: str) -> bytes:
+    """稳定排序键(照 crowd_service._stable_rank 的形状)。
+
+    按 id 直接排序会让同几个人永远占满 8 个名额;按 seed(= debate id)加盐后,
+    每场辩论的截断名单不同,但同一场重跑恒等 —— settle 幂等要求它是纯函数。
+    """
+    return hashlib.sha256(f"{seed}\x1f{resident_id}".encode("utf-8")).digest()
+
+
+async def stage_venue_of(db, debate_id: str) -> str | None:
+    """这场辩论的剧院地点 id;没有场地信息则 None(= 今天每一场辩论的形态)。
+
+    Debate 模型没有 location 列,本批次不动 schema(红线:迁移与行为变更不得同一次
+    变更)。地点走已有的 WorldEvent 通道,payload 契约由 design_P2.md §②-a 定:
+    ``type="script"`` + ``payload_json={"location_id": venue, "debate_id": id}``。
+
+    payload 的过滤放在 Python 侧而不是 SQL:world_events.payload_json 是
+    ``sa.JSON()``(PG 上是 json 不是 jsonb),而测试库是 sqlite(JSON 运算符不可用)。
+    drive_due_debates 的时间判据同样是 Python 侧过滤,口径一致。
+
+    location_id 的读取经 resolve_event_location_id,与 crowd_service.
+    active_event_location 同一个解析器 —— 否则「人流拉去哪」与「观众算在哪」会分叉。
+    """
+    from app.models.world_event import WorldEvent
+    from app.services.event_location import resolve_event_location_id
+
+    rows = (await db.execute(
+        select(WorldEvent)
+        .where(WorldEvent.type == "script")
+        .order_by(WorldEvent.created_at.desc())
+        .limit(_VENUE_SCAN_LIMIT)
+    )).scalars().all()
+    for ev in rows:
+        payload = ev.payload_json or {}
+        if payload.get("debate_id") != debate_id:
+            continue
+        loc = resolve_event_location_id(payload)
+        return loc if isinstance(loc, str) and loc else None
+    return None
+
+
+async def stage_audience(
+    db, venue: str, *, seed: str, exclude_slugs: tuple[str, ...] = (),
+) -> list[Resident]:
+    """此刻站在 venue 里的清醒自治 sim 居民,至多 AUDIENCE_LIMIT 人。
+
+    「在不在场」用 map_data.capability_location_at 而**不是** get_location_id_at:
+    后者首命中即返,命中序 = dict 插入序 = 静态在前、动态追加在尾,而
+    theater(172,40,178,50) 完全落在 outdoor 街区 east_gardens(140,35,179,58) 内部
+    —— 生产实测 get_location_id_at(175,45) 返 "east_gardens"。照粗查写,观众名单恒
+    为空、观众收益静默失效且零告警。
+
+    存量 dynamic_locations 行没有 capabilities 键 → 归一成空 dict → 恒返空名单 →
+    调用方走老行为。缺省安全,回填前后都不炸。
+
+    候选集与 crowd_service.market_day_crowd_cohort 同源:autonomous +
+    resident_type ∈ {npc, resident}。UGC 角色(resident_type="character")不进名单
+    —— 观众收益写的是 needs/关系,不该落到非 sim 身份上。只有 sleeping 被排除:
+    cohort 那边还挡 chatting/socializing 是因为它要把人**拉走**,而在场观众正在场
+    内说话恰恰是看戏的常态。
+    """
+    from app.agent.location_caps import CAP_STAGE
+    from app.agent.map_data import capability_location_at
+
+    rows = (await db.execute(
+        select(Resident).where(
+            Resident.is_autonomous,
+            Resident.resident_type.in_(["npc", "resident"]),
+            Resident.status.not_in(["sleeping"]),
+        )
+    )).scalars().all()
+    present = [
+        r for r in rows
+        if r.slug not in exclude_slugs
+        and capability_location_at(r.tile_x or 0, r.tile_y or 0, CAP_STAGE) == venue
+    ]
+    present.sort(key=lambda r: _stable_audience_rank(seed, str(r.id)))
+    return present[:AUDIENCE_LIMIT]
