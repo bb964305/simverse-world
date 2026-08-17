@@ -17,6 +17,7 @@ cached ``pool_a``/``pool_b`` counters, so a lost counter update can never
 mint or destroy coins.
 """
 
+import hashlib
 import logging
 from datetime import datetime, timedelta, UTC
 
@@ -33,6 +34,26 @@ STAKE_MAX = 200
 BURN_RATE = 0.05  # 5% of the losing pool is burned on payout
 ROUNDS = 6
 
+#: 观众收益的人数上限。关系 bump 是两两 O(n²)(8 人 = 28 次带 commit 的 UPDATE),
+#: 但这条路径每场辩论只在 settle 时跑一次、不在 tick 热路径上,所以不需要
+#: market_day_crowd_cohort 那套 TTL 缓存 + 单飞锁。
+AUDIENCE_LIMIT = 8
+
+#: 观众的四层收益系数。全部是既有系统的既有量纲,没有一项是货币:
+#: importance 照 _resident_aftermath 里辩手的 0.7/0.6 降一档(design §②-c ≈0.5);
+#: 心情照赢家的 +0.3/+0.1 降一档;social 是 needs 的 [0,1] 标度;
+#: familiarity 是 relation_service 的 [0,1] 标度。
+AUDIENCE_MEMORY_IMPORTANCE = 0.5
+AUDIENCE_MOOD_VALENCE = 0.1
+AUDIENCE_MOOD_AROUSAL = 0.05
+AUDIENCE_SOCIAL_RESTORE = 0.15
+AUDIENCE_FAMILIARITY = 0.02
+
+#: 反查场地时扫描的 script 事件行数上限。script 事件只有两个产地(#7 的 live 辩论、
+#: #8 的公开课),而 settle 发生在 run_live 之后 debate_vote_window_min 内,目标行
+#: 必在最新的一批里。上限存在只是为了让这条查询恒定代价。
+_VENUE_SCAN_LIMIT = 200
+
 _VOTERS_KEY = "sv:debate_voters:{id}"
 
 #: run_live 把辩论推进到 voting 的真实时刻。debates 表没有相位时间列，而本
@@ -43,6 +64,16 @@ _VOTERS_KEY = "sv:debate_voters:{id}"
 #: starts_at 推算，退化成保守结算而不是卡死。
 _VOTING_SINCE_KEY = "sv:debate_voting_since:{id}"
 _VOTING_SINCE_TTL = 7 * 86400
+
+#: 辩论的上演场地。debates 表 13 列无 location,而本批次不动 schema(红线:迁移与
+#: 行为变更不得同一次变更),所以 create_debate 收到的 venue 走 Redis 传给 run_live
+#: —— 与上面 _VOTING_SINCE_KEY 同一条思路、同一个失败姿势。
+#: 读不到 = **不建事件**(fail-closed),绝不臆造场地:announced → live 只隔
+#: debate_stake_window_min(默认 30 分钟),要在这个窗口里丢 Redis 才会漏掉一场的
+#: 人流拉力,代价上限是一场辩论没观众;而回落到「随便挑一个 stage 地点」会把全镇
+#: 往错的楼里拉。
+_VENUE_KEY = "sv:debate_venue:{id}"
+_VENUE_TTL = 7 * 86400
 
 DEBATE_SYSTEM = (
     "你正在参加一场辩论擂台。你要为自己的立场辩护，语气鲜明、有理有据，"
@@ -57,11 +88,16 @@ class DebateError(Exception):
 # --------------------------------------------------------------------------- #
 # Setup / staking                                                             #
 # --------------------------------------------------------------------------- #
-async def create_debate(db, topic: str, a_slug: str, b_slug: str) -> Debate:
+async def create_debate(db, topic: str, a_slug: str, b_slug: str,
+                        *, venue: str | None = None) -> Debate:
     d = Debate(topic=topic, resident_a_slug=a_slug, resident_b_slug=b_slug, status="announced")
     db.add(d)
     await db.commit()
     await db.refresh(d)
+    # P2 #7:上演场地。venue 为 None(今天所有调用方的默认)时整段跳过,与改前逐字节
+    # 相同。场地不进 schema —— 见 _VENUE_KEY 的说明。
+    if venue:
+        await _remember_venue(d.id, venue)
     # S1-3: seed opposing issue stances for the two debaters. `announced` is
     # the reliable first-hand signal — the debate lifecycle stops here today
     # (no live/settle driver in app code). Best-effort + gated: an opinion
@@ -74,6 +110,45 @@ async def create_debate(db, topic: str, a_slug: str, b_slug: str) -> Debate:
     except Exception:
         logger.warning("opinion seed from create_debate failed", exc_info=True)
     return d
+
+
+async def _remember_venue(debate_id: str, venue: str) -> None:
+    """记下这场辩论的上演场地。只有声明了 stage 能力的地点才算数。
+
+    校验放在写入侧:写入侧知道调用方是谁(civic_service 的公开课链),读取侧只拿得到
+    一个字符串。地点没声明 stage 就当没给场地 —— 存量 dynamic_locations 行没有
+    capabilities 键时天然走这条路,缺省安全。
+    """
+    from app.agent.location_caps import CAP_STAGE
+    from app.agent.map_data import has_capability
+    if not has_capability(venue, CAP_STAGE):
+        logger.debug("debate venue %r does not declare stage; ignored", venue)
+        return
+    try:
+        from app.redis_client import get_redis
+        await get_redis().set(_VENUE_KEY.format(id=debate_id), venue, ex=_VENUE_TTL)
+    except Exception:
+        # 场地是叙事装饰;辩论本体(玩家能押注的那个对象)不能因它建不出来。
+        logger.warning("debate venue mark failed for %s", debate_id, exc_info=True)
+
+
+async def _debate_venue(debate_id: str) -> str | None:
+    """读回上演场地;没记过 / 读不出来 / 地点已不再声明 stage → None。
+
+    读取侧**再校验一次**:Redis 里的值可能是几天前写的,而能力声明是公投随时能改的
+    数据。两侧都判,任一侧不成立就退化成「没有场地」= 今天的行为。
+    """
+    try:
+        from app.redis_client import get_redis
+        raw = await get_redis().get(_VENUE_KEY.format(id=debate_id))
+    except Exception:
+        logger.warning("debate venue read failed for %s", debate_id, exc_info=True)
+        return None
+    if not raw:
+        return None
+    from app.agent.location_caps import CAP_STAGE
+    from app.agent.map_data import has_capability
+    return raw if has_capability(raw, CAP_STAGE) else None
 
 
 async def stake(db, debate_id: str, user_id: str, side: str, amount: int) -> DebateStake:
@@ -209,8 +284,69 @@ async def run_live(db, debate: Debate) -> Debate:
 
     debate.status = "voting"
     await db.commit()
+    # P2 #7:开票的同一刻在场地挂一条 type="script" 的世界事件(见下)。
+    await _maybe_open_stage_event(db, debate, res_a, res_b)
     await manager.broadcast({"type": "debate_voting_open", "debate_id": debate.id})
     return debate
+
+
+async def _maybe_open_stage_event(db, debate: Debate, res_a, res_b) -> None:
+    """把这场辩论挂成场地上的一条 ``type="script"`` 世界事件(STAGE_EVENT_ENABLED)。
+
+    **为什么是 "script" 而不是 "news"**:``crowd_service._EVENT_TYPES_WITH_CROWD``
+    是 ``("festival", "script")``(crowd_service.py:28),"news" 不在里面 —— 学院
+    公开课十五天零到访正是栽在这上面。用 "script" 零改动即获得 ``festival_draw_target``
+    的 ×``realism_festival_weight`` 人流拉力(crowd_service.py:207-219),并自动进入
+    所有居民的 decide prompt(``get_active_events_cached`` → ``ctx.world_events``)。
+    ``WorldEvent.type`` 是 ``String(20)`` 自由文本(models/world_event.py:26),不是
+    闭集;``lab/protocol.py:73`` 的那个闭集是 lab 事件总线,与 world_events 表无关。
+
+    **为什么挂在开票这一刻,而不是设计写的「进入 live 之后」**:live 段任何一轮 LLM
+    失败都会走 ``_auto_draw_refund`` 并 return(见上),那条路上这场辩论当场 settled
+    —— 在进入 live 时建事件就会留下一条指着死辩论、还要拉三倍人流一小时的幽灵事件,
+    还得再写一段补偿清理。挂在开票这一刻在同一条成功路径上,墙钟只差六轮 LLM(数十
+    秒),而 ``ends_at`` 取 ``debate_vote_window_min`` 本来就该从「投票开始」量起 ——
+    这也正是 ``drive_due_debates`` 打 ``_mark_voting_since`` 的同一刻(:337-341)。
+
+    全程 best-effort:世界事件是叙事装饰,建不出来绝不能把一场已经跑完六轮的辩论
+    拖进 auto-draw 退款。
+    """
+    from app.config import settings
+    if not settings.stage_event_enabled:
+        return
+    try:
+        venue = await _debate_venue(debate.id)
+        if not venue:
+            return
+        from app.agent.map_data import get_location_by_id
+        from app.models.world_event import WorldEvent
+        place = (get_location_by_id(venue) or {}).get("name") or "剧院"
+        a_name = res_a.name if res_a else "正方"
+        b_name = res_b.name if res_b else "反方"
+        now = datetime.now(UTC)
+        db.add(WorldEvent(
+            type="script",
+            # WorldEvent.title 是 String(200),Debate.topic 是 String(300)——
+            # 真 PG 上不截断就是一条 StringDataRightTruncation。
+            title=f"{place}辩论 · {debate.topic}"[:200],
+            description=(f"{a_name}与{b_name}正在{place}辩论「{debate.topic}」，"
+                         f"居民们可以去{place}旁听、议论。"),
+            payload_json={"location_id": venue, "debate_id": debate.id},
+            starts_at=now,
+            ends_at=now + timedelta(minutes=settings.debate_vote_window_min),
+            # 与 script_service.fire_due_scripts(:79-86)同姿势:realism 开时留给
+            # event_cron 的 flip 去激活,好让 start 相位的广播与集体记忆照常发生。
+            is_active=(False if settings.realism_enabled else True),
+        ))
+        await db.commit()
+    except Exception:
+        logger.warning("stage event for debate %s failed", debate.id, exc_info=True)
+        # 半截写入不回滚的话,PendingRollbackError 会顺着这条共享 session 传染给
+        # drive_due_debates 的下一场辩论(同 event_cron.py:69-77 踩过的坑)。
+        try:
+            await db.rollback()
+        except Exception:
+            logger.warning("stage event rollback itself failed", exc_info=True)
 
 
 async def _auto_draw_refund(db, debate: Debate) -> None:
@@ -459,6 +595,25 @@ async def _resident_aftermath(db, d: Debate, winner: str) -> None:
             await OpinionService(db).update_from_debate(d, seed_only=False)
     except Exception:
         logger.warning("opinion update from settle failed", exc_info=True)
+    # P2 #10:在场观众的收益。全部落在「记忆/心情/社交需求/关系」四个**非货币**
+    # 层 —— settle 已经有一条真金链路(stake 时 charge 已扣走玩家的币 :99,settle
+    # 只做重分配:distributable=int(loser_pool*0.95)、burn=loser_pool-distributable
+    # :396-414),出账恒 ≤ 入账、净销毁 burn+取整余数,是净 sink 不是铸币口。给观众
+    # 发 SC 就是开第二条铸币口且无对应 sink,并与 settle 分账双花。这里一枚不动。
+    #
+    # 跑在 settle 的 await db.commit()(:405)之后,辩论早已 settled;异常自吞并
+    # rollback,既不回染 M7 的生命周期护栏,也不把中断的事务留给上面的
+    # opinion_service(照 execute/basic.py:99-103 _charge_meal 的形状)。
+    try:
+        from app.config import settings
+        if settings.stage_event_enabled:
+            await _audience_aftermath(db, d, winner)
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        logger.warning("debate audience aftermath failed", exc_info=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -466,3 +621,139 @@ async def _resident_aftermath(db, d: Debate, winner: str) -> None:
 # --------------------------------------------------------------------------- #
 async def _resident(db, slug: str) -> Resident | None:
     return (await db.execute(select(Resident).where(Resident.slug == slug))).scalar_one_or_none()
+
+
+def _stable_audience_rank(seed: str, resident_id: str) -> bytes:
+    """稳定排序键(照 crowd_service._stable_rank 的形状)。
+
+    按 id 直接排序会让同几个人永远占满 8 个名额;按 seed(= debate id)加盐后,
+    每场辩论的截断名单不同,但同一场重跑恒等 —— settle 幂等要求它是纯函数。
+    """
+    return hashlib.sha256(f"{seed}\x1f{resident_id}".encode("utf-8")).digest()
+
+
+async def stage_venue_of(db, debate_id: str) -> str | None:
+    """这场辩论的剧院地点 id;没有场地信息则 None(= 今天每一场辩论的形态)。
+
+    Debate 模型没有 location 列,本批次不动 schema(红线:迁移与行为变更不得同一次
+    变更)。地点走已有的 WorldEvent 通道,payload 契约由 design_P2.md §②-a 定:
+    ``type="script"`` + ``payload_json={"location_id": venue, "debate_id": id}``。
+
+    payload 的过滤放在 Python 侧而不是 SQL:world_events.payload_json 是
+    ``sa.JSON()``(PG 上是 json 不是 jsonb),而测试库是 sqlite(JSON 运算符不可用)。
+    drive_due_debates 的时间判据同样是 Python 侧过滤,口径一致。
+
+    location_id 的读取经 resolve_event_location_id,与 crowd_service.
+    active_event_location 同一个解析器 —— 否则「人流拉去哪」与「观众算在哪」会分叉。
+    """
+    from app.models.world_event import WorldEvent
+    from app.services.event_location import resolve_event_location_id
+
+    rows = (await db.execute(
+        select(WorldEvent)
+        .where(WorldEvent.type == "script")
+        .order_by(WorldEvent.created_at.desc())
+        .limit(_VENUE_SCAN_LIMIT)
+    )).scalars().all()
+    for ev in rows:
+        payload = ev.payload_json or {}
+        if payload.get("debate_id") != debate_id:
+            continue
+        loc = resolve_event_location_id(payload)
+        return loc if isinstance(loc, str) and loc else None
+    return None
+
+
+async def stage_audience(
+    db, venue: str, *, seed: str, exclude_slugs: tuple[str, ...] = (),
+) -> list[Resident]:
+    """此刻站在 venue 里的清醒自治 sim 居民,至多 AUDIENCE_LIMIT 人。
+
+    「在不在场」用 map_data.capability_location_at 而**不是** get_location_id_at:
+    后者首命中即返,命中序 = dict 插入序 = 静态在前、动态追加在尾,而
+    theater(172,40,178,50) 完全落在 outdoor 街区 east_gardens(140,35,179,58) 内部
+    —— 生产实测 get_location_id_at(175,45) 返 "east_gardens"。照粗查写,观众名单恒
+    为空、观众收益静默失效且零告警。
+
+    存量 dynamic_locations 行没有 capabilities 键 → 归一成空 dict → 恒返空名单 →
+    调用方走老行为。缺省安全,回填前后都不炸。
+
+    候选集与 crowd_service.market_day_crowd_cohort 同源:autonomous +
+    resident_type ∈ {npc, resident}。UGC 角色(resident_type="character")不进名单
+    —— 观众收益写的是 needs/关系,不该落到非 sim 身份上。只有 sleeping 被排除:
+    cohort 那边还挡 chatting/socializing 是因为它要把人**拉走**,而在场观众正在场
+    内说话恰恰是看戏的常态。
+    """
+    from app.agent.location_caps import CAP_STAGE
+    from app.agent.map_data import capability_location_at
+
+    rows = (await db.execute(
+        select(Resident).where(
+            Resident.is_autonomous,
+            Resident.resident_type.in_(["npc", "resident"]),
+            Resident.status.not_in(["sleeping"]),
+        )
+    )).scalars().all()
+    present = [
+        r for r in rows
+        if r.slug not in exclude_slugs
+        and capability_location_at(r.tile_x or 0, r.tile_y or 0, CAP_STAGE) == venue
+    ]
+    present.sort(key=lambda r: _stable_audience_rank(seed, str(r.id)))
+    return present[:AUDIENCE_LIMIT]
+
+
+async def _audience_aftermath(db, d: Debate, winner: str) -> None:
+    """在场观众的非货币收益:记忆 / 心情 / 社交需求 / 关系。**零 SC 流动**。
+
+    social 是这四层里最该给的一项:needs.social 恢复会改变 most_critical
+    (needs.py:65)与 _crowd_hint(decide/basic.py:410),直接治动机侧 —— 看了一场热闹
+    的辩论就该不那么孤独。needs 写入额外挂 realism_enabled:needs 体系本来就归
+    realism,闸关的世界不该凭空多出 meta_json["needs"]。
+
+    write_needs 不 commit(needs.py:29-34)且必须整体重赋 meta_json 才触发
+    SQLAlchemy 脏检测 —— 所以整批写完统一 commit 一次。
+    """
+    venue = await stage_venue_of(db, d.id)
+    if not venue:
+        return
+    audience = await stage_audience(
+        db, venue, seed=d.id,
+        exclude_slugs=(d.resident_a_slug, d.resident_b_slug),
+    )
+    if not audience:
+        return
+
+    from app.agent.map_data import get_location_by_id
+    from app.config import settings
+    from app.memory.service import MemoryService
+    from app.services.mood_service import apply_mood_event
+    from app.services.relation_service import bump
+
+    venue_name = (get_location_by_id(venue) or {}).get("name") or venue
+    win_slug = d.resident_a_slug if winner == "a" else d.resident_b_slug
+    win_res = await _resident(db, win_slug)
+    win_name = win_res.name if win_res else ("正方" if winner == "a" else "反方")
+
+    mem = MemoryService(db)
+    for r in audience:
+        await mem.add_memory(
+            r.id, "event",
+            f"我在{venue_name}看完了辩论「{d.topic}」,{win_name}赢了。",
+            importance=AUDIENCE_MEMORY_IMPORTANCE, source="debate")
+        # 已经拿到 ORM 对象,用 apply_mood_event 而不是 ..._by_id,省一次 db.get。
+        await apply_mood_event(db, r, AUDIENCE_MOOD_VALENCE, AUDIENCE_MOOD_AROUSAL)
+
+    if settings.realism_enabled:
+        from app.agent.needs import get_needs, write_needs
+        for r in audience:
+            needs = get_needs(r)
+            needs["social"] = min(1.0, needs["social"] + AUDIENCE_SOCIAL_RESTORE)
+            write_needs(r, needs)
+        await db.commit()
+
+    # 同场观众两两加熟。O(n²) 但 n ≤ AUDIENCE_LIMIT(8 → 28 次),且每场辩论只在
+    # settle 时跑一次,不在 tick 热路径上。
+    for i, r1 in enumerate(audience):
+        for r2 in audience[i + 1:]:
+            await bump(db, r1.id, r2.id, AUDIENCE_FAMILIARITY, 0.0)

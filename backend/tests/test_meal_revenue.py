@@ -16,13 +16,14 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.agent.map_data import LOCATIONS
 from app.agent.phases.execute.basic import _charge_meal
 from app.config import settings
 from app.database import Base
 from app.models.memory import Memory
 from app.models.resident import Resident
 from app.models.resident_treasury import ResidentTreasury
-from app.services import coin_service, relation_service
+from app.services import coin_service, relation_service, treasury_service
 
 pytestmark = pytest.mark.anyio
 
@@ -30,6 +31,7 @@ pytestmark = pytest.mark.anyio
 CAFE_TILE = (57, 20)
 TAVERN_TILE = (75, 20)
 SQUARE_TILE = (100, 40)  # 非 dining —— location_category 返 None
+CANTEEN_TILE = (4, 4)    # 地图西北角空地 —— 任何既有地点的 bounds 都不覆盖
 
 
 @pytest.fixture
@@ -274,3 +276,80 @@ async def test_transfer_blowup_rolls_back_and_stays_fail_open(sessions, trade_on
     assert await _balance(sessions, "diner") == 10
     assert await _balance(sessions, "lin") == 0
     assert feed_pushes == []
+
+
+# --------------------------------------------------------------------------- #
+# 7. P1-S7 守恒:餐费要么转给店主,要么进镇库 —— 一分都不许蒸发                   #
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def caps_on(monkeypatch):
+    """P1 能力闸 + 镇库闸(镇库是守恒去向的对手方,两道都得开才有 tax 路径)。"""
+    monkeypatch.setattr(settings, "location_capabilities_enabled", True)
+    monkeypatch.setattr(settings, "town_treasury_enabled", True)
+    return settings
+
+
+@pytest.fixture
+def canteen():
+    """第三个 dining 地点:声明了 dining 却没写 host_duty —— 今天生产里不存在,
+    所以旧代码那条「静默错付给 tavern_hub」的分支不可达。"""
+    slug = "t_canteen_revenue"
+    assert slug not in LOCATIONS, slug
+    LOCATIONS[slug] = {"name": "临时食堂", "type": "public",
+                       "bounds": (2, 2, 6, 6), "center": CANTEEN_TILE,
+                       "entrance": CANTEEN_TILE,
+                       "capabilities": {"dining": {}}}
+    yield slug
+    LOCATIONS.pop(slug, None)
+
+
+async def _total_sc(sessions) -> int:
+    """闭环货币总量 = 全体居民钱包 + 镇库。新 session 重读,只认已落库的钱。"""
+    async with sessions() as db:
+        wallets = sum(
+            (await db.execute(select(ResidentTreasury.balance_sc))).scalars().all())
+        return wallets + await treasury_service.balance(db)
+
+
+async def test_meal_to_the_host_conserves_the_money_supply(sessions, trade_on,
+                                                           caps_on, feed_pushes):
+    """闸开 + 店主在岗:转账守恒,总量逐分不变(treasury_transfer 有对手方)。"""
+    await _seed(
+        sessions,
+        [_res("id-lin-0001", "lin", "林晚秋", "cafe_host"),
+         _res("id-diner-001", "diner", "食客")],
+        diner=10,
+    )
+    before = await _total_sc(sessions)
+
+    await _eat(sessions, "diner")
+
+    cost = settings.npc_meal_cost_sc
+    assert await _total_sc(sessions) == before == 10
+    assert await _balance(sessions, "diner") == 10 - cost
+    assert await _balance(sessions, "lin") == cost
+    async with sessions() as db:
+        assert await treasury_service.balance(db) == 0   # 没走镇库
+
+
+async def test_meal_without_host_duty_goes_to_the_town_not_the_void(
+        sessions, trade_on, caps_on, canteen, feed_pushes):
+    """闸开 + 没写 host_duty:餐费进镇库 —— treasury_debit 是纯销毁,不许走那条。"""
+    await _seed(
+        sessions,
+        [_res("id-diner-001", "diner", "食客", tile=CANTEEN_TILE,
+              district="canteen")],
+        diner=10,
+    )
+    before = await _total_sc(sessions)
+
+    await _eat(sessions, "diner")
+
+    cost = settings.npc_meal_cost_sc
+    assert await _balance(sessions, "diner") == 10 - cost
+    async with sessions() as db:
+        assert await treasury_service.balance(db) == cost  # 进了镇库,不是蒸发
+    assert await _total_sc(sessions) == before == 10       # 总量逐分守恒
+    assert await _wallet(sessions, "diner") == 10 - cost
+    assert feed_pushes == []                               # 没有店主就没有营收 feed

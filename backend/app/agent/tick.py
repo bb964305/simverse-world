@@ -10,6 +10,7 @@ from app.agent.schemas import TickContext, get_world_time
 from app.config import settings
 from app.models.resident import Resident
 from app.redis_client import get_redis
+from app.services.event_location import MARKET_HALL_LOCATION_ID
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +160,7 @@ async def resident_tick(
                             "plan_date": world_date_key(),
                             "plan_slot": 0,
                             "plan_hour_range": [0, 24],
-                            "location": "market_hall",
+                            "location": MARKET_HALL_LOCATION_ID,
                             "importance": 3,
                             "reason": "去集市购买商队货物",
                         })

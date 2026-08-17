@@ -65,6 +65,12 @@ CIVIC_FACTS_FAILOPEN = Counter(
     ["reason"],
 )
 
+CIVIC_EFFECT_APPLIED = Counter(
+    "civic_effect_applied_total",
+    "Civic poll outcomes landed through _execute_outcome, by type and result",
+    ["etype", "result"],
+)
+
 # --- Runtime gauges (wired lazily to avoid import cycles) --------------------
 
 WS_ONLINE_LOCAL = Gauge(

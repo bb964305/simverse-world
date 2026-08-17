@@ -22,7 +22,10 @@ import logging
 import time
 
 from app.config import settings
-from app.agent.map_data import LOCATIONS, get_location_id_at
+from app.agent.location_caps import CAP_STAGE
+from app.agent.map_data import (
+    LOCATIONS, get_location_id_at, location_capabilities,
+)
 from app.services.event_location import resolve_event_location_id
 
 _EVENT_TYPES_WITH_CROWD = ("festival", "script")
@@ -42,6 +45,15 @@ _market_cohort_cache: dict[
 ] = {}
 _market_cohort_lock = asyncio.Lock()
 
+# 舞台观众名单:与集市名单**分开**的缓存与单飞锁。共用锁会让两条人流互相排队,
+# 共用缓存会让两种键互相驱逐(下面那个 >8 的裁剪是按时间戳挑最老的)。
+STAGE_EVENT_CROWD_LIMIT = 6
+STAGE_EVENT_COHORT_TTL_SECONDS = 20.0
+_stage_cohort_cache: dict[
+    tuple[str, str, str, str], tuple[float, frozenset[str]]
+] = {}
+_stage_cohort_lock = asyncio.Lock()
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,13 +65,15 @@ def invalidate_market_day_cohort(world_event_id: str) -> None:
 
 
 def _reset_for_tests() -> None:  # pragma: no cover - test hook
-    global _market_cohort_lock
+    global _market_cohort_lock, _stage_cohort_lock
     _counts_cache["ts"] = -1e9
     _counts_cache["data"] = {}
     _market_cohort_cache.clear()
+    _stage_cohort_cache.clear()
     # Tests may use a fresh event loop per case. Production keeps one loop, but
     # replacing this test-only lock avoids retaining a lock from an old loop.
     _market_cohort_lock = asyncio.Lock()
+    _stage_cohort_lock = asyncio.Lock()
 
 
 def active_event_location(world_events) -> str | None:
@@ -99,9 +113,167 @@ def active_market_day_id(world_events) -> str | None:
     return key[0] if key is not None else None
 
 
-def _stable_market_rank(event_key: tuple[str, str, str], resident_id: str) -> bytes:
-    material = "\x1f".join((*event_key, resident_id)).encode("utf-8")
+def _stable_rank(parts: tuple[str, ...], resident_id: str) -> bytes:
+    """每个 (事件, 居民) 对的确定性排序材料。
+
+    集市与舞台两条 cohort 共用同一条哈希规则:同一场事件在任何进程、任何重启后都选
+    出同一批人(名单不能随 PYTHONHASHSEED 漂),这是 cohort 能被缓存与复算的前提。
+    """
+    material = "\x1f".join((*parts, resident_id)).encode("utf-8")
     return hashlib.sha256(material).digest()
+
+
+def _stable_market_rank(event_key: tuple[str, str, str], resident_id: str) -> bytes:
+    return _stable_rank(event_key, resident_id)
+
+
+# ── P2 #9 舞台事件 (stage event) ──────────────────────────────────────
+# 「哪场事件算演出」= 事件类型 ∈ _EVENT_TYPES_WITH_CROWD;「演在哪」= 事件 payload
+# 指的那栋楼自己声明了 stage 能力。场地资格**不看在场人数、也不看 slug 字面量** ——
+# 这正是 design_P2.md §③ 路 B「地点吸引力与在场人数解耦」的机器表述:拉力全部来自
+# 事件 + 能力声明,actions.py 的 CHAT_RESIDENT 判据一个字不改。
+
+
+def _stage_venue_is_reachable(venue: str) -> bool:
+    """该场地的目的地 tile 是否与镇区连通。
+
+    必须用 get_reachable_tiles 而不是 get_walkable_tiles:后者被
+    pathfinder._get_forced_walkable(:60-68)无边界检查地塞进每个地点的 entrance 与
+    center,会自证成功(实测 theater center(175,45)walkable=True / reachable=False)。
+    孤岛场地一旦被认下,名单里的人会每 tick 走一条 find_path 恒返 None 的路线 ——
+    arrivals 永远 0,而每 tick 照吃一格日行动 cap。
+
+    fail-**closed**:探测异常时返回 False(不认场地、不导流)。宁可少一场戏,也不能把
+    人往走不到的地方赶。剧院 bounds 越界的修复归 P3-c(独立迁移批次),本函数是它落地
+    前的自保,不是它的替代品。
+    """
+    from app.agent.map_data import get_valid_target_tile
+    from app.agent.pathfinder import get_reachable_tiles
+    try:
+        tile = get_valid_target_tile(venue)
+        if not tile:
+            return False
+        return (int(tile[0]), int(tile[1])) in get_reachable_tiles()
+    except Exception:
+        logger.warning("stage venue reachability probe failed: %s", venue,
+                       exc_info=True)
+        return False
+
+
+def _active_stage_event_key(world_events) -> tuple[str, str, str, str] | None:
+    """活跃舞台事件的稳定缓存/选人键 (marker, starts, ends, venue)。
+
+    venue 进键:同一栋楼换一场戏要重开名单,同一场戏挪了地方也要重开。
+    """
+    for event in world_events or []:
+        if event.get("type") not in _EVENT_TYPES_WITH_CROWD:
+            continue
+        venue = resolve_event_location_id(event.get("payload_json"))
+        if not isinstance(venue, str) or venue not in LOCATIONS:
+            continue
+        if CAP_STAGE not in location_capabilities(venue):
+            continue
+        if not _stage_venue_is_reachable(venue):
+            logger.debug("stage event venue is not reachable, ignored: %s", venue)
+            continue
+        # id 有就以 id 为准;starts/ends 区分畸形或合成夹具,并让改期的同一行成为新名单。
+        marker = event.get("id") or event.get("title") or "stage_event"
+        return (str(marker), str(event.get("starts_at") or ""),
+                str(event.get("ends_at") or ""), venue)
+    return None
+
+
+def stage_event_venue(world_events) -> str | None:
+    """正在演出的场地 id;没有合格演出则 None。纯函数、零查询。"""
+    key = _active_stage_event_key(world_events)
+    return key[3] if key is not None else None
+
+
+def active_stage_event_id(world_events) -> str | None:
+    """该场演出的公开身份(用于日志与归因)。"""
+    key = _active_stage_event_key(world_events)
+    return key[0] if key is not None else None
+
+
+def stage_venue_at(x: int, y: int) -> str | None:
+    """居民此刻脚下、且声明了 stage 能力的地点 id;不在任何场地里则 None。
+
+    用 capability_location_at 而**不是** get_location_id_at:后者首命中即返,命中序 =
+    dict 插入序 = 静态在前、动态追加在尾,而 theater(172,40,178,50)完全落在 outdoor
+    街区 east_gardens(140,35,179,58)内部 —— 实测 get_location_id_at(174,45) 返
+    "east_gardens"。照它写,人站在剧院正中也判不出「已在场」,于是每 tick 都会被再拉
+    一次。
+    """
+    from app.agent.map_data import capability_location_at
+    return capability_location_at(x or 0, y or 0, CAP_STAGE)
+
+
+async def stage_event_cohort(
+    db,
+    world_events,
+    *,
+    ttl: float = STAGE_EVENT_COHORT_TTL_SECONDS,
+) -> frozenset[str]:
+    """演出期间被确定性邀请到场的观众(至多 STAGE_EVENT_CROWD_LIMIT 人)。
+
+    形状照 market_day_crowd_cohort(:122-204):进程内 TTL 缓存 + 单飞锁,避免每个并发
+    tick 各查一次居民表(该函数的注释自陈这是 perf 红线);挑的是**真实**的清醒自治
+    居民,移动仍走正常的 VISIT_DISTRICT 通路;查询异常 fail-open 成空集合并短暂缓存,
+    以免一次库故障被放大 N 倍。
+
+    与集市名单的唯一实质差异:**不按站位排除候选**。集市的名单由持久化的 visitor
+    分配定死,舞台没有那层持久化 —— 一旦按站位排除,到场者会在下一个 TTL 窗掉出名单、
+    后来者被逐批补进,一场戏能把全镇轮着拉空。不排除则同一场演出内名单稳定,已到场的
+    人继续占着位置(「到没到」由调用方按站位判,见 stage_venue_at)。
+
+    这就是 design_P2.md §③ 路 B 的外力:名单把 N 个人送到场后,actions.py:80-86 的
+    idle_nearby 自然非空,CHAT_RESIDENT 自动解锁 —— 鸡生蛋被打破一次即可自持,而
+    actions.py 一个字都不用改。
+    """
+    event_key = _active_stage_event_key(world_events)
+    if event_key is None:
+        return frozenset()
+
+    now = time.monotonic()
+    cached = _stage_cohort_cache.get(event_key)
+    if cached is not None and ttl > 0 and now - cached[0] < ttl:
+        return cached[1]
+
+    async with _stage_cohort_lock:
+        now = time.monotonic()
+        cached = _stage_cohort_cache.get(event_key)
+        if cached is not None and ttl > 0 and now - cached[0] < ttl:
+            return cached[1]
+
+        try:
+            from sqlalchemy import select
+            from app.models.resident import Resident
+
+            rows = (await db.execute(
+                select(Resident.id).where(
+                    Resident.is_autonomous,
+                    Resident.resident_type.in_(["npc", "resident"]),
+                    Resident.status.not_in(["sleeping", "chatting", "socializing"]),
+                )
+            )).all()
+            eligible = [str(row[0]) for row in rows]
+            chosen = frozenset(sorted(
+                eligible,
+                key=lambda resident_id: _stable_rank(event_key, resident_id),
+            )[:STAGE_EVENT_CROWD_LIMIT])
+        except Exception:
+            # 不拉人好过把异常抛回 decide 相位(tick.py:102-104 会 break 整条相位链)。
+            logger.warning("stage event crowd cohort query failed", exc_info=True)
+            chosen = frozenset()
+
+        _stage_cohort_cache[event_key] = (now, chosen)
+        # 只有活跃键有用;合成事件快速轮换 id 时把这个小缓存钉在有界大小。
+        if len(_stage_cohort_cache) > 8:
+            oldest = min(_stage_cohort_cache,
+                         key=lambda key: _stage_cohort_cache[key][0])
+            if oldest != event_key:
+                _stage_cohort_cache.pop(oldest, None)
+        return chosen
 
 
 def market_day_visitor_tile(

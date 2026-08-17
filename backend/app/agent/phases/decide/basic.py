@@ -116,6 +116,33 @@ class BasicDecidePlugin:
                 plan.status = "interrupted"
             return ctx
 
+        # P2 #6 (DUTY_VENUE): 营生有「现场」声明的人,今天还没上工、又不在现场时,
+        # 先把这一 tick 定成去现场(零 LLM)。位置是 crowd 之后、Case 2 之前:
+        #   · 不能更靠下 —— 三份出厂 YAML 全设 skip_decide_when_planned: true,
+        #     Case 2 一旦有计划就无条件 return,插在它之后就是死码;
+        #   · 不能更靠上 —— 越过 _maybe_needs_action 就是复现 0809 生产死锁
+        #     (7/11 居民饿死在自家门口);
+        #   · 不能越过 crowd —— caravan cohort 是 gameplay 权威,不是装饰效果。
+        duty_venue = await self._maybe_duty_venue(ctx)
+        if duty_venue is not None:
+            ctx.action_result = duty_venue
+            ctx.plan_followed = False
+            if plan:
+                plan.status = "interrupted"
+            return ctx
+
+        # P2 #9 (STAGE_EVENT_CROWD): 有戏在演时,把确定性的观众名单拉到那栋楼。
+        # 排在 duty 之后 —— 生计优先于看戏;排在 crowd 之后 —— caravan cohort 是
+        # gameplay 权威;排在 Case 2 之前 —— 三份出厂 YAML 全开
+        # skip_decide_when_planned,插在它之后就是死码。
+        stage_crowd = await self._maybe_stage_crowd(ctx)
+        if stage_crowd is not None:
+            ctx.action_result = stage_crowd
+            ctx.plan_followed = False
+            if plan:
+                plan.status = "interrupted"
+            return ctx
+
         # Case 2 (E-09/E-10): plan-priority skip. Follow the plan without an LLM
         # call when nothing warrants reconsidering. force_plan_only (budget 95%+)
         # hard-disables interrupts — the breaker's rule-based fallback.
@@ -312,8 +339,22 @@ class BasicDecidePlugin:
                 return ActionResult(ActionType.GO_HOME, None, None, "精力耗尽，回家休息")
             return None
         # satiety
-        here = get_location_id_at(ctx.resident.tile_x, ctx.resident.tile_y)
-        if location_category(here) == "dining" and ActionType.EAT in ctx.available_actions:
+        # P1: 与 actions.py 的 EAT 门挂同一道闸、用同一个 resolver。口径分叉 =
+        # 「EAT 已解锁,_maybe_needs_action 却判此处不是餐馆」→ 走
+        # nearest_dining_location → 目标恰是脚下这栋楼 → VISIT_DISTRICT 到自己的
+        # entrance → execute already-at-destination → 不进食 → satiety 单调到 0,
+        # 而 most_critical 取 min 后恒返 satiety,GO_HOME 被永久挡在门外。这就是
+        # 0809「7/11 居民饿死在自家门口」的同型链。
+        if settings.location_capabilities_enabled:
+            from app.agent.location_caps import CAP_DINING
+            from app.agent.map_data import capability_location_at
+            here = capability_location_at(
+                ctx.resident.tile_x, ctx.resident.tile_y, CAP_DINING)
+            dining_here = here is not None
+        else:
+            here = get_location_id_at(ctx.resident.tile_x, ctx.resident.tile_y)
+            dining_here = location_category(here) == "dining"
+        if dining_here and ActionType.EAT in ctx.available_actions:
             return ActionResult(ActionType.EAT, here, None, "饿了，吃点东西")
         target = nearest_dining_location((ctx.resident.tile_x, ctx.resident.tile_y))
         if target and ActionType.VISIT_DISTRICT in ctx.available_actions:
@@ -380,6 +421,10 @@ class BasicDecidePlugin:
             return None
         from app.agent.map_data import get_location_id_at, get_valid_target_tile
         from app.services import crowd_service
+        # 集市场地的唯一真相源。不用能力反查:全镇有且只有一个集市场地,路网几何按这
+        # 一栋楼的瓦片手调,第二个 market-capable 地点会让 cohort 判据、目的地与商队
+        # 停车锚点指向不同的楼。
+        from app.services.event_location import MARKET_HALL_LOCATION_ID
         here = get_location_id_at(ctx.resident.tile_x, ctx.resident.tile_y)
         world_events = getattr(ctx, "world_events", None)
         cohort = await crowd_service.market_day_crowd_cohort(
@@ -387,8 +432,8 @@ class BasicDecidePlugin:
             world_events,
             persisted_only=not crowd_enabled,
         )
-        if ctx.resident.id in cohort and here != "market_hall":
-            target = "market_hall"
+        if ctx.resident.id in cohort and here != MARKET_HALL_LOCATION_ID:
+            target = MARKET_HALL_LOCATION_ID
             target_tile = crowd_service.market_day_visitor_tile(
                 ctx.resident.id, cohort, world_events,
             )
@@ -405,6 +450,123 @@ class BasicDecidePlugin:
         return ActionResult(
             action=ActionType.VISIT_DISTRICT, target_slug=target,
             target_tile=target_tile or get_valid_target_tile(target), reason="去凑热闹",
+        )
+
+    async def _maybe_duty_venue(self, ctx: TickContext) -> ActionResult | None:
+        """P2 #6: 营生有「现场」声明、今天还没上工、且人不在现场时,把这一 tick 的
+        目的地定成那个现场(VISIT_DISTRICT,零 LLM)。
+
+        动作必须是 VISIT_DISTRICT:memorize 只在 action ∈ {WANDER, VISIT_DISTRICT,
+        GO_HOME} 时写 metadata['move'](memorize/basic.py:175),而到访验收的口径正是
+        metadata_json->'move'->>'target' —— 产出别的动作,统计完全看不到。
+
+        地点解析全部经 duty_service 的包装函数:一来「营生有没有现场」与「哪栋楼是
+        那个现场」两侧不互相硬编码 slug,二来本文件被 P1-S9 的守卫读全文,map_data 的
+        两个能力反查 helper 的名字在这里一个字都不能出现(注释与 docstring 同样算数)。
+
+        守卫集合与 _maybe_crowd_draw 逐条对齐(可用集 / status / 粘性行程 / GO_HOME);
+        上面几条 early-return 已经挡掉了饿死、暴雨、在途粘性与商队 gameplay 权威,
+        这里不重复写。
+        """
+        if not settings.duty_venue_enabled:
+            return None
+        if ActionType.VISIT_DISTRICT not in ctx.available_actions:
+            return None
+        # 不得把人从对话 / 睡眠 / 已开始的行程里拽出来。
+        if ctx.resident.status in ("sleeping", "chatting", "socializing"):
+            return None
+        if ctx.continuation_trip is not None:
+            return None
+        # 回家不是上工。临界精力与 GO_HOME 行程在上面已受保护;这里再挡一次「行程还
+        # 没落 Redis 的第一步」。
+        if any(
+            plan is not None and plan.action == ActionType.GO_HOME.value
+            for plan in (ctx.current_plan, ctx.scheduled_plan)
+        ):
+            return None
+        from app.services import duty_service
+        if not duty_service.duty_venue_capability(ctx.resident):
+            return None
+        # 今天已经上过工就别再赶路 —— 与 on_work 用同一个 Redis 键
+        # (duty_service._duty_work_cooldown_key),否则会出现「走到了现场但冷却还没过」
+        # 的空跑,白花一格日行动 cap。Redis 抖动时该查询 fail-closed(视为已上工)。
+        if await duty_service.duty_work_done(ctx.resident):
+            return None
+        if duty_service.duty_venue_location_at(ctx.resident):
+            return None  # 已经在现场
+        target = duty_service.nearest_duty_venue(ctx.resident)
+        if not target:
+            return None
+        from app.agent.map_data import get_valid_target_tile
+        target_tile = get_valid_target_tile(target)
+        if not target_tile:
+            return None
+        return ActionResult(
+            action=ActionType.VISIT_DISTRICT, target_slug=target,
+            target_tile=target_tile, reason="去上工",
+        )
+
+    async def _maybe_stage_crowd(self, ctx: TickContext) -> ActionResult | None:
+        """P2 #9: 演出期间把确定性的观众名单送到场(VISIT_DISTRICT,零 LLM)。
+
+        这是 design_P2.md §③ 路 B「地点吸引力与在场人数解耦」的落点:
+        actions.py:80-86 的 CHAT_RESIDENT 判据一个字不改 —— 改判据(路 A)会让 LLM 在
+        空场瞎编 target_slug,找不到人、静默无事发生,却已花掉 LLM 钱和一格日行动 cap。
+        这里换成把人真的送到场:idle_nearby 自然非空,锁自己就开了,且这条路径对没有
+        stage 事件的其它地点零影响。
+
+        动作必须是 VISIT_DISTRICT:memorize 只在 action ∈ {WANDER, VISIT_DISTRICT,
+        GO_HOME} 时写 metadata['move'](memorize/basic.py:175),而到访验收的口径正是
+        metadata_json->'move'->>'target' —— 产出别的动作,统计完全看不到。
+
+        场地解析全部经 crowd_service 的包装函数:一来「哪场事件算演出」与「哪栋楼能
+        当舞台」两侧不互相硬编码 slug,二来本文件被 P1-S9 的守卫扫过 —— map_data 的
+        两个能力反查 helper 的名字在这里一个字都不能出现(注释与 docstring 同样算数),
+        也不得留裸的地点字面量。
+
+        守卫集合与 _maybe_crowd_draw 逐条对齐(可用集 / status / 粘性行程 / GO_HOME);
+        上面几条 early-return 已经挡掉了饿死、暴雨、在途粘性、商队 gameplay 权威与
+        营生导流,这里不重复写。
+        """
+        if not settings.stage_event_crowd_enabled:
+            return None
+        if ActionType.VISIT_DISTRICT not in ctx.available_actions:
+            return None
+        # 缓存的名单可能差几秒。绝不用它把人从对话 / 睡眠 / 已开始的行程里拽出来。
+        if ctx.resident.status in ("sleeping", "chatting", "socializing"):
+            return None
+        if ctx.continuation_trip is not None:
+            return None
+        # 回家不是看戏。临界精力与 GO_HOME 行程在上面已受保护;这里再挡一次「行程还
+        # 没落 Redis 的第一步」。
+        if any(
+            plan is not None and plan.action == ActionType.GO_HOME.value
+            for plan in (ctx.current_plan, ctx.scheduled_plan)
+        ):
+            return None
+        from app.services import crowd_service
+        world_events = getattr(ctx, "world_events", None)
+        # 先解析场地(纯函数、零查询),没戏可看就别去查名单。
+        venue = crowd_service.stage_event_venue(world_events)
+        if not venue:
+            return None
+        if crowd_service.stage_venue_at(
+                ctx.resident.tile_x, ctx.resident.tile_y) == venue:
+            return None  # 已经在场
+        cohort = await crowd_service.stage_event_cohort(ctx.db, world_events)
+        if ctx.resident.id not in cohort:
+            return None
+        from app.agent.map_data import get_valid_target_tile
+        target_tile = get_valid_target_tile(venue)
+        if not target_tile:
+            return None
+        # 刻意**不**设 ctx.market_trip_event_id:那是集市专用的粘性通道,
+        # tick.py:155-162 会把行程的 kind/location 写死成 market_day/market_hall,
+        # 借用它等于把观众登记成买家。代价是本行程不落粘性、每 tick 重算(与既有
+        # festival 抽签同形状),给舞台开一条自己的粘性通道是独立 step。
+        return ActionResult(
+            action=ActionType.VISIT_DISTRICT, target_slug=venue,
+            target_tile=target_tile, reason="去看戏",
         )
 
     async def _crowd_hint(self, ctx: TickContext) -> str:

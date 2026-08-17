@@ -47,6 +47,7 @@ from datetime import datetime, timedelta, UTC
 
 from sqlalchemy import select
 
+from app.agent.location_caps import CAP_POSTAL
 from app.models.resident import Resident
 from app.redis_client import get_redis
 from app.services.resident_privilege_policy import (
@@ -56,6 +57,11 @@ from app.services.resident_privilege_policy import (
 logger = logging.getLogger(__name__)
 
 DUTY_WORK_COOLDOWN_HOURS = 20  # ≈ once per game day, tolerant of schedule drift
+
+#: 公开课世界事件的历史 type 与现 type。冷却判据必须**两种都查**:STAGE_EVENT_ENABLED
+#: 翻开之后新课是 "script",而 7 天窗口里的旧课还是 "news";只认一种的话,翻闸当天
+#: (任一方向)冷却直接失效,讲师每次 WORK 都开一场新课。
+_LECTURE_EVENT_TYPES = ("news", "script")
 
 # Funding is deliberately independent from the duty registry itself: it is a
 # fiscal classification, not an action/permission classification.  Existing
@@ -116,6 +122,86 @@ def max_perk(residents, key: str, default: float = 1.0) -> float:
     """Highest perk value among a group (used for presence-based boosts)."""
     values = [perk(r, key, default) for r in residents] or [default]
     return max([default, *values])
+
+
+# ── P2 营生场所 (duty venue) ───────────────────────────────────────────
+# 「营生有没有现场」是营生自己的属性(下面这张表),「哪栋楼是那个现场」是地点自己
+# 的能力声明(dynamic_locations.data_json / LOCATIONS 的 capabilities)。两侧用能力名
+# 对接,谁都不硬编码对方的 slug。
+#
+# 今天只登记邮差(投递现场 = postal)。讲师的 stage/academy 归 design_P2.md 的 #8,
+# 不在本段;没有 WORK 产出的营生谈不上现场,所以键必须是 _WORK_HANDLERS 的子集。
+DUTY_VENUE_CAPABILITY: dict[str, str] = {
+    "postman": CAP_POSTAL,
+}
+
+
+def _duty_work_cooldown_key(resident_id: str) -> str:
+    """WORK 冷却键的唯一真相源。
+
+    decide 侧的「今天还没上工」判据必须与 on_work 写的是同一个键 —— 两处手写同一
+    字符串迟早漂移,漂移的表现是「人走到了现场但冷却还没过」的空跑(白花一格日行动
+    cap,tick.py:108-117)。
+    """
+    return f"sv:duty_work:{resident_id}"
+
+
+def duty_venue_capability(resident) -> str | None:
+    """该居民营生声明的「现场」能力名;无营生 / 无现场语义 → None。纯函数。
+
+    走 duty_key() 而不是裸读 meta_json:UGC 居民自己往 meta_json 里塞 duty 不算数
+    (trusted_duty 的 provenance 门,resident_privilege_policy.py:105-110)。
+    """
+    return DUTY_VENUE_CAPABILITY.get(duty_key(resident) or "")
+
+
+def duty_venue_location_at(resident) -> str | None:
+    """居民此刻脚下、且提供其营生现场能力的地点 id;不在现场则 None。
+
+    用 map_data.capability_location_at 而**不是** get_location_id_at:后者首命中即返
+    (map_data.py:243-249),命中序 = dict 插入序 = 静态在前、动态追加在尾(:386),而
+    post_office(44,100,48,106) 完全落在 outdoor 街区 south_quarter(42,100,135,109)
+    内部 —— 生产实测 get_location_id_at(46,103) 返 "south_quarter"。照 get_location_id_at
+    写,邮差站在邮局正中也判不出「在现场」,命中率恒 0。
+
+    存量 dynamic_locations 行没有 capabilities 键 → 归一成空 dict → 这里返 None →
+    调用方走老行为。缺省安全,回填前后都不炸。
+    """
+    cap = duty_venue_capability(resident)
+    if not cap:
+        return None
+    from app.agent.map_data import capability_location_at
+    return capability_location_at(resident.tile_x, resident.tile_y, cap)
+
+
+def nearest_duty_venue(resident) -> str | None:
+    """离居民最近的、提供其营生现场能力的地点 id(无营生现场 / 全镇没有这样的地点
+    → None)。decide 侧的导流目的地由它给出。
+
+    返回值必须是 map_data.LOCATIONS 的合法 key —— 下游 memorize 的
+    metadata['move']['target'] 与生产的到访统计口径都吃它
+    (memorize/basic.py:62-63 经 resolve_location_id)。
+    """
+    cap = duty_venue_capability(resident)
+    if not cap:
+        return None
+    from app.agent.map_data import nearest_capability_location
+    return nearest_capability_location((resident.tile_x, resident.tile_y), cap)
+
+
+async def duty_work_done(resident) -> bool:
+    """本冷却窗内是否已经上过工(与 on_work 同一个 Redis 键)。
+
+    fail-**closed**:Redis 抖动时返回 True(视为已上工)。宁可少一次导流,也不能因为
+    Redis 挂了把全镇有现场的营生持有人整齐赶去同一栋楼 —— 这与本模块其余部分的
+    fail-open 方向相反,是刻意的。
+    """
+    try:
+        return bool(await get_redis().exists(_duty_work_cooldown_key(resident.id)))
+    except Exception:
+        logger.debug("duty work cooldown probe failed for %s",
+                     getattr(resident, "slug", "?"), exc_info=True)
+        return True
 
 
 async def find_duty_resident(db, key: str) -> Resident | None:
@@ -180,7 +266,7 @@ async def on_work(db, resident, *, market_day: bool = False) -> str | None:
     slug = resident.slug
     try:
         r = get_redis()
-        cd_key = f"sv:duty_work:{resident.id}"
+        cd_key = _duty_work_cooldown_key(resident.id)
         if await r.exists(cd_key):
             return None
         result = await handler(db, resident)
@@ -404,14 +490,30 @@ async def _work_street_artist(db, resident) -> str | None:
 
 async def _work_lecturer(db, resident) -> str | None:
     """顾明远:每周在学院开一场公开课(WorldEvent,event_cron 按窗口激活,
-    活动期间注入所有居民的决策与对话 prompt,吸引大家去学院)。"""
+    活动期间注入所有居民的决策与对话 prompt,吸引大家去学院)。
+
+    P2 #8(STAGE_EVENT_ENABLED):事件 type 从 ``news`` 改成 ``script``。
+    ``crowd_service._EVENT_TYPES_WITH_CROWD`` 是 ``("festival", "script")``
+    (crowd_service.py:28),``news`` 不在里面 —— 于是 ``active_event_location``
+    (:65-76)永远看不到公开课,``festival_draw_target`` 的
+    ×``realism_festival_weight`` 拉力(:207-219)对公开课**一次都没生效过**。
+    payload 里那句 ``location_id: academy`` 写了三年,一直是死信息。
+
+    不把 ``news`` 加进那个元组:那会让 ``event_templates.NEWS_POOL`` 的 4 条随机
+    新闻也长出人流语义,全镇往一条「今天风很大」里跑。
+
+    闸关 = 逐字节旧行为:type 仍是 ``news``、标题/描述/payload/返回文案一字不变。
+    """
     from app.models.world_event import WorldEvent
+    from app.config import settings
 
     cooldown_days = int(perk(resident, "lecture_cooldown_days", 7))
     since = datetime.now(UTC) - timedelta(days=cooldown_days)
     recent = (await db.execute(
         select(WorldEvent.id).where(
-            WorldEvent.type == "news",
+            # 两种 type 都查(见 _LECTURE_EVENT_TYPES 的说明)。标题过滤已经把范围
+            # 收得极窄("%{name}的公开课%"),不会误伤 script_service 的剧本事件。
+            WorldEvent.type.in_(_LECTURE_EVENT_TYPES),
             WorldEvent.title.like(f"%{resident.name}的公开课%"),
             WorldEvent.created_at >= since,
         ).limit(1)
@@ -420,7 +522,7 @@ async def _work_lecturer(db, resident) -> str | None:
         return None
     now = datetime.now(UTC)
     db.add(WorldEvent(
-        type="news",
+        type=("script" if settings.stage_event_enabled else "news"),
         title=f"{resident.name}的公开课",
         description=f"{resident.name}今天在学院开公开课,讲小镇的历史与来路。居民们可以去学院旁听。",
         payload_json={"location_id": "academy", "duty": "lecturer"},
@@ -457,18 +559,57 @@ async def _work_chronicle_editor(db, resident) -> str | None:
 
 
 async def _work_postman(db, resident) -> str | None:
-    """骆小舟:跑一趟投递——把到期的时间胶囊送到,并留一条投递记忆。"""
+    """骆小舟:跑一趟投递——把到期的时间胶囊送到,并留一条投递记忆。
+
+    P2 #5(DUTY_VENUE_ENABLED):闸开时多做两件事——解析「投递现场」(人是否站在提供
+    postal 能力的地点里),并给这条记忆写 metadata['duty'] = {key, at, delivered}
+    作为 M2 口径的数据源。**两个分支都写**:M2 的比值是 on_site / work_runs,只在
+    现场写会让分母塌成分子,比值恒 1.0、指标失效;不在现场时 at 为 None。
+
+    **投递本身与地点无关,这是硬约束**:deliver_due_capsules 的 WHERE 不带任何
+    location 条件(capsule_service.py:87),nightly_cron.py:173-179 的无条件兜底也原样
+    保留 —— 邮局是「投递现场」不是「准入条件」。不在现场 = 老行为、功能不减,只少了
+    现场叙事与统计标记;任何时刻把闸翻回 false 都不会让胶囊积压。
+
+    闸关 = 逐字节旧行为:不解析地点、不写 metadata、feed payload 不多键、记忆文本
+    走原字符串。
+    """
     delivered = 0
     try:
         from app.services.capsule_service import deliver_due_capsules
         delivered = await deliver_due_capsules(db)
     except Exception:
         logger.warning("postman capsule delivery failed", exc_info=True)
+
+    from app.config import settings
+    venue: str | None = None
+    if settings.duty_venue_enabled:
+        try:
+            venue = duty_venue_location_at(resident)
+        except Exception:
+            # 地点解析永远不能拖垮投递:胶囊已经送出去了。
+            logger.warning("postman venue resolve failed", exc_info=True)
+
+    if venue:
+        from app.agent.map_data import get_location_by_id
+        where = (get_location_by_id(venue) or {}).get("name") or "投递点"
+        note = (f"今天在{where}把 {delivered} 封到期的信分拣出来送走了,看着收信的人拆开,值了。"
+                if delivered else f"今天在{where}把该走的路线跑了一遍,没有迟到的信。")
+    else:
+        note = (f"今天送到了 {delivered} 封到期的信,看着收信的人拆开,值了。"
+                if delivered else "今天把该走的路线跑了一遍,没有迟到的信。")
+
+    metadata = None
+    if settings.duty_venue_enabled:
+        metadata = {"duty": {"key": "postman", "at": venue, "delivered": delivered}}
     from app.memory.service import MemoryService
-    note = (f"今天送到了 {delivered} 封到期的信,看着收信的人拆开,值了。"
-            if delivered else "今天把该走的路线跑了一遍,没有迟到的信。")
-    await MemoryService(db).add_memory(resident.id, "event", note, 0.5, "observation")
-    await _feed(resident.slug, "duty_output", {"duty": "postman", "delivered": delivered})
+    await MemoryService(db).add_memory(
+        resident.id, "event", note, 0.5, "observation", metadata_json=metadata)
+
+    payload = {"duty": "postman", "delivered": delivered}
+    if settings.duty_venue_enabled:
+        payload["at"] = venue
+    await _feed(resident.slug, "duty_output", payload)
     return f"{resident.name}跑完了今天的投递(送达 {delivered} 封)"
 
 

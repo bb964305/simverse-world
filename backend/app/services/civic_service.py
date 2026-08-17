@@ -46,6 +46,22 @@ logger = logging.getLogger(__name__)
 #: ``{slug: option_idx}`` 以便定向回滚（读侧兼容旧 list 格式）。
 META_ELIGIBLE_AT_OPEN = "_eligible_at_open"
 
+META_EFFECT_APPLIED = "_effect_applied"
+META_EFFECT_ERROR = "_effect_error"
+
+#: 执行失败的世界内措辞。错误码不出网,只出这一句(不含坐标、不含内部码)。
+_EFFECT_ERROR_NOTE = {
+    "invalid_geometry": "但选址不合规,本案未能落成。",
+    "unreachable_entrance": "但选址不合规,本案未能落成。",
+    "schema_rejected": "但提案内容不合规,本案未能落成。",
+}
+
+
+def _audit(audit: dict | None, key: str, value) -> None:
+    """最内层的诊断码优先(setdefault),外层的兜底码不覆盖它。"""
+    if audit is not None:
+        audit.setdefault(key, value)
+
 
 def _announce_closes_text(days) -> str:
     """把「还剩几个世界日截止」折成一句**自锚定**的话。认不出的形状 → 空串。
@@ -177,6 +193,15 @@ CIVIC_AGENDA: list[dict] = [
                 "bounds": [44, 100, 48, 106], "center": [46, 103], "entrance": [46, 100],
                 "description": "小镇邮局:寄信、收件、时间胶囊的中转站",
                 "boosted_actions": ["WORK"],
+                # P2 #5:邮局是「投递现场」不是「准入条件」。规范形态是 dict[str, dict]
+                # (location_caps.normalize_capabilities 的不动点);effect.data 除 slug
+                # 外整包落进 dynamic_locations.data_json(:923),再整包进 LOCATIONS
+                # (map_data.py:386)—— 零迁移、零模型改动。
+                # 只改 data:topic 一个字符都不能动,seed_civic_agenda 的幂等键是
+                # Poll.question 精确匹配(:208-210),改字就重开票,而同 slug 再建走的是
+                # 整包覆盖分支(existing.data_json = payload),旧键全丢。
+                # 存量那行的回填是纯数据变更,属独立批次(迁移与开闸不同车)。
+                "capabilities": {"postal": {}},
             }}},
             {"label": "暂缓,维持现状", "effect": None},
         ],
@@ -187,9 +212,25 @@ CIVIC_AGENDA: list[dict] = [
         "options": [
             {"label": "赞成兴建", "effect": {"type": "dynamic_location", "data": {
                 "slug": "theater", "name": "剧院", "type": "public", "role": "culture",
-                "bounds": [172, 40, 178, 50], "center": [175, 45], "entrance": [172, 45],
+                # 168..173 收进 WALKABLE_X_RANGE(上限 173)。旧值 x2=178 / center
+                # x=175 是孤岛,存量行已由 alembic 068 改过 —— 这里同步字面量,
+                # 否则该 effect 重执行会把楼又建回界外。
+                # **topic 一个字都不许动**:seed_civic_agenda 的幂等键是
+                # Poll.question 精确匹配(:208-210),改了就是重开一张票。
+                "bounds": [168, 40, 173, 50], "center": [170, 45], "entrance": [172, 45],
                 "description": "小镇剧院:说书、演展、故事会的舞台",
                 "boosted_actions": ["CHAT_RESIDENT", "OBSERVE"],
+                # P2 #7:剧院是「上演场地」。规范形态是 dict[str, dict]
+                # (location_caps.normalize_capabilities 的不动点);effect.data 除
+                # slug 外整包落进 dynamic_locations.data_json(:923),再整包进
+                # LOCATIONS(map_data.py:386)—— 零迁移、零模型改动。
+                # 只改 data:topic 一个字符都不能动,seed_civic_agenda 的幂等键是
+                # Poll.question 精确匹配(:208-210),改字就重开票,而同 slug 再建走的
+                # 是整包覆盖分支(existing.data_json = payload),旧键全丢。
+                # 上面那三行几何坐标越界(x2=178 > WALKABLE_X_RANGE 上限 173),归
+                # P3-c 的迁移批次改,本批一个数字都不动、也不与它同车。
+                # 存量那行的回填是纯数据变更,属独立批次。
+                "capabilities": {"stage": {}},
             }}},
             {"label": "暂缓,维持现状", "effect": None},
         ],
@@ -731,7 +772,9 @@ async def _close_one_tally(db, poll: Poll) -> None:
     # 个人脑子里记两遍。只在真装上了（applied）之后才排除——流会分支没有赢家。
     exclude_id = None
     if effect:
-        applied = await _execute_outcome(db, effect, poll_id=poll.id)
+        effect_audit: dict = {}
+        applied = await _execute_outcome(db, effect, poll_id=poll.id,
+                                         audit=effect_audit)
         if applied:
             result_note += "议案已生效。"
             if effect.get("type") == "mayor" and effect.get("slug"):
@@ -745,10 +788,45 @@ async def _close_one_tally(db, poll: Poll) -> None:
             # 流会，不是「生效时出了问题」。
             result_note += f"{_VERDICT_NOTE['winner_ineligible']},本案流会。"
         else:
-            result_note += "议案生效时遇到问题,已记录。"
+            result_note += _EFFECT_ERROR_NOTE.get(
+                effect_audit.get("error")
+                if settings.civic_effect_audit_enabled else None,
+                "议案生效时遇到问题,已记录。")
+        if settings.civic_effect_audit_enabled:
+            await _record_effect_audit(db, poll, opts, applied, effect_audit)
     await _clerk_announce(db, f"镇务结果:{poll.question}", result_note,
                           civic_ref=f"poll_result:{poll.id}",
                           exclude_resident_id=exclude_id)
+
+
+async def _record_effect_audit(db, poll, opts: list, applied: bool,
+                               audit: dict) -> None:
+    """把「胜出了但落没落地」写回 ``options_json[0]``(P3 ⑥)。
+
+    挂 opts[0] 沿用既有 blob 约定(_proposer_slug / _npc_voters /
+    _eligible_at_open / _policy_outcome)。**必须排在 _clerk_announce 之前** ——
+    公告整段 try/except 吞异常,审计不该排在一个会吞异常的调用之后。
+    ``won=True`` 且无 ``_effect_applied`` 键 = 执行途中进程死了,与「执行了但
+    失败」(``_effect_applied=False``)可区分 —— 这是把 commit 拆成两次换来的。
+    出网侧无需改动:script_service.public_option 是白名单投影。
+    """
+    try:
+        opts[0][META_EFFECT_APPLIED] = bool(applied)
+        opts[0][META_EFFECT_ERROR] = audit.get("error")
+        poll.options_json = opts
+        flag_modified(poll, "options_json")
+        await db.commit()
+    except Exception:
+        logger.warning("civic effect audit write failed (poll=%s)",
+                       poll.id, exc_info=True)
+    try:
+        from app.observability import CIVIC_EFFECT_APPLIED
+        CIVIC_EFFECT_APPLIED.labels(
+            etype=str(audit.get("etype") or "unknown"),
+            result="applied" if applied else str(audit.get("error") or "failed"),
+        ).inc()
+    except Exception:
+        logger.debug("civic effect counter failed", exc_info=True)
 
 
 #: 流会原因 → 公告措辞（世界内信息物；探针数值永不进 NPC prompt）。
@@ -857,9 +935,16 @@ async def _policy_threshold_verdict(db, opts: list[dict], tally: list[int],
     return None
 
 
-async def _execute_outcome(db, effect: dict, *, poll_id: int | None = None) -> bool:
-    """Land a winning outcome through an existing channel. Returns success."""
+async def _execute_outcome(db, effect: dict, *, poll_id: int | None = None,
+                           audit: dict | None = None) -> bool:
+    """Land a winning outcome through an existing channel. Returns success.
+
+    ``audit`` (opt-in, default None = byte-for-byte pre-P3) collects a short
+    diagnosis code: the bool alone cannot tell "unsupported type" from "the
+    executor raised"."""
     etype = effect.get("type")
+    if audit is not None:
+        audit["etype"] = etype
     try:
         if etype == "policy" and settings.polis_policy_approval_enabled:
             # S2-5: the only new effect type. Gated — with the approval gate off
@@ -879,6 +964,7 @@ async def _execute_outcome(db, effect: dict, *, poll_id: int | None = None) -> b
                 # A core entry can never be amended, not even by referendum.
                 logger.warning("civic outcome targeted a constitutional_core "
                                "policy (%s) — refused", effect.get("key"))
+                _audit(audit, "error", "policy_immutable")
                 return False
         if etype == "system_config":
             from app.services.config_service import ConfigService
@@ -888,7 +974,7 @@ async def _execute_outcome(db, effect: dict, *, poll_id: int | None = None) -> b
             )
             return True
         if etype == "dynamic_location":
-            return await _add_dynamic_location(db, effect["data"])
+            return await _add_dynamic_location(db, effect["data"], audit=audit)
         if etype == "narrative":
             from app.models.world_event import WorldEvent
             ev = effect.get("event", {})
@@ -907,16 +993,88 @@ async def _execute_outcome(db, effect: dict, *, poll_id: int | None = None) -> b
             return await install_mayor(db, effect.get("slug"))
     except Exception:
         logger.warning("civic outcome execution failed (%s)", etype, exc_info=True)
+        _audit(audit, "error", "exception")
+        return False
+    _audit(audit, "error", "unsupported_type")
     return False
 
 
-async def _add_dynamic_location(db, data: dict) -> bool:
+_OPENING_EVENT_MAX_DAYS = 7
+
+
+def _maybe_stage_opening_event(db, slug: str, data: dict) -> int:
+    """新楼落成庆典(P3 ④a):一条 ``type="festival"`` 的世界事件。
+
+    为什么必须是 festival —— ``crowd_service._EVENT_TYPES_WITH_CROWD``
+    (crowd_service.py:28) 是 ("festival", "script") 的闭集,只有这两种能被
+    ``active_event_location`` 看见并拿到 ``realism_festival_weight``(×3) 的抽签
+    偏置。衰减是天然的:×3 是有界偏置不是硬拉,到期由 ``refresh_active_events``
+    翻 ``is_active=False`` —— **不再造第二套衰减权重**。
+
+    只 ``db.add``,由调用方那一次 commit 落盘(同一事务,不新增提交点)。
+    返回实际天数(0 = 没开)。
+    """
+    if not settings.civic_build_opening_event_enabled:
+        return 0
+    raw = data.get("opening_event_days")
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        return 0
+    days = min(raw, _OPENING_EVENT_MAX_DAYS)
+    from app.models.world_event import WorldEvent
+    now = datetime.now(UTC)
+    name = data.get("name") or slug
+    db.add(WorldEvent(
+        type="festival", title=f"{name}落成",
+        description=f"{name}今天开门,镇上的人陆续过去看热闹。",
+        payload_json={"location_id": slug, "opening": True},
+        starts_at=now, ends_at=now + timedelta(days=days),
+        is_active=False,
+    ))
+    return days
+
+
+async def _add_dynamic_location(db, data: dict, *,
+                                audit: dict | None = None) -> bool:
     """Insert a dynamic_locations overlay row + trigger the world reload so the
     new building is reachable without a redeploy."""
     from app.models.dynamic_location import DynamicLocation
     slug = data.get("slug")
     if not slug or "bounds" not in data:
+        _audit(audit, "error", "schema_rejected")
         return False
+    if settings.civic_build_schema_enabled:
+        # routers/polls.py:92-98 允许 admin 直接塞任意 effect dict,所以净化必须
+        # 挂在落库点而不是 CIVIC_AGENDA 侧。丢键不拒条:拒绝会让「新字段先落库、
+        # 代码后上线」的部署顺序把合法行判成非法。
+        from app.services.civic_build import normalize_location_data
+        data, _schema_warns = normalize_location_data(data)
+        for _w in _schema_warns:
+            logger.warning("civic build payload normalized (%s): %s", slug, _w)
+    if settings.civic_build_validate_enabled:
+        # 四个参数成套:公投是 upsert(allow_existing_slug)、outdoor 街区是地面
+        # 不是楼(否则邮局这类合法楼被误杀)、越界与可达性是新楼的两道门。
+        # 必须跑在任何写库之前 —— 一旦并进 LOCATIONS,pathfinder 的
+        # _get_forced_walkable 会把新楼入口自己塞进 walkable 集合自证成功。
+        from app.lab.apply import validate_location_patch
+        _errors, _warns = validate_location_patch(
+            {"slug": slug,
+             "data": {k: v for k, v in data.items() if k != "slug"}},
+            allow_existing_slug=True,
+            outdoor_overlap_is_warning=True,
+            require_walkable_range=True,
+            require_reachable_entrance=True,
+        )
+        for _w in _warns:
+            logger.info("civic build warning (%s): %s", slug, _w)
+        if _errors:
+            logger.warning("civic build rejected (%s): %s",
+                           slug, "; ".join(_errors))
+            _audit(audit, "error",
+                   "unreachable_entrance"
+                   if any("reachable" in e for e in _errors)
+                   else "invalid_geometry")
+            _audit(audit, "detail", _errors[0])
+            return False
     existing = (await db.execute(
         select(DynamicLocation).where(DynamicLocation.slug == slug)
     )).scalar_one_or_none()
@@ -926,6 +1084,7 @@ async def _add_dynamic_location(db, data: dict) -> bool:
     else:
         existing.data_json = payload
         existing.active = True
+    _maybe_stage_opening_event(db, slug, data)
     await db.commit()
     try:
         from app.lab.apply import reload_world, publish_world_reload
@@ -977,7 +1136,16 @@ async def maybe_spawn_lecture_debate(db, event: dict) -> bool:
             return False
         topic = event.get("title", "小镇议题").replace("的公开课", "")
         from app.services.debate_service import create_debate
-        await create_debate(db, f"关于「{topic}」的争论", a.slug, b.slug)
+        # P2 #7:把辩论安排到声明了 stage 能力的地点(今天全镇唯一的是剧院)。
+        # 闸关 = 不传场地 = 逐字节旧行为。地点由能力反查得出,这里**不硬编码**剧院
+        # 的 slug —— 剧院是公投建的动态行,slug 是数据不是代码常量。守卫在
+        # tests/test_stage_event_debate.py:它禁掉本函数体里出现该 slug 的字面量。
+        venue = None
+        if settings.stage_event_enabled:
+            from app.agent.location_caps import CAP_STAGE
+            from app.agent.map_data import capability_locations
+            venue = next(iter(capability_locations(CAP_STAGE)), None)
+        await create_debate(db, f"关于「{topic}」的争论", a.slug, b.slug, venue=venue)
         return True
     except Exception:
         logger.warning("lecture debate spawn failed", exc_info=True)
