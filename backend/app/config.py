@@ -585,6 +585,10 @@ class Settings(BaseSettings):
     # 即邮局被 south_quarter、剧院被 east_gardens 遮蔽的今天。
     location_specific_first_enabled: bool = False
 
+    # 公投执行结果写回 options_json[0](_effect_applied/_effect_error)。
+    # 关 = 失败原因只剩一句中文公告 + 一行 warning。
+    civic_effect_audit_enabled: bool = False
+
     # P2 Task 1 — relation write deltas (reused, zero new LLM calls) + decay.
     realism_rel_familiarity_chat: float = 0.05
     realism_rel_affinity_chat: float = 0.03      # ± by wrapup mood (positive/negative)

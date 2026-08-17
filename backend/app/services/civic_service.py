@@ -46,6 +46,22 @@ logger = logging.getLogger(__name__)
 #: ``{slug: option_idx}`` 以便定向回滚（读侧兼容旧 list 格式）。
 META_ELIGIBLE_AT_OPEN = "_eligible_at_open"
 
+META_EFFECT_APPLIED = "_effect_applied"
+META_EFFECT_ERROR = "_effect_error"
+
+#: 执行失败的世界内措辞。错误码不出网,只出这一句(不含坐标、不含内部码)。
+_EFFECT_ERROR_NOTE = {
+    "invalid_geometry": "但选址不合规,本案未能落成。",
+    "unreachable_entrance": "但选址不合规,本案未能落成。",
+    "schema_rejected": "但提案内容不合规,本案未能落成。",
+}
+
+
+def _audit(audit: dict | None, key: str, value) -> None:
+    """最内层的诊断码优先(setdefault),外层的兜底码不覆盖它。"""
+    if audit is not None:
+        audit.setdefault(key, value)
+
 
 def _announce_closes_text(days) -> str:
     """把「还剩几个世界日截止」折成一句**自锚定**的话。认不出的形状 → 空串。
@@ -731,7 +747,9 @@ async def _close_one_tally(db, poll: Poll) -> None:
     # 个人脑子里记两遍。只在真装上了（applied）之后才排除——流会分支没有赢家。
     exclude_id = None
     if effect:
-        applied = await _execute_outcome(db, effect, poll_id=poll.id)
+        effect_audit: dict = {}
+        applied = await _execute_outcome(db, effect, poll_id=poll.id,
+                                         audit=effect_audit)
         if applied:
             result_note += "议案已生效。"
             if effect.get("type") == "mayor" and effect.get("slug"):
@@ -745,10 +763,45 @@ async def _close_one_tally(db, poll: Poll) -> None:
             # 流会，不是「生效时出了问题」。
             result_note += f"{_VERDICT_NOTE['winner_ineligible']},本案流会。"
         else:
-            result_note += "议案生效时遇到问题,已记录。"
+            result_note += _EFFECT_ERROR_NOTE.get(
+                effect_audit.get("error")
+                if settings.civic_effect_audit_enabled else None,
+                "议案生效时遇到问题,已记录。")
+        if settings.civic_effect_audit_enabled:
+            await _record_effect_audit(db, poll, opts, applied, effect_audit)
     await _clerk_announce(db, f"镇务结果:{poll.question}", result_note,
                           civic_ref=f"poll_result:{poll.id}",
                           exclude_resident_id=exclude_id)
+
+
+async def _record_effect_audit(db, poll, opts: list, applied: bool,
+                               audit: dict) -> None:
+    """把「胜出了但落没落地」写回 ``options_json[0]``(P3 ⑥)。
+
+    挂 opts[0] 沿用既有 blob 约定(_proposer_slug / _npc_voters /
+    _eligible_at_open / _policy_outcome)。**必须排在 _clerk_announce 之前** ——
+    公告整段 try/except 吞异常,审计不该排在一个会吞异常的调用之后。
+    ``won=True`` 且无 ``_effect_applied`` 键 = 执行途中进程死了,与「执行了但
+    失败」(``_effect_applied=False``)可区分 —— 这是把 commit 拆成两次换来的。
+    出网侧无需改动:script_service.public_option 是白名单投影。
+    """
+    try:
+        opts[0][META_EFFECT_APPLIED] = bool(applied)
+        opts[0][META_EFFECT_ERROR] = audit.get("error")
+        poll.options_json = opts
+        flag_modified(poll, "options_json")
+        await db.commit()
+    except Exception:
+        logger.warning("civic effect audit write failed (poll=%s)",
+                       poll.id, exc_info=True)
+    try:
+        from app.observability import CIVIC_EFFECT_APPLIED
+        CIVIC_EFFECT_APPLIED.labels(
+            etype=str(audit.get("etype") or "unknown"),
+            result="applied" if applied else str(audit.get("error") or "failed"),
+        ).inc()
+    except Exception:
+        logger.debug("civic effect counter failed", exc_info=True)
 
 
 #: 流会原因 → 公告措辞（世界内信息物；探针数值永不进 NPC prompt）。
@@ -857,9 +910,16 @@ async def _policy_threshold_verdict(db, opts: list[dict], tally: list[int],
     return None
 
 
-async def _execute_outcome(db, effect: dict, *, poll_id: int | None = None) -> bool:
-    """Land a winning outcome through an existing channel. Returns success."""
+async def _execute_outcome(db, effect: dict, *, poll_id: int | None = None,
+                           audit: dict | None = None) -> bool:
+    """Land a winning outcome through an existing channel. Returns success.
+
+    ``audit`` (opt-in, default None = byte-for-byte pre-P3) collects a short
+    diagnosis code: the bool alone cannot tell "unsupported type" from "the
+    executor raised"."""
     etype = effect.get("type")
+    if audit is not None:
+        audit["etype"] = etype
     try:
         if etype == "policy" and settings.polis_policy_approval_enabled:
             # S2-5: the only new effect type. Gated — with the approval gate off
@@ -879,6 +939,7 @@ async def _execute_outcome(db, effect: dict, *, poll_id: int | None = None) -> b
                 # A core entry can never be amended, not even by referendum.
                 logger.warning("civic outcome targeted a constitutional_core "
                                "policy (%s) — refused", effect.get("key"))
+                _audit(audit, "error", "policy_immutable")
                 return False
         if etype == "system_config":
             from app.services.config_service import ConfigService
@@ -888,7 +949,7 @@ async def _execute_outcome(db, effect: dict, *, poll_id: int | None = None) -> b
             )
             return True
         if etype == "dynamic_location":
-            return await _add_dynamic_location(db, effect["data"])
+            return await _add_dynamic_location(db, effect["data"], audit=audit)
         if etype == "narrative":
             from app.models.world_event import WorldEvent
             ev = effect.get("event", {})
@@ -907,15 +968,20 @@ async def _execute_outcome(db, effect: dict, *, poll_id: int | None = None) -> b
             return await install_mayor(db, effect.get("slug"))
     except Exception:
         logger.warning("civic outcome execution failed (%s)", etype, exc_info=True)
+        _audit(audit, "error", "exception")
+        return False
+    _audit(audit, "error", "unsupported_type")
     return False
 
 
-async def _add_dynamic_location(db, data: dict) -> bool:
+async def _add_dynamic_location(db, data: dict, *,
+                                audit: dict | None = None) -> bool:
     """Insert a dynamic_locations overlay row + trigger the world reload so the
     new building is reachable without a redeploy."""
     from app.models.dynamic_location import DynamicLocation
     slug = data.get("slug")
     if not slug or "bounds" not in data:
+        _audit(audit, "error", "schema_rejected")
         return False
     if settings.civic_build_schema_enabled:
         # routers/polls.py:92-98 允许 admin 直接塞任意 effect dict,所以净化必须
@@ -944,6 +1010,11 @@ async def _add_dynamic_location(db, data: dict) -> bool:
         if _errors:
             logger.warning("civic build rejected (%s): %s",
                            slug, "; ".join(_errors))
+            _audit(audit, "error",
+                   "unreachable_entrance"
+                   if any("reachable" in e for e in _errors)
+                   else "invalid_geometry")
+            _audit(audit, "detail", _errors[0])
             return False
     existing = (await db.execute(
         select(DynamicLocation).where(DynamicLocation.slug == slug)
