@@ -1,8 +1,11 @@
 """Town map data: named locations, coordinates, and utility functions."""
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 LOCATIONS: dict[str, dict[str, Any]] = {
     # === Public Facilities ===
@@ -280,6 +283,76 @@ def location_category(loc_id: str | None) -> str | None:
     if loc and loc.get("category"):
         return loc["category"]
     return "dining" if loc_id in _DINING_LOCATIONS else None
+
+
+# ── Location capability declarations (P1) ─────────────────────────────
+# 能力 = 「地点声明自己提供什么」。老 dynamic_locations 行没有 capabilities 键 →
+# 归一成空 dict → 不解锁任何东西,与改前逐位相同(缺省安全)。
+#
+# capability 与 category 双向相容:这里把 category == "dining" 无条件视为拥有
+# dining 能力,于是 has_capability(x,"dining") 恒为 location_category(x)=="dining"
+# 的超集 —— 任何既有 category 驱动的行为不可能因为忘写声明而丢失。反方向(能力
+# 派生出 category)在 location_category 里做,且只读纯字典的 _declared_capabilities,
+# 两个方向因此不成环。
+
+
+def _declared_capabilities(loc: dict | None,
+                           loc_id: str | None = None) -> dict[str, dict]:
+    """一条地点 dict 上显式声明的能力(已归一、已丢弃未知项)。纯字典读。
+
+    动态行(公投建楼)额外按 CIVIC_GRANTABLE_CAPABILITIES 白名单降级 —— 这是把
+    location_caps 里「公投永远不能授予 research」那条安全边界在 P1 内**真正执行**,
+    不依赖 P3 任何一道闸的开闸顺序:routers/polls.py 允许 admin 附带任意 effect
+    dict,civic_service._add_dynamic_location 只校验 slug 非空 + "bounds" in data
+    就整包落库。降级只作用于 _dynamic_slugs,静态地点不受影响。
+    """
+    from app.agent.location_caps import (
+        CIVIC_GRANTABLE_CAPABILITIES, normalize_capabilities)
+    if not loc:
+        return {}
+    caps = normalize_capabilities(loc.get("capabilities"))
+    if loc_id is not None and loc_id in _dynamic_slugs:
+        dropped = sorted(set(caps) - CIVIC_GRANTABLE_CAPABILITIES)
+        if dropped:
+            logger.warning(
+                "dynamic location %s declared non-grantable capabilities %s",
+                loc_id, dropped)
+        caps = {k: v for k, v in caps.items()
+                if k in CIVIC_GRANTABLE_CAPABILITIES}
+    return caps
+
+
+def location_capabilities(loc_id: str | None) -> frozenset[str]:
+    """该地点提供的能力集合 = 显式声明 并上 category 派生。"""
+    if not loc_id:
+        return frozenset()
+    from app.agent.location_caps import CAP_DINING
+    caps = set(_declared_capabilities(get_location_by_id(loc_id), loc_id))
+    if location_category(loc_id) == "dining":
+        caps.add(CAP_DINING)
+    return frozenset(caps)
+
+
+def has_capability(loc_id: str | None, cap: str) -> bool:
+    """该地点是否提供 cap。"""
+    return cap in location_capabilities(loc_id)
+
+
+def capability_param(loc_id: str | None, cap: str, key: str, default=None):
+    """读取该地点某项能力的参数(如 dining 的 host_duty)。
+
+    地点没声明该能力 / 声明了但没写这个参数 / 显式写了 null → 返回 default。
+    调用方必须能接住 default:第三个 dining 地点忘写 host_duty 时不得静默把餐费
+    错付给别人(execute/basic.py 的 else 分支就是这个历史 bug)。
+    """
+    if not loc_id:
+        return default
+    params = _declared_capabilities(
+        get_location_by_id(loc_id), loc_id).get(cap)
+    if not params:
+        return default
+    value = params.get(key, default)
+    return default if value is None else value
 
 
 def nearest_dining_location(from_tile: tuple[int, int]) -> str | None:
