@@ -385,6 +385,43 @@ def capability_param(loc_id: str | None, cap: str, key: str, default=None):
     return default if value is None else value
 
 
+def capability_location_at(x: int, y: int, cap: str) -> str | None:
+    """站在 (x,y) 时提供 cap 的地点 id —— bounds 命中且声明该能力者中面积最小
+    (最具体)的那个,平局取 LOCATIONS 插入序先者。
+
+    为什么不复用 get_location_id_at:它是首命中即返,命中序 = dict 插入序 = 静态在
+    前、动态追加在尾。生产两栋公投楼 post_office(44,100,48,106) 与
+    theater(172,40,178,50) 分别完全落在 outdoor 街区 south_quarter(42,100,135,109) /
+    east_gardens(140,35,179,58) 内部,首命中永远返回街区 —— 任何以「站在楼里」为门
+    的能力对它们恒为假(实测 get_location_id_at(46,103) == "south_quarter")。
+
+    这里换成「最具体者优先」把能力门从遮蔽里摘出来,同时不动 get_location_id_at 的
+    首命中契约:location_tracker._build_lookup 的 setdefault 与它同序且注释自陈必须
+    同序,改它会波及首访事件、location_lore、/exploration/me。那是 P3 的活。
+
+    bounds 用 .get 防御性读取:civic_service._add_dynamic_location 零几何校验,一条
+    畸形行不得让本查询崩。
+    """
+    best_id: str | None = None
+    best_area: int | None = None
+    for loc_id, loc in LOCATIONS.items():
+        bounds = loc.get("bounds")
+        if not bounds or len(bounds) != 4:
+            continue
+        try:
+            x1, y1, x2, y2 = (int(v) for v in bounds)
+        except (TypeError, ValueError):
+            continue
+        if not (x1 <= x <= x2 and y1 <= y <= y2):
+            continue
+        if cap not in location_capabilities(loc_id):
+            continue
+        area = (abs(x2 - x1) + 1) * (abs(y2 - y1) + 1)
+        if best_area is None or area < best_area:
+            best_id, best_area = loc_id, area
+    return best_id
+
+
 def nearest_dining_location(from_tile: tuple[int, int]) -> str | None:
     """Nearest dining-category location entrance to ``from_tile``."""
     best, best_d = None, None
