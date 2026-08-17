@@ -203,7 +203,12 @@ CIVIC_AGENDA: list[dict] = [
         "options": [
             {"label": "赞成兴建", "effect": {"type": "dynamic_location", "data": {
                 "slug": "theater", "name": "剧院", "type": "public", "role": "culture",
-                "bounds": [172, 40, 178, 50], "center": [175, 45], "entrance": [172, 45],
+                # 168..173 收进 WALKABLE_X_RANGE(上限 173)。旧值 x2=178 / center
+                # x=175 是孤岛,存量行已由 alembic 068 改过 —— 这里同步字面量,
+                # 否则该 effect 重执行会把楼又建回界外。
+                # **topic 一个字都不许动**:seed_civic_agenda 的幂等键是
+                # Poll.question 精确匹配(:208-210),改了就是重开一张票。
+                "bounds": [168, 40, 173, 50], "center": [170, 45], "entrance": [172, 45],
                 "description": "小镇剧院:说书、演展、故事会的舞台",
                 "boosted_actions": ["CHAT_RESIDENT", "OBSERVE"],
             }}},
