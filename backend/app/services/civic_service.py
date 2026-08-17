@@ -177,6 +177,15 @@ CIVIC_AGENDA: list[dict] = [
                 "bounds": [44, 100, 48, 106], "center": [46, 103], "entrance": [46, 100],
                 "description": "小镇邮局:寄信、收件、时间胶囊的中转站",
                 "boosted_actions": ["WORK"],
+                # P2 #5:邮局是「投递现场」不是「准入条件」。规范形态是 dict[str, dict]
+                # (location_caps.normalize_capabilities 的不动点);effect.data 除 slug
+                # 外整包落进 dynamic_locations.data_json(:923),再整包进 LOCATIONS
+                # (map_data.py:386)—— 零迁移、零模型改动。
+                # 只改 data:topic 一个字符都不能动,seed_civic_agenda 的幂等键是
+                # Poll.question 精确匹配(:208-210),改字就重开票,而同 slug 再建走的是
+                # 整包覆盖分支(existing.data_json = payload),旧键全丢。
+                # 存量那行的回填是纯数据变更,属独立批次(迁移与开闸不同车)。
+                "capabilities": {"postal": {}},
             }}},
             {"label": "暂缓,维持现状", "effect": None},
         ],
