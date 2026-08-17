@@ -45,6 +45,15 @@ _market_cohort_cache: dict[
 ] = {}
 _market_cohort_lock = asyncio.Lock()
 
+# 舞台观众名单:与集市名单**分开**的缓存与单飞锁。共用锁会让两条人流互相排队,
+# 共用缓存会让两种键互相驱逐(下面那个 >8 的裁剪是按时间戳挑最老的)。
+STAGE_EVENT_CROWD_LIMIT = 6
+STAGE_EVENT_COHORT_TTL_SECONDS = 20.0
+_stage_cohort_cache: dict[
+    tuple[str, str, str, str], tuple[float, frozenset[str]]
+] = {}
+_stage_cohort_lock = asyncio.Lock()
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,13 +65,15 @@ def invalidate_market_day_cohort(world_event_id: str) -> None:
 
 
 def _reset_for_tests() -> None:  # pragma: no cover - test hook
-    global _market_cohort_lock
+    global _market_cohort_lock, _stage_cohort_lock
     _counts_cache["ts"] = -1e9
     _counts_cache["data"] = {}
     _market_cohort_cache.clear()
+    _stage_cohort_cache.clear()
     # Tests may use a fresh event loop per case. Production keeps one loop, but
     # replacing this test-only lock avoids retaining a lock from an old loop.
     _market_cohort_lock = asyncio.Lock()
+    _stage_cohort_lock = asyncio.Lock()
 
 
 def active_event_location(world_events) -> str | None:
@@ -195,6 +206,74 @@ def stage_venue_at(x: int, y: int) -> str | None:
     """
     from app.agent.map_data import capability_location_at
     return capability_location_at(x or 0, y or 0, CAP_STAGE)
+
+
+async def stage_event_cohort(
+    db,
+    world_events,
+    *,
+    ttl: float = STAGE_EVENT_COHORT_TTL_SECONDS,
+) -> frozenset[str]:
+    """演出期间被确定性邀请到场的观众(至多 STAGE_EVENT_CROWD_LIMIT 人)。
+
+    形状照 market_day_crowd_cohort(:122-204):进程内 TTL 缓存 + 单飞锁,避免每个并发
+    tick 各查一次居民表(该函数的注释自陈这是 perf 红线);挑的是**真实**的清醒自治
+    居民,移动仍走正常的 VISIT_DISTRICT 通路;查询异常 fail-open 成空集合并短暂缓存,
+    以免一次库故障被放大 N 倍。
+
+    与集市名单的唯一实质差异:**不按站位排除候选**。集市的名单由持久化的 visitor
+    分配定死,舞台没有那层持久化 —— 一旦按站位排除,到场者会在下一个 TTL 窗掉出名单、
+    后来者被逐批补进,一场戏能把全镇轮着拉空。不排除则同一场演出内名单稳定,已到场的
+    人继续占着位置(「到没到」由调用方按站位判,见 stage_venue_at)。
+
+    这就是 design_P2.md §③ 路 B 的外力:名单把 N 个人送到场后,actions.py:80-86 的
+    idle_nearby 自然非空,CHAT_RESIDENT 自动解锁 —— 鸡生蛋被打破一次即可自持,而
+    actions.py 一个字都不用改。
+    """
+    event_key = _active_stage_event_key(world_events)
+    if event_key is None:
+        return frozenset()
+
+    now = time.monotonic()
+    cached = _stage_cohort_cache.get(event_key)
+    if cached is not None and ttl > 0 and now - cached[0] < ttl:
+        return cached[1]
+
+    async with _stage_cohort_lock:
+        now = time.monotonic()
+        cached = _stage_cohort_cache.get(event_key)
+        if cached is not None and ttl > 0 and now - cached[0] < ttl:
+            return cached[1]
+
+        try:
+            from sqlalchemy import select
+            from app.models.resident import Resident
+
+            rows = (await db.execute(
+                select(Resident.id).where(
+                    Resident.is_autonomous,
+                    Resident.resident_type.in_(["npc", "resident"]),
+                    Resident.status.not_in(["sleeping", "chatting", "socializing"]),
+                )
+            )).all()
+            eligible = [str(row[0]) for row in rows]
+            chosen = frozenset(sorted(
+                eligible,
+                key=lambda resident_id: _stable_rank(event_key, resident_id),
+            )[:STAGE_EVENT_CROWD_LIMIT])
+        except Exception:
+            # 不拉人好过把异常抛回 decide 相位(tick.py:102-104 会 break 整条相位链)。
+            logger.warning("stage event crowd cohort query failed", exc_info=True)
+            chosen = frozenset()
+
+        _stage_cohort_cache[event_key] = (now, chosen)
+        # 只有活跃键有用;合成事件快速轮换 id 时把这个小缓存钉在有界大小。
+        if len(_stage_cohort_cache) > 8:
+            oldest = min(_stage_cohort_cache,
+                         key=lambda key: _stage_cohort_cache[key][0])
+            if oldest != event_key:
+                _stage_cohort_cache.pop(oldest, None)
+        return chosen
 
 
 def market_day_visitor_tile(
