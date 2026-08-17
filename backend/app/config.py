@@ -581,6 +581,10 @@ class Settings(BaseSettings):
     # 进程重启才走得到(find_path 的 to_tile not in walkable 直接 return None)。
     world_reload_reset_path_cache: bool = False
 
+    # 坐标反查按「具体性」优先(非 outdoor > 面积小)。关 = 首命中 = 插入序,
+    # 即邮局被 south_quarter、剧院被 east_gardens 遮蔽的今天。
+    location_specific_first_enabled: bool = False
+
     # P2 Task 1 — relation write deltas (reused, zero new LLM calls) + decay.
     realism_rel_familiarity_chat: float = 0.05
     realism_rel_affinity_chat: float = 0.03      # ± by wrapup mood (positive/negative)

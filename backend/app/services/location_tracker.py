@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.agent.map_data import LOCATIONS
+from app.agent import map_data
 from app.database import async_session
 from app.events.bus import emit
 from app.models.location_visit import LocationVisit
@@ -30,7 +31,7 @@ _tile_to_location: dict[tuple[int, int], str] = {}
 
 def _build_lookup() -> None:
     _tile_to_location.clear()
-    for loc_id, loc in LOCATIONS.items():
+    for loc_id, loc in map_data.iter_locations_for_lookup():
         bounds = loc.get("bounds")
         if not bounds:
             continue

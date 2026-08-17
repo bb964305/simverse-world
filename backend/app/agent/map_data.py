@@ -260,9 +260,62 @@ LOCATIONS: dict[str, dict[str, Any]] = {
 _STATIC_LOCATION_SLUGS: frozenset[str] = frozenset(LOCATIONS)
 
 
+#: 「具体性优先」的 bounds 扫描序(P3 ④d)。LOCATIONS 的插入序把 6 条 outdoor
+#: 大街区排在静态字面量末尾(索引 28-33),动态楼一律追加在更后面
+#: (load_dynamic_locations) —— 于是首命中让邮局(44,100,48,106) 被
+#: south_quarter(42,100,135,109) 完全遮蔽。排序键 (是否 outdoor, bounds 面积)
+#: 升序;sorted 稳定,平局仍按插入序。**只换扫描序,不动 LOCATIONS 本身** ——
+#: nearest_dining_location / nearest_indoor_location 的「并列取先者」遍历的是
+#: LOCATIONS,不受影响。
+_bounds_order: list[str] = []
+_specificity_cache: list[tuple[str, dict]] = []
+_cached_keys: frozenset[str] = frozenset()
+
+
+def _bounds_area(loc: dict) -> int:
+    b = loc.get("bounds")
+    if not b or len(b) != 4:
+        return 0
+    return (abs(int(b[2]) - int(b[0])) + 1) * (abs(int(b[3]) - int(b[1])) + 1)
+
+
+def rebuild_bounds_order() -> None:
+    """重算具体性索引 + 缓存扫描列表。LOCATIONS 变动后必须调。"""
+    global _bounds_order, _specificity_cache, _cached_keys
+    _bounds_order = [loc_id for loc_id, _ in sorted(
+        LOCATIONS.items(),
+        key=lambda kv: (kv[1].get("type") == "outdoor", _bounds_area(kv[1])))]
+    _specificity_cache = [(loc_id, LOCATIONS[loc_id]) for loc_id in _bounds_order]
+    _cached_keys = frozenset(_bounds_order)
+
+
+def _specificity_items() -> list[tuple[str, dict]]:
+    # 守卫必须是键集身份,**不能是长度**:load_dynamic_locations 先 pop 全部动态
+    # slug 再 merge 本轮,一次「下线一栋+上线一栋」净条数相同 -> 长度守卫不触发,
+    # 新 slug 既不在 _bounds_order 里也不会被补进来 -> get_location_id_at 对整栋
+    # 新楼返 None(不是返旧值),EAT/RESEARCH/躲雨/首访/lore 全线失效且零异常。
+    # frozenset != dict_keys 是 O(n) 无分配比较;命中缓存直接返回同一个列表,
+    # 顺带修掉「每次调用重建 34 元组列表」(实测 20000 次 25.2ms)。
+    # 就地改某条已有 slug 的 bounds(键集不变)守卫看不见 —— load_dynamic_locations
+    # 末尾已显式 rebuild,其余就地改 LOCATIONS 的调用方须自行调它。
+    if _cached_keys != LOCATIONS.keys():
+        rebuild_bounds_order()
+    return _specificity_cache
+
+
+def iter_locations_for_lookup():
+    """当前生效的 bounds 扫描序。``_find_location_in_bounds`` 与
+    ``location_tracker._build_lookup`` **必须**共用这一个入口 —— 两处不同序
+    会让 tracker 与 agent 认出不同的楼(location_tracker.py 的表头注释)。"""
+    from app.config import settings
+    if settings.location_specific_first_enabled:
+        return _specificity_items()
+    return LOCATIONS.items()
+
+
 def _find_location_in_bounds(x: int, y: int) -> tuple[str | None, dict | None]:
     """Return (loc_id, loc) if (x,y) falls within any location's bounds, else (None, None)."""
-    for loc_id, loc in LOCATIONS.items():
+    for loc_id, loc in iter_locations_for_lookup():
         x1, y1, x2, y2 = loc["bounds"]
         if x1 <= x <= x2 and y1 <= y <= y2:
             return loc_id, loc
@@ -590,6 +643,7 @@ async def load_dynamic_locations() -> int:
         LOCATIONS[row.slug] = data
         _dynamic_slugs.add(row.slug)
         n += 1
+    rebuild_bounds_order()
     return n
 
 
@@ -698,3 +752,6 @@ async def allocate_home(db) -> str | None:
     )
     occupied = {row[0]: row[1] for row in rows.all()}
     return assign_home(occupied)
+
+
+rebuild_bounds_order()
