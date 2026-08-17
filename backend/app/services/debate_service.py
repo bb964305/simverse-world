@@ -263,8 +263,69 @@ async def run_live(db, debate: Debate) -> Debate:
 
     debate.status = "voting"
     await db.commit()
+    # P2 #7:开票的同一刻在场地挂一条 type="script" 的世界事件(见下)。
+    await _maybe_open_stage_event(db, debate, res_a, res_b)
     await manager.broadcast({"type": "debate_voting_open", "debate_id": debate.id})
     return debate
+
+
+async def _maybe_open_stage_event(db, debate: Debate, res_a, res_b) -> None:
+    """把这场辩论挂成场地上的一条 ``type="script"`` 世界事件(STAGE_EVENT_ENABLED)。
+
+    **为什么是 "script" 而不是 "news"**:``crowd_service._EVENT_TYPES_WITH_CROWD``
+    是 ``("festival", "script")``(crowd_service.py:28),"news" 不在里面 —— 学院
+    公开课十五天零到访正是栽在这上面。用 "script" 零改动即获得 ``festival_draw_target``
+    的 ×``realism_festival_weight`` 人流拉力(crowd_service.py:207-219),并自动进入
+    所有居民的 decide prompt(``get_active_events_cached`` → ``ctx.world_events``)。
+    ``WorldEvent.type`` 是 ``String(20)`` 自由文本(models/world_event.py:26),不是
+    闭集;``lab/protocol.py:73`` 的那个闭集是 lab 事件总线,与 world_events 表无关。
+
+    **为什么挂在开票这一刻,而不是设计写的「进入 live 之后」**:live 段任何一轮 LLM
+    失败都会走 ``_auto_draw_refund`` 并 return(见上),那条路上这场辩论当场 settled
+    —— 在进入 live 时建事件就会留下一条指着死辩论、还要拉三倍人流一小时的幽灵事件,
+    还得再写一段补偿清理。挂在开票这一刻在同一条成功路径上,墙钟只差六轮 LLM(数十
+    秒),而 ``ends_at`` 取 ``debate_vote_window_min`` 本来就该从「投票开始」量起 ——
+    这也正是 ``drive_due_debates`` 打 ``_mark_voting_since`` 的同一刻(:337-341)。
+
+    全程 best-effort:世界事件是叙事装饰,建不出来绝不能把一场已经跑完六轮的辩论
+    拖进 auto-draw 退款。
+    """
+    from app.config import settings
+    if not settings.stage_event_enabled:
+        return
+    try:
+        venue = await _debate_venue(debate.id)
+        if not venue:
+            return
+        from app.agent.map_data import get_location_by_id
+        from app.models.world_event import WorldEvent
+        place = (get_location_by_id(venue) or {}).get("name") or "剧院"
+        a_name = res_a.name if res_a else "正方"
+        b_name = res_b.name if res_b else "反方"
+        now = datetime.now(UTC)
+        db.add(WorldEvent(
+            type="script",
+            # WorldEvent.title 是 String(200),Debate.topic 是 String(300)——
+            # 真 PG 上不截断就是一条 StringDataRightTruncation。
+            title=f"{place}辩论 · {debate.topic}"[:200],
+            description=(f"{a_name}与{b_name}正在{place}辩论「{debate.topic}」，"
+                         f"居民们可以去{place}旁听、议论。"),
+            payload_json={"location_id": venue, "debate_id": debate.id},
+            starts_at=now,
+            ends_at=now + timedelta(minutes=settings.debate_vote_window_min),
+            # 与 script_service.fire_due_scripts(:79-86)同姿势:realism 开时留给
+            # event_cron 的 flip 去激活,好让 start 相位的广播与集体记忆照常发生。
+            is_active=(False if settings.realism_enabled else True),
+        ))
+        await db.commit()
+    except Exception:
+        logger.warning("stage event for debate %s failed", debate.id, exc_info=True)
+        # 半截写入不回滚的话,PendingRollbackError 会顺着这条共享 session 传染给
+        # drive_due_debates 的下一场辩论(同 event_cron.py:69-77 踩过的坑)。
+        try:
+            await db.rollback()
+        except Exception:
+            logger.warning("stage event rollback itself failed", exc_info=True)
 
 
 async def _auto_draw_refund(db, debate: Debate) -> None:

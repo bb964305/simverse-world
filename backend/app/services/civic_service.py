@@ -997,7 +997,16 @@ async def maybe_spawn_lecture_debate(db, event: dict) -> bool:
             return False
         topic = event.get("title", "小镇议题").replace("的公开课", "")
         from app.services.debate_service import create_debate
-        await create_debate(db, f"关于「{topic}」的争论", a.slug, b.slug)
+        # P2 #7:把辩论安排到声明了 stage 能力的地点(今天全镇唯一的是剧院)。
+        # 闸关 = 不传场地 = 逐字节旧行为。地点由能力反查得出,这里**不硬编码**剧院
+        # 的 slug —— 剧院是公投建的动态行,slug 是数据不是代码常量。守卫在
+        # tests/test_stage_event_debate.py:它禁掉本函数体里出现该 slug 的字面量。
+        venue = None
+        if settings.stage_event_enabled:
+            from app.agent.location_caps import CAP_STAGE
+            from app.agent.map_data import capability_locations
+            venue = next(iter(capability_locations(CAP_STAGE)), None)
+        await create_debate(db, f"关于「{topic}」的争论", a.slug, b.slug, venue=venue)
         return True
     except Exception:
         logger.warning("lecture debate spawn failed", exc_info=True)
