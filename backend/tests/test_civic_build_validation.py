@@ -7,7 +7,7 @@ upsert 允许同 slug。
 """
 import pytest
 
-from app.agent import map_data
+from app.agent import map_data, pathfinder
 from app.lab.apply import validate_add_location, validate_location_patch
 
 POST_OFFICE = {"slug": "post_office", "data": {
@@ -114,3 +114,66 @@ def test_post_office_passes_walkable_range():
         POST_OFFICE, outdoor_overlap_is_warning=True, require_walkable_range=True)
     assert errors == []
     assert warnings == ["bounds sit inside outdoor block 'south_quarter'"]
+
+
+# ── 入口可达性(S3) ─────────────────────────────────────────────────────
+
+THEATER_CENTER = (175, 45)
+
+
+@pytest.fixture
+def fresh_path_cache(locations_snapshot):
+    """pathfinder 的 walkable/reachable 是 module-global 缓存,别的测试改过
+    LOCATIONS 会串味 —— 用还原后的静态地图重算一次。"""
+    pathfinder.reset_walkable_cache()
+    yield
+    pathfinder.reset_walkable_cache()
+
+
+def test_reachable_entrance_check_is_opt_in(fresh_path_cache):
+    """天文台入口(10,88) 在 walkable 域外 → 不可达;默认关时旧入口照样放行。"""
+    good = {"slug": "observatory", "data": {
+        "name": "天文台", "bounds": [5, 88, 15, 96], "entrance": [10, 88]}}
+    assert validate_add_location(good) == []
+    errors, _ = validate_location_patch(good, require_reachable_entrance=True)
+    assert errors == ["entrance (10, 88) is not reachable from the town hub"]
+
+
+def test_post_office_entrance_is_reachable(fresh_path_cache):
+    errors, _ = validate_location_patch(
+        POST_OFFICE, outdoor_overlap_is_warning=True,
+        require_walkable_range=True, require_reachable_entrance=True)
+    assert errors == [], "邮局入口(46,100) 实测可达,不该被任何一条新规则挡住"
+
+
+def test_walkable_set_would_self_certify_but_reachable_does_not(fresh_path_cache):
+    """必须先把剧院并进 LOCATIONS 才谈得上「自证」:_get_forced_walkable
+    (pathfinder.py:60-68) 只对 LOCATIONS 里的 entrance/center 强标。不并进去时
+    (175,45) 是 walkable=False/reachable=False,断言恒真但跟 forced-walkable
+    机制毫无关系 —— 那是伪证据。"""
+    map_data.LOCATIONS["theater"] = {**THEATER["data"],
+                                     "bounds": (172, 40, 178, 50),
+                                     "center": (175, 45),
+                                     "entrance": (172, 45)}
+    pathfinder.reset_walkable_cache()
+    assert THEATER_CENTER in pathfinder.get_walkable_tiles(), \
+        "forced_walkable 会把它自己的 center 无条件塞进 walkable(自证)"
+    assert THEATER_CENTER not in pathfinder.get_reachable_tiles(), \
+        "hub 连通分量才戳得穿:find_path 到它实测返 None"
+    # 拿这枚「walkable 但不可达」的 tile 当门 —— 走 civic 的 upsert 形态(同 slug
+    # 覆盖写),否则新 slug 的 bounds 必然压在 theater 自己身上,多出一条 overlap
+    # error 淹掉这里要钉的那条。实现前因缺 require_reachable_entrance 关键字必然
+    # TypeError 红,实现后必须被拒。
+    errors, _ = validate_location_patch(
+        {"slug": "theater", "data": {**THEATER["data"], "entrance": [175, 45]}},
+        allow_existing_slug=True, outdoor_overlap_is_warning=True,
+        require_reachable_entrance=True)
+    assert errors == [
+        "entrance (175, 45) is not reachable from the town hub"]
+
+
+def test_missing_entrance_is_rejected_when_reachability_required(fresh_path_cache):
+    errors, _ = validate_location_patch(
+        {"slug": "blob", "data": {"name": "无门之楼", "bounds": [20, 90, 24, 94]}},
+        require_reachable_entrance=True)
+    assert errors == ["missing entrance/center"]

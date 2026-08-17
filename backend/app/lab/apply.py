@@ -55,6 +55,7 @@ def validate_location_patch(
     allow_existing_slug: bool = False,
     outdoor_overlap_is_warning: bool = False,
     require_walkable_range: bool = False,
+    require_reachable_entrance: bool = False,
 ) -> tuple[list[str], list[str]]:
     """Structural + conflict checks for an add_location patch.
 
@@ -77,6 +78,10 @@ def validate_location_patch(
     MAP_WIDTH_TILES/MAP_HEIGHT_TILES, so theater (x2=178 < 180) passed while
     WALKABLE_X_RANGE tops out at 173. Off by default: the pre-P3 fixtures
     (tests/test_world_governance.py:36) legitimately sit outside that band.
+
+    ``require_reachable_entrance`` — uses get_reachable_tiles(), never
+    get_walkable_tiles(). Same pick order as map_data.get_valid_target_tile:
+    entrance wins, center is only the fallback.
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -131,6 +136,22 @@ def validate_location_patch(
                             "bounds/entrance leave the walkable area "
                             f"[{wx1},{wx2}]x[{wy1},{wy2}]: ({px},{py})")
                         break
+            if require_reachable_entrance:
+                ent = data.get("entrance") or data.get("center")
+                if not ent or len(ent) != 2:
+                    errors.append("missing entrance/center")
+                else:
+                    # get_walkable_tiles() force-adds every location's
+                    # entrance/center (pathfinder.py:60-68) and would
+                    # self-certify; only the hub-connected component tells the
+                    # truth (theater's center is walkable but unreachable).
+                    # Evaluated BEFORE the new row is merged into LOCATIONS, so
+                    # this asks "does the door land on the existing town?".
+                    from app.agent.pathfinder import get_reachable_tiles
+                    tile = (int(ent[0]), int(ent[1]))
+                    if tile not in get_reachable_tiles():
+                        errors.append(
+                            f"entrance {tile} is not reachable from the town hub")
     if not data.get("name"):
         errors.append("missing name")
     return errors, warnings
