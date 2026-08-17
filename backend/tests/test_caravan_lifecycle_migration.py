@@ -44,4 +44,4 @@ def test_agent_player_migrations_extend_market_visitors_and_are_head():
     assert npc_turns.down_revision == "062_add_agent_players"
     assert quota_counters.down_revision == "063_agent_npc_chat_turns"
     assert ugc_privileges.down_revision == "064_forge_quota_counters"
-    assert script.get_heads() == ["065_sanitize_ugc_privileges"]
+    assert script.get_heads() == ["068_fix_theater_bounds"]

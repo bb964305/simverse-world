@@ -610,6 +610,21 @@ class Settings(BaseSettings):
     # 与 REALISM_CROWD_ENABLED 正交:确定性名单是 gameplay 拉力,不是装饰性抽签
     # (照 caravan lifecycle 的先例,decide/basic.py:361-365)。
     stage_event_crowd_enabled: bool = False
+    # reload_world 顺带清 pathfinder/caravan 路网缓存。关 = 运行中新建的楼要等
+    # 进程重启才走得到(find_path 的 to_tile not in walkable 直接 return None)。
+    world_reload_reset_path_cache: bool = False
+
+    # 坐标反查按「具体性」优先(非 outdoor > 面积小)。关 = 首命中 = 插入序,
+    # 即邮局被 south_quarter、剧院被 east_gardens 遮蔽的今天。
+    location_specific_first_enabled: bool = False
+
+    # 公投执行结果写回 options_json[0](_effect_applied/_effect_error)。
+    # 关 = 失败原因只剩一句中文公告 + 一行 warning。
+    civic_effect_audit_enabled: bool = False
+
+    # 新楼落成庆典(effect.data 的 opening_event_days 控制天数,0/缺省=不开)。
+    # 注意:真要产生位移拉力还须 REALISM_CROWD_ENABLED —— 那道闸生产默认 False。
+    civic_build_opening_event_enabled: bool = False
 
     # P2 Task 1 — relation write deltas (reused, zero new LLM calls) + decay.
     realism_rel_familiarity_chat: float = 0.05
@@ -691,6 +706,10 @@ class Settings(BaseSettings):
     # M3 civic governance: proposals → clerk bulletin → NPC+player vote → execute.
     civic_polls_enabled: bool = True
     civic_poll_days: int = 3                      # voting window length
+    # --- P3 公投建楼接线(每道闸一个独立回滚面,默认全关) -----------------
+    # 关 = 逐字节旧行为。开闸硬顺序见 deploy/backend/.env.example。
+    civic_build_schema_enabled: bool = False   # effect.data 白名单投影 + type 缺省
+    civic_build_validate_enabled: bool = False  # 落库前几何/越界/可达性校验
     # Kill switch for the 2026-07-25 _npc_choice bias fix (option-0 monopoly:
     # A2=M zero signal + index-order tie-break + all-effect polls). True falls
     # back to the pre-fix scorer byte-for-byte. Default False = fix ON, because
@@ -773,6 +792,10 @@ class Settings(BaseSettings):
     civic_facts_enabled: bool = False             # 主开关 (env CIVIC_FACTS_ENABLED): 小镇现况事实层
     civic_facts_cache_ttl_seconds: float = 60.0   # 公共事实快照 TTL(每 worker 进程内)
     civic_facts_max_stale_seconds: float = 600.0  # 有界 fail-open: 旧快照超这么久宁可不注入,也不注入过期镇长
+    # 「小镇有哪些地方」名单里给公投新建的楼留几个坑。0 = 逐字节旧行为
+    # (静态在前占满 PLACES_LIMIT,新楼永远被挤掉)。没填满的坑退还给静态,
+    # 所以 len(places) 与改前恒等。
+    civic_facts_places_dynamic_reserve: int = 0
     civic_memory_broadcast_enabled: bool = False  # 主开关 (env CIVIC_MEMORY_BROADCAST_ENABLED): 镇务记忆广播
     civic_memory_importance: float = 0.9          # 结果类(选举/议案生效)的 raw importance
     civic_memory_notice_importance: float = 0.6   # 征询/日常公告的 raw importance(低一档,不挤占候选池)

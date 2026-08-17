@@ -399,22 +399,38 @@ async def _read_places(db: AsyncSession) -> list[str]:
     ``PLACES_LIMIT`` / ``PLACE_MAX_CHARS``:动态地点的名字来自公投 effect 的
     ``data``,是自由文本;而公投能一直建楼,条数只增不减。**先截断再去重**——
     去重后再截断会让两个只有尾巴不同的长名字在 prompt 里并排出现同一个词。
-    静态设施在前,所以被条数上限挤掉的总是新加的动态地点。
+    静态设施在前,所以被条数上限挤掉的总是新加的动态地点 —— 这是
+    ``civic_facts_places_dynamic_reserve == 0``(默认)时的口径。
     """
     from app.agent.map_data import LOCATIONS
     from app.models.dynamic_location import DynamicLocation
 
     names = [loc["name"] for loc in LOCATIONS.values()
              if loc.get("type") == "public" and loc.get("name")]
-    rows = (await db.execute(
-        select(DynamicLocation.data_json)
-        .where(DynamicLocation.active.is_(True))
-        .order_by(DynamicLocation.slug)
-    )).scalars().all()
-    names += [data["name"] for data in (r or {} for r in rows)
-              if data.get("type") == "public" and data.get("name")]
-    clipped = (_clip(name, PLACE_MAX_CHARS) for name in names)
-    return list(dict.fromkeys(clipped))[:PLACES_LIMIT]
+    reserve = max(0, int(settings.civic_facts_places_dynamic_reserve or 0))
+    stmt = select(DynamicLocation.data_json).where(DynamicLocation.active.is_(True))
+    # reserve=0 保持旧口径(按 slug 的字典序,与新旧无关);开了保留位才换成
+    # 「新楼优先」,否则坑会稳定地留给 slug 靠前的那栋老楼。created_at 是建表
+    # 就有的列(033_add_world_governance.py:51),换排序零迁移。
+    stmt = (stmt.order_by(DynamicLocation.created_at.desc(), DynamicLocation.slug)
+            if reserve else stmt.order_by(DynamicLocation.slug))
+    rows = (await db.execute(stmt)).scalars().all()
+    dyn = [data["name"] for data in (r or {} for r in rows)
+           if data.get("type") == "public" and data.get("name")]
+    if not reserve:
+        clipped = (_clip(name, PLACE_MAX_CHARS) for name in names + dyn)
+        return list(dict.fromkeys(clipped))[:PLACES_LIMIT]
+    # 保留位:动态先占最多 reserve 个坑,静态填剩下的,没填满的坑退还给静态。
+    # 渲染顺序仍是静态在前 —— 只有名额分配先给动态,公共设施在 prompt 里的
+    # 顺序不抖(前缀缓存)。去重顺序不动:先 _clip 再 dict.fromkeys。
+    dyn_clipped = list(dict.fromkeys(_clip(n, PLACE_MAX_CHARS) for n in dyn))
+    head = dyn_clipped[:reserve]
+    static_clipped = [c for c in dict.fromkeys(_clip(n, PLACE_MAX_CHARS)
+                                               for n in names) if c not in head]
+    static_clipped = static_clipped[:max(0, PLACES_LIMIT - len(head))]
+    tail = [c for c in dyn_clipped[reserve:]
+            if c not in head and c not in static_clipped]
+    return (static_clipped + head + tail)[:PLACES_LIMIT]
 
 
 #: (section 名, 读取函数) —— 顺序即返回字典的键序,也是 fail-open 的 reason 取值域。
