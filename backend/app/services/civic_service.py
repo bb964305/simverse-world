@@ -925,6 +925,26 @@ async def _add_dynamic_location(db, data: dict) -> bool:
         data, _schema_warns = normalize_location_data(data)
         for _w in _schema_warns:
             logger.warning("civic build payload normalized (%s): %s", slug, _w)
+    if settings.civic_build_validate_enabled:
+        # 四个参数成套:公投是 upsert(allow_existing_slug)、outdoor 街区是地面
+        # 不是楼(否则邮局这类合法楼被误杀)、越界与可达性是新楼的两道门。
+        # 必须跑在任何写库之前 —— 一旦并进 LOCATIONS,pathfinder 的
+        # _get_forced_walkable 会把新楼入口自己塞进 walkable 集合自证成功。
+        from app.lab.apply import validate_location_patch
+        _errors, _warns = validate_location_patch(
+            {"slug": slug,
+             "data": {k: v for k, v in data.items() if k != "slug"}},
+            allow_existing_slug=True,
+            outdoor_overlap_is_warning=True,
+            require_walkable_range=True,
+            require_reachable_entrance=True,
+        )
+        for _w in _warns:
+            logger.info("civic build warning (%s): %s", slug, _w)
+        if _errors:
+            logger.warning("civic build rejected (%s): %s",
+                           slug, "; ".join(_errors))
+            return False
     existing = (await db.execute(
         select(DynamicLocation).where(DynamicLocation.slug == slug)
     )).scalar_one_or_none()
