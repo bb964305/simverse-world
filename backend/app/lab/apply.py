@@ -47,16 +47,36 @@ def _norm_bounds(raw) -> tuple[int, int, int, int] | None:
     return (x1, y1, x2, y2)
 
 
-def validate_add_location(patch: dict) -> list[str]:
-    """Structural + conflict checks for an add_location patch. Returns a list of
-    human-readable errors (empty = valid). Checked against the *current* merged
-    LOCATIONS (static + already-applied dynamic)."""
+def validate_location_patch(
+    patch: dict,
+    *,
+    allow_existing_slug: bool = False,
+    outdoor_overlap_is_warning: bool = False,
+) -> tuple[list[str], list[str]]:
+    """Structural + conflict checks for an add_location patch.
+
+    Returns ``(errors, warnings)`` — empty ``errors`` = may be persisted.
+    Checked against the *current* merged LOCATIONS (static + already-applied
+    dynamic).
+
+    ``outdoor_overlap_is_warning`` — an ``outdoor`` block is the ground, not a
+    building: post_office sits inside south_quarter and theater inside
+    east_gardens, and both are legitimate. With the downgrade on, the scan must
+    NOT stop at the first hit: the six outdoor blocks are the last static
+    entries (indices 28-33) and dynamic buildings are appended after them
+    (map_data.py:386), so an early break would hide a real building clash.
+
+    ``allow_existing_slug`` — the civic path is an upsert
+    (civic_service.py:927 overwrites data_json for a known slug), so a known
+    slug is neither fatal nor an overlap with itself.
+    """
     errors: list[str] = []
+    warnings: list[str] = []
     slug = patch.get("slug")
     data = patch.get("data") or {}
     if not slug or not isinstance(slug, str):
         errors.append("missing slug")
-    elif slug in LOCATIONS:
+    elif slug in LOCATIONS and not allow_existing_slug:
         errors.append(f"slug '{slug}' already exists")
 
     bounds = _norm_bounds(data.get("bounds"))
@@ -71,9 +91,17 @@ def validate_add_location(patch: dict) -> list[str]:
             errors.append(f"bounds out of map range or inverted: {bounds}")
         else:
             for other_slug, loc in LOCATIONS.items():
+                if allow_existing_slug and other_slug == slug:
+                    continue
                 ob = _norm_bounds(loc.get("bounds"))
-                if ob and _overlap(bounds, ob):
-                    errors.append(f"bounds overlap existing location '{other_slug}'")
+                if not (ob and _overlap(bounds, ob)):
+                    continue
+                if outdoor_overlap_is_warning and loc.get("type") == "outdoor":
+                    warnings.append(
+                        f"bounds sit inside outdoor block '{other_slug}'")
+                    continue
+                errors.append(f"bounds overlap existing location '{other_slug}'")
+                if not outdoor_overlap_is_warning:
                     break
             # Spawn reachability heuristic: entrance must be inside the new bbox
             # and not swallowed by another location's bbox.
@@ -84,6 +112,13 @@ def validate_add_location(patch: dict) -> list[str]:
                     errors.append("entrance/center must lie within bounds")
     if not data.get("name"):
         errors.append("missing name")
+    return errors, warnings
+
+
+def validate_add_location(patch: dict) -> list[str]:
+    """Pre-P3 contract kept byte-for-byte: errors only, first overlap wins, a
+    known slug is fatal. Callers: lab apply engine + admin proposal preview."""
+    errors, _ = validate_location_patch(patch)
     return errors
 
 
