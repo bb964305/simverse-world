@@ -50,16 +50,45 @@ async def _charge_meal(db, resident) -> None:
 
         cost = settings.npc_meal_cost_sc
         # 经营者解析提前一次,转账目标与赊账分支两用 (cafe_host / tavern_hub)。
+        #
+        # P1: 闸开时 duty key 改读地点 dining 能力的 host_duty 参数,并把 loc_id
+        # 统一到 capability_location_at —— 与 actions.py 的 EAT 门同口径,否则会出现
+        # 「EAT 已解锁但这里因 outdoor 遮蔽拿到街区 id」的分叉。host_duty 缺失时 key
+        # 为 None → 不查 duty → 餐费改记镇库(见下);旧代码在这种情况下会把餐费静默
+        # 转给 tavern_hub 的持有者(错付)。
         loc_id = get_location_id_at(resident.tile_x, resident.tile_y)
         host = None
-        if location_category(loc_id) == "dining":
+        key = None
+        dining_id = None
+        if settings.location_capabilities_enabled:
+            from app.agent.location_caps import CAP_DINING
+            from app.agent.map_data import capability_location_at, capability_param
+            dining_id = capability_location_at(
+                resident.tile_x, resident.tile_y, CAP_DINING)
+            if dining_id:
+                loc_id = dining_id
+                key = capability_param(dining_id, CAP_DINING, "host_duty")
+        elif location_category(loc_id) == "dining":
             key = "cafe_host" if loc_id == "cafe" else "tavern_hub"
+        if key:
             host = await find_duty_resident(db, key)
 
         to_host = settings.npc_trade_enabled and host is not None and host.slug != slug
+        # P1: 声明了 dining 却没写 host_duty 时,餐费记入镇库而不是销毁。两个
+        # _pending 变体同事务落库,由下方既有的 `await db.commit()` 收口,不会出现
+        # 「扣了没进账」;paid=False 时 pending 分支一个字都没写,赊账路径不变。
+        to_town = (not to_host and settings.location_capabilities_enabled
+                   and settings.town_treasury_enabled
+                   and dining_id is not None and cost > 0)
         if to_host:
             paid = await coin_service.treasury_transfer(db, slug, host.slug, cost,
                                                         reason="meal")
+        elif to_town:
+            from app.services import treasury_service
+            paid = await coin_service.treasury_debit_pending(db, slug, cost)
+            if paid:
+                await treasury_service.tax_pending(db, cost,
+                                                   reason="meal:no_host_duty")
         else:
             paid = await coin_service.treasury_debit(db, slug, cost, reason="meal")
         balance = await coin_service.treasury_balance(db, slug)
