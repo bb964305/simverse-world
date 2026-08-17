@@ -394,6 +394,10 @@ class BasicDecidePlugin:
             return None
         from app.agent.map_data import get_location_id_at, get_valid_target_tile
         from app.services import crowd_service
+        # 集市场地的唯一真相源。不用能力反查:全镇有且只有一个集市场地,路网几何按这
+        # 一栋楼的瓦片手调,第二个 market-capable 地点会让 cohort 判据、目的地与商队
+        # 停车锚点指向不同的楼。
+        from app.services.event_location import MARKET_HALL_LOCATION_ID
         here = get_location_id_at(ctx.resident.tile_x, ctx.resident.tile_y)
         world_events = getattr(ctx, "world_events", None)
         cohort = await crowd_service.market_day_crowd_cohort(
@@ -401,8 +405,8 @@ class BasicDecidePlugin:
             world_events,
             persisted_only=not crowd_enabled,
         )
-        if ctx.resident.id in cohort and here != "market_hall":
-            target = "market_hall"
+        if ctx.resident.id in cohort and here != MARKET_HALL_LOCATION_ID:
+            target = MARKET_HALL_LOCATION_ID
             target_tile = crowd_service.market_day_visitor_tile(
                 ctx.resident.id, cohort, world_events,
             )
