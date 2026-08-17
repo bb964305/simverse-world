@@ -665,6 +665,9 @@ class Settings(BaseSettings):
     # M3 civic governance: proposals → clerk bulletin → NPC+player vote → execute.
     civic_polls_enabled: bool = True
     civic_poll_days: int = 3                      # voting window length
+    # --- P3 公投建楼接线(每道闸一个独立回滚面,默认全关) -----------------
+    # 关 = 逐字节旧行为。开闸硬顺序见 deploy/backend/.env.example。
+    civic_build_schema_enabled: bool = False   # effect.data 白名单投影 + type 缺省
     # Kill switch for the 2026-07-25 _npc_choice bias fix (option-0 monopoly:
     # A2=M zero signal + index-order tie-break + all-effect polls). True falls
     # back to the pre-fix scorer byte-for-byte. Default False = fix ON, because

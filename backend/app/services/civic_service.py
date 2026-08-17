@@ -917,6 +917,14 @@ async def _add_dynamic_location(db, data: dict) -> bool:
     slug = data.get("slug")
     if not slug or "bounds" not in data:
         return False
+    if settings.civic_build_schema_enabled:
+        # routers/polls.py:92-98 允许 admin 直接塞任意 effect dict,所以净化必须
+        # 挂在落库点而不是 CIVIC_AGENDA 侧。丢键不拒条:拒绝会让「新字段先落库、
+        # 代码后上线」的部署顺序把合法行判成非法。
+        from app.services.civic_build import normalize_location_data
+        data, _schema_warns = normalize_location_data(data)
+        for _w in _schema_warns:
+            logger.warning("civic build payload normalized (%s): %s", slug, _w)
     existing = (await db.execute(
         select(DynamicLocation).where(DynamicLocation.slug == slug)
     )).scalar_one_or_none()
