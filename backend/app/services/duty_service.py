@@ -58,6 +58,11 @@ logger = logging.getLogger(__name__)
 
 DUTY_WORK_COOLDOWN_HOURS = 20  # ≈ once per game day, tolerant of schedule drift
 
+#: 公开课世界事件的历史 type 与现 type。冷却判据必须**两种都查**:STAGE_EVENT_ENABLED
+#: 翻开之后新课是 "script",而 7 天窗口里的旧课还是 "news";只认一种的话,翻闸当天
+#: (任一方向)冷却直接失效,讲师每次 WORK 都开一场新课。
+_LECTURE_EVENT_TYPES = ("news", "script")
+
 # Funding is deliberately independent from the duty registry itself: it is a
 # fiscal classification, not an action/permission classification.  Existing
 # resident JSON may predate ``funding_source``; these defaults make opening the
@@ -485,14 +490,30 @@ async def _work_street_artist(db, resident) -> str | None:
 
 async def _work_lecturer(db, resident) -> str | None:
     """顾明远:每周在学院开一场公开课(WorldEvent,event_cron 按窗口激活,
-    活动期间注入所有居民的决策与对话 prompt,吸引大家去学院)。"""
+    活动期间注入所有居民的决策与对话 prompt,吸引大家去学院)。
+
+    P2 #8(STAGE_EVENT_ENABLED):事件 type 从 ``news`` 改成 ``script``。
+    ``crowd_service._EVENT_TYPES_WITH_CROWD`` 是 ``("festival", "script")``
+    (crowd_service.py:28),``news`` 不在里面 —— 于是 ``active_event_location``
+    (:65-76)永远看不到公开课,``festival_draw_target`` 的
+    ×``realism_festival_weight`` 拉力(:207-219)对公开课**一次都没生效过**。
+    payload 里那句 ``location_id: academy`` 写了三年,一直是死信息。
+
+    不把 ``news`` 加进那个元组:那会让 ``event_templates.NEWS_POOL`` 的 4 条随机
+    新闻也长出人流语义,全镇往一条「今天风很大」里跑。
+
+    闸关 = 逐字节旧行为:type 仍是 ``news``、标题/描述/payload/返回文案一字不变。
+    """
     from app.models.world_event import WorldEvent
+    from app.config import settings
 
     cooldown_days = int(perk(resident, "lecture_cooldown_days", 7))
     since = datetime.now(UTC) - timedelta(days=cooldown_days)
     recent = (await db.execute(
         select(WorldEvent.id).where(
-            WorldEvent.type == "news",
+            # 两种 type 都查(见 _LECTURE_EVENT_TYPES 的说明)。标题过滤已经把范围
+            # 收得极窄("%{name}的公开课%"),不会误伤 script_service 的剧本事件。
+            WorldEvent.type.in_(_LECTURE_EVENT_TYPES),
             WorldEvent.title.like(f"%{resident.name}的公开课%"),
             WorldEvent.created_at >= since,
         ).limit(1)
@@ -501,7 +522,7 @@ async def _work_lecturer(db, resident) -> str | None:
         return None
     now = datetime.now(UTC)
     db.add(WorldEvent(
-        type="news",
+        type=("script" if settings.stage_event_enabled else "news"),
         title=f"{resident.name}的公开课",
         description=f"{resident.name}今天在学院开公开课,讲小镇的历史与来路。居民们可以去学院旁听。",
         payload_json={"location_id": "academy", "duty": "lecturer"},
