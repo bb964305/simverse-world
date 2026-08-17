@@ -157,11 +157,12 @@ def test_ties_go_to_the_earlier_insertion(temp_location):
     assert nearest_capability_location((51, 62), CAP_MARKET) == "t_a"
 
 
-def test_decide_has_a_reserved_seat_comment_for_p2():
-    """P1 只留座位不落分支:_maybe_capability_errand 需要真实消费者才可行为验证,
-    提前落地就是无法测行为的死码。"""
+def test_the_p1_seat_is_now_filled_by_the_p2_duty_venue_branch():
+    """P1 只留座位(占位名 _maybe_capability_errand),P2 #6 用实名 _maybe_duty_venue
+    兑现它。座位与真分支不得并存 —— 并存说明分支插错了位置。"""
     src = (Path(__file__).resolve().parents[1]
            / "app" / "agent" / "phases" / "decide" / "basic.py")
     text = src.read_text(encoding="utf-8")
-    assert "_maybe_capability_errand" in text
+    assert "_maybe_capability_errand" not in text
+    assert "async def _maybe_duty_venue" in text
     assert "skip_decide_when_planned" in text

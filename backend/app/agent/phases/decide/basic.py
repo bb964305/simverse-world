@@ -116,21 +116,20 @@ class BasicDecidePlugin:
                 plan.status = "interrupted"
             return ctx
 
-        # ── P2 座位:_maybe_capability_errand ──────────────────────────
-        # 「按地点能力挑目的地」的规则分支要插在这里 —— crowd 之后、Case 2 之前,
-        # 做成 _maybe_crowd_draw 的同级 peer。
-        #   · 不能更靠下:三份出厂 YAML 全设 skip_decide_when_planned: true,下面的
-        #     Case 2 一旦有计划就无条件 return,插在它之后 = 死码。
-        #   · 不能更靠上:越过 _maybe_needs_action 就是复现 0809 生产死锁;
-        #     tests/test_realism_needs.py 的
-        #     test_critical_need_remains_ahead_of_market_pull 钉死这条排序。
-        #   · 不能越过 crowd:caravan cohort 是 gameplay 权威,不是装饰性效果。
-        # 命中后必须置 ctx.plan_followed = False 并把 plan.status 改成
-        # "interrupted"(照 :112-117),否则 tick.py:127-131 会把这次自由移动误判成
-        # planned_move 写进粘性行程。
-        # P1 只交付反查函数(map_data.capability_locations /
-        # nearest_capability_location);分支本体在 P2(实名 _maybe_duty_venue /
-        # _maybe_stage_draw)—— 没有真实消费者时它是无法做行为验证的死码。
+        # P2 #6 (DUTY_VENUE): 营生有「现场」声明的人,今天还没上工、又不在现场时,
+        # 先把这一 tick 定成去现场(零 LLM)。位置是 crowd 之后、Case 2 之前:
+        #   · 不能更靠下 —— 三份出厂 YAML 全设 skip_decide_when_planned: true,
+        #     Case 2 一旦有计划就无条件 return,插在它之后就是死码;
+        #   · 不能更靠上 —— 越过 _maybe_needs_action 就是复现 0809 生产死锁
+        #     (7/11 居民饿死在自家门口);
+        #   · 不能越过 crowd —— caravan cohort 是 gameplay 权威,不是装饰效果。
+        duty_venue = await self._maybe_duty_venue(ctx)
+        if duty_venue is not None:
+            ctx.action_result = duty_venue
+            ctx.plan_followed = False
+            if plan:
+                plan.status = "interrupted"
+            return ctx
 
         # Case 2 (E-09/E-10): plan-priority skip. Follow the plan without an LLM
         # call when nothing warrants reconsidering. force_plan_only (budget 95%+)
@@ -439,6 +438,60 @@ class BasicDecidePlugin:
         return ActionResult(
             action=ActionType.VISIT_DISTRICT, target_slug=target,
             target_tile=target_tile or get_valid_target_tile(target), reason="去凑热闹",
+        )
+
+    async def _maybe_duty_venue(self, ctx: TickContext) -> ActionResult | None:
+        """P2 #6: 营生有「现场」声明、今天还没上工、且人不在现场时,把这一 tick 的
+        目的地定成那个现场(VISIT_DISTRICT,零 LLM)。
+
+        动作必须是 VISIT_DISTRICT:memorize 只在 action ∈ {WANDER, VISIT_DISTRICT,
+        GO_HOME} 时写 metadata['move'](memorize/basic.py:175),而到访验收的口径正是
+        metadata_json->'move'->>'target' —— 产出别的动作,统计完全看不到。
+
+        地点解析全部经 duty_service 的包装函数:一来「营生有没有现场」与「哪栋楼是
+        那个现场」两侧不互相硬编码 slug,二来本文件被 P1-S9 的守卫读全文,map_data 的
+        两个能力反查 helper 的名字在这里一个字都不能出现(注释与 docstring 同样算数)。
+
+        守卫集合与 _maybe_crowd_draw 逐条对齐(可用集 / status / 粘性行程 / GO_HOME);
+        上面几条 early-return 已经挡掉了饿死、暴雨、在途粘性与商队 gameplay 权威,
+        这里不重复写。
+        """
+        if not settings.duty_venue_enabled:
+            return None
+        if ActionType.VISIT_DISTRICT not in ctx.available_actions:
+            return None
+        # 不得把人从对话 / 睡眠 / 已开始的行程里拽出来。
+        if ctx.resident.status in ("sleeping", "chatting", "socializing"):
+            return None
+        if ctx.continuation_trip is not None:
+            return None
+        # 回家不是上工。临界精力与 GO_HOME 行程在上面已受保护;这里再挡一次「行程还
+        # 没落 Redis 的第一步」。
+        if any(
+            plan is not None and plan.action == ActionType.GO_HOME.value
+            for plan in (ctx.current_plan, ctx.scheduled_plan)
+        ):
+            return None
+        from app.services import duty_service
+        if not duty_service.duty_venue_capability(ctx.resident):
+            return None
+        # 今天已经上过工就别再赶路 —— 与 on_work 用同一个 Redis 键
+        # (duty_service._duty_work_cooldown_key),否则会出现「走到了现场但冷却还没过」
+        # 的空跑,白花一格日行动 cap。Redis 抖动时该查询 fail-closed(视为已上工)。
+        if await duty_service.duty_work_done(ctx.resident):
+            return None
+        if duty_service.duty_venue_location_at(ctx.resident):
+            return None  # 已经在现场
+        target = duty_service.nearest_duty_venue(ctx.resident)
+        if not target:
+            return None
+        from app.agent.map_data import get_valid_target_tile
+        target_tile = get_valid_target_tile(target)
+        if not target_tile:
+            return None
+        return ActionResult(
+            action=ActionType.VISIT_DISTRICT, target_slug=target,
+            target_tile=target_tile, reason="去上工",
         )
 
     async def _crowd_hint(self, ctx: TickContext) -> str:
