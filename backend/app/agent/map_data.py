@@ -28,6 +28,8 @@ LOCATIONS: dict[str, dict[str, Any]] = {
         "entrance": (72, 14),
         "description": "热闹的社交场所，居民们喜欢在这里聊天和交换消息",
         "boosted_actions": ["CHAT_RESIDENT", "GOSSIP"],
+        # host_duty 脱离 dining 毫无意义,所以参数作用域跟着能力走。
+        "capabilities": {"dining": {"host_duty": "tavern_hub"}},
     },
     "cafe": {
         "name": "咖啡馆",
@@ -38,6 +40,7 @@ LOCATIONS: dict[str, dict[str, Any]] = {
         "entrance": (53, 14),
         "description": "安静的休闲场所，适合一对一的深度对话",
         "boosted_actions": ["CHAT_RESIDENT", "IDLE"],
+        "capabilities": {"dining": {"host_duty": "cafe_host"}},
     },
     "workshop": {
         "name": "工坊",
@@ -94,6 +97,9 @@ LOCATIONS: dict[str, dict[str, Any]] = {
         "entrance": (116, 72),
         "description": "小镇的元游戏入口：研究员在此接入隔离沙箱，完成玩家委托、产出世界变更提案",
         "boosted_actions": ["RESEARCH"],
+        # 只收编「站在哪」这一半门槛;身份门 has_trusted_lab_access 不在能力体系内。
+        # research 的 civic_grantable=False —— 公投永远不能给别的楼授予它。
+        "capabilities": {"research": {}},
     },
     # === Private Houses ===
     "house_a": {
@@ -208,6 +214,12 @@ LOCATIONS: dict[str, dict[str, Any]] = {
         "allocatable": False,
         "description": "集市日开放的独立交易大厅，商队与本地摊主在此摆摊买卖",
         "boosted_actions": ["WORK", "OBSERVE"],
+        # 仅供发现/导流(P3 冷启动、town_facts),禁止用于场地解析。场地权威是
+        # settings.market_day_venue + event_location.resolve_event_location_id;
+        # 路网几何(caravan_route._MARKET_AVENUE_X_BOUNDS / caravan_parking)是按这
+        # 一栋楼的实际瓦片手调的,改成能力反查一旦出现第二个 market-capable 地点,
+        # cohort 判据 / decide 目的地 / 商队停车锚点会指向不同的楼,静默分裂。
+        "capabilities": {"market": {}},
     },
     # === Outdoor Areas ===
     "north_path": {
@@ -241,6 +253,11 @@ LOCATIONS: dict[str, dict[str, Any]] = {
         "description": "小镇南部的新居住区，宽阔步道通往成排住宅",
     },
 }
+
+#: 模块 import 期的静态 slug 快照(不含动态合入的楼)。P1 的能力防漂移守卫只锁这个
+#: 集合:既防代码误声明第二个 research 地点,又不挡 P3 的公投建楼在数据侧扩展
+#: dining。load_dynamic_locations 只增删 LOCATIONS,不动这个 frozenset。
+_STATIC_LOCATION_SLUGS: frozenset[str] = frozenset(LOCATIONS)
 
 
 def _find_location_in_bounds(x: int, y: int) -> tuple[str | None, dict | None]:
