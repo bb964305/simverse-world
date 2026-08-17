@@ -600,6 +600,17 @@ class Settings(BaseSettings):
     # debate settle 的 5% burn 是唯一真金出口,不得双花)。
     stage_event_enabled: bool = False
 
+    # --- P2 剧院人流 (STAGE_EVENT_CROWD_ENABLED) ---
+    # 演出期间把一支确定性的观众名单(≤6 人,sha256 稳定排序)拉到声明了 stage 能力的
+    # 那栋楼。关 = decide 的 _maybe_stage_crowd 第一行即返回,决策排序与今天逐字节
+    # 等价、零额外查询。
+    # 这是 design_P2.md §③ 路 B:actions.py:80-86 的 CHAT_RESIDENT 判据一个字不改,
+    # 靠「人真的到场」把鸡生蛋打破一次即可自持 —— 副作用半径只在有 active stage
+    # 事件时,其它地点的授权集逐条不变。
+    # 与 REALISM_CROWD_ENABLED 正交:确定性名单是 gameplay 拉力,不是装饰性抽签
+    # (照 caravan lifecycle 的先例,decide/basic.py:361-365)。
+    stage_event_crowd_enabled: bool = False
+
     # P2 Task 1 — relation write deltas (reused, zero new LLM calls) + decay.
     realism_rel_familiarity_chat: float = 0.05
     realism_rel_affinity_chat: float = 0.03      # ± by wrapup mood (positive/negative)
