@@ -747,6 +747,10 @@ class Settings(BaseSettings):
     civic_facts_enabled: bool = False             # 主开关 (env CIVIC_FACTS_ENABLED): 小镇现况事实层
     civic_facts_cache_ttl_seconds: float = 60.0   # 公共事实快照 TTL(每 worker 进程内)
     civic_facts_max_stale_seconds: float = 600.0  # 有界 fail-open: 旧快照超这么久宁可不注入,也不注入过期镇长
+    # 「小镇有哪些地方」名单里给公投新建的楼留几个坑。0 = 逐字节旧行为
+    # (静态在前占满 PLACES_LIMIT,新楼永远被挤掉)。没填满的坑退还给静态,
+    # 所以 len(places) 与改前恒等。
+    civic_facts_places_dynamic_reserve: int = 0
     civic_memory_broadcast_enabled: bool = False  # 主开关 (env CIVIC_MEMORY_BROADCAST_ENABLED): 镇务记忆广播
     civic_memory_importance: float = 0.9          # 结果类(选举/议案生效)的 raw importance
     civic_memory_notice_importance: float = 0.6   # 征询/日常公告的 raw importance(低一档,不挤占候选池)
