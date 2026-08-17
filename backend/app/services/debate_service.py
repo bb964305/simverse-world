@@ -39,6 +39,16 @@ ROUNDS = 6
 #: market_day_crowd_cohort 那套 TTL 缓存 + 单飞锁。
 AUDIENCE_LIMIT = 8
 
+#: 观众的四层收益系数。全部是既有系统的既有量纲,没有一项是货币:
+#: importance 照 _resident_aftermath 里辩手的 0.7/0.6 降一档(design §②-c ≈0.5);
+#: 心情照赢家的 +0.3/+0.1 降一档;social 是 needs 的 [0,1] 标度;
+#: familiarity 是 relation_service 的 [0,1] 标度。
+AUDIENCE_MEMORY_IMPORTANCE = 0.5
+AUDIENCE_MOOD_VALENCE = 0.1
+AUDIENCE_MOOD_AROUSAL = 0.05
+AUDIENCE_SOCIAL_RESTORE = 0.15
+AUDIENCE_FAMILIARITY = 0.02
+
 #: 反查场地时扫描的 script 事件行数上限。script 事件只有两个产地(#7 的 live 辩论、
 #: #8 的公开课),而 settle 发生在 run_live 之后 debate_vote_window_min 内,目标行
 #: 必在最新的一批里。上限存在只是为了让这条查询恒定代价。
@@ -585,6 +595,25 @@ async def _resident_aftermath(db, d: Debate, winner: str) -> None:
             await OpinionService(db).update_from_debate(d, seed_only=False)
     except Exception:
         logger.warning("opinion update from settle failed", exc_info=True)
+    # P2 #10:在场观众的收益。全部落在「记忆/心情/社交需求/关系」四个**非货币**
+    # 层 —— settle 已经有一条真金链路(stake 时 charge 已扣走玩家的币 :99,settle
+    # 只做重分配:distributable=int(loser_pool*0.95)、burn=loser_pool-distributable
+    # :396-414),出账恒 ≤ 入账、净销毁 burn+取整余数,是净 sink 不是铸币口。给观众
+    # 发 SC 就是开第二条铸币口且无对应 sink,并与 settle 分账双花。这里一枚不动。
+    #
+    # 跑在 settle 的 await db.commit()(:405)之后,辩论早已 settled;异常自吞并
+    # rollback,既不回染 M7 的生命周期护栏,也不把中断的事务留给上面的
+    # opinion_service(照 execute/basic.py:99-103 _charge_meal 的形状)。
+    try:
+        from app.config import settings
+        if settings.stage_event_enabled:
+            await _audience_aftermath(db, d, winner)
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        logger.warning("debate audience aftermath failed", exc_info=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -672,3 +701,59 @@ async def stage_audience(
     ]
     present.sort(key=lambda r: _stable_audience_rank(seed, str(r.id)))
     return present[:AUDIENCE_LIMIT]
+
+
+async def _audience_aftermath(db, d: Debate, winner: str) -> None:
+    """在场观众的非货币收益:记忆 / 心情 / 社交需求 / 关系。**零 SC 流动**。
+
+    social 是这四层里最该给的一项:needs.social 恢复会改变 most_critical
+    (needs.py:65)与 _crowd_hint(decide/basic.py:410),直接治动机侧 —— 看了一场热闹
+    的辩论就该不那么孤独。needs 写入额外挂 realism_enabled:needs 体系本来就归
+    realism,闸关的世界不该凭空多出 meta_json["needs"]。
+
+    write_needs 不 commit(needs.py:29-34)且必须整体重赋 meta_json 才触发
+    SQLAlchemy 脏检测 —— 所以整批写完统一 commit 一次。
+    """
+    venue = await stage_venue_of(db, d.id)
+    if not venue:
+        return
+    audience = await stage_audience(
+        db, venue, seed=d.id,
+        exclude_slugs=(d.resident_a_slug, d.resident_b_slug),
+    )
+    if not audience:
+        return
+
+    from app.agent.map_data import get_location_by_id
+    from app.config import settings
+    from app.memory.service import MemoryService
+    from app.services.mood_service import apply_mood_event
+    from app.services.relation_service import bump
+
+    venue_name = (get_location_by_id(venue) or {}).get("name") or venue
+    win_slug = d.resident_a_slug if winner == "a" else d.resident_b_slug
+    win_res = await _resident(db, win_slug)
+    win_name = win_res.name if win_res else ("正方" if winner == "a" else "反方")
+
+    mem = MemoryService(db)
+    for r in audience:
+        await mem.add_memory(
+            r.id, "event",
+            f"我在{venue_name}看完了辩论「{d.topic}」,{win_name}赢了。",
+            importance=AUDIENCE_MEMORY_IMPORTANCE, source="debate")
+        # 已经拿到 ORM 对象,用 apply_mood_event 而不是 ..._by_id,省一次 db.get。
+        await apply_mood_event(db, r, AUDIENCE_MOOD_VALENCE, AUDIENCE_MOOD_AROUSAL)
+
+    if settings.realism_enabled:
+        from app.agent.needs import get_needs, write_needs
+        for r in audience:
+            needs = get_needs(r)
+            needs["social"] = min(1.0, needs["social"] + AUDIENCE_SOCIAL_RESTORE)
+            write_needs(r, needs)
+        await db.commit()
+
+    # 同场观众两两加熟。O(n²) 但 n ≤ AUDIENCE_LIMIT(8 → 28 次),且每场辩论只在
+    # settle 时跑一次,不在 tick 热路径上。
+    for i, r1 in enumerate(audience):
+        for r2 in audience[i + 1:]:
+            await bump(db, r1.id, r2.id, AUDIENCE_FAMILIARITY, 0.0)
