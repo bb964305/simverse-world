@@ -78,6 +78,11 @@ python3 -m venv .venv
 
 然后启动 API：
 
+下面的 `JWT_SECRET` 是本机临时密码。
+绝不能把它用于生产环境。
+
+生产环境必须生成新的随机密钥。
+
 ```bash
 DATABASE_URL=sqlite+aiosqlite:///./simverse-dev.db \
   AUTO_CREATE_TABLES=true \
