@@ -147,6 +147,7 @@ docs/ROADMAP.md           唯一现行路线图：现在和下一步
      AUTO_CREATE_TABLES=true \
      RUN_BACKGROUND_TASKS=false \
      REDIS_URL=redis://localhost:6379/0 \
+     DEBUG=true \
      ./.venv/bin/uvicorn app.main:app --reload --port 8000
    ```
 
