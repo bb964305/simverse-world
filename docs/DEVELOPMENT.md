@@ -37,7 +37,7 @@ docker --version
 docker compose version
 ```
 
-Vite 8 不再支持 Node.js 18。
+Vite 8 要求使用上面列出的较新 Node.js 版本。
 Node 版本太旧时，前端无法可靠构建。
 
 ## 路线一：最短体验
