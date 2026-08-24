@@ -100,7 +100,10 @@ services:
         condition: service_healthy
       bootstrap:
         condition: service_completed_successfully
-    env_file: .env
+    env_file:
+      - path: .env
+      - path: hosted-agent-runner.env
+        required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-changeme}@db:5432/skills_world
       REDIS_URL: redis://redis:6379/0
@@ -197,6 +200,11 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-changeme}@db:5432/skills_world
       REDIS_URL: redis://redis:6379/0
+      # The world worker never decrypts hosted-provider credentials and must
+      # not inherit the API/hosted-worker KEK from the shared env file.
+      HOSTED_AGENT_RUNNER_ENABLED: "false"
+      HOSTED_AGENT_RUNNER_ACTIVE_KEY_ID: ""
+      HOSTED_AGENT_RUNNER_KEYRING: ""
       RESIDENT_SPRITE_ENABLED: "${RESIDENT_SPRITE_ENABLED:-false}"
       RESIDENT_SPRITE_ARTIFACT_DIR: /var/lib/simverse/resident-sprites
       RESIDENT_SPRITE_CAPABILITY_RECEIPT: /run/secrets/resident-sprite-capability.json
@@ -216,6 +224,40 @@ services:
       timeout: 5s
       retries: 6
       start_period: 180s
+
+  # Durable BYOK Agent controllers run separately from world simulation. This
+  # process alone receives arbitrary provider egress and the hosted credential
+  # keyring; feature-off deployments remain dormant but heartbeat healthy.
+  hosted-agent-worker:
+    build:
+      context: ../backend
+      dockerfile: ../deploy/Dockerfile
+    command: python -m app.hosted_agents.main
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      api:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
+    env_file:
+      - path: .env
+      - path: hosted-agent-runner.env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-changeme}@db:5432/skills_world
+      REDIS_URL: redis://redis:6379/0
+      HOSTED_AGENT_RUNNER_INTERNAL_API_BASE: http://api:8000
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import asyncio,sys; from app.tasks.loop_heartbeat import snapshot; s=asyncio.run(snapshot()); sys.exit(0 if s['hosted_agent']['state'] == 'ok' else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 90s
 
   # Standalone Lab Runner (recovery plan Phase 8 / status report gap #7): consumes
   # the Redis run queue and executes sandbox adapters in a process SEPARATE from

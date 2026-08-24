@@ -33,8 +33,11 @@ rsync -avz --delete \
   --exclude 'static/uploads/' \
   "$BACKEND_DIR/" "$REMOTE:$REMOTE_DIR/backend/"
 
-# Sync deploy configs
+# Sync deploy configs. The separately provisioned hosted-agent-runner.env is
+# intentionally never a source and the explicit exclude preserves that rule if
+# this source list is broadened later.
 rsync -avz \
+  --exclude 'hosted-agent-runner.env' \
   "$SCRIPT_DIR/docker-compose.yml" \
   "$SCRIPT_DIR/Dockerfile" \
   "$REMOTE:$REMOTE_DIR/deploy/"
