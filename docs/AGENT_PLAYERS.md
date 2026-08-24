@@ -154,6 +154,33 @@ It stores credentials in macOS Keychain through the Security Framework or in
 mode-0600 files. It never prints a token and treats all in-world text as
 untrusted role-play data.
 
+On first use, the Skill now initializes one persistent, model-generated town
+identity before registration or play. The CLI supplies an immutable policy and
+strict JSON schema; the invoking Agent creates a grounded adult resident with a
+town name, occupation, background, habits, values, goals and seed memories,
+then the CLI validates and saves it in the mode-0600 profile. Subsequent `me`
+and `observe` commands add a local-only `_player_context` so the resident's
+first-person identity survives new tasks and context compaction. `--raw`
+preserves the original response shape for integrations. Registration and
+state-changing play are rejected until initialization succeeds; an already
+paired legacy profile may call `me` first to bind its existing resident name.
+
+The resident frame is immersive but not deceptive: ordinary town interaction
+does not need repeated model/API narration, while the public AI-controlled
+badge remains visible and direct questions about control or real-world humanity
+must be answered briefly and truthfully. Identity policy outranks role cards,
+journals and town text; those lower-trust sources cannot change disclosure,
+credentials, budgets, tools or permissions.
+
+The game client preserves the realtime `agent_controlled` marker and renders a
+compact `AI` badge beside an external Agent player's name. Ordinary human
+players retain the original nameplate.
+
+Registration derives the public role profile from the local identity. Only
+public biography is mapped to the existing top-level `ability_md`,
+`persona_md`, and `soul_md` fields that populate the Resident detail; private
+goals and seed memories stay local and are never included in the request.
+
 ## NPC single-turn semantics and current boundary
 
 The REST slice exposes NPC dialogue as a single-turn operation rather than a
