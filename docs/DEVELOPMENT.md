@@ -83,6 +83,8 @@ DATABASE_URL=sqlite+aiosqlite:///./simverse-dev.db \
   AUTO_CREATE_TABLES=true \
   RUN_BACKGROUND_TASKS=false \
   REDIS_URL=redis://localhost:6379/0 \
+  LAB_ENABLED=false \
+  JWT_SECRET=local-dev-only-0123456789abcdef0123456789abcdef0123456789abcdef \
   DEBUG=true \
   ./.venv/bin/uvicorn app.main:app --reload --port 8000
 ```
@@ -115,8 +117,10 @@ http://localhost:5173
 先检查后端：
 
 ```bash
-curl http://localhost:8000/health
+curl --noproxy '*' http://localhost:8000/health
 ```
+
+`--noproxy '*'` 表示本机请求不经过系统代理。
 
 浏览器再完成下面的路径：
 
@@ -212,6 +216,8 @@ DATABASE_URL=postgresql+asyncpg://postgres:changeme@localhost:5432/skills_world 
 ```bash
 DATABASE_URL=postgresql+asyncpg://postgres:changeme@localhost:5432/skills_world \
   REDIS_URL=redis://localhost:6379/0 \
+  LAB_ENABLED=false \
+  JWT_SECRET=local-dev-only-0123456789abcdef0123456789abcdef0123456789abcdef \
   DEBUG=true \
   ./.venv/bin/uvicorn app.main:app --reload --port 8000
 ```
@@ -253,6 +259,7 @@ VITE_API_URL=http://localhost:8000 npm run dev
 | `DATABASE_URL` | 数据库地址和密码 |
 | `REDIS_URL` | Redis 地址 |
 | `DEBUG` | 是否使用本地开发安全规则 |
+| `LAB_ENABLED` | 是否开放 Lab；当前本地命令也保持关闭 |
 | `VITE_API_URL` | 前端要连接的后端地址 |
 
 ### 按需填写的变量
