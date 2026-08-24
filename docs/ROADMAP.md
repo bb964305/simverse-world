@@ -1,89 +1,158 @@
-# Simverse World Roadmap
+# Simverse World 当前路线图
 
-> 状态基线：2026-07-27。本文是项目唯一现行规划文档；旧规格、过程记录、研究、测试报告与运行证据均已移入 [`archive/2026-07-25/`](../archive/2026-07-25/README.md)，只作为历史证据，不再代表当前实现或待办。
+最后更新：2026-08-24
 
-居民形象供应商资格、批次生成、审核、安装与恢复命令见 [`RESIDENT_SPRITE_OPERATIONS.md`](RESIDENT_SPRITE_OPERATIONS.md)。
+这篇文章只写项目现在的状态和下一步。
 
-## 当前基线
+旧路线图已经保存到：
 
-| 领域 | 当前状态 | 下一道门 |
+- [2026-08-24 重写前路线图](../archive/2026-08-24/ROADMAP.before-documentation-rewrite.md)
+
+## 第一眼先看这里
+
+| 问题 | 现在的答案 |
+|---|---|
+| 已经能用什么 | 登录、地图、居民、聊天、记忆、经济、社区玩法和管理功能已经部署 |
+| 哪些有条件 | AI、搜索、OAuth 和托管 Agent 需要正确密钥或管理员配置 |
+| 哪些已经关闭 | Lab 实验执行、居民精灵生成和外部 Agent 自助注册 |
+| 接下来做什么 | 先观察生产稳定性，再推进生命周期和扩容 |
+
+## 状态词怎么读
+
+路线图只使用下面八个状态词：
+
+| 状态 | 白话说明 |
+|---|---|
+| 未开始 | 还没有进入实现 |
+| 开发中 | 正在设计、编码或验证 |
+| 代码完成 | 代码已写好，但还没有生产证据 |
+| 已部署 | 已经放到生产服务器 |
+| 已开启 | 生产功能开关已经打开 |
+| 已验证 | 已用真实环境或用户路径证明 |
+| 已关闭 | 代码可能还在，但当前不能使用 |
+| 已废弃 | 不再继续使用，也不计划恢复 |
+
+## 已经能用
+
+| 功能 | 状态 | 玩家得到什么 |
 |---|---|---|
-| 核心小镇 | 已完成。账号、角色炼化、实时地图与对话、居民自治、记忆与人格、经济、集市、公告、赛季、辩论和基础治理已经接入主流程 | 继续以生产观测修正体验，不再单列基础里程碑 |
-| 小镇消费与场所激活 P0-P3 | **P0/P1 已于 2026-08-15 部署、开闸并取得生产证据**：vm212 已到迁移 067；一次性发展金向 8 位居民发放 91 SC 且重复调用不重发；余额中位数由 2 升至 12 SC、贫困人数由 8 降至 0；世界日消费已开启，首日 claim 恰好 1 次且同日重放不执行。P2/P3 代码已暗上，但 `MARKET_PLAYER_ENABLED=false`、`LAB_ENABLED=false` | 按 [`reports/ops-deploy-p0-p1-2026-08-15.md`](reports/ops-deploy-p0-p1-2026-08-15.md) 连续观察至少 3 个世界日；指标稳定后再按 [`runbooks/2026-08-15-town-p0-p3-rollout.md`](runbooks/2026-08-15-town-p0-p3-rollout.md) 独立推进 P2，P3 继续等待安全门 |
-| M1-M6 扩展 | 已完成并部署。经济、故事弧、镇务自治、记忆评估、空间扩展和镇长选举已接电 | 观察长期节律与成本 |
-| 拟真与世界时钟 | P0-P2 已实现并在 vm212 开启；世界时钟为 Asia/Shanghai、`k=4` | 继续校准需求、关系、信息扩散和真实账单 |
-| 生产修缮 | heat 时区混比、预算静默告警和 SBTI backfill 工具已完成并部署；`_npc_choice` 的 option-0 结构性偏向（三条根因）已修复并合入主线 | **修复后的投票样本已经取到**：2026-07-25 23:00:12 UTC 夜间任务投出 33 票（worker 日志 `33 NPC civic votes cast`），option-0 占比由 100% 降到 42.4%，归一化熵 0.895~0.994。样本来自事故后重新 seed 的 11 位居民，够证「偏向已消除」，不够做人格-选项相关性分析 |
-| 社会地基 | S2-1 职位实体化、S1-3 舆论动力学已完成并在 vm212 开闸；S1-5 财政闭环（迁移 048）与 S2-5 政策分级审批（迁移 049）**已部署且已开闸**（`TOWN_TREASURY_ENABLED` / `POLIS_POLICY_ENABLED` / `POLIS_POLICY_APPROVAL_ENABLED` 三个开关 2026-07-25 15:31 起全为 true，代码默认值仍为关闭）；四个财政条目已接线到 TreasuryService；S1-1 声誉已实现，选举与 NPC 投票已消费同一份数据。**F1 声誉语义修复已合入主线**（`6128ecb`）：tone 改由关系 affinity 决定、base_tone 退为偏置项；候选集选取不再按声誉排序截断，被动选举权与名声解耦；声誉入票收敛到唯一通道 `vote_trust_delta()` | **REP 已于 2026-08-07 在 vm212 开闸**（`REP_ENABLED=true`，deploy `.env` 单独变更，代码默认仍关）：开闸后首轮夜间 recompute 已证实——2026-08-07 23:01 UTC worker 日志 `S1-1: reputation recomputed for 14 residents`、`meta_json['reputation']` 全员落库、`/townhall/overview` 声誉名单 14 人非空且 `credit_ok=false` 恰为最低两人 jiang-lin(-0.0258)/zhou-dahe(-0.0150)——与 2026-08-05 标定（n=11、affinity 覆盖率 93.0%、阈值 `0.0058` 拒绝 2/11）预测的拒绝面逐人一致。下一道门：3-5 晚后（≈08-11）复跑 `rep_calibrate.py` 复标定（首轮 EMA≈稳态×0.3 会逐夜外扩，且人口已 11→14）；`credit_allowed()` 仍无生产消费方，赊账接线另立变更 |
-| 政治层边界 | 玩家创作居民（forge / import 五条创建路径）自动获得投票权与被选举权的泄漏已修复：新建居民类型为 `resident`，`is_autonomous`（人口）与 `is_civic_voter`（政治权利）按语义拆分；`purge_residents` 加玩家角色防呆；burn-in 报告加政治层边界探针。F2 已合入主线（`6128ecb`）：晋升/撤销写入口、`civic_standing_history` 表（迁移 051）、三态闸门 `CIVIC_PROMOTION_MODE`、读写双守卫 | **存量泄漏实例实测为 0**——`SELECT resident_type,count(*) FROM residents` → `npc\|11`，全是 07-25 事故后重新 seed 的内置阵容。所以回填（T2）在 vm212 上是**空跑，0 行是正确结果不是失败**。真正的洞是**修复尚未部署**：生产容器内无 `civic_membership.py`、`alembic current` = 049，今天在生产 forge 一个居民照旧拿到投票权与被选举权。**部署（T1）才是关泄漏的动作，不是回填**。T1 已于 2026-07-28 01:26 UTC 完成，生产实测 `CIVIC_VOTER_TYPES=['npc']` / `SIM_RESIDENT_TYPES=['npc','resident']` / `UGC_RESIDENT_TYPE='resident'`，边界探针读数「居民 11 / 有政治权利 11 / 算人口 11」为回填前基线 |
-| 工程健康 | 夜间任务错过窗口补跑、聊天锁 DB 侧回收、后台 loop 心跳与死亡告警（`GET /health/loops`）**已部署并在产**，自 2026-07-25 16:53:59 UTC 起生效 | 补跑已被真实触发（07-25 15:32 worker 日志 `nightly: anchor 07:00 … catching up now`）；`/health/loops` 五路 loop 全 `ok`、`stale` 为空。**尚未被检验的是告警路径本身**——线上从未出现过 stale，「loop 真死了会不会报」这一路仍无证据 |
-| 市政厅与实验楼 UI | 实验楼已具备发布、运行直播、审批、验收与安全产物下载；本地代码新增服务端报价、模型/资源展示和只读终端步骤轮询，尚未部署主站 | 在 staging 跑通玩家端完整委托并复核移动端布局 |
-| Lab Agent | 已选择 Codex Adapter；Codex 0.144.4 Runtime、Responses→阿里云 Chat 网关已部署 ARM staging。低报酬固定 `deepseek-v4-flash` + 2C/2G，高报酬固定 `deepseek-v4-pro` + 4C/4G；Runtime 无直接外网，当前只声明 `code` 能力 | 仍需主站部署、生产身份、逐任务强隔离、制品外部存储/扫描、外部 attestation 与并发压测，未满足前不作生产开放 |
-| 居民原创形象 | M1/M2 已并入主线但默认关闭（`RESIDENT_SPRITE_ENABLED=false`、`VITE_RESIDENT_SPRITE_ENABLED=false`），M3 本地安装已完成、尚未部署：provider v2 资格 `de3b7f662683410f87be7280966403ae` 已通过并签发 capability `e1ed7c34138a8f931b6928678bdc70306c1e65c2be475ee55c5f006187f40d8e`；批次 `9a11b878c6374ee6b28829e0742b6c06` 的 25/25 套候选通过自动 QC、真实 Phaser 四方向渲染与九项人工审核，累计审计 106 次请求；50 个文件已原子安装，资源树摘要为 `84e0f9e2366f84e8f4a856bb7f5a002fd0e787b53d4bafe87eb6133ef567463c` | 继续打磨生成质量、排队与费用控制；开关保持关闭，待 staging 完成迁移、独立 worker、管理员审核、热更新和回滚演练后另行决定是否启用 |
-| 美术发布 | 16 个 tilemap 文件已由项目所有者确认授权并补齐署名；25 张居民纹理和 25 张头像已原创替换并带逐文件 receipt，source/dist 两层 release gate 均通过 | 部署构建产物并在 staging/生产抽查实际 Phaser 加载、缓存版本与回滚路径 |
+| 公网首页和 API 健康 | 已验证 | 2026-08-24 公网健康检查返回 HTTP 200 |
+| 注册和登录 | 已部署 | 玩家可以建立账号并进入项目 |
+| LinuxDo OAuth 登录 | 已部署 | 配置好服务商后可以使用第三方登录 |
+| 新手引导 | 已部署 | 玩家可以创建或选择居民 |
+| 2D 小镇地图 | 已部署 | 玩家可以移动、看居民和进入建筑 |
+| 实时消息 | 已部署 | WebSocket 推送聊天和世界变化 |
+| AI 居民 | 已开启 | 后台工人会推动居民行动和事件 |
+| 居民聊天 | 已部署 | 玩家能和居民对话 |
+| 记忆和反思 | 已部署 | 居民能保存记忆并形成长期印象 |
+| 关系图谱 | 已部署 | 玩家能查看居民之间的关系 |
+| Forge 炼化 | 已部署 | 玩家能调研资料并创建角色 |
+| 商店和委托 | 已部署 | 玩家能消费 Soul Coin 和处理委托 |
+| 市场、商队和 NPC 交易 | 已开启 | 生产开关已经打开 |
+| 赛季、辩论和市政厅 | 已部署 | 玩家能参加社区治理玩法 |
+| 时间胶囊和公告 | 已部署 | 玩家能查看世界记录和公共消息 |
+| 公开小镇和观看页 | 已部署 | 访客能在限制范围查看小镇 |
+| Agent Player API | 已部署 | 获准的外部 Agent 可以进入世界 |
+| 托管 Agent 控制器 | 已开启 | 专用后台工人已经启用 |
+| 管理控制台 | 已部署 | 管理员可以查看和控制关键系统 |
 
-## 阶段路线
+这里的“已部署”表示功能已经在生产代码中。
+它不表示每个外部服务都一定配置完成。
 
-| 阶段 | 状态 | 范围 | 完成标准 |
+## 条件开放
+
+| 功能 | 状态 | 开放条件 |
+|---|---|---|
+| AI 对话和居民决策 | 已开启 | LLM 地址、密钥和预算正常 |
+| Forge 联网调研 | 已部署 | 搜索服务和模型服务正常 |
+| LinuxDo OAuth | 已部署 | OAuth 客户端和回调地址正确 |
+| 托管 Agent | 已开启 | 管理员创建控制器并配置专用密钥 |
+| 外部 Agent 配对 | 已部署 | 用户主动批准一次配对 |
+| 管理控制台 | 已部署 | 当前账号具有管理员权限 |
+| 市场购买 | 已开启 | 市场、商队和库存保护开关保持一致 |
+
+条件不满足时，普通地图仍应继续工作。
+
+## 已经关闭
+
+| 功能 | 状态 | 原因 | 现在保留什么 |
 |---|---|---|---|
-| **0. 决策与核心基线** | 完成 | M1-M6、世界时钟、拟真开闸、预算和行动量口径 | 决策进入配置与生产环境 |
-| **1. 上线收尾** | 基本完成 | vm212 部署、迁移 047、heat 修复、告警、SBTI 回填、TownHall/LabTerminal | 算法偏向已修，**投票分布样本已取到**（07-25 23:00 的 33 票，option-0 由 100% 降至 42.4%）；成本侧单边口径已核（07-15 起逐日与价目表一致），供应商账单比对未做 |
-| **2. 社会地基** | 进行中 | S2-1、S1-3、S1-5、S2-5 已完成且已在 vm212 开闸；S1-1 声誉已实现，F1 语义修复已合入，**`REP_ENABLED` 已于 2026-08-07 在 vm212 开闸** | 官职、舆论、财政、政策和声誉形成可观察闭环——F1/F2/F3 的接线与配置面已于 2026-08-05 收口（近期优先级 5），`rep_credit_min_score` 同日重标定（0.0058，拒绝面 2/11）；`REP_ENABLED` 已按评估报告 §5 六步单开闸并取得首轮 recompute 证据（步骤 4/6 完成，2026-08-07 23:01 UTC，14 residents），剩步骤 5 复标定（≈08-11）与其余政治线开关（F2/F3，默认关） |
-| **3. 降本提质** | 机制完成，持续优化 | 计量、预算熔断、模型路由、计划跳过、行为与记忆一致性探针 | 用连续生产数据校准单位成本与行为质量 |
-| **4. 实验楼开放** | 进行中（ARM staging） | Codex Adapter、模型网关、资源分档、玩家报价/发布/直播/验收、制品链路、生产审批 | 主站 staging 跑通受保护真实委托；完成逐任务强隔离、外部制品与 attestation 后再灰度 |
-| **5. 政治深化** | 已开局（F2/F3 已接线，开关默认关） | 抽签任官、轮值议事、集会投票、卸任审计、陪审、丑闻与政体演变 | 权力流转和冲突能形成持续故事。**已落代码**：F3 的任期到期触发补选（补掉「无限期无镇长」断链）+ 卸任财政审计；F2 的公民权晋升/撤销三档模型。**已接线未开闸**：F2 pass 在夜间链钦定位（163e9b1），F3 审计+补选经 `term_check` 在链上；三条线旋钮已进 Settings 与两份 .env.example（2026-08-05 收口），开关全默认关，开闸是独立变更 |
-| **6. 生命周期** | 未开始 | 健康、医疗、年龄、退休、迁入迁出、死亡与继承 | 人口能自然更替且过程可感知 |
-| **7. 扩容成熟** | 未开始 | 人口结构优化、25-40 人稳定运行、实验楼机构化、多镇对照 | 多个小镇可长期、可比较地自运行 |
-| **8. 居民原创形象** | 主线代码完成但功能开关默认关闭；M3 本地生成、审核、安装与双层 provenance 清关完成，尚未部署 | 角色锚点、四方向动作条、像素图集后处理、自动 QC、Phaser 审核、动态发布，以及 25 个静态 slot 的批量原创替换 | 继续打磨；staging 完成迁移、独立 worker、动态发布、热更新与回滚演练后再决定启用 |
+| Lab 实验执行 | 已关闭 | 原 ARM 服务器已经不可用 | 实验楼参观和历史只读信息 |
+| Lab 结果发布 | 已关闭 | 运行时和执行链都已暂停 | 已有状态说明 |
+| 居民精灵生成 | 已关闭 | 仍需生产审核、费用和回滚演练 | 已有生成代码和历史候选 |
+| 外部 Agent 自助注册 | 已关闭 | 仍需公开申请和滥用控制 | 管理员批准和用户配对路径 |
 
-## 居民原创形象里程碑
+Lab 有三层关闭：
 
-| 里程碑 | 状态 | 范围 | 完成标准 |
-|---|---|---|---|
-| **M1：CLI 可生成** | 本地完成；provider v2 capability 已通过资格审核并实际用于批次生成 | 已完成严格 capability 绑定、独立 7-request/费用确认门、锚点和方向条生成、`96x128` 图集后处理、自动 QC、manifest、失败隔离、断点恢复，以及对中转 signed URL 的公网 DNS、无重定向、无凭据下载、PNG/尺寸上限和摘要化请求证据校验；非 HTTPS 结果下载仅可用显式 `insecure_http_test` receipt | 在 staging 以同一 capability 与 worker-only 密钥复验可恢复生成，并保持自动 QC、请求证据和预算门闭环 |
-| **M2：管理员可审核发布** | 代码已并入主线，后端、worker 与前端入口默认关闭，未部署 | 已完成任务持久化、租约 worker、管理端进度、请求数与保守成本上界（未配置时明确显示未知）、真实 Phaser 四方向预览、九项人工审核、批准/拒绝/派生重试/回滚、原子静态发布和 `sprite_updated` 热更新 | 保持双开关关闭；部署迁移 050 与独立 worker后，配置经复核的单次请求成本上界，并在 staging 完成“生成 -> 审核 -> 发布 -> 热更新 -> 回滚”演练；未经批准的资源继续留在非公开 volume |
-| **M3：25 套替换与清关** | 本地完成，尚未部署 | 已明确对象是 25 个可复用静态 sprite slot，不是当前 11 位 seed NPC；版本化文字外观清单禁止旧图视觉参考；批次 `9a11b878c6374ee6b28829e0742b6c06` 在 275 次 / 保守 `$275.00` 上限内累计审计 106 次请求，并以不可变合并证据复用同 capability、同 catalog、同 request hash 的已通过运行；25 套均经真实 Phaser 四方向渲染、截图固证与九项人工批准，50 个文件已原子替换，source/dist provenance gate 均通过 | 部署构建产物，在 staging 和生产抽查 25 个 slot 的实际加载、静态 URL batch 缓存更新与安装恢复路径 |
+- `LAB_ENABLED=false`。
+- Redis 运行时开关为 `0`。
+- `lab-runner` 容器已停止。
 
-## 近期优先级
+证据见[Lab 停用报告](reports/ops-lab-shutdown-2026-08-24.md)。
 
-> 状态基线 2026-07-27 晚。`origin/master` = `6128ecb`（含管理系统「立刻做」批次 + F1/F2/F3 三条线）；vm212 仍停在 `049`，跑的是 2026-07-25 的镜像。**代码与生产之间隔着 3 个批次**，下面 1、2 两项是解开这个错位的动作。
+历史上曾经使用过 ARM staging。
+那条运行链现在已关闭，不能作为当前能力。
 
-1. ~~部署主线到 vm212（迁移 049 → 051）~~ —— **已完成**（2026-07-28 01:26 UTC，报告见 [`reports/ops-deploy-2026-07-28-T1.md`](reports/ops-deploy-2026-07-28-T1.md)）。落地内容：
-   - 政治层边界修复（`civic_membership.py` 等）——**这才是关 UGC 投票权泄漏的动作**，不是回填
-   - 管理系统批次：平台密钥读侧掩码、哨兵账号铸币收口、`0.0.0.0:8100` 收回回环
-   - F1/F2/F3 的代码（开关全默认关，接线未做，**部署本身不改变任何运行时行为**）
-   - bootstrap 会往 `users` 插一行 `id='system'` 哨兵（幂等 additive）。**部署前后各查一次** `SELECT id,email FROM users WHERE id='system';`（前应为空，后应恰好一行）
-   `docker-compose.yml` 是宿主文件，`git archive backend` 送不上去，端口收窄要单独一步 scp + `docker compose up -d`。
-2. ~~回填存量泄漏居民~~ —— **在 vm212 上已无对象**。实测 `residents` 只有 11 行且全是 `npc` 内置阵容，泄漏实例为 0。回填脚本仍要写（其它环境可能有存量，且它是 F2 晋升判定的锚点载体），但在本环境跑出 0 行是正确结果。
-3. **在途 3 张 poll 已延期到 2026-07-31T23:29:43Z**（2026-07-27 执行，`scripts/postpone_open_polls.py`，完成标记 `system_config.civic_poll_postpone_until`）→ 实际关票在 **2026-08-01 23:00 UTC**。第 1 项已于 07-28 完成，**结票会走安全路径**：候选人全部不在籍 → `install_mayor` 零写入 + 流会公告，不会出现「公告说某人当选、库里没有镇长」。届时复核公告正文与 `SELECT slug, meta_json->'mayor' FROM residents` 读数即为验收证据。
-4. ~~跑 `scripts/rep_calibrate.py` 用真实分布重标定 `rep_credit_min_score`；再让市政厅消费同一份声誉数据~~ —— **已完成**（2026-08-05，评估见 [`reports/2026-08-05-rep-gate-assessment.md`](reports/2026-08-05-rep-gate-assessment.md)）：vm212 实测 n=11、affinity 覆盖率 93.0%，阈值 `-0.3`（拒绝 0/11，装饰性）改为 `0.0058`（拒绝 2/11）；`/townhall/overview` 新增只读 `reputation` 节，市政厅面板加「声誉」tab（信用受限徽记 + 未开闸横幅）。开闸动作本身单独部署，不与本批同车。
-5. **统一收口**：~~`config.py` / `.env.example` 补齐三条线的旋钮；`nightly_cron` 接入 F2 晋升 pass（位置写死在 `close_due_polls` 之后、`run_npc_voting` 之前）与 F3 `office_audit`。**不做这一步，F1/F2/F3 的代码在运行时是死的。**~~ **已完成（2026-08-05）**：F2 接线在 163e9b1；F3 经 term_check 在链上（回归钉 tests/test_nightly_office_audit_wiring.py）；CIVIC_×12 进 Settings、F3 空缺阈值旋钮、deploy env 25 键补齐（tests/test_civic_settings_knobs.py / test_env_example_consistency.py 守住）。开关全默认关，开闸另行变更。
-6. 在真实 PostgreSQL / Redis / WebSocket 上以 25 与 40 名自治居民跑扩容与成本测试（确定性测试工具已完成）。
-7. Lab 继续保持 Mock-only。~~合入前重编号~~——**已完成**（2026-08-05）：lab 迁移整链重编号 `051/052/053 → 052/053/054`，`052_add_lab_codex_model_tier` 的 `down_revision` 改指 `051_add_civic_standing_history`，分支已 rebase 到 master，`ScriptDirectory.get_heads()` 单头（断言固化在 `test_civic_standing_history_model.py::test_migration_single_head_and_chains_onto_050`）。下一步：将已在 ARM staging 健康运行的 Codex Runtime 接入主站 staging，部署 Lab 迁移（052-054）和玩家报价 UI，跑通“发布 code 委托 → 分档调度 → 直播 → 验收 → 安全下载”；在逐任务强隔离、外部制品存储/扫描和 attestation 完成前不进入生产灰度。合入 master 时同步把主仓 `backend/.env` 里 4 行注释状态的 lab-codex 配置去掉行首 `# `（2026-07-27 管理系统批次待办）。
-8. 在 staging 演练迁移 050、独立 worker、管理端生成/审核/发布、`sprite_updated` 热更新和回滚；确认 provider 密钥不进入 API 容器。
-9. 部署已清关的 25-slot 构建产物，抽查 source/dist receipt、静态 URL batch 缓存和生产 Phaser 四方向加载，并保留安装事务的恢复材料。
+## 当前开发重点
 
-## 已确定的运行口径
+| 工作 | 状态 | 完成标志 |
+|---|---|---|
+| 生产稳定性观察 | 开发中 | 市场、商队、交易和后台心跳持续稳定 |
+| 文档结构整理 | 开发中 | 玩家、开发者和运维人员都能从首页找到答案 |
+| 居民原创形象生产门 | 开发中 | 独立工人、管理员审核、费用控制和回滚全部验证 |
+| 外部 Agent 开放规则 | 开发中 | 申请、审批、限流和滥用处理形成闭环 |
+| Lab 替代平台评估 | 未开始 | 有可用平台、安全边界、真实任务和回滚证据 |
 
-- 世界时间唯一入口为 `backend/app/world_clock.py`；世界时锚 Asia/Shanghai，速度 `WORLD_CLOCK_K=4`。
-- 行动配额按世界日计数；代码默认 `AGENT_MAX_DAILY_ACTIONS=20`，vm212 当前配置为 100。
-- 全局 LLM 日预算上限为 `$10`；预算、TTL、日志和运维 cron 使用真实时间。
-- `POLIS_OFFICE_ENABLED` 与 `POLIS_OPINION_ENABLED` 代码默认关闭，vm212 测试环境已显式开启。
-- `TOWN_TREASURY_ENABLED`、`POLIS_POLICY_ENABLED`、`POLIS_POLICY_APPROVAL_ENABLED` 代码默认仍为关闭，但 **vm212 自 2026-07-25 15:31 起三个全部为 true**。关闭时行为与开发前逐字节一致（工资继续凭空铸造、售货不抽税、审批走单人 CAS、投票是相对多数）——该回退语义只对未开闸环境成立。
-- **`REP_ENABLED` 代码默认仍为关；vm212 已于 2026-08-07 11:43 UTC 开闸**（deploy `.env` 单独变更 + force-recreate api/agent-worker，零同车改动）。三条开闸前置此前已清空：F1（`6128ecb`）修掉前两条——tone 不再是常量负值、改由该条八卦对应的关系 affinity 决定（`rep_gossip_base_tone` 退为偏置项）；`election_service` 的候选集选取不再按声誉排序截断，声誉只经 `vote_trust_delta()` 影响得票、不决定谁能参选。第三条 2026-08-05 收口：`rep_credit_min_score` 用 vm212 真实分布标定为 `0.0058`（`app/config.py`，拒绝面 2/11 非空非全量；旧值 `-0.3` 实测拒绝 0/11 属装饰性闸门），标定证据与开闸操作单见 [`reports/2026-08-05-rep-gate-assessment.md`](reports/2026-08-05-rep-gate-assessment.md)。开闸后首轮夜间 recompute 已于 2026-08-07 23:01 UTC 证实（worker 日志 14 residents + 落库 + 市政厅名单，拒绝面与标定逐人一致）。注意 `credit_allowed()` 尚无生产消费方（唯一活读者是市政厅 `credit_ok` 展示），开闸影响面 = 夜间 recompute 落库 + `vote_trust_delta()` 入票；nightly 节奏 = 每真实日一次、北京 07:00 锚点（k 不改频率）。
-- 政治层有两条**不同**的边界，不得合并成一个谓词：`Resident.is_autonomous`（人口／仿真，读它的有 agent loop、市政厅名册、职务查找、mayor 清扫、讲座池）与 `Resident.is_civic_voter`（政治权利，只有投票、法定人数分母、镇长候选池三处）。取值定义在 `app/services/civic_membership.py`。玩家创作居民为 `resident`：算人口、无政治权利。任何新增的 `Resident(...)` 构造点必须显式写 `resident_type`——依赖模型默认值 `"npc"` 正是 07-25 泄漏的根因，`test_ugc_resident_no_political_rights.py` 会扫描并拦截。
-- 代码迁移链头为 `054_freeze_lab_model_cost_rate`（047 → `048_add_town_treasury` → 049 → 050 → `051_add_civic_standing_history` → `052_add_lab_codex_model_tier` → 053 → 054），单头，实测 `ScriptDirectory.get_heads()` 返回一个（lab 线原 051/052/053 已于 2026-08-05 重编号并 re-chain 到 051 之后）。**vm212 已于 2026-07-28 01:26 UTC 部署到 051**（见 [`reports/ops-deploy-2026-07-28-T1.md`](reports/ops-deploy-2026-07-28-T1.md)），主站部署 lab 线时必须按序升级 052 → 054。
-- **M-A 经济内生化 + 并发加固**（分支 `feat/npc-economy-ma-race-hardening`，**代码完成、未合并、未部署**）在 054 之后再挂两条迁移：`055_add_commission_acceptor`（C3 NPC 接单）与 `056_add_item_stock`（库存列化）。两条都是**暗上**（加列 + 新列自身的回填，零读者），行为由各自默认关的闸控制，开闸是 `deploy/.env` 的**另一次**变更（红线：迁移与行为变更不同车）。闸共 5 个：`NPC_TRADE_ENABLED` / `CARAVAN_ENABLED` / `TAX_CARRY_ENABLED`（M-A 本体）+ `ITEM_STOCK_GUARD_ENABLED`（加固：库存扣减走 `UPDATE items SET stock = stock - qty WHERE code = :c AND active AND stock >= qty`，关 = 旧 `payload_json` 读-改-写）。分数税账的尾数键为 `system_config.town_tax_carry_milli`（**整数 milli-SC**，1 SC = 1000，走数据库内原子增量；老键 `town_tax_carry` 已弃用不再读写）。两处竞态的真并发证据用 `-m economy_postgres` + `ECONOMY_TEST_DATABASE_URL` 在可丢弃 PG 上跑（默认门排除）；实测旧实现下 20 笔并发 skim 会**多征** 3.6 SC（重复计入同一份尚未兑走的尾数），8 个并发买家会把 `stock=1` 的作品卖出 8 件。
-- 后台 loop 心跳与聊天锁回收的旋钮以环境变量为运行时来源（`LOOP_HEARTBEAT_*`、`SOCIAL_STATUS_*`），`Settings` 中的同名字段只提供默认值。
-- Lab 的代码默认仍为 `lab_adapter=mock`、`lab_oci_enabled=false`；开发环境可显式选择 ARM Codex Adapter。当前 Codex Runtime 是共享容器中的非 root 独立进程/工作区和资源配额，不等同于逐任务 VM 或生产级强隔离；真实执行能力进入生产仍须独立审批。
-- 运行时生成的居民精灵发布到后端持久化 static/media volume，不能写入 Vite 构建产物；`sprite_key` 继续作为逻辑标识，生成资源使用内容哈希 URL 规避 Phaser/CDN 旧缓存。
-- 居民原创形象首版只开放给管理员；所有候选资源必须经过自动 QC 与人工审核，采用“暂存写入 -> 完整校验 -> 原子发布 -> 数据库切换”的顺序，玩家自助生成须在成本和滥用控制具备后另行决策。
-- 供应商请求采用持久化预算和阶段 claim 防止并发重复；若进程在已提交请求但本地结果尚未落盘时中断，系统保留 claim 与证据并要求人工恢复，不宣称跨外部供应商的 exactly-once。
-- M3 静态替换以 `frontend/config/resident-sprite-generation.json` 的 25 个 slot 为唯一清单；当前 11 位 seed NPC 继续通过 `sprite_key` 复用这些 slot，环境数据库 resident ID 和旧 Smallville `agent.json` 人设都不能反向生成外观。
-- M3 每个原始批次只允许每个 slot 一个预分配 run；新授权目标批次只能在 catalog、source policy、模型、基线树、价格快照、request hash 与 capability receipt 全部一致时，以不可变证据继承旧批次中通过自动 QC 的原始 run，并累计保留目标失败尝试成本；不得通过派生或链式继承绕过单项与批次请求上限。
+## 后续阶段
 
-## 路线图维护规则
+| 阶段 | 状态 | 目标 |
+|---|---|---|
+| 居民生命周期 | 未开始 | 加入健康、医疗、年龄、退休、迁入迁出和继承 |
+| 25 到 40 人稳定运行 | 未开始 | 更大人口下仍能稳定行动和交流 |
+| 多小镇对照 | 未开始 | 多个小镇可以长期运行和比较 |
+| 实验楼重新机构化 | 未开始 | 新平台安全通过后再决定是否恢复 |
 
-- 只记录当前事实、未完成能力和下一道门，不累积提交日志、测试流水或一次性 kickoff。
-- 功能“代码完成”“已部署”“已开闸”“生产验证”必须分开表述，不能互相替代。
-- 阶段状态变化直接更新本文；详细证据进入新的日期归档，不再新增第二份现行计划。
-- 历史文档中的 fallback、Mock、默认关闭和旧分支说明只描述当时状态，除非本文重新确认，否则不构成当前约束。
+后续阶段不能跳过生产稳定性。
+
+## 下一步顺序
+
+1. 连续观察市场、商队、NPC 交易和世界日任务。
+2. 处理重复错误、心跳过期和经济异常。
+3. 完成居民原创形象的生产安全门。
+4. 完成外部 Agent 的公开申请与滥用控制。
+5. 设计居民生命周期的最小版本。
+6. 在稳定基础上做 25 到 40 人压力验证。
+7. 只有新平台通过安全验收，才重新评估 Lab。
+
+## 怎样判断一项工作完成
+
+代码能构建，不等于完成。
+
+一项工作至少需要：
+
+1. 测试先失败，再通过。
+2. 完整测试和构建通过。
+3. 数据库变化在 PostgreSQL 验证。
+4. 真实应用已经启动。
+5. 真实用户路径已经走通。
+6. 生产功能有健康和恢复方法。
+7. 文档已经更新。
+
+## 去哪里看证据
+
+| 想看什么 | 文档 |
+|---|---|
+| 当前 Lab 关闭证据 | [2026-08-24 Lab 停用报告](reports/ops-lab-shutdown-2026-08-24.md) |
+| 小镇 P0 到 P3 发布 | [2026-08-15 发布手册](runbooks/2026-08-15-town-p0-p3-rollout.md) |
+| P0 到 P1 生产结果 | [2026-08-15 部署报告](reports/ops-deploy-p0-p1-2026-08-15.md) |
+| 完整旧路线图 | [2026-08-24 历史快照](../archive/2026-08-24/ROADMAP.before-documentation-rewrite.md) |
+| 更早的规格和报告 | [2026-07-25 历史目录](../archive/2026-07-25/README.md) |
+
+## 维护规则
+
+- 只写当前事实、未完成工作和下一道门。
+- 提交哈希、SQL 和长日志放进报告或 runbook。
+- 旧状态放进 `archive/`，不从历史中删除。
+- 功能关闭时，说明关闭原因和保留内容。
+- 每次生产状态变化后更新日期。
+- 不确定是否上线时，使用“代码完成”，不要写“已部署”。
