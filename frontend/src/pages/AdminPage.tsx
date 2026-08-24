@@ -1,11 +1,13 @@
 import { useState } from 'react'
-import { Navigate, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
+import { AdminAccessState } from '../components/admin/AdminAccessState'
 import { AdminSidebar, type AdminTab } from '../components/admin/AdminSidebar'
 import { DashboardPanel } from '../components/admin/DashboardPanel'
 import { SocietyInsightsPanel } from '../components/admin/SocietyInsightsPanel'
 import { GovernanceInsightsPanel } from '../components/admin/GovernanceInsightsPanel'
 import { UsersPanel } from '../components/admin/UsersPanel'
 import { ResidentsPanel } from '../components/admin/ResidentsPanel'
+import { HostedAgentsPanel } from '../components/admin/HostedAgentsPanel'
 import { ForgeMonitorPanel } from '../components/admin/ForgeMonitorPanel'
 import { EconomyControlPanel, EconomyPanel } from '../components/admin/EconomyPanel'
 import { EventsPanel } from '../components/admin/EventsPanel'
@@ -23,6 +25,7 @@ const TAB_TITLES: Record<AdminTab, { title: string; eyebrow: string; subtitle: s
   governance: { title: '治理与事件演化', eyebrow: 'GOVERNANCE', subtitle: '判断公职、政策、事件与社区共识。' },
   users: { title: '用户权限', eyebrow: 'CONTROL CENTER', subtitle: '管理账号状态、权限与余额。' },
   residents: { title: '居民编辑', eyebrow: 'CONTROL CENTER', subtitle: '维护居民档案、区域与运行状态。' },
+  hosted_agents: { title: 'Agent 托管', eyebrow: 'CONTROL CENTER', subtitle: '配置常驻 Agent 居民，并观察它们的地图位置、行动与用量。' },
   economy_control: { title: '经济参数', eyebrow: 'CONTROL CENTER', subtitle: '调整会影响小镇经济行为的动态参数。' },
   events: { title: '事件投放', eyebrow: 'CONTROL CENTER', subtitle: '创建和维护小镇世界事件。' },
   proposals: { title: '提案审批', eyebrow: 'CONTROL CENTER', subtitle: '审查、应用或回退世界变更。' },
@@ -42,7 +45,7 @@ export function AdminPage() {
   const [controlOpen, setControlOpen] = useState(false)
 
   if (!user?.is_admin) {
-    return <Navigate to="/play" replace />
+    return <AdminAccessState kind="forbidden" />
   }
 
   const selectTab = (tab: AdminTab) => {
@@ -65,6 +68,8 @@ export function AdminPage() {
         return <UsersPanel />
       case 'residents':
         return <ResidentsPanel token={token} />
+      case 'hosted_agents':
+        return <HostedAgentsPanel token={token} />
       case 'economy_control':
         return <EconomyControlPanel token={token} />
       case 'forge':

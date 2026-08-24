@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
   getAdminLabRuns, cancelAdminLabRun, getAdminLabStatus, setAdminLabKillSwitch,
-  type AdminLabRun, type AdminLabStatus,
+  getAdminLabMarketCandidates, reviewAdminLabMarketCandidate,
+  type AdminLabRun, type AdminLabStatus, type AdminLabMarketCandidate,
 } from '../../services/api'
 
 // Admin Lab run monitor + runtime kill switch (P2, spec §5.3/§8).
@@ -9,25 +10,27 @@ import {
 export function LabRunsPanel({ token }: { token: string }) {
   const [runs, setRuns] = useState<AdminLabRun[]>([])
   const [status, setStatus] = useState<AdminLabStatus | null>(null)
+  const [candidates, setCandidates] = useState<AdminLabMarketCandidate[]>([])
   const [filter, setFilter] = useState('')
   const [loading, setLoading] = useState(true)
   const [notice, setNotice] = useState<string | null>(null)
 
   const load = useCallback(() => {
     setLoading(true)
-    Promise.all([getAdminLabRuns(token, filter || undefined), getAdminLabStatus(token)])
-      .then(([r, s]) => { setRuns(r.runs); setStatus(s) })
+    Promise.all([getAdminLabRuns(token, filter || undefined), getAdminLabStatus(token), getAdminLabMarketCandidates(token)])
+      .then(([r, s, c]) => { setRuns(r.runs); setStatus(s); setCandidates(c.candidates) })
       .catch(() => setNotice('加载失败'))
       .finally(() => setLoading(false))
   }, [token, filter])
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([getAdminLabRuns(token, filter || undefined), getAdminLabStatus(token)])
-      .then(([r, s]) => {
+    Promise.all([getAdminLabRuns(token, filter || undefined), getAdminLabStatus(token), getAdminLabMarketCandidates(token)])
+      .then(([r, s, c]) => {
         if (cancelled) return
         setRuns(r.runs)
         setStatus(s)
+        setCandidates(c.candidates)
       })
       .catch(() => { if (!cancelled) setNotice('加载失败') })
       .finally(() => { if (!cancelled) setLoading(false) })
@@ -47,6 +50,14 @@ export function LabRunsPanel({ token }: { token: string }) {
     try { await cancelAdminLabRun(token, id); load() } catch { setNotice('熔断失败') }
   }
 
+  const reviewCandidate = async (id: string, decision: 'approve' | 'reject') => {
+    try {
+      const updated = await reviewAdminLabMarketCandidate(token, id, decision)
+      setCandidates((current) => current.map((candidate) => candidate.id === id ? updated : candidate))
+      setNotice(decision === 'approve' ? '候选成果已进入集市候选池' : '候选成果已退回')
+    } catch { setNotice('候选审核失败') }
+  }
+
   return (
     <div>
       <h1 style={{ fontSize: 20, marginBottom: 16 }}>🧪 实验楼运行监控</h1>
@@ -62,6 +73,14 @@ export function LabRunsPanel({ token }: { token: string }) {
             适配器：<b>{status.adapter}</b>
             <span style={{ margin: '0 10px', color: 'var(--text-muted)' }}>·</span>
             运行时：<b style={{ color: status.runtime_enabled ? '#10b981' : '#ef4444' }}>{status.runtime_enabled ? '运行中' : '已停用'}</b>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 9 }}>
+              {status.checks.map((check) => (
+                <span key={check.key} style={{
+                  fontSize: 10, border: '1px solid var(--border)', borderRadius: 999,
+                  padding: '2px 7px', color: check.ok ? '#10b981' : check.optional ? 'var(--text-muted)' : '#f59e0b',
+                }}>{check.ok ? '✓' : check.optional ? '○' : '!'} {check.label}</span>
+              ))}
+            </div>
           </div>
           <button onClick={() => void toggleKill()} style={{
             marginLeft: 'auto', background: status.runtime_enabled ? '#ef4444' : '#10b981', color: 'white',
@@ -112,6 +131,29 @@ export function LabRunsPanel({ token }: { token: string }) {
           ))}
         </div>
       )}
+
+      <h2 style={{ fontSize: 15, margin: '28px 0 10px' }}>实验成果市场候选</h2>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {candidates.length === 0 && <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>暂无候选成果。</div>}
+        {candidates.map((candidate) => (
+          <div key={candidate.id} style={{
+            border: '1px solid var(--border)', borderRadius: 8, padding: 12,
+            display: 'flex', gap: 12, alignItems: 'center', fontSize: 12,
+          }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 700 }}>{candidate.title}</div>
+              <div style={{ color: 'var(--text-muted)', marginTop: 3 }}>
+                {candidate.offer_type} · 建议 {candidate.suggested_price_sc} SC · {candidate.status}
+              </div>
+              {candidate.summary && <div style={{ color: 'var(--text-secondary)', marginTop: 4 }}>{candidate.summary}</div>}
+            </div>
+            {candidate.status === 'pending' && <>
+              <button onClick={() => void reviewCandidate(candidate.id, 'approve')} style={{ border: '1px solid #10b98166', color: '#10b981', background: 'none', borderRadius: 6, padding: '6px 10px', cursor: 'pointer' }}>通过</button>
+              <button onClick={() => void reviewCandidate(candidate.id, 'reject')} style={{ border: '1px solid #ef444466', color: '#ef4444', background: 'none', borderRadius: 6, padding: '6px 10px', cursor: 'pointer' }}>退回</button>
+            </>}
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

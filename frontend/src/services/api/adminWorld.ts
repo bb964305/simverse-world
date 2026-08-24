@@ -388,9 +388,30 @@ export interface AdminLabRun {
 }
 
 export interface AdminLabStatus {
+  visitor_open: boolean
   deploy_enabled: boolean
   runtime_enabled: boolean
+  publish_allowed: boolean
+  beta_mode: boolean
+  beta_admitted: boolean
   adapter: string
+  available_scopes: string[]
+  blockers: string[]
+  checks: Array<{ key: string; label: string; ok: boolean; optional?: boolean }>
+}
+
+export interface AdminLabMarketCandidate {
+  id: string
+  artifact_id: string
+  task_id: string
+  title: string
+  summary: string
+  offer_type: 'good' | 'service' | 'contract'
+  suggested_price_sc: number
+  status: 'pending' | 'approved' | 'rejected' | 'published'
+  review_note: string
+  created_at: string | null
+  updated_at: string | null
 }
 
 export function getAdminLabStatus(token: string): Promise<AdminLabStatus> {
@@ -413,6 +434,29 @@ export function getAdminLabRuns(token: string, status?: string): Promise<{ runs:
 export function cancelAdminLabRun(token: string, runId: string): Promise<{ ok: boolean }> {
   return apiFetch(`/admin/lab/runs/${encodeURIComponent(runId)}/cancel`, {
     method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export function getAdminLabMarketCandidates(
+  token: string,
+  status?: string,
+): Promise<{ candidates: AdminLabMarketCandidate[] }> {
+  const query = status ? `?status=${encodeURIComponent(status)}` : ''
+  return apiFetch(`/admin/lab/market-candidates${query}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export function reviewAdminLabMarketCandidate(
+  token: string,
+  candidateId: string,
+  decision: 'approve' | 'reject',
+  note = '',
+): Promise<AdminLabMarketCandidate> {
+  return apiFetch(`/admin/lab/market-candidates/${encodeURIComponent(candidateId)}/review`, {
+    method: 'POST',
+    body: JSON.stringify({ decision, note }),
     headers: { Authorization: `Bearer ${token}` },
   })
 }

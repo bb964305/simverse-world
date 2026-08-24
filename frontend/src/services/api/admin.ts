@@ -84,6 +84,80 @@ export interface AdminEconomyConfig {
   rating_bonus: number
 }
 
+export interface AdminEconomyOperations {
+  generated_at: string
+  gates: Record<string, boolean>
+  residents: {
+    count: number
+    total_balance_sc: number
+    median_balance_sc: number
+    min_balance_sc: number
+    max_balance_sc: number
+    poverty_line_sc: number
+    poverty_count: number
+    poverty_share: number
+    eligible_for_cheapest_import: number
+    eligible_for_resident_work: number
+    world_day_purchase_cap: number
+  }
+  town: {
+    balance_sc: number
+    daily_payroll_sc: number
+    payroll_runway_world_days: number | null
+    target_payroll_days: number
+  }
+  caravan: { visit_id: string | null; phase: string | null; market_purchases_7d: number }
+  lab_market_candidates: Record<string, number>
+  bootstrap: {
+    applied: boolean
+    batch_id: string | null
+    created_at: string | null
+    preview: AdminEconomyBootstrap | null
+  }
+  warnings: string[]
+}
+
+export interface AdminEconomyBootstrap {
+  bootstrap_key: string
+  resident_floor_sc: number
+  resident_count?: number
+  resident_grants?: Array<{
+    resident_slug: string
+    balance_before_sc: number
+    amount_sc: number
+    balance_after_sc: number
+  }>
+  resident_grant_sc?: number
+  daily_payroll_sc?: number
+  payroll_days?: number
+  town_balance_before_sc?: number
+  town_target_sc: number
+  town_grant_sc: number
+  already_applied: boolean
+  batch_id?: string
+  created_at?: string | null
+}
+
+export function getAdminEconomyOperations(token: string): Promise<AdminEconomyOperations> {
+  return apiFetch('/admin/economy/operations', {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export function getAdminEconomyBootstrap(token: string): Promise<AdminEconomyBootstrap> {
+  return apiFetch('/admin/economy/bootstrap', {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export function applyAdminEconomyBootstrap(token: string): Promise<AdminEconomyBootstrap> {
+  return apiFetch('/admin/economy/bootstrap', {
+    method: 'POST',
+    body: JSON.stringify({ confirm: true }),
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
 export function getAdminEconomyStats(token: string): Promise<AdminEconomyStats> {
   return apiFetch('/admin/economy/stats', {
     headers: { Authorization: `Bearer ${token}` },

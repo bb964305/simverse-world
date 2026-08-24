@@ -5,6 +5,7 @@ export type AdminTab =
   | 'governance'
   | 'users'
   | 'residents'
+  | 'hosted_agents'
   | 'economy_control'
   | 'events'
   | 'proposals'
@@ -29,6 +30,7 @@ const ANALYTICS_ITEMS: NavItem[] = [
 const CONTROL_ITEMS: NavItem[] = [
   { key: 'users', icon: '👥', label: '用户权限' },
   { key: 'residents', icon: '🏠', label: '居民编辑' },
+  { key: 'hosted_agents', icon: '🤖', label: 'Agent 托管' },
   { key: 'economy_control', icon: '🪙', label: '经济参数' },
   { key: 'events', icon: '📣', label: '事件投放' },
   { key: 'proposals', icon: '🌍', label: '提案审批' },

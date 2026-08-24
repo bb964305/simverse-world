@@ -16,7 +16,17 @@
   --text-secondary: #515154;
   --text-muted: #86868b;
   --accent: #0071e3;
-  min-height: 100vh;
+  /* global.css locks body scrolling for the fixed Phaser shell. Admin owns a
+     viewport-sized scroll root so wheel/touch scrolling never depends on the
+     previous route's body class cleanup. */
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: stable;
   background: var(--admin-bg);
   color: #1d1d1f;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC",
@@ -168,6 +178,11 @@
   top: 46px;
   right: 0;
   width: 220px;
+  max-height: calc(100vh - 62px);
+  max-height: calc(100dvh - 62px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   padding: 8px;
   border: 1px solid rgba(0, 0, 0, 0.07);
   border-radius: 18px;

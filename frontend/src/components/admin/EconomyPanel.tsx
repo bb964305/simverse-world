@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   getAdminEconomyStats,
   getAdminTransactions,
@@ -6,12 +6,22 @@ import {
   updateAdminEconomyConfig,
   getAdminEconomySeries,
   getAdminInvestments,
+  getAdminEconomyOperations,
+  applyAdminEconomyBootstrap,
   type AdminEconomyStats,
   type AdminTransaction,
   type AdminEconomyConfig,
   type EconomySeriesPoint,
   type AdminInvestmentsResponse,
+  type AdminEconomyOperations,
 } from '../../services/api'
+
+const GATE_LABELS: Record<string, string> = {
+  npc_economy: 'NPC 经济', npc_trade: 'NPC 交易', world_day_consumption: '世界日消费',
+  town_treasury: '镇财政', town_ledger: '镇库流水', sustainable_public_wages: '可持续公共工资',
+  market_hall_venue: '集市大厅场地', item_stock_guard: '库存保护', caravan: '商队准入',
+  caravan_lifecycle: '商队生命周期', player_market: '玩家集市',
+}
 
 // ─── Shared sub-components ────────────────────────────────────────
 
@@ -655,6 +665,76 @@ function EconomyConfigSection({ token }: { token: string }) {
 
 // ─── Main EconomyPanel ────────────────────────────────────────────
 
+function EconomyOperationsSection({ token }: { token: string }) {
+  const [data, setData] = useState<AdminEconomyOperations | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [applying, setApplying] = useState(false)
+
+  const load = useCallback(() => {
+    setError(null)
+    getAdminEconomyOperations(token).then(setData).catch((reason: unknown) => {
+      setError(reason instanceof Error ? reason.message : '运行状态加载失败')
+    })
+  }, [token])
+
+  useEffect(() => { load() }, [load])
+
+  const applyBootstrap = async () => {
+    if (!data?.bootstrap.preview || applying) return
+    const preview = data.bootstrap.preview
+    const confirmed = window.confirm(
+      `确认执行一次性发展补助？居民补助 ${preview.resident_grant_sc ?? 0} SC，镇库补助 ${preview.town_grant_sc} SC。该批次不可重复执行。`,
+    )
+    if (!confirmed) return
+    setApplying(true); setError(null)
+    try {
+      await applyAdminEconomyBootstrap(token)
+      load()
+    } catch (reason: unknown) {
+      setError(reason instanceof Error ? reason.message : '补助执行失败')
+    } finally { setApplying(false) }
+  }
+
+  return (
+    <SectionCard>
+      <SectionHeader icon="🩺" title="居民经济运行与开闸状态" />
+      {error && <div style={{ color: '#ff6b6b', fontSize: 12, marginBottom: 10 }}>{error}</div>}
+      {!data ? <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>加载中…</div> : <>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
+          {Object.entries(data.gates).map(([key, enabled]) => (
+            <span key={key} style={{
+              border: '1px solid var(--border)', borderRadius: 999, padding: '3px 8px',
+              fontSize: 10, color: enabled ? '#53d769' : 'var(--text-muted)',
+            }}>{enabled ? '●' : '○'} {GATE_LABELS[key] ?? key}</span>
+          ))}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10 }}>
+          <StatCard label="居民余额中位数" value={data.residents.median_balance_sc} color="var(--accent)" />
+          <StatCard label={`贫困居民（≤${data.residents.poverty_line_sc}）`} value={data.residents.poverty_count} color={data.residents.poverty_share > 0.2 ? '#ff6b6b' : undefined} />
+          <StatCard label="可购买进口货" value={data.residents.eligible_for_cheapest_import} />
+          <StatCard label="镇库余额" value={data.town.balance_sc} />
+          <StatCard label="工资续航（世界日）" value={data.town.payroll_runway_world_days} color={(data.town.payroll_runway_world_days ?? 999) < data.town.target_payroll_days ? '#f59e0b' : undefined} />
+          <StatCard label="7日玩家集市成交" value={data.caravan.market_purchases_7d} />
+        </div>
+        {data.warnings.length > 0 && <div style={{ marginTop: 12, border: '1px solid rgba(245,158,11,.25)', borderRadius: 8, padding: 10, color: '#d6bd8b', fontSize: 11, lineHeight: 1.7 }}>
+          {data.warnings.map((warning) => <div key={warning}>⚠ {warning}</div>)}
+        </div>}
+        <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', flex: 1 }}>
+            {data.bootstrap.applied
+              ? `发展补助已执行 · 批次 ${data.bootstrap.batch_id}`
+              : `建议补助：居民 ${data.bootstrap.preview?.resident_grant_sc ?? 0} SC，镇库 ${data.bootstrap.preview?.town_grant_sc ?? 0} SC`}
+          </div>
+          {!data.bootstrap.applied && <button onClick={() => void applyBootstrap()} disabled={applying} style={{
+            border: '1px solid var(--accent)', background: 'rgba(14,165,233,.08)', color: 'var(--accent)',
+            borderRadius: 7, padding: '7px 12px', fontSize: 11, fontWeight: 700, cursor: applying ? 'default' : 'pointer',
+          }}>{applying ? '执行中…' : '执行一次性发展补助'}</button>}
+        </div>
+      </>}
+    </SectionCard>
+  )
+}
+
 interface EconomyPanelProps {
   token: string
 }
@@ -671,6 +751,9 @@ export function EconomyPanel({ token }: EconomyPanelProps) {
 
       {/* Stat Cards */}
       <EconomyStatsSection token={token} />
+
+      {/* Resident liquidity + rollout readiness */}
+      <EconomyOperationsSection token={token} />
 
       {/* Inflation curve */}
       <InflationCurveSection token={token} />

@@ -47,6 +47,7 @@ describe('AdminSidebar', () => {
 
     expect(screen.getByRole('button', { name: /用户权限/ })).toBeTruthy()
     expect(screen.getByRole('button', { name: /居民编辑/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Agent 托管/ })).toBeTruthy()
     expect(screen.getByRole('button', { name: /经济参数/ })).toBeTruthy()
     expect(screen.getByRole('button', { name: /事件投放/ })).toBeTruthy()
     expect(screen.getByRole('button', { name: /提案审批/ })).toBeTruthy()
