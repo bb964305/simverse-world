@@ -63,16 +63,16 @@ API 是前端和后端约定的请求接口。
 | 文件 | 短句数 |
 |---|---|
 | 根 `README.md` | 19 / 20 |
-| `docs/README.md` | 20 / 20 |
+| `docs/README.md` | 19 / 20 |
 | `START_HERE.md` | 20 / 20 |
-| `GAMEPLAY.md` | 19 / 20 |
+| `GAMEPLAY.md` | 20 / 20 |
 | `ARCHITECTURE.md` | 20 / 20 |
 | `DEVELOPMENT.md` | 20 / 20 |
 | `CONTRIBUTING.md` | 20 / 20 |
-| `DEPLOYMENT.md` | 19 / 20 |
-| `OPERATIONS.md` | 18 / 20 |
+| `DEPLOYMENT.md` | 20 / 20 |
+| `OPERATIONS.md` | 20 / 20 |
 | `GLOSSARY.md` | 20 / 20 |
-| `ROADMAP.md` | 19 / 20 |
+| `ROADMAP.md` | 20 / 20 |
 
 ## 真实启动环境
 
