@@ -1,13 +1,15 @@
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useSearchParams } from 'react-router-dom'
 import { Suspense, lazy, useEffect, useState } from 'react'
 import { useGameStore } from './stores/gameStore'
 import { LoginPage } from './pages/LoginPage'
 import { AuthCallbackPage } from './pages/AuthCallbackPage'
+import { AdminAccessState } from './components/admin/AdminAccessState'
 import { AchievementToast } from './components/AchievementToast'
 import { ConnectionBanner } from './components/ConnectionBanner'
 import { EncounterCard } from './components/EncounterCard'
 import { ErrorBoundary } from './components/ErrorBoundary'
-import { checkOnboarding } from './services/api'
+import { checkOnboarding, getMe, type MeResponse } from './services/api'
+import { loginPath, safeAuthReturnTo } from './services/authReturnTo'
 
 // Heavy pages are code-split so the login/first-load bundle stays lean:
 // GamePage pulls in Phaser (~1.4MB), ProfilePage pulls in @uiw/react-md-editor
@@ -33,8 +35,52 @@ function normalizePathname(pathname: string): string {
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const token = useGameStore((s) => s.token)
-  if (!token) return <Navigate to="/login" replace />
+  const { pathname, search, hash } = useLocation()
+  if (!token) return <Navigate to={loginPath(`${pathname}${search}${hash}`)} replace />
   return <>{children}</>
+}
+
+function AdminRoute() {
+  const token = useGameStore((s) => s.token)
+  const setAuth = useGameStore((s) => s.setAuth)
+  const [attempt, setAttempt] = useState(0)
+  const [result, setResult] = useState<{
+    token: string
+    attempt: number
+    user?: MeResponse
+    error?: string
+  } | null>(null)
+
+  useEffect(() => {
+    if (!token) return
+    let cancelled = false
+
+    getMe(token)
+      .then((user) => {
+        if (cancelled || useGameStore.getState().token !== token) return
+        setAuth(user, token)
+        setResult({ token, attempt, user })
+      })
+      .catch((reason: unknown) => {
+        if (cancelled || useGameStore.getState().token !== token) return
+        setResult({
+          token,
+          attempt,
+          error: reason instanceof Error ? reason.message : '无法验证后台权限',
+        })
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [attempt, setAuth, token])
+
+  if (!token || result?.token !== token || result.attempt !== attempt) return <PageFallback />
+  if (result.error) {
+    return <AdminAccessState kind="verification_error" onRetry={() => setAttempt((value) => value + 1)} />
+  }
+  if (!result.user?.is_admin) return <AdminAccessState kind="forbidden" />
+  return <AdminPage />
 }
 
 // Landing directly on "/" (bookmark, closed tab, browser back) skips the
@@ -73,7 +119,12 @@ function HomeRoute() {
 
 function LoginRoute() {
   const token = useGameStore((s) => s.token)
-  return token ? <Navigate to="/" replace /> : <LoginPage />
+  const [params] = useSearchParams()
+  const requestedNext = params.get('next')
+  // Preserve the old authenticated /login -> / behavior when no explicit
+  // destination exists, because HomeRoute performs the onboarding check.
+  const next = requestedNext ? safeAuthReturnTo(requestedNext, '/') : '/'
+  return token ? <Navigate to={next} replace /> : <LoginPage />
 }
 
 function PageFallback() {
@@ -125,7 +176,7 @@ export function AppRoutes() {
             <Route path="/auth/callback" element={<AuthCallbackPage />} />
             <Route path="/town" element={<TownPage />} />
             <Route path="/watch" element={<WatchPage />} />
-            <Route path="/onboarding" element={<ProtectedRoute><OnboardingPage /></ProtectedRoute>} />
+            <Route path="/onboarding" element={<OnboardingPage />} />
             <Route path="/" element={<HomeRoute />} />
             {/* The game also lives at /play — many entry points (landing CTA,
                 onboarding redirect, Admin/Forge/ErrorBoundary) navigate here.
@@ -133,7 +184,7 @@ export function AppRoutes() {
             <Route path="/play" element={<ProtectedRoute><GamePage /></ProtectedRoute>} />
             <Route path="/forge" element={<ProtectedRoute><ForgePage /></ProtectedRoute>} />
             <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
-            <Route path="/admin" element={<ProtectedRoute><AdminPage /></ProtectedRoute>} />
+            <Route path="/admin" element={<ProtectedRoute><AdminRoute /></ProtectedRoute>} />
             <Route path="/graph" element={<ProtectedRoute><GraphPage /></ProtectedRoute>} />
             <Route path="/seasons" element={<ProtectedRoute><SeasonsPage /></ProtectedRoute>} />
             <Route path="/debates" element={<ProtectedRoute><DebatesPage /></ProtectedRoute>} />

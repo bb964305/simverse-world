@@ -1,10 +1,10 @@
 import '@testing-library/jest-dom/vitest'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { AppRoutes } from './App'
 import { useGameStore } from './stores/gameStore'
-import { checkOnboarding } from './services/api'
+import { checkOnboarding, getMe } from './services/api'
 
 vi.mock('./pages/GamePage', () => ({
   GamePage: () => <main data-testid="game-page">Game World</main>,
@@ -26,11 +26,16 @@ vi.mock('./pages/WatchPage', () => ({
   WatchPage: () => <main data-testid="watch-page">Agent Viewer</main>,
 }))
 
+vi.mock('./pages/AdminPage', () => ({
+  AdminPage: () => <main data-testid="admin-page">Admin Console</main>,
+}))
+
 // HomeRoute (E2E-01) re-checks onboarding before rendering GamePage so a
 // player landing on "/" directly (bookmark, closed tab, browser back) can't
 // skip the resident picker. Stub the API call; individual tests override it.
 vi.mock('./services/api', () => ({
   checkOnboarding: vi.fn(),
+  getMe: vi.fn(),
 }))
 
 const user = {
@@ -41,16 +46,25 @@ const user = {
   soul_coin_balance: 0,
 }
 
+const adminUser = { ...user, is_admin: true }
+
+function LocationProbe() {
+  const location = useLocation()
+  return <output data-testid="route-location">{`${location.pathname}${location.search}${location.hash}`}</output>
+}
+
 function renderRoute(path: string) {
   return render(
     <MemoryRouter initialEntries={[path]}>
       <AppRoutes />
+      <LocationProbe />
     </MemoryRouter>,
   )
 }
 
 beforeEach(() => {
   localStorage.clear()
+  sessionStorage.clear()
   useGameStore.setState({
     user: null,
     token: null,
@@ -64,6 +78,7 @@ beforeEach(() => {
     needs_onboarding: false,
     player_resident_id: 'resident-1',
   })
+  vi.mocked(getMe).mockReset().mockResolvedValue({ ...user, is_admin: false })
 })
 
 afterEach(() => {
@@ -89,6 +104,7 @@ describe('public and authenticated routes', () => {
     renderRoute('/login')
     expect(await screen.findByTestId('game-page')).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: '进入 Simverse' })).not.toBeInTheDocument()
+    expect(checkOnboarding).toHaveBeenCalledWith('token')
   })
 
   it('shows the game at /play when authenticated', async () => {
@@ -176,6 +192,100 @@ describe('public and authenticated routes', () => {
     expect(screen.queryByText('连接已断开，正在重连…')).not.toBeInTheDocument()
     expect(screen.queryByText('First Visit')).not.toBeInTheDocument()
     expect(screen.queryByText('你好')).not.toBeInTheDocument()
+  })
+})
+
+describe('admin route authorization', () => {
+  it('sends a logged-out visitor to login with /admin as the return destination', async () => {
+    renderRoute('/admin')
+
+    expect(await screen.findByRole('heading', { name: '进入 Simverse' })).toBeInTheDocument()
+    expect(screen.getByTestId('route-location')).toHaveTextContent('/login?next=%2Fadmin')
+    expect(screen.queryByTestId('game-page')).not.toBeInTheDocument()
+  })
+
+  it('keeps a stale cached admin candidate on /admin until live identity confirms access', async () => {
+    let resolveIdentity!: (value: typeof adminUser) => void
+    vi.mocked(getMe).mockReturnValue(new Promise((resolve) => { resolveIdentity = resolve }))
+    useGameStore.setState({ user: { ...user, is_admin: false }, token: 'admin-token' })
+
+    renderRoute('/admin')
+
+    expect(screen.getByText('加载中…')).toBeInTheDocument()
+    expect(screen.getByTestId('route-location')).toHaveTextContent('/admin')
+    expect(screen.queryByTestId('game-page')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('admin-page')).not.toBeInTheDocument()
+
+    resolveIdentity(adminUser)
+
+    expect(await screen.findByTestId('admin-page')).toBeInTheDocument()
+    expect(screen.getByTestId('route-location')).toHaveTextContent('/admin')
+    expect(useGameStore.getState().user?.is_admin).toBe(true)
+    expect(getMe).toHaveBeenCalledWith('admin-token')
+  })
+
+  it('recovers an admin session when the cached user record is missing', async () => {
+    vi.mocked(getMe).mockResolvedValue(adminUser)
+    useGameStore.setState({ user: null, token: 'admin-token' })
+
+    renderRoute('/admin')
+
+    expect(await screen.findByTestId('admin-page')).toBeInTheDocument()
+    expect(screen.getByTestId('route-location')).toHaveTextContent('/admin')
+  })
+
+  it('shows a fail-closed permission page for a confirmed non-admin without navigating to /play', async () => {
+    vi.mocked(getMe).mockResolvedValue({ ...user, is_admin: false })
+    useGameStore.setState({ user: adminUser, token: 'resident-token' })
+
+    renderRoute('/admin')
+
+    expect(await screen.findByRole('heading', { name: '没有后台管理权限' })).toBeInTheDocument()
+    expect(screen.getByTestId('route-location')).toHaveTextContent('/admin')
+    expect(screen.queryByTestId('game-page')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('admin-page')).not.toBeInTheDocument()
+  })
+
+  it('keeps network verification failures on a retryable safe page', async () => {
+    vi.mocked(getMe)
+      .mockRejectedValueOnce(new Error('network down'))
+      .mockResolvedValueOnce(adminUser)
+    useGameStore.setState({ user: adminUser, token: 'admin-token' })
+
+    renderRoute('/admin')
+
+    expect(await screen.findByRole('heading', { name: '暂时无法验证后台权限' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重新验证' })).toBeInTheDocument()
+    expect(screen.getByTestId('route-location')).toHaveTextContent('/admin')
+    expect(screen.queryByTestId('game-page')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '重新验证' }))
+    expect(await screen.findByTestId('admin-page')).toBeInTheDocument()
+    expect(getMe).toHaveBeenCalledTimes(2)
+    expect(screen.getByTestId('route-location')).toHaveTextContent('/admin')
+  })
+
+  it('returns an expired session to login while retaining /admin', async () => {
+    vi.mocked(getMe).mockImplementation(async () => {
+      useGameStore.getState().logout()
+      throw new Error('Session expired')
+    })
+    useGameStore.setState({ user: adminUser, token: 'expired-token' })
+
+    renderRoute('/admin')
+
+    expect(await screen.findByRole('heading', { name: '进入 Simverse' })).toBeInTheDocument()
+    expect(screen.getByTestId('route-location')).toHaveTextContent('/login?next=%2Fadmin')
+  })
+
+  it('honors an authenticated login return destination and revalidates admin access', async () => {
+    vi.mocked(getMe).mockResolvedValue(adminUser)
+    useGameStore.setState({ user: { ...user, is_admin: false }, token: 'admin-token' })
+
+    renderRoute('/login?next=%2Fadmin')
+
+    expect(await screen.findByTestId('admin-page')).toBeInTheDocument()
+    expect(screen.getByTestId('route-location')).toHaveTextContent('/admin')
   })
 })
 

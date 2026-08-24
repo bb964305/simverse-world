@@ -1,6 +1,12 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useGameStore } from '../stores/gameStore'
+import {
+  clearOAuthReturnTo,
+  onboardingPath,
+  rememberOAuthReturnTo,
+  safeAuthReturnTo,
+} from '../services/authReturnTo'
 import '../styles/login-page.css'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
@@ -14,6 +20,8 @@ export function LoginPage() {
   const [error, setError] = useState('')
   const setAuth = useGameStore((state) => state.setAuth)
   const navigate = useNavigate()
+  const [params] = useSearchParams()
+  const next = safeAuthReturnTo(params.get('next'))
 
   useEffect(() => {
     document.body.classList.add('auth-page-open')
@@ -46,8 +54,9 @@ export function LoginPage() {
       }
 
       const data = await response.json()
+      clearOAuthReturnTo()
       setAuth(data.user, data.access_token)
-      navigate('/onboarding', { replace: true })
+      navigate(onboardingPath(next), { replace: true })
     } catch {
       setError('网络错误，请重试')
     } finally {
@@ -104,11 +113,11 @@ export function LoginPage() {
         </div>
 
         <div className="auth-oauth">
-          <a href={`${API}/auth/github/login`}>
+          <a href={`${API}/auth/github/login`} onClick={() => rememberOAuthReturnTo(next)}>
             <svg aria-hidden="true"><use href="/icons.svg#github-icon" /></svg>
             GitHub 登录
           </a>
-          <a href={`${API}/auth/linuxdo/login`}>
+          <a href={`${API}/auth/linuxdo/login`} onClick={() => rememberOAuthReturnTo(next)}>
             <span className="auth-oauth__linuxdo" aria-hidden="true">L</span>
             LinuxDo 登录
           </a>

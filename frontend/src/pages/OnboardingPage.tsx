@@ -10,6 +10,7 @@ import {
 } from '../services/api'
 import type { ResidentListItem, SpriteTemplate } from '../services/api'
 import { staticResidentSpriteUrl } from '../game/residentSpriteRuntime'
+import { loginPath, safeAuthReturnTo } from '../services/authReturnTo'
 
 interface PresetCard {
   slug: string
@@ -42,15 +43,10 @@ function districtColor(district: string): string {
   return map[district] ?? '#71717a'
 }
 
-function safeNext(raw: string | null): string {
-  if (!raw || !raw.startsWith('/') || raw.startsWith('//')) return '/play'
-  return raw
-}
-
 export function OnboardingPage() {
   const navigate = useNavigate()
   const [params] = useSearchParams()
-  const next = safeNext(params.get('next'))
+  const next = safeAuthReturnTo(params.get('next'))
   const token = useGameStore((s) => s.token)
 
   const [presets, setPresets] = useState<PresetCard[]>([])
@@ -61,7 +57,7 @@ export function OnboardingPage() {
 
   useEffect(() => {
     if (!token) {
-      navigate(`/login?next=${encodeURIComponent(next)}`, { replace: true })
+      navigate(loginPath(next), { replace: true })
       return
     }
 
@@ -72,7 +68,7 @@ export function OnboardingPage() {
       try {
         // Check if onboarding is needed
         const check = await checkOnboarding(token!)
-        if (!check.needs_onboarding) {
+        if (!cancelled && !check.needs_onboarding) {
           navigate(next, { replace: true })
           return
         }

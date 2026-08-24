@@ -119,6 +119,8 @@ export interface MeResponse {
   lab_enabled?: boolean
 }
 
-export function getMe(): Promise<MeResponse> {
-  return apiFetch('/users/me')
+export function getMe(token?: string): Promise<MeResponse> {
+  return apiFetch('/users/me', token
+    ? { headers: { Authorization: `Bearer ${token}` } }
+    : {})
 }

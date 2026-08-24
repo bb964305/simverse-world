@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useGameStore } from '../stores/gameStore'
+import {
+  clearOAuthReturnTo,
+  loginPath,
+  onboardingPath,
+  readOAuthReturnTo,
+} from '../services/authReturnTo'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -10,38 +16,59 @@ export function AuthCallbackPage() {
   // replaces the old synchronous setError inside the effect
   // (react-hooks/set-state-in-effect) with identical rendered output.
   const [token] = useState(() => new URLSearchParams(window.location.search).get('token'))
+  const [next] = useState(() => readOAuthReturnTo())
   const [error, setError] = useState(token ? '' : '登录失败：未收到 token')
   const setAuth = useGameStore((s) => s.setAuth)
   const navigate = useNavigate()
 
   useEffect(() => {
+    let cancelled = false
+    let redirectTimer: ReturnType<typeof setTimeout> | undefined
+    const controller = new AbortController()
+    const returnToLogin = () => {
+      redirectTimer = setTimeout(() => navigate(loginPath(next), { replace: true }), 2000)
+    }
+
     if (!token) {
-      const timer = setTimeout(() => navigate('/login', { replace: true }), 2000)
-      return () => clearTimeout(timer)
+      returnToLogin()
+      return () => {
+        cancelled = true
+        controller.abort()
+        if (redirectTimer) clearTimeout(redirectTimer)
+      }
     }
 
     const fetchUser = async () => {
       try {
         const resp = await fetch(`${API}/users/me`, {
           headers: { Authorization: `Bearer ${token}` },
+          signal: controller.signal,
         })
+        if (cancelled) return
         if (!resp.ok) {
           setError('登录失败：无法获取用户信息')
-          const timer = setTimeout(() => navigate('/login', { replace: true }), 2000)
-          return () => clearTimeout(timer)
+          returnToLogin()
+          return
         }
         const user = await resp.json()
+        if (cancelled) return
+        clearOAuthReturnTo()
         setAuth(user, token)
-        navigate('/onboarding', { replace: true })
-      } catch {
+        navigate(onboardingPath(next), { replace: true })
+      } catch (reason: unknown) {
+        if (cancelled || (reason instanceof DOMException && reason.name === 'AbortError')) return
         setError('网络错误，请重试')
-        const timer = setTimeout(() => navigate('/login', { replace: true }), 2000)
-        return () => clearTimeout(timer)
+        returnToLogin()
       }
     }
 
-    fetchUser()
-  }, [token, navigate, setAuth])
+    void fetchUser()
+    return () => {
+      cancelled = true
+      controller.abort()
+      if (redirectTimer) clearTimeout(redirectTimer)
+    }
+  }, [token, next, navigate, setAuth])
 
   return (
     <div style={{
