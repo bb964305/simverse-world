@@ -42,12 +42,15 @@ async def _require_user(request: Request, db: AsyncSession):
     return user
 
 
-async def _require_lab_enabled() -> None:
-    if not settings.lab_enabled:
-        raise HTTPException(status_code=503, detail="Lab is disabled")
-    from app.lab import is_lab_runtime_enabled
-    if not await is_lab_runtime_enabled():
-        raise HTTPException(status_code=503, detail="Lab is temporarily disabled")
+async def _require_lab_enabled(*, user_id: str, is_admin: bool) -> None:
+    from app.services.lab_readiness_service import snapshot
+
+    status = await snapshot(user_id=user_id, is_admin=is_admin)
+    if status["publish_allowed"]:
+        return
+    if not status["beta_admitted"]:
+        raise HTTPException(status_code=403, detail="Lab closed beta access required")
+    raise HTTPException(status_code=503, detail="Lab publishing is unavailable")
 
 
 class CreateTaskBody(BaseModel):
@@ -63,6 +66,21 @@ class CreateTaskBody(BaseModel):
 class TaskQuoteBody(BaseModel):
     reward_sc: int = Field(gt=0)
     scopes: list[str] = Field(default_factory=list)
+
+
+class MarketCandidateBody(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    summary: str = Field(default="", max_length=500)
+    offer_type: Literal["good", "service", "contract"] = "service"
+    suggested_price_sc: int = Field(default=0, ge=0, le=1000)
+
+
+@router.get("/status")
+async def lab_status(request: Request, db: AsyncSession = Depends(get_db)):
+    user = await _require_user(request, db)
+    from app.services.lab_readiness_service import snapshot
+
+    return await snapshot(user_id=user.id, is_admin=user.is_admin)
 
 
 # ── researchers ───────────────────────────────────────────────────────
@@ -117,7 +135,7 @@ async def quote_task(body: TaskQuoteBody, request: Request, db: AsyncSession = D
 @router.post("/tasks")
 async def create_task(body: CreateTaskBody, request: Request, db: AsyncSession = Depends(get_db)):
     user = await _require_user(request, db)
-    await _require_lab_enabled()
+    await _require_lab_enabled(user_id=user.id, is_admin=user.is_admin)
     try:
         task = await svc.create_task(
             db, issuer_id=user.id, title=body.title, brief=body.brief_md, scopes=body.scopes,
@@ -129,6 +147,43 @@ async def create_task(body: CreateTaskBody, request: Request, db: AsyncSession =
         code = 402 if "balance" in detail else 400
         raise HTTPException(status_code=code, detail=detail)
     return svc.serialize(task)
+
+
+@router.get("/market-candidates")
+async def list_market_candidates(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    user = await _require_user(request, db)
+    from app.services import lab_market_candidate_service as candidates
+
+    rows = await candidates.list_for_user(db, user_id=user.id)
+    return {"candidates": [candidates.serialize(row) for row in rows]}
+
+
+@router.post("/artifacts/{artifact_id}/market-candidate")
+async def nominate_market_candidate(
+    artifact_id: str,
+    body: MarketCandidateBody,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    user = await _require_user(request, db)
+    from app.services import lab_market_candidate_service as candidates
+
+    try:
+        row = await candidates.nominate(
+            db,
+            artifact_id=artifact_id,
+            user_id=user.id,
+            title=body.title,
+            summary=body.summary,
+            offer_type=body.offer_type,
+            suggested_price_sc=body.suggested_price_sc,
+        )
+    except candidates.CandidateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return candidates.serialize(row)
 
 
 @router.get("/tasks")

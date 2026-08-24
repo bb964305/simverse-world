@@ -237,6 +237,11 @@ class Settings(BaseSettings):
     lab_adapter: str = "mock"               # default sandbox adapter (mock|codex|openclaw|hermes|computer_use)
     lab_creator_share: float = 0.2          # researcher's creator gets this share of reward_sc; rest → treasury
     lab_platform_fee_rate: float = 0.1      # platform fee added on top of reward (fee = ceil(reward*rate)) → sink
+    # Empty keeps the historical "all authenticated users" behavior.  Setting
+    # one or more ids turns publishing into a closed beta; admins retain access.
+    # Read/status/artifact routes remain available so a gate change never traps
+    # escrow or hides completed work.
+    lab_beta_user_ids: list[str] = []
     lab_max_concurrent_runs: int = 3        # global cap on concurrently-running runs
     lab_max_concurrent_per_researcher: int = 1  # per-researcher cap on concurrently-running runs (0 = disabled)
     lab_daily_tasks_per_user: int = 20      # per-player daily task-publish cap
@@ -701,6 +706,13 @@ class Settings(BaseSettings):
     commission_lifecycle_v2_enabled: bool = False
     npc_trade_reserve_sc: int = 5                 # 买方保留金,兼作贫困线(余额须 > 它 + 价)
     npc_trade_max_buys_per_night: int = 2         # 全镇每晚成交上限(每人至多 1 笔)
+    # World-day trade cadence is a separate rollout gate.  Once enabled the
+    # accelerated clock owns consumption and nightly stops running that one
+    # pass, avoiding four-world-days-per-purchase starvation and double runs.
+    npc_trade_world_day_enabled: bool = False
+    npc_trade_population_cap_ratio: float = Field(default=0.15, ge=0.0, le=1.0)
+    economy_bootstrap_resident_floor_sc: int = Field(default=12, ge=0, le=1000)
+    economy_bootstrap_payroll_days: int = Field(default=7, ge=1, le=90)
     caravan_enabled: bool = False                 # C4 外来商队(绑集市日,外生买方 + 第二税源)
     caravan_stall_fee_sc: int = 5                 # 摊位费→镇库,不依赖 tax_rate
     caravan_budget_sc: int = 30                   # 每次到访的作品收购预算
@@ -708,6 +720,11 @@ class Settings(BaseSettings):
     # migration/API/worker ship; enabling it makes event_cron enqueue visits
     # instead of invoking the legacy one-shot settlement.
     caravan_lifecycle_enabled: bool = False
+    # Player-facing market session remains independently reversible after the
+    # caravan lifecycle ships.  It uses the lifecycle visit as its stock and
+    # phase authority; opening it without lifecycle is a visible closed state.
+    market_player_enabled: bool = False
+    market_catalog_version: str = "caravan-market-v1"
     caravan_lifecycle_interval_seconds: int = Field(default=5, ge=1, le=300)
     caravan_wait_lead_seconds: int = Field(default=600, ge=0, le=86400)
     caravan_route_tile_ms: int = Field(default=150, ge=10, le=5000)

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import random
 from datetime import datetime, UTC
 
@@ -255,7 +256,12 @@ async def run_consumption_pass(db: AsyncSession, rng=None) -> dict:
         .order_by(Resident.slug)
     )).all()
     reserve = settings.npc_trade_reserve_sc
-    cap = settings.npc_trade_max_buys_per_night
+    cap = int(settings.npc_trade_max_buys_per_night)
+    if settings.npc_trade_world_day_enabled:
+        cap = max(
+            cap,
+            math.ceil(len(buyers) * float(settings.npc_trade_population_cap_ratio)),
+        )
 
     for buyer_id, buyer_slug in buyers:
         if summary["bought"] >= cap:

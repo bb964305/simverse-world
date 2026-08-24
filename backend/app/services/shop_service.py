@@ -30,6 +30,13 @@ ITEM_DEFS: list[dict] = [
     {"code": "decor_rug", "kind": "decor", "name": "地毯", "description": "家园装饰", "icon": "🟫", "price_sc": 60, "payload_json": {"sprite": "rug_01", "w": 2, "h": 2}},
     {"code": "tip_5sc", "kind": "tip", "name": "打赏 5", "description": "给创作打赏 5 SC", "icon": "💰", "price_sc": 5, "payload_json": {}},
     {"code": "tip_20sc", "kind": "tip", "name": "打赏 20", "description": "给创作打赏 20 SC", "icon": "💎", "price_sc": 20, "payload_json": {}},
+    # Market-only inventory receipts. They stay inactive so the ordinary shop
+    # cannot sell them; a caravan purchase writes the Purchase row that grants
+    # decor ownership. Migration 067 seeds the same rows in production.
+    {"code": "market_tea_chest", "kind": "decor", "name": "远行茶箱", "description": "商队茶叶留下的收藏茶箱，可摆在家中", "icon": "🍵", "price_sc": 0, "payload_json": {"market_receipt": True, "sprite": "tea_chest"}, "active": False},
+    {"code": "market_trinket_display", "kind": "decor", "name": "异乡小玩意", "description": "来自远方商路的收藏摆件", "icon": "🎁", "price_sc": 0, "payload_json": {"market_receipt": True, "sprite": "trinket"}, "active": False},
+    {"code": "market_cloth_roll", "kind": "decor", "name": "花布卷", "description": "可陈列在家中的异乡花布", "icon": "🧵", "price_sc": 0, "payload_json": {"market_receipt": True, "sprite": "cloth_roll"}, "active": False},
+    {"code": "market_foreign_lantern", "kind": "decor", "name": "异域工匠灯", "description": "商队工匠现场制作的限量灯饰", "icon": "🏮", "price_sc": 0, "payload_json": {"market_receipt": True, "sprite": "foreign_lantern"}, "active": False},
 ]
 
 
@@ -38,7 +45,9 @@ async def seed_items(db: AsyncSession) -> int:
     for d in ITEM_DEFS:
         existing = (await db.execute(select(Item).where(Item.code == d["code"]))).scalar_one_or_none()
         if existing is None:
-            db.add(Item(**d, active=True))
+            values = dict(d)
+            active = bool(values.pop("active", True))
+            db.add(Item(**values, active=active))
     await db.commit()
     return len(ITEM_DEFS)
 

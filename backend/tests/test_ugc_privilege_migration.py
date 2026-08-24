@@ -22,7 +22,7 @@ def _load_migration():
     return module
 
 
-def test_065_chains_after_quota_migration_on_single_head():
+def test_065_chains_after_quota_migration_and_repository_has_single_head():
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
@@ -32,6 +32,10 @@ def test_065_chains_after_quota_migration_on_single_head():
     revision = script.get_revision("065_sanitize_ugc_privileges")
     assert revision.down_revision == "064_forge_quota_counters"
     assert len(revision.revision) <= 32
+    hosted_agents = script.get_revision("066_hosted_agent_controllers")
+    assert hosted_agents.down_revision == "065_sanitize_ugc_privileges"
+    market_economy = script.get_revision("067_market_economy_loop")
+    assert market_economy.down_revision == "066_hosted_agent_controllers"
 
 
 def test_065_portably_removes_only_ugc_privileges_and_is_idempotent():

@@ -17,6 +17,7 @@ from app.observability import init_sentry
 from app.redis_client import close_redis
 from app.http import close_client
 from app.tasks.embedding_backfill import embedding_backfill_loop
+from app.tasks.economy_cron import economy_cron_loop
 from app.tasks.caravan_lifecycle import caravan_lifecycle_loop
 from app.tasks.heat_cron import heat_cron_loop
 from app.tasks.event_cron import event_cron_loop
@@ -37,7 +38,7 @@ async def main() -> None:
     # Redis outlives this container.  Clear the previous owner's leases so the
     # Compose healthcheck can only pass after this process emits fresh beats.
     await clear_owned_heartbeats(
-        ("agent", "event", "heat", "nightly", "embedding_backfill", "caravan")
+        ("agent", "event", "heat", "nightly", "embedding_backfill", "caravan", "economy")
     )
 
     def _request_stop(sig: signal.Signals) -> None:
@@ -67,6 +68,7 @@ async def main() -> None:
         asyncio.create_task(nightly_cron_loop(), name="nightly-cron"),
         asyncio.create_task(embedding_backfill_loop(), name="embedding-backfill"),
         asyncio.create_task(caravan_lifecycle_loop(), name="caravan-lifecycle"),
+        asyncio.create_task(economy_cron_loop(), name="economy-cron"),
         asyncio.create_task(world_reload_subscriber(), name="world-reload"),
     ]
     if settings.resident_sprite_enabled:

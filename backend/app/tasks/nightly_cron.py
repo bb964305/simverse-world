@@ -466,12 +466,14 @@ async def run_nightly_jobs(*, once_per_day: bool = False) -> None:
     if (_trade_settings.npc_economy_enabled
             and _trade_settings.npc_trade_enabled):
         try:
-            from app.services.npc_trade_service import (
-                run_commission_accept_pass, run_consumption_pass,
-            )
+            from app.services.npc_trade_service import run_commission_accept_pass
             async with async_session() as db:
                 accepted = await run_commission_accept_pass(db)
-                bought = await run_consumption_pass(db)
+                # Once the accelerated world-day driver owns consumption this
+                # real-day job must not run a second demand pass.
+                if not _trade_settings.npc_trade_world_day_enabled:
+                    from app.services.npc_trade_service import run_consumption_pass
+                    bought = await run_consumption_pass(db)
         except Exception:
             logger.error("M-A npc commission acceptance/trade failed", exc_info=True)
 

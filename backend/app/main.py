@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
-from app.routers import auth, users, residents, forge, profile, search, bulletin, onboarding, sprites, avatar, settings as settings_router, media as media_router, events as events_router, notifications as notifications_router, achievements as achievements_router, shop as shop_router, digest as digest_router, daily as daily_router, commissions as commissions_router, graph as graph_router, exploration as exploration_router, capsules as capsules_router, feed as feed_router, photos as photos_router, tts as tts_router, seasons as seasons_router, goals as goals_router, debates as debates_router, polls as polls_router, home_decor as home_decor_router, caravans as caravans_router
+from app.routers import auth, users, residents, forge, profile, search, bulletin, onboarding, sprites, avatar, settings as settings_router, media as media_router, events as events_router, notifications as notifications_router, achievements as achievements_router, shop as shop_router, digest as digest_router, daily as daily_router, commissions as commissions_router, graph as graph_router, exploration as exploration_router, capsules as capsules_router, feed as feed_router, photos as photos_router, tts as tts_router, seasons as seasons_router, goals as goals_router, debates as debates_router, polls as polls_router, home_decor as home_decor_router, caravans as caravans_router, markets as markets_router
 from app.routers import lab as lab_router
 from app.routers import world as world_router
 from app.routers import townhall as townhall_router
@@ -22,6 +22,7 @@ from app.tasks.heat_cron import heat_cron_loop
 from app.tasks.event_cron import event_cron_loop
 from app.tasks.nightly_cron import nightly_cron_loop
 from app.tasks.embedding_backfill import embedding_backfill_loop
+from app.tasks.economy_cron import economy_cron_loop
 from app.tasks.caravan_lifecycle import caravan_lifecycle_loop
 from app.tasks.resident_sprite_worker import resident_sprite_worker_loop
 from app.agent.loop import agent_loop
@@ -101,6 +102,7 @@ async def lifespan(app):
             asyncio.create_task(agent_loop.run()),
             asyncio.create_task(embedding_backfill_loop()),
             asyncio.create_task(caravan_lifecycle_loop()),
+            asyncio.create_task(economy_cron_loop()),
         ]
         if settings.resident_sprite_enabled:
             background_tasks.append(asyncio.create_task(resident_sprite_worker_loop()))
@@ -225,6 +227,7 @@ app.include_router(settings_router.router)
 app.include_router(media_router.router)
 app.include_router(events_router.router)
 app.include_router(caravans_router.router)
+app.include_router(markets_router.router)
 app.include_router(notifications_router.router)
 app.include_router(achievements_router.router)
 app.include_router(shop_router.router)

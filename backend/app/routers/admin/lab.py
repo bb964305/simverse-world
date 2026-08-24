@@ -25,16 +25,55 @@ class ArbitrationBody(BaseModel):
     decision: Literal["settle", "refund"]
 
 
+class CandidateReviewBody(BaseModel):
+    decision: Literal["approve", "reject"]
+    note: str = ""
+
+
 @router.get("/status")
 async def lab_status(admin: User = Depends(require_admin)):
     """Deploy-level switch + live runtime kill-switch state."""
-    from app.config import settings
-    from app.lab import is_lab_runtime_enabled
-    return {
-        "deploy_enabled": settings.lab_enabled,
-        "runtime_enabled": await is_lab_runtime_enabled(),
-        "adapter": settings.lab_adapter,
-    }
+    from app.services.lab_readiness_service import snapshot
+
+    return await snapshot(user_id=admin.id, is_admin=True)
+
+
+@router.get("/market-candidates")
+async def list_market_candidates(
+    status: str | None = None,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.models.market import LabMarketCandidate
+    from app.services import lab_market_candidate_service as candidates
+
+    query = select(LabMarketCandidate).order_by(LabMarketCandidate.created_at.desc())
+    if status:
+        query = query.where(LabMarketCandidate.status == status)
+    rows = (await db.execute(query.limit(200))).scalars().all()
+    return {"candidates": [candidates.serialize(row) for row in rows]}
+
+
+@router.post("/market-candidates/{candidate_id}/review")
+async def review_market_candidate(
+    candidate_id: str,
+    body: CandidateReviewBody,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.services import lab_market_candidate_service as candidates
+
+    try:
+        row = await candidates.review(
+            db,
+            candidate_id=candidate_id,
+            reviewer_id=admin.id,
+            decision=body.decision,
+            note=body.note,
+        )
+    except candidates.CandidateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return candidates.serialize(row)
 
 
 @router.post("/kill-switch")

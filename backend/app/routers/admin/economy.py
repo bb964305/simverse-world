@@ -1,5 +1,6 @@
 """Admin Economy — global stats, transaction log, dynamic config."""
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +16,10 @@ from app.schemas.admin import (
 )
 
 router = APIRouter(prefix="/economy", tags=["admin-economy"])
+
+
+class EconomyBootstrapApply(BaseModel):
+    confirm: bool = False
 
 
 async def _get_economy_stats(db: AsyncSession) -> dict:
@@ -120,6 +125,41 @@ async def economy_stats(
     """Global economy statistics."""
     stats = await _get_economy_stats(db)
     return EconomyStatsResponse(**stats)
+
+
+@router.get("/operations")
+async def economy_operations(
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Resident liquidity, payroll runway, rollout gates and warnings."""
+    from app.services.economy_observability_service import snapshot
+
+    return await snapshot(db)
+
+
+@router.get("/bootstrap")
+async def economy_bootstrap_preview(
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.services.economy_bootstrap_service import preview
+
+    return await preview(db)
+
+
+@router.post("/bootstrap")
+async def economy_bootstrap_apply(
+    body: EconomyBootstrapApply,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Apply the one-time external development grant as one DB transaction."""
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="confirm=true is required")
+    from app.services.economy_bootstrap_service import apply
+
+    return await apply(db, requested_by_user_id=admin.id)
 
 
 @router.get("/series")
