@@ -48,6 +48,7 @@ async def _write_beat(name: str, age_s: float) -> None:
 def test_all_background_loops_are_registered():
     assert set(hb.LOOP_INTERVALS) == {
         "heat", "event", "nightly", "agent", "embedding_backfill", "caravan",
+        "hosted_agent", "economy",
     }
 
 

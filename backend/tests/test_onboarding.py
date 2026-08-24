@@ -145,6 +145,44 @@ async def test_create_player_resident_duplicate_blocked(db_session):
 
 
 @pytest.mark.anyio
+async def test_create_player_resident_slug_override_late_conflict_raises_clean_error(
+    db_session, monkeypatch
+):
+    first = User(name="First", email="first-slug@test.com")
+    second = User(name="Second", email="second-slug@test.com")
+    db_session.add_all([first, second])
+    await db_session.commit()
+    await db_session.refresh(first)
+    await db_session.refresh(second)
+
+    slug = "p-hosted-late-conflict"
+    resident = await create_player_resident(
+        db=db_session,
+        user_id=first.id,
+        name="First",
+        sprite_key="埃迪",
+        slug_override=slug,
+    )
+    assert resident.slug == slug
+
+    async def _pretend_slug_is_free(*_args, **_kwargs):
+        return False
+
+    monkeypatch.setattr(
+        "app.services.onboarding_service._player_slug_exists",
+        _pretend_slug_is_free,
+    )
+    with pytest.raises(ValueError, match="already exists"):
+        await create_player_resident(
+            db=db_session,
+            user_id=second.id,
+            name="Second",
+            sprite_key="亚当",
+            slug_override=slug,
+        )
+
+
+@pytest.mark.anyio
 async def test_skip_onboarding(db_session):
     """skip_onboarding should create a default player resident."""
     user = User(name="Skipper", email="skipper@test.com")

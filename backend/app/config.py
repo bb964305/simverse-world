@@ -1,4 +1,6 @@
-from pydantic import Field, model_validator
+from urllib.parse import urlsplit
+
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings
 
 _DEFAULT_JWT_SECRET = "dev-secret-change-in-production"
@@ -302,6 +304,20 @@ class Settings(BaseSettings):
     agent_observation_event_limit: int = 20
     agent_message_max_chars: int = 280
     agent_presence_ttl_seconds: int = 90
+    # Durable hosted runner credentials. The feature stays fail-closed until
+    # operators provision a versioned AES-256-GCM keyring.
+    hosted_agent_runner_enabled: bool = False
+    hosted_agent_runner_active_key_id: str = ""
+    hosted_agent_runner_keyring: SecretStr = SecretStr("")
+    hosted_agent_runner_allowed_hosts: list[str] = Field(default_factory=list)
+    hosted_agent_runner_internal_api_base: str = "http://api:8000"
+    hosted_agent_runner_max_concurrent: int = Field(default=3, ge=1, le=20)
+    hosted_agent_runner_llm_timeout_seconds: float = Field(default=60.0, gt=0, le=120)
+    hosted_agent_runner_lease_seconds: int = Field(default=180, ge=90, le=900)
+    hosted_agent_runner_poll_seconds: float = Field(default=2.0, ge=0.25, le=30)
+    hosted_agent_runner_max_response_bytes: int = Field(
+        default=262_144, ge=4096, le=1_048_576
+    )
     # 主 tick 跳过 chatting/socializing:开 = 跳过(chatting 先查 Redis 聊天锁,
     # 无锁视为陈旧状态 → 自愈复位 idle 并照常 tick)。关 = master 行为逐字节一致:
     # 主 tick 仅跳 sleeping(夜间归巢路径本就是三态检查,不受此闸影响)。
@@ -883,6 +899,71 @@ class Settings(BaseSettings):
     loop_heartbeat_min_stale_sec: float = 900.0  # 阈值下限, 防 60s 级 loop 误报
     loop_heartbeat_alert_cooldown_min: float = 60.0   # 同 loop 两次告警最小间隔
     loop_heartbeat_check_interval_min: float = 5.0    # 一次 beat 最多多久巡检一次
+
+    @model_validator(mode="after")
+    def _validate_hosted_agent_runner_keyring(self) -> "Settings":
+        if not self.hosted_agent_runner_enabled:
+            return self
+        from app.services.hosted_agent_runner_crypto import (
+            HostedRunnerSecretError,
+            load_hosted_runner_keyring,
+        )
+
+        try:
+            load_hosted_runner_keyring(
+                active_key_id=self.hosted_agent_runner_active_key_id,
+                keyring_json=self.hosted_agent_runner_keyring,
+            )
+        except HostedRunnerSecretError as exc:
+            raise ValueError(
+                "HOSTED_AGENT_RUNNER is enabled but "
+                "HOSTED_AGENT_RUNNER_ACTIVE_KEY_ID / HOSTED_AGENT_RUNNER_KEYRING "
+                "is missing or invalid"
+            ) from exc
+        if not self.debug and not self.hosted_agent_runner_allowed_hosts:
+            raise ValueError(
+                "HOSTED_AGENT_RUNNER_ALLOWED_HOSTS must not be empty when the "
+                "hosted runner is enabled outside DEBUG"
+            )
+        try:
+            internal_api = urlsplit(self.hosted_agent_runner_internal_api_base)
+            internal_port = internal_api.port
+        except ValueError as exc:
+            raise ValueError(
+                "HOSTED_AGENT_RUNNER_INTERNAL_API_BASE is invalid"
+            ) from exc
+        allowed_internal_hosts = (
+            {"api", "localhost", "127.0.0.1", "::1"}
+            if self.debug
+            else {"api"}
+        )
+        if (
+            internal_api.scheme != "http"
+            or internal_api.hostname not in allowed_internal_hosts
+            or internal_port != 8000
+            or internal_api.username is not None
+            or internal_api.password is not None
+            or internal_api.path not in {"", "/"}
+            or internal_api.query
+            or internal_api.fragment
+        ):
+            raise ValueError(
+                "HOSTED_AGENT_RUNNER_INTERNAL_API_BASE must be the private "
+                "http://api:8000 service endpoint (DEBUG may use loopback:8000)"
+            )
+        return self
+
+    @property
+    def hosted_agent_runner_secret_keyring(self):
+        """Return the hosted-runner keyring only when the feature is enabled."""
+        if not self.hosted_agent_runner_enabled:
+            return None
+        from app.services.hosted_agent_runner_crypto import load_hosted_runner_keyring
+
+        return load_hosted_runner_keyring(
+            active_key_id=self.hosted_agent_runner_active_key_id,
+            keyring_json=self.hosted_agent_runner_keyring,
+        )
 
     model_config = {"env_file": ".env"}
 

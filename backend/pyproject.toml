@@ -22,6 +22,7 @@ dependencies = [
     "prometheus-fastapi-instrumentator>=7.0",
     "sentry-sdk>=2.0",
     "pillow>=10.4",
+    "cryptography>=43.0",
 ]
 
 [project.optional-dependencies]

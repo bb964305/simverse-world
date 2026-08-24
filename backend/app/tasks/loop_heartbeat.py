@@ -63,6 +63,8 @@ LOOP_INTERVALS: dict[str, float | None] = {
     "agent": None,                 # settings.agent_tick_interval
     "embedding_backfill": None,    # settings.embedding_backfill_interval_seconds
     "caravan": None,               # settings.caravan_lifecycle_interval_seconds
+    "economy": 60.0,               # economy_cron.ECONOMY_CRON_INTERVAL_SECONDS
+    "hosted_agent": None,          # settings.hosted_agent_runner_poll_seconds
 }
 
 # Heartbeats outlive any plausible threshold but are not kept forever, so a
@@ -133,6 +135,8 @@ def _interval_s(name: str) -> float:
             return float(settings.embedding_backfill_interval_seconds)
         if name == "caravan":
             return float(settings.caravan_lifecycle_interval_seconds)
+        if name == "hosted_agent":
+            return float(settings.hosted_agent_runner_poll_seconds)
         return float(settings.agent_tick_interval)
     except Exception:
         return 60.0

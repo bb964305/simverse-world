@@ -138,6 +138,14 @@ async def test_registration_issues_scoped_hashed_credentials(client, db_session)
 
 
 @pytest.mark.anyio
+async def test_registration_keeps_name_based_slug_for_external_agents(client):
+    created, _credentials, _session = await _register_and_session(
+        client, name="Slug Traveler"
+    )
+    assert created["agent"]["slug"] == "p-slug-traveler"
+
+
+@pytest.mark.anyio
 async def test_message_player_repeats_until_explicitly_acknowledged(client, db_session):
     created_a, _credentials_a, session_a = await _register_and_session(client, "信使甲")
     created_b, _credentials_b, session_b = await _register_and_session(client, "信使乙")

@@ -70,3 +70,4 @@ import app.models.policy  # noqa: F401
 import app.models.civic_standing_history  # noqa: F401
 # Headless external players and their scoped opaque credentials.
 import app.models.agent_player  # noqa: F401
+import app.models.hosted_agent  # noqa: F401

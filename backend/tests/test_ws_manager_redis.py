@@ -115,6 +115,20 @@ async def test_headless_agent_presence_expires_and_leaves_online_roster(mgr):
 
 
 @pytest.mark.anyio
+async def test_headless_agent_presence_can_be_revoked_immediately(mgr):
+    await mgr.update_agent_position(
+        "hosted-u", 12, 34, "right", "Hosted", ttl_seconds=300
+    )
+    assert await mgr.get_visible_position("hosted-u") is not None
+
+    assert await mgr.revoke_agent_presence("hosted-u") is True
+    assert await mgr.get_visible_position("hosted-u") is None
+    assert await mgr.get_online_players() == []
+    # Retrying an operator pause is idempotent and emits no second removal.
+    assert await mgr.revoke_agent_presence("hosted-u") is False
+
+
+@pytest.mark.anyio
 async def test_websocket_disconnect_does_not_erase_headless_agent_lease(mgr):
     await mgr.update_agent_position(
         "shared-id", 50, 60, "left", "Agent", ttl_seconds=30

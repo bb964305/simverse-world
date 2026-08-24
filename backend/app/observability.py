@@ -160,6 +160,12 @@ def init_sentry(component: str) -> bool:
             environment=settings.sentry_environment,
             traces_sample_rate=settings.sentry_traces_sample_rate,
             release=None,
+            # Credential-bearing endpoints (including durable hosted BYOK
+            # provisioning) must never place request bodies, request PII, or stack
+            # locals (which may include an Authorization header) in telemetry.
+            max_request_body_size="never",
+            include_local_variables=False,
+            send_default_pii=False,
         )
         sentry_sdk.set_tag("component", component)
         logger.info("Sentry initialised (component=%s)", component)

@@ -4,6 +4,7 @@ import re
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.map_data import get_location_by_id
@@ -43,6 +44,7 @@ async def create_player_resident(
     persona_md: str = "",
     soul_md: str = "",
     portrait_url: str | None = None,
+    slug_override: str | None = None,
     commit: bool = True,
 ) -> Resident:
     """Create a Resident(type='player') and bind it to the User."""
@@ -60,11 +62,11 @@ async def create_player_resident(
         CENTRAL_PLAZA_Y + random.randint(-SPAWN_RADIUS, SPAWN_RADIUS),
     )
 
-    # Generate unique slug
-    slug = _generate_player_slug(name)
-    existing = await db.execute(select(Resident).where(Resident.slug == slug))
-    if existing.scalar_one_or_none():
-        slug = f"{slug}-{uuid.uuid4().hex[:6]}"
+    slug = await _resolve_player_slug(
+        db,
+        name=name,
+        slug_override=slug_override,
+    )
 
     district, spawn_x, spawn_y, _home = await allocate_resident_location(
         db,
@@ -74,12 +76,13 @@ async def create_player_resident(
         assign_housing=False,
     )
 
-    resident = Resident(
+    resident = await _insert_player_resident(
+        db,
         slug=slug,
+        base_slug=slug_override.strip() if slug_override else _generate_player_slug(name),
+        allow_retry=slug_override is None,
         name=name,
         district=district,
-        status="idle",
-        resident_type="player",
         reply_mode=reply_mode,
         sprite_key=sprite_key,
         tile_x=spawn_x,
@@ -89,10 +92,7 @@ async def create_player_resident(
         persona_md=persona_md,
         soul_md=soul_md,
         portrait_url=portrait_url,
-        meta_json={"origin": "onboarding"},
     )
-    db.add(resident)
-    await db.flush()  # ensure resident.id is persisted before FK reference
 
     # Bind to user and set initial position. users.last_x/last_y are PIXEL
     # coords everywhere else (spawn read in ws connection, disconnect persist,
@@ -156,3 +156,86 @@ def _generate_player_slug(name: str) -> str:
     if not slug:
         slug = f"player-{uuid.uuid4().hex[:8]}"
     return f"p-{slug}"  # prefix with p- to distinguish from NPC residents
+
+
+async def _player_slug_exists(db: AsyncSession, slug: str) -> bool:
+    existing = await db.execute(select(Resident.id).where(Resident.slug == slug))
+    return existing.scalar_one_or_none() is not None
+
+
+def _randomized_player_slug(base_slug: str) -> str:
+    return f"{base_slug}-{uuid.uuid4().hex[:6]}"
+
+
+async def _resolve_player_slug(
+    db: AsyncSession,
+    *,
+    name: str,
+    slug_override: str | None,
+) -> str:
+    if slug_override is not None:
+        slug = slug_override.strip()
+        if not slug:
+            raise ValueError("player slug override cannot be empty")
+        if await _player_slug_exists(db, slug):
+            raise ValueError(f"Resident slug '{slug}' already exists")
+        return slug
+
+    base_slug = _generate_player_slug(name)
+    if await _player_slug_exists(db, base_slug):
+        return _randomized_player_slug(base_slug)
+    return base_slug
+
+
+async def _insert_player_resident(
+    db: AsyncSession,
+    *,
+    slug: str,
+    base_slug: str,
+    allow_retry: bool,
+    name: str,
+    district: str,
+    reply_mode: str,
+    sprite_key: str,
+    tile_x: int,
+    tile_y: int,
+    creator_id: str,
+    ability_md: str,
+    persona_md: str,
+    soul_md: str,
+    portrait_url: str | None,
+) -> Resident:
+    attempts = 0
+    candidate = slug
+    while True:
+        resident = Resident(
+            slug=candidate,
+            name=name,
+            district=district,
+            status="idle",
+            resident_type="player",
+            reply_mode=reply_mode,
+            sprite_key=sprite_key,
+            tile_x=tile_x,
+            tile_y=tile_y,
+            creator_id=creator_id,
+            ability_md=ability_md,
+            persona_md=persona_md,
+            soul_md=soul_md,
+            portrait_url=portrait_url,
+            meta_json={"origin": "onboarding"},
+        )
+        try:
+            async with db.begin_nested():
+                db.add(resident)
+                await db.flush()  # persist resident.id before FK reference
+            return resident
+        except IntegrityError as exc:
+            if not allow_retry:
+                raise ValueError(f"Resident slug '{base_slug}' already exists") from exc
+            attempts += 1
+            if attempts >= 8:
+                raise ValueError(
+                    "Could not allocate a unique player slug after repeated conflicts"
+                ) from exc
+            candidate = _randomized_player_slug(base_slug)

@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import secrets
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -23,12 +24,18 @@ from app.models.agent_player import (
     AgentNpcChatTurnReceipt,
     AgentPlayer,
 )
+from app.models.hosted_agent import (
+    HostedAgentController,
+    HostedAgentDailyUsage,
+    HostedAgentTurn,
+)
 from app.models.conversation import Conversation, Message
 from app.models.resident import Resident
 from app.models.user import User
 from app.rate_limit import limiter
 from app.services.agent_player_service import (
     AgentPlayerError,
+    agent_presence_ttl_seconds,
     acknowledge_private_events,
     agent_me,
     create_agent_session_token,
@@ -45,6 +52,7 @@ from app.services.agent_player_service import (
 )
 from app.services.coin_service import charge_pending, get_balance
 from app.services.daily_reward_service import claim_daily_reward
+from app.services.hosted_agent_service import HOSTED_RESULT_FIELD, encrypt_turn_value
 from app.llm.budget import user_over_budget
 from app.services.player_npc_chat_service import (
     build_single_turn_prompt,
@@ -80,31 +88,80 @@ def _bearer(request: Request) -> str:
     return auth.removeprefix("Bearer ").strip()
 
 
-async def _agent_profile(request: Request, db: AsyncSession):
+async def _lock_running_hosted_controller(
+    db: AsyncSession, profile: AgentPlayer
+) -> HostedAgentController | None:
+    if profile.control_kind != "hosted_agent":
+        return None
+    controller = (
+        await db.execute(
+            select(HostedAgentController)
+            .where(HostedAgentController.agent_player_id == profile.id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if controller is None or controller.desired_status != "running":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "hosted_controller_not_running"},
+        )
+    return controller
+
+
+async def _touch_agent_presence(db: AsyncSession, profile: AgentPlayer) -> None:
+    if profile.control_kind == "hosted_agent":
+        # Controller -> profile is the global lock order. Holding the controller
+        # through the DB heartbeat makes this linearizable with admin pause.
+        await _lock_running_hosted_controller(db, profile)
+        await db.refresh(profile, with_for_update=True)
+    profile.last_seen_at = datetime.now(UTC)
+    await db.commit()
+    await _refresh_agent_presence(db, profile)
+
+
+async def _agent_profile(
+    request: Request,
+    db: AsyncSession,
+    *,
+    touch_presence: bool = True,
+    require_hosted_running: bool = True,
+):
     try:
         profile = await require_agent_session(db, _bearer(request))
+        if touch_presence or profile.control_kind != "hosted_agent":
+            await _touch_agent_presence(db, profile)
+        elif require_hosted_running and profile.control_kind == "hosted_agent":
+            await _lock_running_hosted_controller(db, profile)
+            await db.commit()
         await recover_expired_npc_chat_turns(db)
-        profile.last_seen_at = datetime.now(UTC)
-        await db.commit()
-        await _refresh_agent_presence(db, profile)
         return profile
     except AgentPlayerError as exc:
         _fail(exc)
 
 
-async def _refresh_agent_presence(db: AsyncSession, profile) -> None:
+async def _refresh_agent_presence(
+    db: AsyncSession, profile: AgentPlayer, *, direction: str = "down"
+) -> bool:
     """Best-effort expiring realtime projection for a REST-controlled avatar."""
+    if profile.control_kind == "hosted_agent":
+        try:
+            await _lock_running_hosted_controller(db, profile)
+        except HTTPException:
+            await db.commit()
+            return False
     user = await db.get(User, profile.user_id)
     if user is None:
-        return
+        await db.commit()
+        return False
     try:
+        presence_ttl = agent_presence_ttl_seconds(profile)
         became_online = await manager.update_agent_position(
             user.id,
             float(user.last_x),
             float(user.last_y),
-            "down",
+            direction,
             user.name,
-            ttl_seconds=settings.agent_presence_ttl_seconds,
+            ttl_seconds=presence_ttl,
         )
         if became_online:
             await manager.broadcast(
@@ -114,14 +171,21 @@ async def _refresh_agent_presence(db: AsyncSession, profile) -> None:
                     "name": user.name,
                     "x": user.last_x,
                     "y": user.last_y,
-                    "direction": "down",
+                    "direction": direction,
                     "agent_controlled": True,
-                    "presence_ttl_seconds": settings.agent_presence_ttl_seconds,
+                    "presence_ttl_seconds": presence_ttl,
                 },
                 exclude=user.id,
             )
+        await db.commit()
+        return True
     except Exception:
+        # No durable projection is mutated in this transaction. Commit only
+        # releases a possible Hosted controller row lock without expiring the
+        # authenticated profile object used by the enclosing route.
+        await db.commit()
         logger.warning("Agent presence heartbeat failed", exc_info=True)
+        return False
 
 
 class ClientInfo(BaseModel):
@@ -211,6 +275,140 @@ def _aware_utc(value: datetime | None) -> datetime | None:
     if value is not None and value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value
+
+
+def _hosted_fence_headers(request: Request) -> dict[str, Any] | None:
+    names = {
+        "controller_id": "X-Simverse-Hosted-Controller-ID",
+        "lease_token": "X-Simverse-Hosted-Lease-Token",
+        "lease_epoch": "X-Simverse-Hosted-Lease-Epoch",
+        "control_version": "X-Simverse-Hosted-Control-Version",
+        "turn_id": "X-Simverse-Hosted-Turn-ID",
+        "event_cursor": "X-Simverse-Hosted-Event-Cursor",
+    }
+    raw = {key: request.headers.get(header) for key, header in names.items()}
+    if not any(value is not None for value in raw.values()):
+        return None
+    if not all(value is not None and value != "" for value in raw.values()):
+        raise HTTPException(status_code=400, detail={"code": "invalid_hosted_action_fence"})
+    try:
+        uuid.UUID(str(raw["controller_id"]))
+        uuid.UUID(str(raw["turn_id"]))
+        lease_epoch = int(str(raw["lease_epoch"]))
+        control_version = int(str(raw["control_version"]))
+        event_cursor = int(str(raw["event_cursor"]))
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail={"code": "invalid_hosted_action_fence"})
+    if lease_epoch < 0 or control_version < 1 or event_cursor < 0:
+        raise HTTPException(status_code=400, detail={"code": "invalid_hosted_action_fence"})
+    return {
+        "controller_id": str(raw["controller_id"]),
+        "lease_token": str(raw["lease_token"]),
+        "lease_epoch": lease_epoch,
+        "control_version": control_version,
+        "turn_id": str(raw["turn_id"]),
+        "event_cursor": event_cursor,
+    }
+
+
+async def _lock_hosted_action_fence(
+    db: AsyncSession,
+    *,
+    profile: AgentPlayer,
+    body: AgentActionRequest,
+    fence: dict[str, Any],
+) -> tuple[HostedAgentController, HostedAgentTurn]:
+    """Lock controller first; profile locks must always follow this helper."""
+    controller = (
+        await db.execute(
+            select(HostedAgentController)
+            .where(HostedAgentController.id == fence["controller_id"])
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    now = datetime.now(UTC)
+    if (
+        controller is None
+        or controller.agent_player_id != profile.id
+        or controller.desired_status != "running"
+        or controller.runtime_status != "claimed"
+        or controller.lease_token != fence["lease_token"]
+        or controller.lease_epoch != fence["lease_epoch"]
+        or controller.control_version != fence["control_version"]
+        or (_aware_utc(controller.lease_expires_at) or now) <= now
+    ):
+        raise HTTPException(status_code=409, detail={"code": "hosted_controller_fence_lost"})
+    turn = (
+        await db.execute(
+            select(HostedAgentTurn)
+            .where(
+                HostedAgentTurn.id == fence["turn_id"],
+                HostedAgentTurn.controller_id == controller.id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if (
+        turn is None
+        or turn.state != "committing"
+        or turn.lease_epoch != controller.lease_epoch
+        or turn.control_version != controller.control_version
+        or turn.action_id != body.action_id
+        or turn.action_type != body.type
+        or turn.observation_seq != body.observation_seq
+        or turn.event_cursor != fence["event_cursor"]
+    ):
+        raise HTTPException(status_code=409, detail={"code": "hosted_turn_fence_lost"})
+    return controller, turn
+
+
+def _terminalize_hosted_npc_failure(
+    controller: HostedAgentController | None,
+    turn: HostedAgentTurn | None,
+    *,
+    error_code: str,
+) -> None:
+    """Finish a terminal NPC receipt in the same locked DB transaction."""
+    if controller is None or turn is None or turn.state != "committing":
+        return
+    now = datetime.now(UTC)
+    turn.state = "failed"
+    turn.error_code = error_code[:100]
+    turn.updated_at = now
+    controller.runtime_status = "idle"
+    controller.lease_owner = None
+    controller.lease_token = None
+    controller.lease_expires_at = None
+    controller.heartbeat_at = now
+    controller.next_action_at = now
+    controller.next_tick_at = now
+    controller.last_error_code = error_code[:100]
+    controller.updated_at = now
+
+
+async def _lock_current_hosted_action_usage(
+    db: AsyncSession, controller: HostedAgentController
+) -> HostedAgentDailyUsage:
+    """Charge actions to their commit-day UTC ledger, not decision-day usage."""
+    usage_date = datetime.now(UTC).date()
+    usage = (
+        await db.execute(
+            select(HostedAgentDailyUsage)
+            .where(
+                HostedAgentDailyUsage.controller_id == controller.id,
+                HostedAgentDailyUsage.usage_date == usage_date,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if usage is None:
+        usage = HostedAgentDailyUsage(
+            controller_id=controller.id,
+            usage_date=usage_date,
+        )
+        db.add(usage)
+        await db.flush()
+    return usage
 
 
 def _clear_profile_operation(profile: AgentPlayer, token: str | None = None) -> bool:
@@ -315,10 +513,8 @@ async def create_agent_session(
 ):
     try:
         credential, profile = await resolve_opaque_credential(db, _bearer(request), "play")
+        await _touch_agent_presence(db, profile)
         session_token, expires_at = create_agent_session_token(profile, credential)
-        profile.last_seen_at = datetime.now(UTC)
-        await db.commit()
-        await _refresh_agent_presence(db, profile)
     except AgentPlayerError as exc:
         _fail(exc)
     return {
@@ -360,7 +556,12 @@ async def acknowledge_agent_events(
     body: AgentEventAckRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    profile = await _agent_profile(request, db)
+    profile = await _agent_profile(request, db, touch_presence=False)
+    if profile.control_kind == "hosted_agent":
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "hosted_events_ack_requires_action_commit"},
+        )
     try:
         result = await acknowledge_private_events(db, profile, body.event_cursor)
     except AgentPlayerError as exc:
@@ -376,8 +577,24 @@ async def agent_action(
     body: AgentActionRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    profile = await _agent_profile(request, db)
+    profile = await _agent_profile(
+        request,
+        db,
+        touch_presence=False,
+        require_hosted_running=False,
+    )
     profile_id = profile.id
+    hosted_fence = _hosted_fence_headers(request)
+    if profile.control_kind == "hosted_agent" and hosted_fence is None:
+        raise HTTPException(
+            status_code=403, detail={"code": "hosted_action_fence_required"}
+        )
+    hosted_controller: HostedAgentController | None = None
+    hosted_turn: HostedAgentTurn | None = None
+    if hosted_fence is not None:
+        hosted_controller, hosted_turn = await _lock_hosted_action_fence(
+            db, profile=profile, body=body, fence=hosted_fence
+        )
     # Serialize actions for one avatar. Player messages also update the target
     # inbox sequence, so lock both profiles in deterministic ID order to avoid
     # A->B / B->A deadlocks on PostgreSQL.
@@ -444,6 +661,7 @@ async def agent_action(
         _fail(exc)
 
     profile.observation_seq += 1
+    profile.last_seen_at = datetime.now(UTC)
     presence = result.pop("_presence", None)
     response = {
         "action_id": body.action_id,
@@ -461,6 +679,51 @@ async def agent_action(
             result_json=response,
         )
     )
+    if hosted_controller is not None and hosted_turn is not None and hosted_fence is not None:
+        if hosted_fence["event_cursor"] > profile.event_seq:
+            await db.rollback()
+            raise HTTPException(status_code=409, detail={"code": "hosted_event_cursor_ahead"})
+        profile.last_seen_event_seq = max(
+            profile.last_seen_event_seq, hosted_fence["event_cursor"]
+        )
+        usage = await _lock_current_hosted_action_usage(db, hosted_controller)
+        if usage.actions >= hosted_controller.max_actions_per_day:
+            await db.rollback()
+            raise HTTPException(
+                status_code=429, detail={"code": "hosted_action_budget_exhausted"}
+            )
+        usage.actions += 1
+        usage.updated_at = datetime.now(UTC)
+        hosted_turn.result_version = 1
+        hosted_turn.result_envelope = encrypt_turn_value(
+            turn_id=hosted_turn.id,
+            field_name=HOSTED_RESULT_FIELD,
+            value=response,
+        )
+        hosted_turn.state = "completed"
+        hosted_turn.updated_at = datetime.now(UTC)
+        now = datetime.now(UTC)
+        wait_seconds = 0.0
+        if body.type == "wait":
+            try:
+                wait_seconds = max(0.0, float(body.params.get("seconds", 0)))
+            except (TypeError, ValueError):
+                wait_seconds = 0.0
+        action_delay = max(float(hosted_controller.action_interval_seconds), wait_seconds)
+        hosted_controller.runtime_status = "idle"
+        hosted_controller.lease_owner = None
+        hosted_controller.lease_token = None
+        hosted_controller.lease_expires_at = None
+        hosted_controller.heartbeat_at = now
+        hosted_controller.last_presence_at = now
+        hosted_controller.last_action_at = now
+        hosted_controller.next_action_at = now + timedelta(seconds=action_delay)
+        hosted_controller.next_tick_at = now + timedelta(
+            seconds=min(float(hosted_controller.heartbeat_seconds), action_delay)
+        )
+        hosted_controller.provider_retry_at = None
+        hosted_controller.last_error_code = None
+        hosted_controller.retry_count = 0
     try:
         await db.commit()
     except IntegrityError:
@@ -481,18 +744,14 @@ async def agent_action(
         raise
     # Presence is an eventually-consistent realtime projection. The durable
     # position + sequence + receipt above are authoritative and atomic.
-    if presence:
-        from app.ws.manager import manager
-
+    presence_refreshed = await _refresh_agent_presence(
+        db,
+        profile,
+        direction=str(presence.get("direction", "down")) if presence else "down",
+    )
+    if presence and presence_refreshed:
         try:
-            await manager.update_agent_position(
-                presence["user_id"],
-                float(presence["x"]),
-                float(presence["y"]),
-                presence["direction"],
-                presence["name"],
-                ttl_seconds=settings.agent_presence_ttl_seconds,
-            )
+            presence_ttl = agent_presence_ttl_seconds(profile)
             await manager.broadcast(
                 {
                     "type": "player_moved",
@@ -502,7 +761,7 @@ async def agent_action(
                     "y": presence["y"],
                     "direction": presence["direction"],
                     "agent_controlled": True,
-                    "presence_ttl_seconds": settings.agent_presence_ttl_seconds,
+                    "presence_ttl_seconds": presence_ttl,
                 },
                 exclude=presence["user_id"],
             )
@@ -526,7 +785,32 @@ async def agent_npc_chat_turn(
     commit atomically. A crash leaves a recoverable pending receipt; retrying
     the same turn resumes it without opening or charging a second conversation.
     """
-    profile = await _agent_profile(request, db)
+    profile = await _agent_profile(
+        request,
+        db,
+        touch_presence=False,
+        require_hosted_running=False,
+    )
+    hosted_fence = _hosted_fence_headers(request)
+    if profile.control_kind == "hosted_agent" and hosted_fence is None:
+        raise HTTPException(
+            status_code=403, detail={"code": "hosted_action_fence_required"}
+        )
+    hosted_controller: HostedAgentController | None = None
+    hosted_turn: HostedAgentTurn | None = None
+    hosted_action_body = AgentActionRequest(
+        action_id=body.turn_id,
+        observation_seq=body.observation_seq,
+        type="npc_chat_turn",
+        params={"resident_slug": body.resident_slug, "text": body.text},
+    )
+    if hosted_fence is not None:
+        hosted_controller, hosted_turn = await _lock_hosted_action_fence(
+            db,
+            profile=profile,
+            body=hosted_action_body,
+            fence=hosted_fence,
+        )
     profile_id = profile.id
     user_id = profile.user_id
     request_hash = _npc_chat_request_hash(body)
@@ -556,9 +840,22 @@ async def agent_npc_chat_turn(
         if receipt.status == "completed":
             return _chat_receipt_response(receipt)
         if receipt.status == "failed":
+            error_detail = (receipt.response_json or {}).get("detail")
+            error_code = (
+                str(error_detail.get("code"))
+                if isinstance(error_detail, dict) and error_detail.get("code")
+                else "npc_chat_failed"
+            )
+            _terminalize_hosted_npc_failure(
+                hosted_controller,
+                hosted_turn,
+                error_code=error_code,
+            )
+            if hosted_controller is not None:
+                await db.commit()
             raise HTTPException(
                 status_code=receipt.http_status,
-                detail=(receipt.response_json or {}).get("detail", "NPC chat failed"),
+                detail=error_detail or "NPC chat failed",
             )
         now = datetime.now(UTC)
         lease_expires_at = _aware_utc(receipt.lease_expires_at)
@@ -777,21 +1074,55 @@ async def agent_npc_chat_turn(
             )
             raise
 
+    # Rollback of the Hosted fence read below expires ORM instances. Keep only
+    # non-secret scalar identifiers across that transaction boundary so no
+    # async lazy load can occur outside SQLAlchemy's greenlet context.
+    npc_resident_id = resident.id
+    npc_conversation_id = conversation.id
+    npc_receipt_id = receipt.id
+
     # Phase 2: no DB connection is held across the billable model call.
     assert owned_lease_token is not None
     try:
+        if hosted_fence is not None:
+            # Phase 1 committed the pending NPC receipt and released its row
+            # locks. Recheck the durable controller immediately before spend;
+            # release the read lock before the external model call.
+            current_profile = await db.get(AgentPlayer, profile_id)
+            if current_profile is None:
+                raise HTTPException(status_code=409, detail={"code": "turn_recovery_failed"})
+            await _lock_hosted_action_fence(
+                db,
+                profile=current_profile,
+                body=hosted_action_body,
+                fence=hosted_fence,
+            )
+            await db.rollback()
         # The Anthropic SDK applies its timeout per retry attempt. Bound the
         # entire operation so automatic retries can never outlive the durable
         # receipt and shared resident leases.
         async with asyncio.timeout(NPC_CHAT_CALL_TIMEOUT_SECONDS):
             reply = await generate_single_turn_reply(
                 prompt=prompt,
-                resident_id=resident.id,
+                resident_id=npc_resident_id,
                 user_id=user_id,
-                conversation_id=conversation.id,
+                conversation_id=npc_conversation_id,
             )
         if not reply:
             raise RuntimeError("NPC returned an empty reply")
+        if hosted_fence is not None:
+            # Hold controller -> turn locks through Phase 3. If pause won while
+            # the model ran, this raises and the existing failure path releases
+            # the NPC/profile operation without committing charge or dialogue.
+            current_profile = await db.get(AgentPlayer, profile_id)
+            if current_profile is None:
+                raise HTTPException(status_code=409, detail={"code": "turn_recovery_failed"})
+            hosted_controller, hosted_turn = await _lock_hosted_action_fence(
+                db,
+                profile=current_profile,
+                body=hosted_action_body,
+                fence=hosted_fence,
+            )
     except Exception:
         logger.warning("Agent NPC chat model call failed", exc_info=True)
         # Release our own lease and restore availability immediately. The same
@@ -806,7 +1137,7 @@ async def agent_npc_chat_turn(
             failed_receipt = (
                 await db.execute(
                     select(AgentNpcChatTurnReceipt)
-                    .where(AgentNpcChatTurnReceipt.id == receipt.id)
+                    .where(AgentNpcChatTurnReceipt.id == npc_receipt_id)
                     .with_for_update()
                 )
             ).scalar_one_or_none()
@@ -871,7 +1202,7 @@ async def agent_npc_chat_turn(
     # Phase 3: claim the still-pending receipt and atomically finalize effects.
     try:
         lock_still_owned = await manager.lock_resident(
-            resident.id,
+            npc_resident_id,
             lock_owner,
             ttl_seconds=60,
         )
@@ -885,21 +1216,21 @@ async def agent_npc_chat_turn(
     if profile is None:
         if lock_still_owned:
             await manager.unlock_resident(
-                resident.id, expected_owner=lock_owner
+                npc_resident_id, expected_owner=lock_owner
             )
         raise HTTPException(status_code=409, detail={"code": "turn_recovery_failed"})
     await db.refresh(profile, with_for_update=True)
     receipt = (
         await db.execute(
             select(AgentNpcChatTurnReceipt)
-            .where(AgentNpcChatTurnReceipt.id == receipt.id)
+            .where(AgentNpcChatTurnReceipt.id == npc_receipt_id)
             .with_for_update()
         )
     ).scalar_one_or_none()
     if receipt is None:
         if lock_still_owned:
             await manager.unlock_resident(
-                resident.id, expected_owner=lock_owner
+                npc_resident_id, expected_owner=lock_owner
             )
         raise HTTPException(status_code=409, detail={"code": "turn_recovery_failed"})
     if receipt.request_hash != request_hash:
@@ -907,7 +1238,7 @@ async def agent_npc_chat_turn(
     if receipt.status == "completed":
         if lock_still_owned:
             await manager.unlock_resident(
-                resident.id, expected_owner=lock_owner
+                npc_resident_id, expected_owner=lock_owner
             )
         return _chat_receipt_response(receipt)
     lease_expires_at = _aware_utc(receipt.lease_expires_at)
@@ -958,6 +1289,11 @@ async def agent_npc_chat_turn(
         _clear_profile_operation(profile, owned_lease_token)
         resident.status = "popular" if resident.heat >= 50 else "idle"
         conversation.ended_at = datetime.now(UTC)
+        _terminalize_hosted_npc_failure(
+            hosted_controller,
+            hosted_turn,
+            error_code="observation_changed_during_turn",
+        )
         await db.commit()
         await release_npc_chat_lock_and_notify(
             agent_player_id=profile_id,
@@ -984,6 +1320,11 @@ async def agent_npc_chat_turn(
         _clear_profile_operation(profile, owned_lease_token)
         resident.status = "popular" if resident.heat >= 50 else "idle"
         conversation.ended_at = datetime.now(UTC)
+        _terminalize_hosted_npc_failure(
+            hosted_controller,
+            hosted_turn,
+            error_code="insufficient_soul_coins",
+        )
         await db.commit()
         await release_npc_chat_lock_and_notify(
             agent_player_id=profile_id,
@@ -1009,6 +1350,7 @@ async def agent_npc_chat_turn(
             logger.warning("Agent NPC chat social restore failed", exc_info=True)
     conversation.ended_at = datetime.now(UTC)
     profile.observation_seq += 1
+    profile.last_seen_at = datetime.now(UTC)
     _clear_profile_operation(profile, owned_lease_token)
     balance = await get_balance(db, profile.user_id)
     response = {
@@ -1028,7 +1370,54 @@ async def agent_npc_chat_turn(
     receipt.lease_token = None
     receipt.lease_expires_at = None
     receipt.updated_at = datetime.now(UTC)
+    if hosted_controller is not None and hosted_turn is not None and hosted_fence is not None:
+        if hosted_fence["event_cursor"] != hosted_turn.event_cursor:
+            await db.rollback()
+            raise HTTPException(status_code=409, detail={"code": "hosted_event_cursor_mismatch"})
+        if hosted_fence["event_cursor"] > profile.event_seq:
+            await db.rollback()
+            raise HTTPException(status_code=409, detail={"code": "hosted_event_cursor_ahead"})
+        usage = await _lock_current_hosted_action_usage(db, hosted_controller)
+        if usage.actions >= hosted_controller.max_actions_per_day:
+            await db.rollback()
+            raise HTTPException(
+                status_code=429, detail={"code": "hosted_action_budget_exhausted"}
+            )
+        now = datetime.now(UTC)
+        usage.actions += 1
+        usage.updated_at = now
+        profile.last_seen_event_seq = max(
+            profile.last_seen_event_seq, hosted_fence["event_cursor"]
+        )
+        hosted_turn.result_version = 1
+        hosted_turn.result_envelope = encrypt_turn_value(
+            turn_id=hosted_turn.id,
+            field_name=HOSTED_RESULT_FIELD,
+            value=response,
+        )
+        hosted_turn.state = "completed"
+        hosted_turn.updated_at = now
+        hosted_controller.runtime_status = "idle"
+        hosted_controller.lease_owner = None
+        hosted_controller.lease_token = None
+        hosted_controller.lease_expires_at = None
+        hosted_controller.heartbeat_at = now
+        hosted_controller.last_presence_at = now
+        hosted_controller.last_action_at = now
+        hosted_controller.next_action_at = now + timedelta(
+            seconds=hosted_controller.action_interval_seconds
+        )
+        hosted_controller.next_tick_at = now + timedelta(
+            seconds=min(
+                hosted_controller.heartbeat_seconds,
+                hosted_controller.action_interval_seconds,
+            )
+        )
+        hosted_controller.provider_retry_at = None
+        hosted_controller.last_error_code = None
+        hosted_controller.retry_count = 0
     await db.commit()
+    await _refresh_agent_presence(db, profile)
     await release_npc_chat_lock_and_notify(
         agent_player_id=profile_id,
         lease_token=owned_lease_token,

@@ -183,6 +183,21 @@ app.add_middleware(
     detail="Import request exceeds the multipart body size limit",
 )
 
+from app.routers.admin.hosted_agents import (  # noqa: E402
+    MAX_HOSTED_AGENT_CREATE_BODY_BYTES,
+)
+
+app.add_middleware(
+    RouteBodyLimitMiddleware,
+    limits={
+        ("POST", "/admin/hosted-agents"): MAX_HOSTED_AGENT_CREATE_BODY_BYTES,
+    },
+    prefix_limits={
+        ("PATCH", "/admin/hosted-agents/"): MAX_HOSTED_AGENT_CREATE_BODY_BYTES,
+    },
+    detail="Hosted Agent request exceeds the body size limit",
+)
+
 # --- REST rate limiting (OPTIMIZATION_PLAN P1-1, limit sub-item) ---
 # The Limiter instance lives in app.rate_limit so routers can import the
 # decorator without a circular dependency on this module. Here we only wire

@@ -94,8 +94,23 @@ def _agent_is_online(profile: AgentPlayer) -> bool:
     if last_seen is None:
         return False
     return last_seen >= datetime.now(UTC) - timedelta(
-        seconds=max(1, settings.agent_presence_ttl_seconds)
+        seconds=agent_presence_ttl_seconds(profile)
     )
+
+
+def agent_presence_ttl_seconds(profile: AgentPlayer) -> int:
+    """Return one TTL shared by Redis presence and durable online projection."""
+    base = max(1, settings.agent_presence_ttl_seconds)
+    if profile.control_kind != "hosted_agent":
+        return base
+    longest_internal_action = max(35, int(settings.user_llm_timeout) + 35)
+    hosted_operation_window = (
+        int(settings.hosted_agent_runner_llm_timeout_seconds)
+        + longest_internal_action
+        + 60  # maximum configured Hosted heartbeat interval
+        + 30  # scheduling/network jitter
+    )
+    return max(base, hosted_operation_window)
 
 
 def _tile_from_presence(position: dict[str, Any] | None) -> tuple[int, int] | None:
@@ -138,6 +153,8 @@ async def register_agent_player(
     client: dict[str, Any],
     role: dict[str, Any],
     public_visible: bool,
+    slug_override: str | None = None,
+    commit: bool = True,
 ) -> tuple[AgentPlayer, User, Resident, IssuedToken]:
     """Atomically create an Agent principal, player avatar and pairing code."""
     cleaned_name = name.strip()
@@ -178,6 +195,7 @@ async def register_agent_player(
             ability_md=ability_md,
             persona_md=persona_md,
             soul_md=soul_md,
+            slug_override=slug_override,
             commit=False,
         )
         # Make the external origin visible to public projections while retaining
@@ -209,16 +227,28 @@ async def register_agent_player(
             expires_at=datetime.now(UTC) + timedelta(minutes=settings.agent_pairing_minutes),
         )
         db.add(pair.credential)
-        await db.commit()
-        await db.refresh(profile)
+        if commit:
+            await db.commit()
+            await db.refresh(profile)
+        else:
+            await db.flush()
         return profile, user, resident, pair
+    except ValueError as exc:
+        await db.rollback()
+        detail = str(exc)
+        status_code = 409 if "slug" in detail.lower() and "exists" in detail.lower() else 400
+        raise AgentPlayerError(detail, status_code) from exc
     except Exception:
         await db.rollback()
         raise
 
 
 async def redeem_pairing(
-    db: AsyncSession, pairing_code: str, expected_agent_player_id: str | None = None
+    db: AsyncSession,
+    pairing_code: str,
+    expected_agent_player_id: str | None = None,
+    *,
+    commit: bool = True,
 ) -> tuple[AgentPlayer, IssuedToken, IssuedToken]:
     now = datetime.now(UTC)
     token_hash = _credential_hash(pairing_code)
@@ -255,7 +285,10 @@ async def redeem_pairing(
     play = _new_credential(profile.id, "play")
     view = _new_credential(profile.id, "view")
     db.add_all([play.credential, view.credential])
-    await db.commit()
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
     return profile, play, view
 
 

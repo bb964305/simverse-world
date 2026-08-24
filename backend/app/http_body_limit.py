@@ -27,12 +27,17 @@ class RouteBodyLimitMiddleware:
         app,
         *,
         limits: dict[tuple[str, str], int],
+        prefix_limits: dict[tuple[str, str], int] | None = None,
         detail: str = "Request body exceeds the size limit",
     ) -> None:
         self.app = app
         self.limits = {
             (method.upper(), path): int(limit)
             for (method, path), limit in limits.items()
+        }
+        self.prefix_limits = {
+            (method.upper(), prefix): int(limit)
+            for (method, prefix), limit in (prefix_limits or {}).items()
         }
         self.detail = detail
 
@@ -43,6 +48,14 @@ class RouteBodyLimitMiddleware:
 
         key = (scope.get("method", "").upper(), scope.get("path", ""))
         limit = self.limits.get(key)
+        if limit is None:
+            matches = [
+                (len(prefix), candidate_limit)
+                for (method, prefix), candidate_limit in self.prefix_limits.items()
+                if method == key[0] and key[1].startswith(prefix)
+            ]
+            if matches:
+                limit = max(matches)[1]
         if limit is None:
             await self.app(scope, receive, send)
             return

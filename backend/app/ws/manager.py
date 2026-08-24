@@ -361,6 +361,49 @@ class ConnectionManager:
                         raise
         return removed
 
+    async def revoke_agent_presence(self, user_id: str) -> bool:
+        """Immediately and atomically revoke one headless-Agent map lease."""
+        r = get_redis()
+        while True:
+            async with r.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(
+                        AGENT_POSITIONS_KEY,
+                        AGENT_PRESENCE_EXPIRY_KEY,
+                        AGENT_PRESENCE_VERSION_KEY,
+                    )
+                    position = await pipe.hget(AGENT_POSITIONS_KEY, user_id)
+                    expiry = await pipe.zscore(AGENT_PRESENCE_EXPIRY_KEY, user_id)
+                    version = await pipe.hget(AGENT_PRESENCE_VERSION_KEY, user_id)
+                    if position is None and expiry is None and version is None:
+                        await pipe.reset()
+                        return False
+                    pipe.multi()
+                    pipe.zrem(AGENT_PRESENCE_EXPIRY_KEY, user_id)
+                    pipe.hdel(AGENT_POSITIONS_KEY, user_id)
+                    pipe.hdel(AGENT_PRESENCE_VERSION_KEY, user_id)
+                    pipe.publish(
+                        WS_CHANNEL,
+                        json.dumps(
+                            {
+                                "op": "broadcast",
+                                "data": {
+                                    "type": "player_left",
+                                    "player_id": user_id,
+                                },
+                                "exclude": None,
+                            }
+                        ),
+                    )
+                    await pipe.execute()
+                    return True
+                except Exception as exc:
+                    from redis.exceptions import WatchError
+
+                    if isinstance(exc, WatchError):
+                        continue
+                    raise
+
     async def run_agent_presence_reaper(self) -> None:
         """Remove expired headless-Agent leases and notify live browsers."""
         while True:
