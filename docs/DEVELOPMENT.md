@@ -305,6 +305,21 @@ VITE_API_URL=http://localhost:8000 npm run dev
 
 这些测试需要单独环境和明确标记。
 
+### 2026-08-24 测试基线
+
+当前默认后端测试还不是全绿。
+
+本次实际运行 4250 项：
+
+```text
+4202 passed, 47 failed, 1 skipped
+```
+
+47 个失败都属于已关闭的 Lab 子系统。
+不要把这个结果说成“全部通过”。
+
+完整清单和单独复现见[文档整理验收报告](reports/docs-validation-2026-08-24.md)。
+
 ## 运行前端验证
 
 在 `frontend/` 目录依次运行：
