@@ -32,6 +32,10 @@ logger = logging.getLogger(__name__)
 RunHandler = Callable[[str], Awaitable[None]]
 PROTOCOL_V2_ADAPTER = "simverse_ref"
 _RUNNER_OWNER_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid4()}"
+# redis-py 8 defaults TCP reads to 5 seconds.  Keep the server-side blocking
+# pop below that boundary; using the same value races the client's read timer
+# and turns every healthy empty-queue poll into a noisy TimeoutError.
+_QUEUE_BLOCK_SECONDS = 4
 
 
 class ProtocolConsumerUnavailable(ValueError):
@@ -753,7 +757,8 @@ async def runner_loop(
     while True:
         try:
             run_id = await lab_queue.dequeue_run(
-                protocol_version=protocol_version, timeout=5
+                protocol_version=protocol_version,
+                timeout=_QUEUE_BLOCK_SECONDS,
             )
             if run_id is None:
                 i += 1

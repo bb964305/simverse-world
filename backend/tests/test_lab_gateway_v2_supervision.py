@@ -1563,12 +1563,14 @@ async def test_runner_error_disposition_is_protocol_scoped(
     monkeypatch, protocol_version, should_requeue
 ):
     dequeues = 0
+    dequeue_timeouts: list[float] = []
     requeued: list[tuple[str, int]] = []
     acked: list[tuple[str, int]] = []
 
     async def dequeue(*, protocol_version, timeout):
         nonlocal dequeues
         dequeues += 1
+        dequeue_timeouts.append(timeout)
         if dequeues == 1:
             return "delivery-error-run"
         raise asyncio.CancelledError
@@ -1607,6 +1609,8 @@ async def test_runner_error_disposition_is_protocol_scoped(
     monkeypatch.setattr(runner.asyncio, "sleep", _async_noop)
 
     await runner.runner_loop(protocol_version=protocol_version)
+    assert dequeue_timeouts == [runner._QUEUE_BLOCK_SECONDS] * 2
+    assert runner._QUEUE_BLOCK_SECONDS < 5
     if should_requeue:
         assert requeued == [("delivery-error-run", protocol_version)]
         assert acked == []
