@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { apiFetch, API_BASE } from './api'
+import { apiFetch, API_BASE, getMe } from './api'
 import { useGameStore } from '../stores/gameStore'
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -36,6 +36,24 @@ describe('apiFetch', () => {
     await apiFetch('/x')
     const init = fetchMock.mock.calls[0][1] as RequestInit
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer tok-abc')
+  })
+
+  it('lets an authorization gate pin /users/me to its current store token', async () => {
+    localStorage.setItem('token', 'newer-tab-token')
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      id: 'admin-1',
+      name: 'Admin',
+      email: 'admin@example.com',
+      avatar: null,
+      soul_coin_balance: 0,
+      is_admin: true,
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await getMe('guard-token')
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    expect((init.headers as Record<string, string>).Authorization).toBe('Bearer guard-token')
   })
 
   it('401 logs out through the store exactly once and throws', async () => {
