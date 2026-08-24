@@ -9,6 +9,7 @@ import { BulletinBoard } from './BulletinBoard'
 import { ExperimentPanel } from './ExperimentPanel'
 import { TownHallPanel } from './TownHallPanel'
 import { LabTerminalPanel } from './LabTerminalPanel'
+import { MarketHallPanel } from './MarketHallPanel'
 import { ShopModal } from './ShopModal'
 import { bridge } from '../game/phaserBridge'
 import { disconnectWS, onWSMessage } from '../services/ws'
@@ -97,8 +98,9 @@ export function TopNav() {
   // goes stale whenever coins move outside a coin_update WS frame (stakes,
   // purchases made on other pages, or plain reloads).
   const updateBalance = useGameStore((s) => s.updateBalance)
-  // Lab entry is deploy-gated (LAB_ENABLED): hidden until /users/me confirms
-  // the feature is on, so a disabled deploy never shows a dead entry (P2 fix).
+  // The experiment building is now a permanent visitor destination. This flag
+  // only controls the operator terminal; ExperimentPanel reads the richer
+  // /lab/status projection and renders a closed-beta/paused state itself.
   const [labEnabled, setLabEnabled] = useState(false)
   useEffect(() => {
     getMe()
@@ -232,12 +234,13 @@ export function TopNav() {
     }
     const unsubBulletin = bridge.on('bulletin:open', closeLocalLayers)
     const unsubExperiment = bridge.on('experiment:open', closeLocalLayers)
+    const unsubMarket = bridge.on('market:open', closeLocalLayers)
     const unsubTownhall = bridge.on('townhall:open', closeLocalLayers)
     const unsubLabTerminal = bridge.on('labterminal:open', closeLocalLayers)
-    return () => { unsubBulletin(); unsubExperiment(); unsubTownhall(); unsubLabTerminal() }
+    return () => { unsubBulletin(); unsubExperiment(); unsubMarket(); unsubTownhall(); unsubLabTerminal() }
   }, [])
 
-  const BRIDGE_PANELS = ['bulletin', 'experiment', 'townhall', 'labterminal'] as const
+  const BRIDGE_PANELS = ['bulletin', 'experiment', 'market', 'townhall', 'labterminal'] as const
   type BridgePanel = (typeof BRIDGE_PANELS)[number]
 
   const closeBridgePanels = () => {
@@ -284,9 +287,8 @@ export function TopNav() {
           <button onClick={() => openModal('shop')} className="game-nav-link game-nav-link--pink">🛒 商店</button>
           <button onClick={() => openModal('commission')} className="game-nav-link game-nav-link--green">🗒️ 委托</button>
           <button onClick={() => openBridgePanel('townhall')} className="game-nav-link game-nav-link--violet">🏛️ 市政厅</button>
-          {labEnabled && (
-            <button onClick={() => openBridgePanel('experiment')} className="game-nav-link game-nav-link--teal">🧪 实验楼</button>
-          )}
+          {caravanState?.visible && <button onClick={() => openBridgePanel('market')} className="game-nav-link game-nav-link--gold">🏬 集市</button>}
+          <button onClick={() => openBridgePanel('experiment')} className="game-nav-link game-nav-link--teal">🧪 实验楼</button>
           {labEnabled && (
             <button onClick={() => openBridgePanel('labterminal')} className="game-nav-link game-nav-link--teal">📊 实验楼终端</button>
           )}
@@ -314,9 +316,8 @@ export function TopNav() {
               <button onClick={() => openModal('shop')} className="game-nav-link game-nav-link--pink" role="menuitem">🛒 商店</button>
               <button onClick={() => openModal('commission')} className="game-nav-link game-nav-link--green" role="menuitem">🗒️ 委托</button>
               <button onClick={() => openBridgePanel('townhall')} className="game-nav-link game-nav-link--violet" role="menuitem">🏛️ 市政厅</button>
-              {labEnabled && (
-                <button onClick={() => openBridgePanel('experiment')} className="game-nav-link game-nav-link--teal" role="menuitem">🧪 实验楼</button>
-              )}
+              <button onClick={() => openBridgePanel('market')} className="game-nav-link game-nav-link--gold" role="menuitem">🏬 集市大厅</button>
+              <button onClick={() => openBridgePanel('experiment')} className="game-nav-link game-nav-link--teal" role="menuitem">🧪 实验楼</button>
               {labEnabled && (
                 <button onClick={() => openBridgePanel('labterminal')} className="game-nav-link game-nav-link--teal" role="menuitem">📊 实验楼终端</button>
               )}
@@ -498,6 +499,7 @@ export function TopNav() {
         a 48px fixed-position containing block around them. */}
     <BulletinBoard />
     <ExperimentPanel />
+    <MarketHallPanel />
     <TownHallPanel />
     <LabTerminalPanel />
     {/* The shared event-height variable moves every game HUD surface below it. */}
@@ -521,6 +523,14 @@ export function TopNav() {
             aria-label="关闭世界事件"
             className="game-dialog-close"
           >✕</button>
+        )}
+        {caravanStatus && (
+          <button
+            onClick={() => openBridgePanel('market')}
+            className="game-dialog-close"
+            aria-label="查看商队集市"
+            style={{ width: 'auto', padding: '0 8px', fontSize: 11 }}
+          >查看货单</button>
         )}
       </div>
     )}

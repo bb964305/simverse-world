@@ -2,7 +2,7 @@ import Phaser from 'phaser'
 import { bridge } from './phaserBridge'
 import { observeContainerResize, waitForNonZeroSize } from './canvasSize'
 import { applyStatusVisuals, clearStatusVisuals, releaseAllStatusVisuals, STATUS_CONFIG } from './StatusVisuals'
-import { useGameStore } from '../stores/gameStore'
+import { useGameStore, type OnlinePlayer } from '../stores/gameStore'
 import { sendPosition, sendWS, onWSMessage } from '../services/ws'
 import { API_BASE, updatePlayerPosition, getHomeDecor, decorEmoji, getActiveEvents, getCommissions, HOUSING_BOUNDS, type DecorItem } from '../services/api'
 import { TILE_SIZE } from './worldGeometry'
@@ -41,6 +41,11 @@ import { MarketPurchaseRuntime } from './marketPurchaseRuntime'
 const PLAYER_SPEED = 160
 const NPC_INTERACT_DISTANCE = 60
 const PLAYER_INTERACT_DISTANCE = 80
+const BUILDING_INTERACT_DISTANCE = 104
+const INTERACTIVE_BUILDINGS = [
+  { key: 'experiment', name: '实验楼', icon: '🧪', tileX: 116, tileY: 72 },
+  { key: 'market', name: '集市大厅', icon: '🏬', tileX: 105, tileY: 94 },
+] as const
 const CARAVAN_MERCHANT_TEXTURE = 'caravan-merchant'
 const CARAVAN_CONVOY_TEXTURE = 'caravan-convoy'
 const CARAVAN_STALL_TEXTURE = 'caravan-stall'
@@ -100,12 +105,39 @@ interface CaravanView {
   label: Phaser.GameObjects.Text
 }
 
+interface OtherPlayerLabel {
+  container: Phaser.GameObjects.Container
+  aiBadge: Phaser.GameObjects.Text
+  name: Phaser.GameObjects.Text
+}
+
+interface OtherPlayerView {
+  sprite: Phaser.Physics.Arcade.Sprite
+  label: OtherPlayerLabel
+}
+
 let gameInstance: Phaser.Game | null = null
 let stopResizeObserver: (() => void) | null = null
 let initGeneration = 0
 let gameOwner: symbol | null = null
 let pendingOwner: symbol | null = null
 let gameZoom = 1
+
+const OTHER_PLAYER_NAME_LABEL_STYLE = {
+  fontSize: '11px',
+  color: '#ffffff',
+  backgroundColor: '#0ea5e9cc',
+  padding: { x: 4, y: 2 },
+}
+
+const OTHER_PLAYER_AI_BADGE_STYLE = {
+  fontSize: '10px',
+  color: '#dbeafe',
+  backgroundColor: '#1d4ed8ee',
+  padding: { x: 4, y: 2 },
+}
+
+const OTHER_PLAYER_LABEL_GAP = 4
 
 export function destroyGame(owner?: symbol): void {
   const ownsPending = owner === undefined || pendingOwner === owner
@@ -184,7 +216,7 @@ class MainScene extends Phaser.Scene {
   private residents: ResidentData[] = []
   private mapReady = false
   private isTeleporting = false
-  private otherPlayerSprites: Map<string, { sprite: Phaser.Physics.Arcade.Sprite; label: Phaser.GameObjects.Text }> = new Map()
+  private otherPlayerSprites: Map<string, OtherPlayerView> = new Map()
   // B3 home decor: emoji objects per resident slug, rendered below characters.
   private decorLayer: Phaser.GameObjects.Layer | null = null
   private decorTexts: Map<string, Phaser.GameObjects.Text[]> = new Map()
@@ -260,6 +292,40 @@ class MainScene extends Phaser.Scene {
     // StatusVisuals keeps a module-level sprite→visuals registry; the objects
     // themselves die with the scene, but the Map entries must be released here.
     releaseAllStatusVisuals()
+  }
+
+  private createOtherPlayerLabel(x: number, y: number, player: Pick<OnlinePlayer, 'name' | 'agent_controlled'>): OtherPlayerLabel {
+    const container = this.add.container(x, y).setDepth(5)
+    const aiBadge = this.add.text(0, 0, 'AI', OTHER_PLAYER_AI_BADGE_STYLE).setOrigin(0, 0.5)
+    const name = this.add.text(0, 0, player.name, OTHER_PLAYER_NAME_LABEL_STYLE).setOrigin(0, 0.5)
+    container.add([aiBadge, name])
+
+    const label = { container, aiBadge, name }
+    this.syncOtherPlayerLabel(label, player)
+    return label
+  }
+
+  private syncOtherPlayerLabel(label: OtherPlayerLabel, player: Pick<OnlinePlayer, 'name' | 'agent_controlled'>): void {
+    const showAiBadge = player.agent_controlled === true
+    label.name.setText(player.name)
+    label.aiBadge.setVisible(showAiBadge)
+
+    const badgeWidth = showAiBadge ? label.aiBadge.width : 0
+    const gap = showAiBadge ? OTHER_PLAYER_LABEL_GAP : 0
+    const totalWidth = badgeWidth + gap + label.name.width
+    let cursor = -totalWidth / 2
+
+    if (showAiBadge) {
+      label.aiBadge.setPosition(cursor, 0)
+      cursor += badgeWidth + gap
+    }
+
+    label.name.setPosition(cursor, 0)
+    label.container.setSize(totalWidth, Math.max(label.aiBadge.height, label.name.height))
+  }
+
+  private positionOtherPlayerLabel(label: OtherPlayerLabel, x: number, y: number): void {
+    label.container.setPosition(x, y - 28)
   }
 
   preload() {
@@ -736,16 +802,14 @@ class MainScene extends Phaser.Scene {
         // Tint to distinguish from local player
         sprite.setTint(0x88ccff)
 
-        const label = this.add.text(p.x, p.y - 28, p.name, {
-          fontSize: '11px', color: '#ffffff',
-          backgroundColor: '#0ea5e9cc', padding: { x: 4, y: 2 },
-        }).setOrigin(0.5).setDepth(5)
+        const label = this.createOtherPlayerLabel(p.x, p.y - 28, p)
 
         this.otherPlayerSprites.set(playerId, { sprite, label })
       }
 
       const entry = this.otherPlayerSprites.get(playerId)!
       const { sprite, label } = entry
+      this.syncOtherPlayerLabel(label, p)
 
       // Smoothly move toward target position
       const dx = p.x - sprite.x
@@ -765,16 +829,21 @@ class MainScene extends Phaser.Scene {
         sprite.setFrame(p.direction || 'down')
       }
 
-      label.setPosition(sprite.x, sprite.y - 28)
+      this.positionOtherPlayerLabel(label, sprite.x, sprite.y)
     })
     // Remove disconnected players
     this.otherPlayerSprites.forEach((entry, playerId) => {
       if (!onlinePlayers.has(playerId)) {
         entry.sprite.destroy()
-        entry.label.destroy()
+        entry.label.container.destroy()
         this.otherPlayerSprites.delete(playerId)
       }
     })
+
+    // Read E exactly once per frame, then route it to the closest interaction
+    // lane. Calling JustDown separately for NPC/player/building makes priority
+    // depend on Phaser's key sampling details.
+    const interactPressed = Phaser.Input.Keyboard.JustDown(this.eKey)
 
     // NPC proximity
     let nearest: ResidentData | null = null
@@ -795,7 +864,7 @@ class MainScene extends Phaser.Scene {
     }
     bridge.emit('npc:nearby', nearest)
 
-    if (Phaser.Input.Keyboard.JustDown(this.eKey) && nearest) {
+    if (interactPressed && nearest) {
       const cfg = STATUS_CONFIG[nearest.status]
       if (cfg?.canChat) {
         bridge.emit('npc:interact', nearest)
@@ -821,8 +890,31 @@ class MainScene extends Phaser.Scene {
     })
     bridge.emit('player:nearby', nearestPlayer)
 
-    if (Phaser.Input.Keyboard.JustDown(this.eKey) && nearestPlayer && !nearest) {
+    if (interactPressed && nearestPlayer && !nearest) {
       bridge.emit('player:interact', nearestPlayer)
+    }
+
+    // Public buildings remain discoverable even while their mutation/commerce
+    // gates are closed. React panels render the authoritative visitor state.
+    let nearestBuilding: typeof INTERACTIVE_BUILDINGS[number] | null = null
+    let nearestBuildingDist = Infinity
+    if (!nearest && !nearestPlayer) {
+      for (const building of INTERACTIVE_BUILDINGS) {
+        const distance = Phaser.Math.Distance.Between(
+          this.player.x,
+          this.player.y,
+          building.tileX * TILE_SIZE + TILE_SIZE / 2,
+          building.tileY * TILE_SIZE + TILE_SIZE / 2,
+        )
+        if (distance < BUILDING_INTERACT_DISTANCE && distance < nearestBuildingDist) {
+          nearestBuilding = building
+          nearestBuildingDist = distance
+        }
+      }
+    }
+    bridge.emit('building:nearby', nearestBuilding)
+    if (interactPressed && nearestBuilding) {
+      bridge.emit(`${nearestBuilding.key}:open`)
     }
   }
 

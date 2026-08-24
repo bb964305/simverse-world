@@ -7,8 +7,10 @@ import {
   listLabResearchers, createLabTask, quoteLabTask, getLabTasks, getLabTask, getLabRun,
   cancelLabTask, acceptLabResult, rejectLabResult, getLabRunSteps, respondLabApproval,
   getWorldLocations, getMe, downloadLabArtifact,
+  getLabStatus, getLabMarketCandidates, nominateLabMarketCandidate,
   type LabResearcher, type LabTask, type LabRun, type LabRunStep, type LabArtifact,
-  type LabApproval, type LabTaskQuote, type WorldLocation,
+  type LabApproval, type LabTaskQuote, type WorldLocation, type LabStatus,
+  type LabMarketCandidate,
 } from '../services/api'
 import { formatLabMemory, formatLabRunProfile } from '../services/labModel'
 import { resolveLabDisplay, selectLabTask, canDecideApproval, approvalId } from '../services/labState'
@@ -20,7 +22,7 @@ import { labInput, labTab, labChip, labPublishBtn, labTaskRow, labBtn, labClose 
 // Panel-local state (spec sanctions this over a store slice); live run steps come
 // via the ws.ts onWSMessage fan-out with a REST poll fallback.
 
-type LabTab = 'publish' | 'live' | 'artifacts'
+type LabTab = 'visit' | 'publish' | 'live' | 'artifacts'
 const ACCENT = '#14b8a6'
 
 // Defense-in-depth for artifact bodies (gap #10): even released (clean+verified)
@@ -32,6 +34,7 @@ const INERT_MD_COMPONENTS: Components = {
   img: ({ alt }) => <span style={{ color: 'var(--text-muted)' }}>🖼️ {alt || '图片（远程加载已屏蔽）'}</span>,
 }
 const TABS: { key: LabTab; label: string }[] = [
+  { key: 'visit', label: '参观 & 状态' },
   { key: 'publish', label: '发布委托' },
   { key: 'live', label: '运行直播' },
   { key: 'artifacts', label: '产物 & 提案墙' },
@@ -40,13 +43,15 @@ const TABS: { key: LabTab; label: string }[] = [
 function errText(e: unknown): string {
   const m = e instanceof Error ? e.message : String(e)
   if (m.includes('402') || m.includes('balance')) return '余额不足'
+  if (m.includes('403') || m.includes('closed beta')) return '当前账号尚未获得封闭测试资格'
   if (m.includes('503')) return '实验楼暂时关闭'
   return '操作失败，请稍后重试'
 }
 
 export function ExperimentPanel() {
   const [open, setOpen] = useState(false)
-  const [tab, setTab] = useState<LabTab>('publish')
+  const [tab, setTab] = useState<LabTab>('visit')
+  const [status, setStatus] = useState<LabStatus | null>(null)
   const updateBalance = useGameStore((s) => s.updateBalance)
   const closeButtonRef = useRef<HTMLButtonElement>(null)
 
@@ -61,6 +66,7 @@ export function ExperimentPanel() {
 
   useEffect(() => {
     if (!open) return
+    getLabStatus().then(setStatus).catch(() => setStatus(null))
     closeButtonRef.current?.focus()
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setOpen(false)
@@ -70,6 +76,9 @@ export function ExperimentPanel() {
   }, [open])
 
   if (!open) return null
+  const visibleTab: LabTab = status && !status.publish_allowed && tab === 'publish'
+    ? 'visit'
+    : tab
 
   return (
     <div
@@ -94,21 +103,66 @@ export function ExperimentPanel() {
             发布真实委托 · 观看研究员运行 · 领取产物与世界提案
           </div>
         </div>
+        <span style={{
+          marginLeft: 'auto', marginRight: 8, borderRadius: 999, padding: '3px 8px',
+          fontSize: 10, border: '1px solid var(--border)',
+          color: status?.publish_allowed ? ACCENT : 'var(--text-muted)',
+        }}>
+          {status?.publish_allowed ? '封闭测试可用' : status?.deploy_enabled ? '参观开放 · 发布受限' : '参观开放 · 筹备中'}
+        </span>
         <button ref={closeButtonRef} onClick={() => setOpen(false)} className="game-dialog-close" style={labClose()} aria-label="关闭实验楼">✕</button>
       </div>
 
       <div style={{ display: 'flex', gap: 4, padding: '8px 20px 0', borderBottom: '1px solid var(--border)' }}>
-        {TABS.map((t) => (
-          <button key={t.key} onClick={() => setTab(t.key)} style={labTab(tab === t.key)}>{t.label}</button>
+        {TABS.filter((t) => t.key !== 'publish' || status?.publish_allowed).map((t) => (
+          <button key={t.key} onClick={() => setTab(t.key)} style={labTab(visibleTab === t.key)}>{t.label}</button>
         ))}
       </div>
 
       <div style={{ padding: 20 }}>
-        {tab === 'publish' && <PublishTab onPublished={() => { getMe().then((m) => updateBalance(m.soul_coin_balance)).catch(() => {}) }} />}
-        {tab === 'live' && <LiveTab onBalanceChange={() => { getMe().then((m) => updateBalance(m.soul_coin_balance)).catch(() => {}) }} />}
-        {tab === 'artifacts' && <ArtifactsTab />}
+        {visibleTab === 'visit' && <VisitTab status={status} />}
+        {visibleTab === 'publish' && <PublishTab onPublished={() => { getMe().then((m) => updateBalance(m.soul_coin_balance)).catch(() => {}) }} />}
+        {visibleTab === 'live' && <LiveTab onBalanceChange={() => { getMe().then((m) => updateBalance(m.soul_coin_balance)).catch(() => {}) }} />}
+        {visibleTab === 'artifacts' && <ArtifactsTab />}
       </div>
       </section>
+    </div>
+  )
+}
+
+function VisitTab({ status }: { status: LabStatus | null }) {
+  if (!status) {
+    return <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>正在读取实验楼运行状态…</div>
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{
+        border: `1px solid ${ACCENT}44`, borderRadius: 10, padding: 14,
+        background: '#14b8a608', fontSize: 12, lineHeight: 1.7,
+      }}>
+        <div style={{ fontWeight: 800, color: ACCENT, marginBottom: 4 }}>
+          {status.publish_allowed ? '实验委托通道已为你开放' : '实验楼参观区已开放'}
+        </div>
+        {status.publish_allowed
+          ? '你可以发布 code 范围的真实研究委托。资金先进入托管，产物经过审核后再放款。'
+          : status.beta_mode && !status.beta_admitted
+            ? '当前处于封闭测试阶段。你仍可查看运行方式和已完成成果，发布权限由管理员准入。'
+            : '真实执行通道尚在筹备或暂停中。关闭状态不会影响已完成任务与产物读取。'}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 }}>
+        {status.checks.map((check) => (
+          <div key={check.key} style={{
+            border: '1px solid var(--border)', borderRadius: 8, padding: '9px 11px',
+            display: 'flex', alignItems: 'center', gap: 8, fontSize: 11,
+          }}>
+            <span>{check.ok ? '✅' : check.optional ? '◌' : '⏳'}</span>
+            <span style={{ color: check.ok ? 'var(--text-secondary)' : 'var(--text-muted)' }}>{check.label}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ color: 'var(--text-muted)', fontSize: 11, lineHeight: 1.7 }}>
+        当前适配器：{status.adapter} · 能力域：{status.available_scopes.join('、') || '暂无'}。研究成果只能进入审核队列，不会直接修改小镇。
+      </div>
     </div>
   )
 }
@@ -444,6 +498,7 @@ function ArtifactsTab() {
   const [tasks, setTasks] = useState<LabTask[]>([])
   const [artifacts, setArtifacts] = useState<Record<string, LabArtifact[]>>({})
   const [worldChanges, setWorldChanges] = useState<WorldLocation[]>([])
+  const [candidates, setCandidates] = useState<LabMarketCandidate[]>([])
 
   useEffect(() => {
     getLabTasks('mine').then((r) => {
@@ -455,7 +510,20 @@ function ArtifactsTab() {
     }).catch(() => {})
     // Proposal wall: buildings the researchers actually added to the town.
     getWorldLocations().then((r) => setWorldChanges(r.locations.filter((l) => l.dynamic))).catch(() => {})
+    getLabMarketCandidates().then((r) => setCandidates(r.candidates)).catch(() => {})
   }, [])
+
+  const nominate = async (artifact: LabArtifact) => {
+    const candidate = await nominateLabMarketCandidate(artifact.id, {
+      title: artifact.title || '实验楼成果',
+      summary: '由实验楼产物提交，等待市场产品化与安全审核。',
+      offer_type: 'service',
+      suggested_price_sc: 5,
+    })
+    setCandidates((current) => current.some((item) => item.id === candidate.id)
+      ? current.map((item) => item.id === candidate.id ? candidate : item)
+      : [candidate, ...current])
+  }
 
   const wall = worldChanges.length > 0 && (
     <div style={{ border: '1px solid #14b8a644', borderRadius: 10, padding: 12, background: '#14b8a608' }}>
@@ -495,7 +563,11 @@ function ArtifactsTab() {
                   <span key={b.key} style={{ fontSize: 10, border: '1px solid var(--border)', borderRadius: 4, padding: '0 4px' }}>{b.label}</span>
                 ))}
               </div>
-              <ArtifactContent artifact={a} />
+              <ArtifactContent
+                artifact={a}
+                candidate={candidates.find((candidate) => candidate.artifact_id === a.id)}
+                onNominate={() => nominate(a)}
+              />
             </div>
           ))}
         </div>
@@ -504,9 +576,13 @@ function ArtifactsTab() {
   )
 }
 
-function ArtifactContent({ artifact }: { artifact: LabArtifact }) {
+function ArtifactContent({ artifact, candidate, onNominate }: {
+  artifact: LabArtifact
+  candidate?: LabMarketCandidate
+  onNominate: () => Promise<void>
+}) {
   const [preview, setPreview] = useState<string | null>(null)
-  const [busy, setBusy] = useState<'preview' | 'download' | null>(null)
+  const [busy, setBusy] = useState<'preview' | 'download' | 'nominate' | null>(null)
   const [error, setError] = useState(false)
   const canPreview = Boolean(
     artifact.content_type?.startsWith('text/')
@@ -542,6 +618,11 @@ function ArtifactContent({ artifact }: { artifact: LabArtifact }) {
     }
   }
 
+  const nominate = async () => {
+    setBusy('nominate'); setError(false)
+    try { await onNominate() } catch { setError(true) } finally { setBusy(null) }
+  }
+
   if (!artifact.unlocked) {
     const pending = ['pending_upload', 'quarantined'].includes(artifact.storage_status || '')
       || ['pending', 'scanning'].includes(artifact.scan_status || '')
@@ -560,6 +641,15 @@ function ArtifactContent({ artifact }: { artifact: LabArtifact }) {
       <button onClick={() => void download()} disabled={busy !== null} style={btn(ACCENT)}>
         {busy === 'download' ? '下载中' : '下载'}
       </button>
+      {candidate ? (
+        <span style={{ alignSelf: 'center', fontSize: 10, color: candidate.status === 'approved' ? ACCENT : 'var(--text-muted)' }}>
+          市场候选：{{ pending: '待审核', approved: '已通过', rejected: '未通过', published: '已发布' }[candidate.status]}
+        </span>
+      ) : artifact.scan_status === 'clean' && artifact.verification_status === 'verified' ? (
+        <button onClick={() => void nominate()} disabled={busy !== null} style={btn('#d97706')}>
+          {busy === 'nominate' ? '提交中' : '提交为集市候选'}
+        </button>
+      ) : null}
     </div>
     {error && <div style={{ fontSize: 11, color: '#ef4444' }}>产物读取失败</div>}
     {preview !== null && (

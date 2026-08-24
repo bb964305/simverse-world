@@ -6,6 +6,7 @@ import { CoinNotification } from '../components/CoinNotification'
 import { PhotoBooth } from '../components/PhotoBooth'
 import { DecorEditor } from '../components/DecorEditor'
 import { MinimapOverlay } from '../components/minimap/MinimapOverlay'
+import { BuildingTooltip } from '../components/BuildingTooltip'
 import { useGameStore } from '../stores/gameStore'
 import { connectWS } from '../services/ws'
 import { getSettings } from '../services/api'
@@ -69,6 +70,7 @@ export function GamePage() {
         className={`game-shell__canvas${chatOpen ? ' game-shell__canvas--chat-open' : ''}`}
       />
       <NpcTooltip />
+      <BuildingTooltip />
       <ChatDrawer />
       <CoinNotification />
       <PhotoBooth />

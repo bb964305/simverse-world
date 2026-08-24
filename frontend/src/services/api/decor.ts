@@ -37,6 +37,10 @@ export const DECOR_EMOJI: Record<string, string> = {
   decor_lamp: '🪔',
   decor_plant: '🪴',
   decor_rug: '🟫',
+  market_tea_chest: '🍵',
+  market_trinket_display: '🎁',
+  market_cloth_roll: '🧵',
+  market_foreign_lantern: '🏮',
 }
 
 export function decorEmoji(itemCode: string): string {

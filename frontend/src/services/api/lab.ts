@@ -11,6 +11,40 @@ export interface LabResearcher {
   avg_rating: number
 }
 
+export interface LabStatusCheck {
+  key: string
+  label: string
+  ok: boolean
+  optional?: boolean
+}
+
+export interface LabStatus {
+  visitor_open: boolean
+  deploy_enabled: boolean
+  runtime_enabled: boolean
+  publish_allowed: boolean
+  beta_mode: boolean
+  beta_admitted: boolean
+  adapter: string
+  available_scopes: string[]
+  blockers: string[]
+  checks: LabStatusCheck[]
+}
+
+export interface LabMarketCandidate {
+  id: string
+  artifact_id: string
+  task_id: string
+  title: string
+  summary: string
+  offer_type: 'good' | 'service' | 'contract'
+  suggested_price_sc: number
+  status: 'pending' | 'approved' | 'rejected' | 'published'
+  review_note: string
+  created_at: string | null
+  updated_at: string | null
+}
+
 export interface LabTask {
   id: string
   issuer_user_id: string
@@ -137,6 +171,29 @@ export interface LabTaskQuote {
 
 export function listLabResearchers(): Promise<{ researchers: LabResearcher[] }> {
   return apiFetch('/lab/researchers')
+}
+
+export function getLabStatus(): Promise<LabStatus> {
+  return apiFetch('/lab/status')
+}
+
+export function getLabMarketCandidates(): Promise<{ candidates: LabMarketCandidate[] }> {
+  return apiFetch('/lab/market-candidates')
+}
+
+export function nominateLabMarketCandidate(
+  artifactId: string,
+  input: {
+    title: string
+    summary?: string
+    offer_type?: 'good' | 'service' | 'contract'
+    suggested_price_sc?: number
+  },
+): Promise<LabMarketCandidate> {
+  return apiFetch(`/lab/artifacts/${encodeURIComponent(artifactId)}/market-candidate`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
 }
 
 export function createLabTask(input: CreateLabTaskInput): Promise<LabTask> {

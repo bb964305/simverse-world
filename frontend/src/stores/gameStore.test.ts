@@ -229,4 +229,32 @@ describe('online players slice', () => {
     useGameStore.getState().clearOnlinePlayers()
     expect(useGameStore.getState().onlinePlayers.size).toBe(0)
   })
+
+  it('preserves agent_controlled when later updates omit the optional field', () => {
+    useGameStore.getState().setOnlinePlayer({
+      player_id: 'p1',
+      name: 'Guide',
+      x: 0,
+      y: 0,
+      direction: 'down',
+      agent_controlled: true,
+    })
+
+    useGameStore.getState().setOnlinePlayer({
+      player_id: 'p1',
+      name: 'Guide',
+      x: 32,
+      y: 64,
+      direction: 'right',
+    })
+
+    expect(useGameStore.getState().onlinePlayers.get('p1')).toMatchObject({
+      player_id: 'p1',
+      name: 'Guide',
+      x: 32,
+      y: 64,
+      direction: 'right',
+      agent_controlled: true,
+    })
+  })
 })

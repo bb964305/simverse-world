@@ -16,6 +16,7 @@ export interface OnlinePlayer {
   x: number
   y: number
   direction: string
+  agent_controlled?: boolean
 }
 
 export type ChatTarget =
@@ -186,7 +187,15 @@ export const useGameStore = create<GameState>((set) => ({
   setProfileTab: (tab) => set({ profileTab: tab }),
   setOnlinePlayer: (p) => set((s) => {
     const next = new Map(s.onlinePlayers)
-    next.set(p.player_id, p)
+    const current = next.get(p.player_id)
+    const merged: OnlinePlayer = {
+      ...current,
+      ...p,
+      ...(p.agent_controlled === undefined && current?.agent_controlled !== undefined
+        ? { agent_controlled: current.agent_controlled }
+        : {}),
+    }
+    next.set(p.player_id, merged)
     return { onlinePlayers: next }
   }),
   removeOnlinePlayer: (id) => set((s) => {

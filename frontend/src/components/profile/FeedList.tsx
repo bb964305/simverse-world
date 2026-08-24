@@ -17,6 +17,12 @@ const KIND_META: { match: (k: string) => boolean; icon: string; label: string }[
   { match: (k) => k.startsWith('mood'), icon: '💫', label: '心情波动' },
   { match: (k) => k.startsWith('personality'), icon: '🧬', label: '人格演化' },
   { match: (k) => k.startsWith('debate'), icon: '⚔️', label: '辩论动态' },
+  { match: (k) => k === 'wage', icon: '🪙', label: '领取了工作报酬' },
+  { match: (k) => k === 'meal_income', icon: '🍲', label: '获得了餐饮收入' },
+  { match: (k) => k === 'npc_purchase', icon: '🛍️', label: '完成了一笔镇民交易' },
+  { match: (k) => k === 'npc_commission_taken', icon: '🗒️', label: '接下了一份委托' },
+  { match: (k) => k === 'npc_commission_done', icon: '✅', label: '完成了一份委托' },
+  { match: (k) => k === 'caravan_purchase', icon: '🛒', label: '作品被商队收购' },
 ]
 
 function kindMeta(kind: string): { icon: string; label: string } {
@@ -32,6 +38,13 @@ function payloadSummary(kind: string, payload: Record<string, unknown>): string 
     if (kind === 'creation') return `《${title}》`
     return title
   }
+  const name = typeof payload.name === 'string' ? payload.name : null
+  const amount = typeof payload.amount === 'number' ? payload.amount
+    : typeof payload.earned === 'number' ? payload.earned
+      : typeof payload.price === 'number' ? payload.price : null
+  if (name && amount !== null) return `「${name}」· ${amount} SC`
+  if (name) return `「${name}」`
+  if (amount !== null) return `${amount} SC`
   for (const key of ['text', 'topic', 'mood', 'summary']) {
     const v = payload[key]
     if (typeof v === 'string' && v) return v

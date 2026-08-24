@@ -1,4 +1,4 @@
-import { useGameStore } from '../stores/gameStore'
+import { useGameStore, type OnlinePlayer } from '../stores/gameStore'
 import { bridge } from '../game/phaserBridge'
 import {
   INITIAL_CONVERGENCE, isNewerRevision, advanceConvergence, type WorldConvergence,
@@ -30,6 +30,23 @@ const RECONNECT_BASE_MS = 3000
 const RECONNECT_MAX_MS = 30000
 export const CARAVAN_DISCONNECT_STALE_MS = 30000
 export const CARAVAN_RESYNC_INTERVAL_MS = 30000
+
+function toOnlinePlayer(
+  data: Record<string, unknown>,
+  usePositionFallback = false,
+): OnlinePlayer {
+  const player: OnlinePlayer = {
+    player_id: data.player_id as string,
+    name: (data.name as string) || '?',
+    x: usePositionFallback ? ((data.x as number) ?? 0) : data.x as number,
+    y: usePositionFallback ? ((data.y as number) ?? 0) : data.y as number,
+    direction: (data.direction as string) || 'down',
+  }
+  if (typeof data.agent_controlled === 'boolean') {
+    player.agent_controlled = data.agent_controlled
+  }
+  return player
+}
 
 function clearCaravanStaleTimer(): void {
   if (caravanStaleTimer !== null) {
@@ -156,22 +173,10 @@ export function connectWS(): void {
       }
       // Handle online players
       if (data.type === 'player_moved') {
-        useGameStore.getState().setOnlinePlayer({
-          player_id: data.player_id as string,
-          name: (data.name as string) || '?',
-          x: data.x as number,
-          y: data.y as number,
-          direction: (data.direction as string) || 'down',
-        })
+        useGameStore.getState().setOnlinePlayer(toOnlinePlayer(data))
       }
       if (data.type === 'player_joined') {
-        useGameStore.getState().setOnlinePlayer({
-          player_id: data.player_id as string,
-          name: (data.name as string) || '?',
-          x: (data.x as number) ?? 0,
-          y: (data.y as number) ?? 0,
-          direction: (data.direction as string) || 'down',
-        })
+        useGameStore.getState().setOnlinePlayer(toOnlinePlayer(data, true))
       }
       if (data.type === 'player_left') {
         useGameStore.getState().removeOnlinePlayer(data.player_id as string)
@@ -210,13 +215,7 @@ export function connectWS(): void {
       }
       if (data.type === 'online_players') {
         const players = data.players as Array<Record<string, unknown>>
-        players.forEach((p) => useGameStore.getState().setOnlinePlayer({
-          player_id: p.player_id as string,
-          name: (p.name as string) || '?',
-          x: p.x as number,
-          y: p.y as number,
-          direction: (p.direction as string) || 'down',
-        }))
+        players.forEach((p) => useGameStore.getState().setOnlinePlayer(toOnlinePlayer(p)))
       }
       // Notification (S4): push a live notification into the store; the bell
       // badge reads unreadCount and the drawer reads the list.

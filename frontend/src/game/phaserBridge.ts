@@ -33,3 +33,6 @@ export const bridge = new PhaserBridge()
 // React → React  townhall:close    (no payload — close TownHallPanel)
 // React → React  labterminal:open  (no payload — open read-only LabTerminalPanel; emitted by TopNav button, lab-gated) (Society §10)
 // React → React  labterminal:close (no payload — close LabTerminalPanel)
+// Phaser → React  building:nearby  { key, name, icon, tileX, tileY } | null
+// Phaser → React  market:open      (no payload — open visit-scoped MarketHallPanel)
+// React → React   market:close     (no payload — close MarketHallPanel)
