@@ -194,6 +194,21 @@ install -d -m 700 /opt/skills-world/backups
 /opt/skills-world/backups/skills_world-20260824T070000Z.dump
 ```
 
+先确认磁盘还有足够空间：
+
+```bash
+df -h /opt/skills-world/backups
+```
+
+再确认这个文件名还没有被使用：
+
+```bash
+test ! -e /opt/skills-world/backups/skills_world-20260824T070000Z.dump
+```
+
+命令失败时，换一个新的文件名。
+不要覆盖旧备份。
+
 执行备份：
 
 ```bash
