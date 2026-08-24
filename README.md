@@ -14,7 +14,7 @@ AI 居民有自己的性格、记忆、关系和日常行动。
 - **普通玩家**：从[第一次阅读手册](docs/START_HERE.md)开始，最后读[玩家指南](docs/GAMEPLAY.md)。
 - **项目开发者**：先读[本地开发手册](docs/DEVELOPMENT.md)，再读[贡献指南](docs/CONTRIBUTING.md)。
 - **生产运维人员**：先读[部署说明](docs/DEPLOYMENT.md)，再读[运维手册](docs/OPERATIONS.md)。
-- **管理员或外部 Agent 开发者**：从[文档总目录](docs/README.md)选择对应入口。
+- **管理员或外部 Agent 开发者**：外部 Agent 是接入小镇的程序玩家；请从[文档总目录](docs/README.md)选择入口。
 
 读完自己的路径，就能开始使用或维护项目。
 
@@ -40,7 +40,11 @@ Lab 实验执行已经关闭。
 - 让获准的外部 Agent 进入世界。
 - 用管理后台查看系统和控制功能开关。
 
+AI 会让程序生成对话和行动。
+OAuth 表示借助其他网站登录。
+
 AI、OAuth、搜索和托管 Agent 需要对应配置。
+托管 Agent 是由服务器长期运行的程序玩家。
 条件不满足时，普通地图仍应可以打开。
 
 ## 玩家怎样进入小镇
@@ -80,22 +84,25 @@ AI、OAuth、搜索和托管 Agent 需要对应配置。
 | 部分 | 白话用途 |
 |---|---|
 | 前端 | 玩家看到和点击的网页与地图 |
-| 后端 | 处理登录、规则、AI、记忆和 API |
-| 数据层 | PostgreSQL 保存长期数据，Redis 传递实时消息 |
+| 后端 | 处理登录、规则、AI、记忆和 API 请求 |
+| 数据层 | PostgreSQL 数据库长期存档，Redis 消息站传递实时变化 |
 | 后台工人 | 推动居民行动和托管 Agent |
 
 完整关系图见[系统结构](docs/ARCHITECTURE.md)。
 
 ## 技术栈
 
+这一节主要给维护者看。
+陌生词可以在[词语表](docs/GLOSSARY.md)中查到。
+
 ### 后端
 
 | 技术 | 用途 |
 |---|---|
 | Python 3.11+ | 后端编程语言 |
-| FastAPI | HTTP 和 WebSocket 服务 |
-| SQLAlchemy 2 | 异步数据库访问 |
-| PostgreSQL 16 + pgvector | 生产数据库和记忆向量检索 |
+| FastAPI | 接收网页请求和实时连接 |
+| SQLAlchemy 2 | 用 Python 读写数据库 |
+| PostgreSQL 16 + pgvector | 保存数据，并按意思查找记忆 |
 | Redis 8 | 生产实时消息、锁和任务协调 |
 | Alembic | 数据库迁移 |
 | PyJWT + bcrypt | 登录凭证和密码保护 |
@@ -119,7 +126,7 @@ AI、OAuth、搜索和托管 Agent 需要对应配置。
 | Vitest | 前端测试 |
 | ESLint | 前端代码规则 |
 | Docker Compose | 本地基础服务和生产容器 |
-| Cloudflare Workers | 前端静态站点部署 |
+| Cloudflare Workers | 把前端网页放到公网 |
 
 完整版本和命令见[本地开发手册](docs/DEVELOPMENT.md)。
 
