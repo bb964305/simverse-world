@@ -216,6 +216,7 @@ class BasicExecutePlugin:
                         else:
                             ctx.resident.status = "idle"
                         ctx.new_tile = (ctx.resident.tile_x, ctx.resident.tile_y)
+                    await ctx.db.commit()
                 elif action == ActionType.WANDER:
                     # Free wandering without a specific landmark destination.
                     # Pick an adjacent walkable tile if available, else stay in place gracefully.

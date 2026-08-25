@@ -587,6 +587,7 @@ async def test_basic_execute_movement():
 
     assert ctx.new_tile == (77, 50)
     assert resident.tile_x == 77
+    ctx.db.commit.assert_awaited_once()
 
 
 @pytest.mark.anyio
