@@ -613,6 +613,18 @@ async def _work_postman(db, resident) -> str | None:
     return f"{resident.name}跑完了今天的投递(送达 {delivered} 封)"
 
 
+async def _work_town_clerk(db, resident) -> str | None:
+    """赵启文:整理市政厅公文与档案记录，并留一条履职记忆。"""
+    from app.memory.service import MemoryService
+    await MemoryService(db).add_memory(
+        resident.id, "event",
+        "在市政厅整理了小镇近期的公文与档案记录，登记了居民们的诉求与各项事务。",
+        0.5, "observation",
+    )
+    await _feed(resident.slug, "duty_output", {"duty": "town_clerk"})
+    return f"{resident.name}整理了市政厅的公文与档案"
+
+
 _WORK_HANDLERS = {
     "workshop_fixer": _work_workshop_fixer,
     "shop_keeper": _work_shop_keeper,
@@ -621,6 +633,7 @@ _WORK_HANDLERS = {
     "researcher": _work_researcher,
     "chronicle_editor": _work_chronicle_editor,
     "postman": _work_postman,
+    "town_clerk": _work_town_clerk,
 }
 
 

@@ -394,3 +394,20 @@ async def test_pay_wage_except_log_does_not_touch_expired_orm(db_session, monkey
     monkeypatch.setattr(treasury_service, "town_to_resident", _deadlock_victim)
 
     await duty_service._pay_wage(db_session, proxy)  # fail-open, 不许抛
+
+
+@pytest.mark.anyio
+async def test_on_work_town_clerk_produces_archive_memory(db_session):
+    from app.models.memory import Memory
+
+    clerk = _resident("clerk", "赵启文", {"key": "town_clerk"})
+    db_session.add(clerk)
+    await db_session.commit()
+
+    line = await duty_service.on_work(db_session, clerk)
+    assert line and "公文" in line
+
+    mem = (await db_session.execute(
+        select(Memory).where(Memory.resident_id == clerk.id)
+    )).scalars().one()
+    assert "市政厅" in mem.content

@@ -1,5 +1,6 @@
 """LLM prompt templates for the agent decision loop and inter-resident chat."""
 from app.agent.actions import ActionType
+from app.config import settings
 
 DECISION_SYSTEM = """\
 你是一个游戏 NPC 居民的自主决策引擎。你的任务是根据居民当前的状态、周围环境和记忆，选择最符合角色人格的下一个行动。
@@ -13,17 +14,17 @@ DECISION_SYSTEM = """\
 输出严格 JSON 格式，不要输出其他内容：
 {{
   "action": "<ACTION_TYPE>",
-  "target_slug": "<居民slug或null>",
-  "target_tile": [x, y] 或 null,
+  "target_slug": {target_slug_contract},
+  "target_tile": {target_tile_contract},
   "reason": "<一句话理由，15字以内>"
 }}
 
 可用的 action 类型：{available_actions}
 
 规则：
-- CHAT_RESIDENT 需要在 nearby_residents 中选一个空闲居民，填入 target_slug
-- WANDER/VISIT_DISTRICT 填入 target_tile（使用地点入口坐标），其余为 null
-- GO_HOME 不需要 target_tile（自动导航到你的家）
+- CHAT_RESIDENT 需要在 nearby_residents 中选一个空闲居民，填入 target_slug（居民slug）
+{movement_target_rule}
+- GO_HOME 不需要 target_slug/target_tile（自动导航到你的家）
 - GOSSIP 需要 target_slug，内容由后续流程生成
 - 社交类型低（So1=L）的居民，倾向于选择 REFLECT/JOURNAL/OBSERVE
 - 行动力高（Ac3=H）的居民，倾向于 WORK/STUDY/WANDER
@@ -114,6 +115,22 @@ def build_decision_prompt(
 
     action_list = ", ".join(a.value for a in available_actions)
 
+    if settings.realism_enabled:
+        target_slug_contract = '"<居民slug、地点ID/名称或null>"'
+        target_tile_contract = "null"
+        movement_target_rule = (
+            "- VISIT_DISTRICT/WANDER 可在 target_slug 填入地点ID（如 "
+            "central_plaza, tavern 等）或地点名称（如 中央广场、酒馆 等），"
+            "服务端会自动导航；自由闲逛填 null"
+        )
+    else:
+        target_slug_contract = '"<居民slug或null>"'
+        target_tile_contract = "[x, y] 或 null"
+        movement_target_rule = (
+            "- WANDER/VISIT_DISTRICT 填入 target_tile（使用地点入口坐标），"
+            "其余为 null"
+        )
+
     system = DECISION_SYSTEM.format(
         name=resident.name,
         current_location=current_location,
@@ -124,6 +141,9 @@ def build_decision_prompt(
         today_action_count=len(today_actions),
         max_daily_actions=max_daily_actions,
         location_boost_hint=location_boost_hint,
+        target_slug_contract=target_slug_contract,
+        target_tile_contract=target_tile_contract,
+        movement_target_rule=movement_target_rule,
     )
     user = DECISION_USER.format(
         world_time=world_time,

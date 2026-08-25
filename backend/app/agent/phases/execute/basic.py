@@ -217,8 +217,29 @@ class BasicExecutePlugin:
                             ctx.resident.status = "idle"
                         ctx.new_tile = (ctx.resident.tile_x, ctx.resident.tile_y)
                     await ctx.db.commit()
+                elif action == ActionType.WANDER:
+                    # Free wandering without a specific landmark destination.
+                    # Pick an adjacent walkable tile if available, else stay in place gracefully.
+                    walkable = get_walkable_tiles()
+                    curr = (ctx.resident.tile_x, ctx.resident.tile_y)
+                    candidates = [
+                        (curr[0] + dx, curr[1] + dy)
+                        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                        if (curr[0] + dx, curr[1] + dy) in walkable
+                    ]
+                    if candidates:
+                        import random
+                        next_tile = random.choice(candidates)
+                        ctx.resident.tile_x = next_tile[0]
+                        ctx.resident.tile_y = next_tile[1]
+                        ctx.resident.status = "walking"
+                        ctx.new_tile = next_tile
+                    else:
+                        ctx.resident.status = "idle"
+                        ctx.new_tile = curr
+                    await ctx.db.commit()
                 else:
-                    # No valid target — reset to idle
+                    # No valid target for targeted movement (VISIT_DISTRICT / GO_HOME) — reset to idle
                     ctx.movement_failed_reason = "invalid_target"
                     ctx.plan_interrupt_reason = "invalid_target"
                     ctx.resident.status = "idle"

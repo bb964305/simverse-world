@@ -13,11 +13,12 @@ async def _admin_headers(db):
 
 
 @pytest.mark.anyio
-async def test_group_read_masks_api_key(client, db_session):
+async def test_group_read_masks_api_key(client, db_session, monkeypatch):
     """llm 分组的默认值直接来自 settings.effective_api_key —— 不能原样下发。"""
     from app.config import settings
     from app.routers.admin.system_config import MASKED_VALUE
 
+    monkeypatch.setattr(settings, "llm_api_key", "sk-test-secret")
     headers = await _admin_headers(db_session)
     resp = await client.get("/admin/system/groups/llm", headers=headers)
     assert resp.status_code == 200

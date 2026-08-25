@@ -518,11 +518,28 @@ async def town_to_resident(
             income, wages = await wage_window_totals(
                 db, window_days=wage_window_days,
             )
-            if wages + amount > int(income * ratio):
+            income_budget = int(income * ratio)
+            from app.config import settings
+            reserve_floor = max(
+                0,
+                int(getattr(settings, "town_wage_reserve_floor_sc", 20)),
+            )
+            reserve_available = max(0, int(locked_balance - reserve_floor))
+            budget_ok = wages + amount <= income_budget
+            reserve_fallback_ok = income == 0 and amount <= reserve_available
+            floor_ok = amount <= reserve_available
+
+            if not floor_ok or not (budget_ok or reserve_fallback_ok):
                 logger.info(
                     "town wage budget exhausted: resident=%s amount=%d "
-                    "income=%d wages=%d ratio=%.3f",
-                    resident_slug, amount, income, wages, ratio,
+                    "income=%d wages=%d ratio=%.3f balance=%d floor=%d",
+                    resident_slug,
+                    amount,
+                    income,
+                    wages,
+                    ratio,
+                    locked_balance,
+                    reserve_floor,
                 )
                 await db.commit()
                 return False

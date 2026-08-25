@@ -18,6 +18,7 @@ from app.models.agent_player import (
     AgentPlayer,
 )
 from app.models.conversation import Conversation, Message
+from app.models.hosted_agent import HostedAgentController
 from app.models.resident import Resident
 from app.models.user import User
 from app.services.player_npc_chat_service import recover_expired_npc_chat_turns
@@ -831,6 +832,69 @@ async def test_private_messages_do_not_leak_to_viewer_or_public_town(client, db_
     assert town.status_code == 200, town.text
     assert town.json()["activity"] == []
     assert "仅目标可见的私聊内容。" not in town.text
+    agent_actors = [r for r in town.json()["residents"] if r.get("kind") == "agent"]
+    if agent_actors:
+        assert "control_kind" in agent_actors[0]
+        assert "activity_status" in agent_actors[0]
+
+
+@pytest.mark.parametrize(
+    ("desired_status", "runtime_status", "expected"),
+    [
+        ("paused", "idle", "paused"),
+        ("paused", "error", "paused"),
+        ("disabled", "disabled", "disabled"),
+        ("running", "error", "error"),
+        ("running", "backoff", "backoff"),
+        ("running", "budget_paused", "budget_paused"),
+        ("running", "auth_blocked", "auth_blocked"),
+    ],
+)
+@pytest.mark.anyio
+async def test_public_town_snapshot_maps_hosted_controller_status(
+    client,
+    db_session,
+    desired_status,
+    runtime_status,
+    expected,
+):
+    created, _credentials, _session = await _register_and_session(
+        client,
+        f"托管状态-{desired_status}-{runtime_status}",
+    )
+    profile = await db_session.get(AgentPlayer, created["application_id"])
+    assert profile is not None
+    resident = await db_session.get(Resident, profile.resident_id)
+    assert resident is not None
+    profile.control_kind = "hosted_agent"
+    db_session.add(
+        HostedAgentController(
+            owner_user_id=profile.user_id,
+            request_id=str(uuid.uuid4()),
+            create_request_hash=hashlib.sha256(
+                f"{desired_status}:{runtime_status}".encode()
+            ).hexdigest(),
+            agent_player_id=profile.id,
+            desired_status=desired_status,
+            runtime_status=runtime_status,
+            provider_host="api.example.com",
+            model="test-model",
+            provider_validation_required=False,
+            secret_envelope="test-envelope",
+            identity_json={},
+            policy_json={},
+        )
+    )
+    await db_session.commit()
+
+    response = await client.get("/api/v1/public/town/snapshot")
+    assert response.status_code == 200, response.text
+    actor = next(
+        item
+        for item in response.json()["residents"]
+        if item.get("slug") == resident.slug
+    )
+    assert actor["activity_status"] == expected
 
 
 @pytest.mark.anyio
