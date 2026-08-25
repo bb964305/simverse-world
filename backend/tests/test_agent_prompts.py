@@ -1,6 +1,7 @@
 """Task 2（burn-in 修复批次 1）：社交半径配置断言 + decide 社交软提示。"""
 from unittest.mock import MagicMock
 
+import pytest
 import yaml
 
 from app.agent.registry import CONFIG_DIR
@@ -63,3 +64,48 @@ def test_decision_prompt_no_social_hint_when_alone():
         available_actions=[ActionType.IDLE], max_daily_actions=20,
     )
     assert "主动搭话" not in system + user
+
+
+@pytest.mark.parametrize(
+    ("realism_enabled", "target_slug_line", "target_tile_line", "movement_rule"),
+    [
+        (
+            False,
+            '"target_slug": "<居民slug或null>"',
+            '"target_tile": [x, y] 或 null',
+            "WANDER/VISIT_DISTRICT 填入 target_tile（使用地点入口坐标）",
+        ),
+        (
+            True,
+            '"target_slug": "<居民slug、地点ID/名称或null>"',
+            '"target_tile": null',
+            "VISIT_DISTRICT/WANDER 可在 target_slug 填入地点ID",
+        ),
+    ],
+)
+def test_decision_prompt_movement_contract_matches_realism_gate(
+    monkeypatch,
+    realism_enabled,
+    target_slug_line,
+    target_tile_line,
+    movement_rule,
+):
+    from app.agent.actions import ActionType
+    from app.agent.prompts import build_decision_prompt
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "realism_enabled", realism_enabled)
+    system, _ = build_decision_prompt(
+        resident=_mk_resident(),
+        schedule_phase="afternoon",
+        world_time="14:00",
+        nearby_residents=[],
+        memories=[],
+        today_actions=[],
+        available_actions=[ActionType.WANDER, ActionType.VISIT_DISTRICT],
+        max_daily_actions=20,
+    )
+
+    assert target_slug_line in system
+    assert target_tile_line in system
+    assert movement_rule in system
