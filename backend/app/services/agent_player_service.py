@@ -23,6 +23,7 @@ from app.models.agent_player import (
     AgentEvent,
     AgentPlayer,
 )
+from app.models.hosted_agent import HostedAgentController
 from app.models.resident import Resident
 from app.models.user import User
 from app.services.onboarding_service import TILE_SIZE, create_player_resident
@@ -973,6 +974,10 @@ async def _build_public_town_snapshot(db: AsyncSession) -> dict[str, Any]:
         user = await db.get(User, profile.user_id)
         if user is not None and not user.is_banned:
             profiles.append(profile)
+    hosted_controllers = {
+        hc.agent_player_id: hc
+        for hc in (await db.execute(select(HostedAgentController))).scalars().all()
+    }
     actors: list[dict[str, Any]] = []
     for profile in profiles:
         resident = await db.get(Resident, profile.resident_id)
@@ -982,12 +987,21 @@ async def _build_public_town_snapshot(db: AsyncSession) -> dict[str, Any]:
         coords = visible_player_tiles.get(profile.user_id)
         tx = coords[0] if coords is not None else None
         ty = coords[1] if coords is not None else None
+        is_online = _agent_is_online(profile) and coords is not None
+        activity_status = "online" if is_online else "dormant"
+        if profile.control_kind == "hosted_agent" and profile.id in hosted_controllers:
+            hc = hosted_controllers[profile.id]
+            if hc.runtime_status in ("error", "paused"):
+                activity_status = hc.runtime_status
+
         actors.append(
             {
                 "slug": resident.slug,
                 "name": resident.name,
                 "kind": "agent",
                 "status": profile.status,
+                "control_kind": profile.control_kind,
+                "activity_status": activity_status,
                 "district": (
                     get_location_id_at(tx, ty)
                     if tx is not None and ty is not None
@@ -995,7 +1009,8 @@ async def _build_public_town_snapshot(db: AsyncSession) -> dict[str, Any]:
                 ),
                 "tile_x": tx,
                 "tile_y": ty,
-                "is_online": _agent_is_online(profile) and coords is not None,
+                "is_online": is_online,
+                "last_seen_at": profile.last_seen_at.isoformat() if profile.last_seen_at else None,
                 "model_label": profile.model_label,
             }
         )

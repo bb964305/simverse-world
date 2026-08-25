@@ -831,6 +831,11 @@ async def test_private_messages_do_not_leak_to_viewer_or_public_town(client, db_
     assert town.status_code == 200, town.text
     assert town.json()["activity"] == []
     assert "仅目标可见的私聊内容。" not in town.text
+    agent_actors = [r for r in town.json()["residents"] if r.get("kind") == "agent"]
+    if agent_actors:
+        assert "control_kind" in agent_actors[0]
+        assert "activity_status" in agent_actors[0]
+
 
 
 @pytest.mark.anyio

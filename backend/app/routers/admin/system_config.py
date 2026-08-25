@@ -43,39 +43,44 @@ from app.schemas.admin import (
 
 router = APIRouter(prefix="/system", tags=["admin-system"])
 
-# Default values for each config group (used when DB has no entries yet)
-DEFAULT_CONFIGS: dict[str, dict[str, object]] = {
-    "llm": {
-        "llm.model": settings.effective_model,
-        "llm.base_url": settings.llm_base_url,
-        "llm.api_key": settings.effective_api_key,
-        "llm.temperature": 0.7,
-        "llm.timeout": 120,
-        "llm.max_retries": 3,
-        "llm.concurrency": 5,
-    },
-    "heat": {
-        "heat.popular_threshold": 50,
-        "heat.sleeping_days": 7,
-        "heat.cron_interval": 3600,
-    },
-    "scoring": {
-        "scoring.min_content_length": 50,
-        "scoring.star3_min_conversations": 50,
-        "scoring.star3_min_rating": 3.5,
-    },
-    "searxng": {
-        "searxng.url": settings.searxng_url,
-        "searxng.query_delay": 1.0,
-        "searxng.top_n": 5,
-    },
-    "portrait": {
-        "portrait.model": settings.portrait_llm_model,
-        "portrait.base_url": settings.portrait_llm_base_url,
-        "portrait.api_key": settings.portrait_llm_api_key,
-        "portrait.timeout": 180,
-    },
-}
+def get_default_configs() -> dict[str, dict[str, object]]:
+    """Return default values for each config group evaluated against current settings."""
+    return {
+        "llm": {
+            "llm.model": settings.effective_model,
+            "llm.base_url": settings.llm_base_url,
+            "llm.api_key": settings.effective_api_key,
+            "llm.temperature": 0.7,
+            "llm.timeout": 120,
+            "llm.max_retries": 3,
+            "llm.concurrency": 5,
+        },
+        "heat": {
+            "heat.popular_threshold": 50,
+            "heat.sleeping_days": 7,
+            "heat.cron_interval": 3600,
+        },
+        "scoring": {
+            "scoring.min_content_length": 50,
+            "scoring.star3_min_conversations": 50,
+            "scoring.star3_min_rating": 3.5,
+        },
+        "searxng": {
+            "searxng.url": settings.searxng_url,
+            "searxng.query_delay": 1.0,
+            "searxng.top_n": 5,
+        },
+        "portrait": {
+            "portrait.model": settings.portrait_llm_model,
+            "portrait.base_url": settings.portrait_llm_base_url,
+            "portrait.api_key": settings.portrait_llm_api_key,
+            "portrait.timeout": 180,
+        },
+    }
+
+
+# Backwards-compatible module-level reference
+DEFAULT_CONFIGS: dict[str, dict[str, object]] = get_default_configs()
 
 VALID_GROUPS = set(DEFAULT_CONFIGS.keys()) | {"economy", "district", "oauth", "sprite", "user_llm", "portrait"}
 
@@ -101,7 +106,7 @@ async def _get_config_group(db: AsyncSession, group: str) -> dict:
     svc = ConfigService(db)
     db_values = await svc.get_group(group)
     # Merge: start with defaults (strip group prefix for key), then overlay DB values
-    defaults = DEFAULT_CONFIGS.get(group, {})
+    defaults = get_default_configs().get(group, {})
     merged: dict[str, object] = {}
     # Add defaults using short keys (strip "group." prefix if present)
     for full_key, default_val in defaults.items():
