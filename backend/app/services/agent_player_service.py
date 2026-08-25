@@ -991,7 +991,14 @@ async def _build_public_town_snapshot(db: AsyncSession) -> dict[str, Any]:
         activity_status = "online" if is_online else "dormant"
         if profile.control_kind == "hosted_agent" and profile.id in hosted_controllers:
             hc = hosted_controllers[profile.id]
-            if hc.runtime_status in ("error", "paused"):
+            if hc.desired_status in {"paused", "disabled"}:
+                activity_status = hc.desired_status
+            elif hc.runtime_status in {
+                "error",
+                "backoff",
+                "budget_paused",
+                "auth_blocked",
+            }:
                 activity_status = hc.runtime_status
 
         actors.append(
