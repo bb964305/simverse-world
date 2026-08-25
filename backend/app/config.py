@@ -884,6 +884,7 @@ class Settings(BaseSettings):
     town_public_duty_wage_sc: int = 1
     town_wage_income_window_days: int = 7
     town_wage_budget_ratio: float = 0.70
+    town_wage_reserve_floor_sc: int = 20        # 镇库保底储备线(高于此储备时允许动用存量支付公职津贴)
 
     # ── S2-5 policies + 四级分级审批 (POLIS_POLICY_*) ────────────────────
     # 两个独立门, 都默认 False → 行为与现状字节级一致 (KICKOFF_S2-5 §3):
