@@ -623,6 +623,19 @@ git diff --check origin/master...HEAD
 cd backend && .venv/bin/python -m compileall -q app tests
 ```
 
+### Verification-discovered diff hygiene cleanup
+
+If the range check reports `backend/tests/test_duty_service.py:414: new blank line at EOF.`, delete the single empty line after the final `assert "市政厅" in mem.content`. This is an existing PR-range formatting defect with no runtime behavior change.
+
+Verify:
+
+```bash
+cd backend && .venv/bin/python -m pytest tests/test_duty_service.py -q
+git diff --check origin/master...HEAD
+```
+
+Commit: `style(test): remove trailing duty test whitespace`
+
 Run the full backend suite, retain its failed node IDs as an artifact under `/tmp`, and compare that exact set with the master CI log from Actions run `32735386500` (not merely the count). The PR may not add any failure beyond the known master set of 49 nodes. If the Actions log is unavailable, create an isolated temporary `origin/master` worktree and reproduce the baseline locally before drawing a no-regression conclusion.
 
 Run real application verification with isolated SQLite and local Redis:

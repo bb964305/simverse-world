@@ -411,4 +411,3 @@ async def test_on_work_town_clerk_produces_archive_memory(db_session):
         select(Memory).where(Memory.resident_id == clerk.id)
     )).scalars().one()
     assert "市政厅" in mem.content
-
