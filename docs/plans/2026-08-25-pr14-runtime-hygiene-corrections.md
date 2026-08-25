@@ -263,6 +263,7 @@ Add this assertion to `test_get_location_id_by_name_and_aliases` in `backend/tes
 
 ```python
     assert get_location_id_by_name("公寓") is None
+    assert get_location_id_by_name("去月华公寓看看") == "apt_moon"
 ```
 
 Run only the two required red gates first:
@@ -291,6 +292,24 @@ Delete this exact entry from `LOCATION_ALIASES`:
     "公寓": "apartment",
 ```
 
+The exact alias removal exposes the existing partial-display fallback: because
+ten concrete apartment names contain `公寓`, returning the first partial match
+would still guess a residence. Replace the display-name partial loop with an
+ambiguity-safe unique match:
+
+```python
+    display_matches = {
+        loc_id
+        for loc_id, loc in LOCATIONS.items()
+        if (loc_name := loc.get("name"))
+        and (loc_name in cleaned or cleaned in loc_name)
+    }
+    if len(display_matches) == 1:
+        return next(iter(display_matches))
+    if len(display_matches) > 1:
+        return None
+```
+
 Keep all specific apartment aliases and the existing dynamic `theater` contract unchanged.
 
 ### Step 3.3: verify and commit
@@ -303,7 +322,7 @@ Acceptance:
 
 - Free WANDER can only move to a four-neighbour walkable tile.
 - A diagonal-only tile leaves the resident idle in place.
-- `公寓` returns `None`; every specific apartment name continues to resolve.
+- `公寓` returns `None` rather than choosing the first of ten partial display-name matches; exact and uniquely partial specific apartment names continue to resolve.
 
 Commit: `fix(agent): constrain free wander and reject generic housing alias`
 

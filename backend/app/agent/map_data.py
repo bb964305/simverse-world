@@ -649,7 +649,6 @@ LOCATION_ALIASES: dict[str, str] = {
     "剧院": "theater",
     "大剧院": "theater",
     # 公寓
-    "公寓": "apartment",
     "月华公寓": "apt_moon",
     "星光公寓": "apt_star",
     "晨曦公寓": "apt_dawn",
@@ -688,11 +687,18 @@ def get_location_id_by_name(name: str | None) -> str | None:
     if cleaned in LOCATION_ALIASES:
         return LOCATION_ALIASES[cleaned]
 
-    # 4. Partial substring match against display names
-    for loc_id, loc in LOCATIONS.items():
-        loc_name = loc.get("name")
-        if loc_name and (loc_name in cleaned or cleaned in loc_name):
-            return loc_id
+    # 4. Partial substring match against display names, but never guess when a
+    # generic name (for example "公寓") matches more than one concrete place.
+    display_matches = {
+        loc_id
+        for loc_id, loc in LOCATIONS.items()
+        if (loc_name := loc.get("name"))
+        and (loc_name in cleaned or cleaned in loc_name)
+    }
+    if len(display_matches) == 1:
+        return next(iter(display_matches))
+    if len(display_matches) > 1:
+        return None
 
     # 5. Partial substring match against aliases
     for alias_name, alias_id in LOCATION_ALIASES.items():

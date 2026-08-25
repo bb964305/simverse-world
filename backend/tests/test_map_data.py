@@ -171,6 +171,8 @@ def test_get_location_id_by_name_and_aliases():
     assert get_location_id_by_name("商店") == "shop"
     assert get_location_id_by_name("工坊") == "workshop"
     assert get_location_id_by_name("铁匠铺") == "workshop"
+    assert get_location_id_by_name("公寓") is None
+    assert get_location_id_by_name("去月华公寓看看") == "apt_moon"
     assert get_location_id_by_name("月华公寓") == "apt_moon"
     assert get_location_id_by_name("邮局") == "town_entrance"
     assert get_location_id_by_name("大剧院") == "theater"
@@ -179,4 +181,3 @@ def test_get_location_id_by_name_and_aliases():
     # Punctuation & spaces
     assert get_location_id_by_name(" 广场。") == "central_plaza"
     assert get_location_id_by_name("“酒馆”") == "tavern"
-

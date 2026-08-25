@@ -224,9 +224,8 @@ class BasicExecutePlugin:
                     curr = (ctx.resident.tile_x, ctx.resident.tile_y)
                     candidates = [
                         (curr[0] + dx, curr[1] + dy)
-                        for dx in (-1, 0, 1)
-                        for dy in (-1, 0, 1)
-                        if (curr[0] + dx, curr[1] + dy) in walkable and (dx != 0 or dy != 0)
+                        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                        if (curr[0] + dx, curr[1] + dy) in walkable
                     ]
                     if candidates:
                         import random

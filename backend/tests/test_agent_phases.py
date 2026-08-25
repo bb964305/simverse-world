@@ -591,6 +591,56 @@ async def test_basic_execute_movement():
 
 
 @pytest.mark.anyio
+async def test_basic_execute_free_wander_rejects_diagonal_only_tile():
+    from app.agent.actions import ActionResult
+    from app.agent.phases.execute.basic import BasicExecutePlugin
+
+    ctx = _make_ctx()
+    ctx.action_result = ActionResult(
+        action=ActionType.WANDER,
+        target_slug=None,
+        target_tile=None,
+        reason="自由散步",
+    )
+
+    with patch(
+        "app.agent.phases.execute.basic.get_walkable_tiles",
+        return_value={(10, 10), (11, 11)},
+    ):
+        ctx = await BasicExecutePlugin().execute(ctx)
+
+    assert (ctx.resident.tile_x, ctx.resident.tile_y) == (10, 10)
+    assert ctx.resident.status == "idle"
+    assert ctx.new_tile == (10, 10)
+    ctx.db.commit.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_basic_execute_free_wander_accepts_orthogonal_tile():
+    from app.agent.actions import ActionResult
+    from app.agent.phases.execute.basic import BasicExecutePlugin
+
+    ctx = _make_ctx()
+    ctx.action_result = ActionResult(
+        action=ActionType.WANDER,
+        target_slug=None,
+        target_tile=None,
+        reason="自由散步",
+    )
+
+    with patch(
+        "app.agent.phases.execute.basic.get_walkable_tiles",
+        return_value={(10, 10), (11, 10)},
+    ):
+        ctx = await BasicExecutePlugin().execute(ctx)
+
+    assert (ctx.resident.tile_x, ctx.resident.tile_y) == (11, 10)
+    assert ctx.resident.status == "walking"
+    assert ctx.new_tile == (11, 10)
+    ctx.db.commit.assert_awaited_once()
+
+
+@pytest.mark.anyio
 async def test_basic_execute_idle():
     from app.agent.phases.execute.basic import BasicExecutePlugin
     from app.agent.actions import ActionResult
