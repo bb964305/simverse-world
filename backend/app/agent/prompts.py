@@ -13,17 +13,17 @@ DECISION_SYSTEM = """\
 输出严格 JSON 格式，不要输出其他内容：
 {{
   "action": "<ACTION_TYPE>",
-  "target_slug": "<居民slug或null>",
-  "target_tile": [x, y] 或 null,
+  "target_slug": "<居民slug、地点ID/名称或null>",
+  "target_tile": null,
   "reason": "<一句话理由，15字以内>"
 }}
 
 可用的 action 类型：{available_actions}
 
 规则：
-- CHAT_RESIDENT 需要在 nearby_residents 中选一个空闲居民，填入 target_slug
-- WANDER/VISIT_DISTRICT 填入 target_tile（使用地点入口坐标），其余为 null
-- GO_HOME 不需要 target_tile（自动导航到你的家）
+- CHAT_RESIDENT 需要在 nearby_residents 中选一个空闲居民，填入 target_slug（居民slug）
+- VISIT_DISTRICT/WANDER 可在 target_slug 填入地点ID（如 central_plaza, tavern 等）或地点名称（如 中央广场、酒馆 等），服务端会自动导航；自由闲逛填 null
+- GO_HOME 不需要 target_slug/target_tile（自动导航到你的家）
 - GOSSIP 需要 target_slug，内容由后续流程生成
 - 社交类型低（So1=L）的居民，倾向于选择 REFLECT/JOURNAL/OBSERVE
 - 行动力高（Ac3=H）的居民，倾向于 WORK/STUDY/WANDER

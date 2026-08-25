@@ -603,17 +603,102 @@ def nearest_indoor_location(from_tile: tuple[int, int]) -> str | None:
     return best
 
 
+LOCATION_ALIASES: dict[str, str] = {
+    # 广场
+    "广场": "central_plaza",
+    "中央广场": "central_plaza",
+    # 酒馆
+    "酒馆": "tavern",
+    "小酒馆": "tavern",
+    # 咖啡馆
+    "咖啡馆": "cafe",
+    "咖啡厅": "cafe",
+    "咖啡店": "cafe",
+    # 工坊
+    "工坊": "workshop",
+    "铁匠铺": "workshop",
+    "修理铺": "workshop",
+    # 图书馆
+    "图书馆": "library",
+    "藏书阁": "library",
+    # 杂货铺
+    "杂货铺": "shop",
+    "杂货店": "shop",
+    "商店": "shop",
+    # 市政厅
+    "市政厅": "town_hall",
+    "镇务厅": "town_hall",
+    # 学院
+    "学院": "academy",
+    "书院": "academy",
+    # 实验楼
+    "实验楼": "experiment_building",
+    "实验室": "experiment_building",
+    # 集市
+    "集市": "market_hall",
+    "集市大厅": "market_hall",
+    # 邮局 / 镇入口
+    "邮局": "town_entrance",
+    "小镇入口": "town_entrance",
+    "镇入口": "town_entrance",
+    "驿站": "town_entrance",
+    # 东岸花园
+    "东岸花园": "east_gardens",
+    "花园": "east_gardens",
+    # 剧院
+    "剧院": "theater",
+    "大剧院": "theater",
+    # 公寓
+    "公寓": "apartment",
+    "月华公寓": "apt_moon",
+    "星光公寓": "apt_star",
+    "晨曦公寓": "apt_dawn",
+    "松风公寓": "apt_pine",
+    "湖畔公寓": "apt_lake",
+    "朝阳公寓": "apt_sunrise",
+    "河湾公寓": "apt_river",
+    "花园公寓": "apt_garden",
+    "果园公寓": "apt_orchard",
+    "港湾公寓": "apt_harbor",
+}
+
+
 def get_location_id_by_name(name: str | None) -> str | None:
-    """Reverse-lookup a location id by its display name (first match).
+    """Reverse-lookup a location id by its display name or alias (first match).
 
     Used by realism plan/decision target resolution so a plan that only carries
-    the location display name (not the slug) still resolves to an entrance tile.
+    the location display name or common alias (not the slug) still resolves to an entrance tile.
     """
     if not name:
         return None
+    cleaned = str(name).strip().strip("\"'“”‘’，。！？.,!?")
+    if not cleaned:
+        return None
+
+    # 1. Exact match on LOCATIONS slug
+    if cleaned in LOCATIONS:
+        return cleaned
+
+    # 2. Exact match on LOCATIONS display name
     for loc_id, loc in LOCATIONS.items():
-        if loc.get("name") == name:
+        if loc.get("name") == cleaned:
             return loc_id
+
+    # 3. Known alias dictionary match
+    if cleaned in LOCATION_ALIASES:
+        return LOCATION_ALIASES[cleaned]
+
+    # 4. Partial substring match against display names
+    for loc_id, loc in LOCATIONS.items():
+        loc_name = loc.get("name")
+        if loc_name and (loc_name in cleaned or cleaned in loc_name):
+            return loc_id
+
+    # 5. Partial substring match against aliases
+    for alias_name, alias_id in LOCATION_ALIASES.items():
+        if alias_name in cleaned:
+            return alias_id
+
     return None
 
 
