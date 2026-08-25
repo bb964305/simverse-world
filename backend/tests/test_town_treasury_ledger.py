@@ -201,6 +201,7 @@ async def test_rolling_income_budget_keeps_thirty_percent_reserve(
     db_session, monkeypatch,
 ):
     monkeypatch.setattr(settings, "town_ledger_enabled", True)
+    monkeypatch.setattr(settings, "town_wage_reserve_floor_sc", 0)
     await treasury_service.tax(db_session, 10, reason="sales_tax:test")
     assert await treasury_service.town_to_resident(
         db_session, "clerk", 7, reason="wage:clerk", wage_budget_ratio=0.70,
@@ -243,6 +244,53 @@ async def test_reserve_allows_wages_when_rolling_income_is_zero(
     )
 
 
+@pytest.mark.anyio
+async def test_income_budget_cannot_break_reserve_floor(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "town_ledger_enabled", True)
+    monkeypatch.setattr(settings, "town_wage_reserve_floor_sc", 20)
+    await treasury_service.tax(db_session, 20, reason="sales_tax:test")
+
+    assert not await treasury_service.town_to_resident(
+        db_session,
+        "clerk",
+        1,
+        reason="wage:clerk",
+        wage_budget_ratio=0.70,
+    )
+    assert await treasury_service.balance(db_session) == 20
+    assert await coin_service.treasury_balance(db_session, "clerk") == 0
+
+
+@pytest.mark.anyio
+async def test_ledger_off_allows_only_surplus_above_floor(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "town_ledger_enabled", False)
+    monkeypatch.setattr(settings, "town_wage_reserve_floor_sc", 20)
+    db_session.add(
+        TownTreasury(
+            key=TOWN_KEY,
+            balance_sc=21,
+            updated_at=datetime.now(UTC),
+        )
+    )
+    await db_session.commit()
+
+    assert await treasury_service.town_to_resident(
+        db_session,
+        "clerk",
+        1,
+        reason="wage:clerk",
+        wage_budget_ratio=0.70,
+    )
+    assert await treasury_service.balance(db_session) == 20
+    assert await treasury_service.wage_window_totals(db_session) == (0, 0)
+    assert not await treasury_service.town_to_resident(
+        db_session,
+        "postman",
+        1,
+        reason="wage:postman",
+        wage_budget_ratio=0.70,
+    )
+
 
 @pytest.mark.anyio
 async def test_funding_split_is_dark_then_public_only(db_session, monkeypatch):
@@ -257,7 +305,7 @@ async def test_funding_split_is_dark_then_public_only(db_session, monkeypatch):
     monkeypatch.setattr(settings, "town_wage_unfunded_policy", "skip")
     monkeypatch.setattr(settings, "election_enabled", False)
     monkeypatch.setattr(settings, "town_duty_funding_enabled", False)
-    await treasury_service.tax(db_session, 20, reason="sales_tax:legacy")
+    await treasury_service.tax(db_session, 30, reason="sales_tax:legacy")
     await duty_service._pay_wage(db_session, private)
     assert await coin_service.treasury_balance(db_session, "smith") == 8
 
