@@ -131,9 +131,23 @@ function createSessionState() {
   }
 }
 
+// Keep bearer credentials out of persistent localStorage. Existing sessions
+// are migrated once so an in-progress launch is not interrupted, then removed
+// from durable storage. sessionStorage survives refreshes but not a closed tab.
+function migrateLegacyAuth(): void {
+  const legacyToken = localStorage.getItem('token')
+  const legacyUser = localStorage.getItem('user')
+  if (!sessionStorage.getItem('token') && legacyToken) sessionStorage.setItem('token', legacyToken)
+  if (!sessionStorage.getItem('user') && legacyUser) sessionStorage.setItem('user', legacyUser)
+  localStorage.removeItem('token')
+  localStorage.removeItem('user')
+}
+
+migrateLegacyAuth()
+
 export const useGameStore = create<GameState>((set) => ({
-  user: (() => { try { return JSON.parse(localStorage.getItem('user') || 'null') } catch { return null } })(),
-  token: localStorage.getItem('token'),
+  user: (() => { try { return JSON.parse(sessionStorage.getItem('user') || 'null') } catch { return null } })(),
+  token: sessionStorage.getItem('token'),
   ...createSessionState(),
   setWsStatus: (status) => set({ wsStatus: status }),
   setMinimapTexture: (url) => set({ minimapTextureUrl: url }),
@@ -141,13 +155,15 @@ export const useGameStore = create<GameState>((set) => ({
   setCameraViewport: (vp) => set({ cameraViewport: vp }),
 
   setAuth: (user, token) => {
-    localStorage.setItem('token', token)
-    localStorage.setItem('user', JSON.stringify(user))
+    sessionStorage.setItem('token', token)
+    sessionStorage.setItem('user', JSON.stringify(user))
     set((state) => state.user?.id === user.id && state.token === token
       ? { user, token }
       : { ...createSessionState(), user, token })
   },
   logout: () => {
+    sessionStorage.removeItem('token')
+    sessionStorage.removeItem('user')
     localStorage.removeItem('token')
     localStorage.removeItem('user')
     set({

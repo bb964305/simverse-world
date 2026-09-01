@@ -1,9 +1,9 @@
 {
   "chainId": 4663,
   "proxy": "0x24f6f6bE48066cbE0B54d741cd4B52862Bb4b05c",
-  "implementation": "0x7BD3b19fD8FEE7cFd40d51Ac0D5D67FFfc9a83d3",
+  "implementation": "0x6104bb41EEA2875ff3d27eF43CE62fBEb3E29A05",
   "admin": "0x5e807ae9c82ba691fca0cc1f56eb01eb58d6f04c",
-  "contract": "SimverseAgentRegistryV2",
+  "contract": "SimverseAgentRegistryV3",
   "upgradeKind": "uups",
-  "upgradedAt": "2026-09-01T15:53:01.995Z"
+  "upgradedAt": "2026-09-01T16:49:34.768Z"
 }

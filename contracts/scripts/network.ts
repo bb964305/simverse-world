@@ -14,6 +14,15 @@ const [chainId, balance, gasPrice, blockNumber] = await Promise.all([
   publicClient.getBlockNumber(),
 ])
 
+const registryAddress = process.env.SIMVERSE_AGENT_REGISTRY as `0x${string}` | undefined
+const registryVersion = registryAddress
+  ? Number(await publicClient.readContract({
+      address: registryAddress,
+      abi: [{ type: 'function', name: 'implementationVersion', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] }],
+      functionName: 'implementationVersion',
+    }))
+  : null
+
 console.log(JSON.stringify({
   network: connection.networkName,
   chainId,
@@ -21,4 +30,6 @@ console.log(JSON.stringify({
   deployer: deployer.account.address,
   balanceETH: formatEther(balance),
   gasPriceWei: gasPrice.toString(),
+  registryAddress: registryAddress ?? null,
+  registryVersion,
 }, null, 2))

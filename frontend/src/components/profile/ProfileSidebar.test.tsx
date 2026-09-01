@@ -38,7 +38,7 @@ describe('ProfileSidebar mobile layout', () => {
     expect(screen.getByTestId('profile-sidebar-mobile')).toBeInTheDocument()
     // Balance is folded into the condensed header, not its own labelled block.
     expect(screen.queryByText('Soul Coin')).not.toBeInTheDocument()
-    expect(screen.getByText(/🪙 42/)).toBeInTheDocument()
+    expect(screen.getByText(/创作了 3 位居民/)).toHaveTextContent('SC 42')
   })
 
   it('still switches tabs from the mobile strip', () => {
@@ -52,7 +52,7 @@ describe('ProfileSidebar mobile layout', () => {
     stubMatchMedia(false)
     render(<ProfileSidebar residentCount={3} />)
     expect(screen.queryByTestId('profile-sidebar-mobile')).not.toBeInTheDocument()
-    expect(screen.getByText('Soul Coin')).toBeInTheDocument()
+    expect(screen.getByText('灵魂积分 · 链下')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /我的居民/ })).toBeInTheDocument()
   })
 })

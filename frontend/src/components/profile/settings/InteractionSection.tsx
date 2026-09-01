@@ -2,8 +2,10 @@ import { useState } from 'react'
 import { updateInteraction, type AllSettings } from '../../../services/api'
 import { FieldLabel, SaveButton, SectionCard, SectionHeader, Toggle } from './shared'
 import { useSectionForm } from './useSectionForm'
+import { useLocale } from '../../../services/locale'
 
 export function InteractionSection({ settings }: { settings: AllSettings }) {
+  const en = useLocale((state) => state.locale === 'en')
   const interaction = settings.interaction as {
     reply_mode?: string
     offline_auto_reply?: boolean
@@ -29,10 +31,10 @@ export function InteractionSection({ settings }: { settings: AllSettings }) {
 
   return (
     <SectionCard>
-      <SectionHeader icon="💬" title="互动设置" />
+      <SectionHeader icon="💬" title={en ? 'Interaction settings' : '互动设置'} />
 
       <div style={{ marginBottom: 16 }}>
-        <FieldLabel>回复模式</FieldLabel>
+        <FieldLabel>{en ? 'Reply mode' : '回复模式'}</FieldLabel>
         <div style={{ display: 'flex', gap: 8 }}>
           {(['manual', 'auto'] as const).map((mode) => (
             <button
@@ -48,19 +50,21 @@ export function InteractionSection({ settings }: { settings: AllSettings }) {
                 transition: 'background 0.15s',
               }}
             >
-              {mode === 'manual' ? '手动' : '自动'}
+              {mode === 'manual' ? (en ? 'Manual' : '手动') : (en ? 'Automatic' : '自动')}
             </button>
           ))}
         </div>
         <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6 }}>
-          {replyMode === 'manual' ? '访客发起对话后，由你手动决定是否用 AI 回复' : '访客消息自动由 AI 角色回复'}
+          {replyMode === 'manual'
+            ? (en ? 'Choose manually whether the AI responds after a visitor starts a conversation.' : '访客发起对话后，由你手动决定是否用 AI 回复')
+            : (en ? 'Your AI character responds to visitor messages automatically.' : '访客消息自动由 AI 角色回复')}
         </div>
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 16 }}>
-        <Toggle value={offlineAutoReply} onChange={setOfflineAutoReply} label="离线时自动回复" />
-        <Toggle value={notificationChat} onChange={setNotificationChat} label="新对话通知" />
-        <Toggle value={notificationSystem} onChange={setNotificationSystem} label="系统通知" />
+        <Toggle value={offlineAutoReply} onChange={setOfflineAutoReply} label={en ? 'Reply automatically while offline' : '离线时自动回复'} />
+        <Toggle value={notificationChat} onChange={setNotificationChat} label={en ? 'New conversation notifications' : '新对话通知'} />
+        <Toggle value={notificationSystem} onChange={setNotificationSystem} label={en ? 'System notifications' : '系统通知'} />
       </div>
 
       <SaveButton onClick={() => void handleSave()} saving={saving} saved={saved} />

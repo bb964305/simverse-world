@@ -188,17 +188,17 @@ export function connectWS(): void {
       // Surface to the user via listeners (chat panel can show a notice);
       // also log so it's observable without a listener (P1-1 limit).
       if (data.type === 'rate_limited') {
-        console.warn('rate_limited:', data.message ?? '请求过快，请稍后再试')
+        console.warn('rate_limited:', data.message ?? (document.documentElement.lang === 'en' ? 'Too many requests. Please try again shortly.' : '请求过快，请稍后再试'))
       }
       // Budget exceeded: per-user daily LLM allowance spent (P1-1, E-24).
       // No charge or reply happened; surface a friendly notice.
       if (data.type === 'budget_exceeded') {
-        console.warn('budget_exceeded:', data.message ?? '今日对话额度已用完，明天再来吧')
+        console.warn('budget_exceeded:', data.message ?? (document.documentElement.lang === 'en' ? 'Today’s conversation allowance has been used.' : '今日对话额度已用完，明天再来吧'))
       }
       // Player-to-player chat: reply from the target player (or auto-reply)
       if (data.type === 'player_chat_reply') {
         useGameStore.getState().addPlayerChatMessage({
-          from: (data.from_name as string) || '对方',
+          from: (data.from_name as string) || (document.documentElement.lang === 'en' ? 'Player' : '对方'),
           text: (data.text as string) || '',
           isAuto: (data.is_auto as boolean) ?? false,
           timestamp: typeof data.timestamp === 'number' ? data.timestamp : Date.now(),
@@ -207,7 +207,7 @@ export function connectWS(): void {
       // Incoming player_chat: another player messaged you
       if (data.type === 'player_chat') {
         useGameStore.getState().addPlayerChatMessage({
-          from: (data.from_name as string) || '对方',
+          from: (data.from_name as string) || (document.documentElement.lang === 'en' ? 'Player' : '对方'),
           text: (data.text as string) || '',
           isAuto: false,
           timestamp: typeof data.timestamp === 'number' ? data.timestamp : Date.now(),
@@ -251,7 +251,7 @@ export function connectWS(): void {
       if (data.type === 'achievement_unlocked' && typeof data.code === 'string') {
         useGameStore.getState().showAchievementToast({
           code: data.code as string,
-          title: (data.title as string) || '成就解锁',
+          title: (data.title as string) || (document.documentElement.lang === 'en' ? 'Achievement unlocked' : '成就解锁'),
           reward_sc: (data.reward_sc as number) || 0,
         })
       }
@@ -268,8 +268,10 @@ export function connectWS(): void {
         useGameStore.getState().addNotification({
           id: `feed-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           kind: 'feed',
-          title: '你关注的居民有新动态',
-          body: `${data.resident_slug as string}：${body}`,
+          title: document.documentElement.lang === 'en' ? 'A resident you follow posted an update' : '你关注的居民有新动态',
+          body: document.documentElement.lang === 'en'
+            ? `${data.resident_slug as string}: ${body}`
+            : `${data.resident_slug as string}：${body}`,
           payload,
           read: false,
           created_at: new Date().toISOString(),

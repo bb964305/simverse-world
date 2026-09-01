@@ -7,8 +7,10 @@ import {
 } from '../../../services/api'
 import { FieldLabel, SaveButton, SectionCard, SectionHeader, TextInput, Toggle } from './shared'
 import { useSectionForm } from './useSectionForm'
+import { useLocale } from '../../../services/locale'
 
 export function LLMSection({ settings }: { settings: AllSettings }) {
+  const en = useLocale((state) => state.locale === 'en')
   const llm = settings.llm as LLMSettings
 
   const systemAllows = llm.system_allows_custom !== false
@@ -37,7 +39,7 @@ export function LLMSection({ settings }: { settings: AllSettings }) {
       const result = await testLLMConnection({ api_format: apiFormat, base_url: baseUrl, api_key: apiKey, model })
       setTestResult(result)
     } catch (err: unknown) {
-      setTestResult({ success: false, message: err instanceof Error ? err.message : '连接失败' })
+      setTestResult({ success: false, message: en ? 'Connection failed' : (err instanceof Error ? err.message : '连接失败') })
     } finally {
       setTesting(false)
     }
@@ -45,7 +47,7 @@ export function LLMSection({ settings }: { settings: AllSettings }) {
 
   return (
     <SectionCard>
-      <SectionHeader icon="🤖" title="LLM 设置" />
+      <SectionHeader icon="🤖" title={en ? 'LLM settings' : 'LLM 设置'} />
 
       {!systemAllows && (
         <div style={{
@@ -53,7 +55,7 @@ export function LLMSection({ settings }: { settings: AllSettings }) {
           background: 'var(--bg-input)', border: '1px solid var(--border)',
           fontSize: 13, color: 'var(--text-muted)',
         }}>
-          系统当前未开放自定义 LLM 接入。
+          {en ? 'Custom LLM connections are currently disabled by the system.' : '系统当前未开放自定义 LLM 接入。'}
         </div>
       )}
 
@@ -61,14 +63,14 @@ export function LLMSection({ settings }: { settings: AllSettings }) {
         <Toggle
           value={enabled}
           onChange={setEnabled}
-          label="启用自定义 LLM"
+          label={en ? 'Enable custom LLM' : '启用自定义 LLM'}
         />
       </div>
 
       {enabled && (
         <>
           <div style={{ marginBottom: 16 }}>
-            <FieldLabel>API 格式</FieldLabel>
+            <FieldLabel>{en ? 'API format' : 'API 格式'}</FieldLabel>
             <div style={{ display: 'flex', gap: 8 }}>
               {(['openai', 'anthropic'] as const).map((fmt) => (
                 <button
@@ -84,7 +86,7 @@ export function LLMSection({ settings }: { settings: AllSettings }) {
                     transition: 'background 0.15s',
                   }}
                 >
-                  {fmt === 'openai' ? 'OpenAI 兼容' : 'Anthropic 兼容'}
+                  {fmt === 'openai' ? (en ? 'OpenAI compatible' : 'OpenAI 兼容') : (en ? 'Anthropic compatible' : 'Anthropic 兼容')}
                 </button>
               ))}
             </div>
@@ -116,7 +118,7 @@ export function LLMSection({ settings }: { settings: AllSettings }) {
           </div>
 
           <div style={{ marginBottom: 16 }}>
-            <FieldLabel>模型名称</FieldLabel>
+            <FieldLabel>{en ? 'Model name' : '模型名称'}</FieldLabel>
             <TextInput
               value={model}
               onChange={setModel}
@@ -139,7 +141,7 @@ export function LLMSection({ settings }: { settings: AllSettings }) {
                 transition: 'opacity 0.15s',
               }}
             >
-              {testing ? '测试中...' : '测试连接'}
+              {testing ? (en ? 'Testing…' : '测试中…') : (en ? 'Test connection' : '测试连接')}
             </button>
 
             {testResult !== null && (
@@ -148,7 +150,7 @@ export function LLMSection({ settings }: { settings: AllSettings }) {
                 color: testResult.success ? '#53d769' : '#ff6b6b',
                 fontWeight: 500,
               }}>
-                {testResult.success ? '✓ ' : '✗ '}{testResult.message}
+                {testResult.success ? '✓ ' : '✗ '}{en ? (testResult.success ? 'Connection successful' : 'Connection failed') : testResult.message}
               </span>
             )}
           </div>

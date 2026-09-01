@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { API_BASE, getResidentCard, type ResidentCardData } from '../services/api'
+import { useLocale } from '../services/locale'
 
 // ── C1 灵魂卡片：canvas 分享卡 ───────────────────────────────────────
 // GET /residents/{slug}/card 的公开摘要绘制成 900x1200 PNG，可下载分享。
@@ -9,7 +10,7 @@ import { API_BASE, getResidentCard, type ResidentCardData } from '../services/ap
 
 const W = 900
 const H = 1200
-const FONT = '"PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif'
+const FONT = 'Inter, Geist, "Noto Sans", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif'
 
 function resolvePortraitUrl(url: string): string {
   return /^https?:\/\//i.test(url) ? url : `${API_BASE}${url}`
@@ -57,7 +58,7 @@ function roundedRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w:
   ctx.closePath()
 }
 
-function drawCard(canvas: HTMLCanvasElement, card: ResidentCardData, portrait: HTMLImageElement | null) {
+function drawCard(canvas: HTMLCanvasElement, card: ResidentCardData, portrait: HTMLImageElement | null, en: boolean) {
   const ctx = canvas.getContext('2d')
   if (!ctx) return
 
@@ -188,7 +189,7 @@ function drawCard(canvas: HTMLCanvasElement, card: ResidentCardData, portrait: H
   ctx.fillText('“', cx - 300, y)
   ctx.font = `28px ${FONT}`
   ctx.fillStyle = '#d4d4d8'
-  const excerpt = card.soul_excerpt || '这位居民的灵魂还在书写中……'
+  const excerpt = card.soul_excerpt || (en ? 'This resident\'s soul is still being written…' : '这位居民的灵魂还在书写中……')
   for (const line of wrapText(ctx, excerpt, 620, 5)) {
     ctx.fillText(line, cx, y)
     y += 46
@@ -205,11 +206,13 @@ function drawCard(canvas: HTMLCanvasElement, card: ResidentCardData, portrait: H
     }
     ctx.font = `22px ${FONT}`
     ctx.fillStyle = 'rgba(113,113,122,0.9)'
-    ctx.fillText('—— 印象最深的回响', cx, y + 8)
+    ctx.fillText(en ? '— DEEPEST ECHO' : '—— 印象最深的回响', cx, y + 8)
   }
 
   // ⑧ 对话数徽章（固定在落款上方，避让正文）
-  const convLabel = `💬 已陪伴对话 ${card.total_conversations} 次`
+  const convLabel = en
+    ? `💬 ${card.total_conversations} conversations shared`
+    : `💬 已陪伴对话 ${card.total_conversations} 次`
   ctx.font = `600 26px ${FONT}`
   const cw = ctx.measureText(convLabel).width + 56
   roundedRectPath(ctx, cx - cw / 2, 1010, cw, 52, 26)
@@ -232,7 +235,7 @@ function drawCard(canvas: HTMLCanvasElement, card: ResidentCardData, portrait: H
   ctx.fillText('S I M V E R S E   W O R L D', cx, 1148)
   ctx.font = `20px ${FONT}`
   ctx.fillStyle = 'rgba(113,113,122,0.9)'
-  ctx.fillText(`@${card.slug} · 灵魂居民档案`, cx, 1180)
+  ctx.fillText(en ? `@${card.slug} · RESIDENT SOUL PROFILE` : `@${card.slug} · 灵魂居民档案`, cx, 1180)
 }
 
 interface SoulCardProps {
@@ -241,6 +244,7 @@ interface SoulCardProps {
 }
 
 export function SoulCard({ slug, onClose }: SoulCardProps) {
+  const en = useLocale((state) => state.locale === 'en')
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [card, setCard] = useState<ResidentCardData | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -251,9 +255,9 @@ export function SoulCard({ slug, onClose }: SoulCardProps) {
     let cancelled = false
     getResidentCard(slug)
       .then((c) => { if (!cancelled) setCard(c) })
-      .catch(() => { if (!cancelled) setError('卡片数据加载失败，请稍后重试') })
+      .catch(() => { if (!cancelled) setError(en ? 'Could not load card data. Try again shortly.' : '卡片数据加载失败，请稍后重试') })
     return () => { cancelled = true }
-  }, [slug])
+  }, [slug, en])
 
   // 数据就绪后绘制；肖像加载失败静默降级为首字母头像
   useEffect(() => {
@@ -270,11 +274,11 @@ export function SoulCard({ slug, onClose }: SoulCardProps) {
       }
       const canvas = canvasRef.current
       if (cancelled || !canvas) return
-      drawCard(canvas, card, portrait)
+      drawCard(canvas, card, portrait, en)
       setReady(true)
     })()
     return () => { cancelled = true }
-  }, [card])
+  }, [card, en])
 
   const download = () => {
     const canvas = canvasRef.current
@@ -291,7 +295,7 @@ export function SoulCard({ slug, onClose }: SoulCardProps) {
       }, 'image/png')
     } catch {
       // SecurityError（canvas 被 taint）——crossOrigin 兜底后理论上不可达
-      setError('图片导出失败：肖像跨域受限')
+      setError(en ? 'Image export failed because the portrait blocks cross-origin access.' : '图片导出失败：肖像跨域受限')
     }
   }
 
@@ -311,7 +315,7 @@ export function SoulCard({ slug, onClose }: SoulCardProps) {
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-          <h3 style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>灵魂卡片</h3>
+          <h3 style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>{en ? 'Soul Card' : '灵魂卡片'}</h3>
           <button
             onClick={onClose}
             style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 18, cursor: 'pointer', padding: 4 }}
@@ -340,7 +344,7 @@ export function SoulCard({ slug, onClose }: SoulCardProps) {
                 position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
                 color: 'var(--text-muted)', fontSize: 13,
               }}>
-                卡片绘制中…
+                {en ? 'Rendering card…' : '卡片绘制中…'}
               </div>
             )}
           </div>
@@ -351,7 +355,7 @@ export function SoulCard({ slug, onClose }: SoulCardProps) {
             onClick={onClose}
             style={{ background: '#27272a', color: 'white', border: 'none', padding: '8px 18px', borderRadius: 'var(--radius)', fontSize: 13, cursor: 'pointer' }}
           >
-            关闭
+            {en ? 'Close' : '关闭'}
           </button>
           <button
             onClick={download}
@@ -362,7 +366,7 @@ export function SoulCard({ slug, onClose }: SoulCardProps) {
               cursor: ready ? 'pointer' : 'default', opacity: ready ? 1 : 0.6,
             }}
           >
-            下载图片
+            {en ? 'Download image' : '下载图片'}
           </button>
         </div>
       </div>

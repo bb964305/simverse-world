@@ -96,6 +96,7 @@ describe('AgentStudioPage', () => {
   it('verifies and restores the latest onchain save into the game profile', async () => {
     vi.mocked(loadOwnedAgents).mockResolvedValue([{
       id: 7n,
+      worldProofCount: 0n,
       residentKey: `0x${'11'.repeat(32)}`,
       uri: 'http://test/web3/content/metadata',
       state: {

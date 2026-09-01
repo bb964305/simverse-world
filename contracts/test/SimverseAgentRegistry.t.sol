@@ -4,6 +4,7 @@ pragma solidity ^0.8.34;
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {SimverseAgentRegistry} from "../contracts/SimverseAgentRegistry.sol";
 import {SimverseAgentRegistryV2} from "../contracts/SimverseAgentRegistryV2.sol";
+import {SimverseAgentRegistryV3} from "../contracts/SimverseAgentRegistryV3.sol";
 
 contract AgentActor {
     function create(
@@ -72,6 +73,16 @@ contract AgentActor {
         bytes32 residentKey
     ) external returns (uint256, bool) {
         return registry.createAgentForResident(uri, digest, residentKey);
+    }
+
+    function prove(
+        SimverseAgentRegistry registry,
+        uint256 agentId,
+        bytes32 kind,
+        bytes32 dataHash,
+        uint64 worldRevision
+    ) external returns (uint256) {
+        return registry.recordWorldProof(agentId, kind, dataHash, worldRevision);
     }
 }
 
@@ -151,6 +162,18 @@ contract SimverseAgentRegistryTest {
         SimverseAgentRegistry.WorldProof memory proof = registry.worldProof(agentId, proofId);
         require(proof.kind == kind && proof.dataHash == dataHash, "proof payload mismatch");
         require(proof.worldRevision == 42, "world revision mismatch");
+    }
+
+    function testOwnerRecordsWorldProof() public {
+        uint256 agentId = alice.create(registry, "ipfs://agent", keccak256("agent"));
+        uint256 proofId = alice.prove(
+            registry,
+            agentId,
+            keccak256("world.snapshot"),
+            keccak256("snapshot-1"),
+            7
+        );
+        require(proofId == 0 && registry.worldProofCount(agentId) == 1, "owner proof missing");
     }
 
     function testOwnerAnchorsAppendOnlyMemoryChain() public {
@@ -235,6 +258,35 @@ contract SimverseAgentRegistryTest {
             succeeded = true;
         } catch {}
         require(!succeeded, "legacy unscoped mint remained enabled");
+    }
+
+    function testV3AllowsOnlyOnePassportPerWallet() public {
+        SimverseAgentRegistryV2 implementationV2 = new SimverseAgentRegistryV2();
+        registry.upgradeToAndCall(address(implementationV2), "");
+        SimverseAgentRegistryV3 implementationV3 = new SimverseAgentRegistryV3();
+        registry.upgradeToAndCall(address(implementationV3), "");
+        SimverseAgentRegistryV3 upgraded = SimverseAgentRegistryV3(address(registry));
+
+        (uint256 firstId, bool created) = alice.createForResident(
+            upgraded,
+            "https://simverse.space/api/web3/content/public/identity-a",
+            keccak256("metadata-a"),
+            keccak256("resident-a")
+        );
+        require(created && upgraded.implementationVersion() == 3, "first Passport missing");
+
+        bool secondSucceeded;
+        try alice.createForResident(
+            upgraded,
+            "https://simverse.space/api/web3/content/public/identity-b",
+            keccak256("metadata-b"),
+            keccak256("resident-b")
+        ) {
+            secondSucceeded = true;
+        } catch {}
+        require(!secondSucceeded, "wallet minted a second Passport");
+        require(upgraded.balanceOf(address(alice)) == 1, "wallet balance is not one");
+        require(upgraded.ownerOf(firstId) == address(alice), "first Passport changed");
     }
 
     function testOnlyUpgraderRoleCanUpgrade() public {

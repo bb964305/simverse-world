@@ -2,10 +2,12 @@ import { useState } from 'react'
 import { updatePrivacy, type AllSettings } from '../../../services/api'
 import { FieldLabel, SaveButton, SectionCard, SectionHeader, Toggle } from './shared'
 import { useSectionForm } from './useSectionForm'
+import { useLocale } from '../../../services/locale'
 
 type PersonaVisibility = 'full' | 'identity_card_only' | 'hidden'
 
 export function PrivacySection({ settings }: { settings: AllSettings }) {
+  const en = useLocale((state) => state.locale === 'en')
   const privacy = settings.privacy as {
     map_visible?: boolean
     persona_visibility?: PersonaVisibility
@@ -27,21 +29,21 @@ export function PrivacySection({ settings }: { settings: AllSettings }) {
   })
 
   const visibilityOptions: { value: PersonaVisibility; label: string; desc: string }[] = [
-    { value: 'full', label: '完整公开', desc: '所有人可查看角色的完整设定' },
-    { value: 'identity_card_only', label: '仅身份卡', desc: '只显示名称和基本信息' },
-    { value: 'hidden', label: '隐藏', desc: '对他人完全隐藏角色信息' },
+    { value: 'full', label: en ? 'Full profile' : '完整公开', desc: en ? 'Anyone can view the complete character profile.' : '所有人可查看角色的完整设定' },
+    { value: 'identity_card_only', label: en ? 'Identity card only' : '仅身份卡', desc: en ? 'Only the name and basic identity are shown.' : '只显示名称和基本信息' },
+    { value: 'hidden', label: en ? 'Hidden' : '隐藏', desc: en ? 'Hide character information from other players.' : '对他人完全隐藏角色信息' },
   ]
 
   return (
     <SectionCard>
-      <SectionHeader icon="🔒" title="隐私设置" />
+      <SectionHeader icon="🔒" title={en ? 'Privacy settings' : '隐私设置'} />
 
       <div style={{ marginBottom: 16 }}>
-        <Toggle value={mapVisible} onChange={setMapVisible} label="在地图上显示我的角色" />
+        <Toggle value={mapVisible} onChange={setMapVisible} label={en ? 'Show my character on the map' : '在地图上显示我的角色'} />
       </div>
 
       <div style={{ marginBottom: 16 }}>
-        <FieldLabel>角色信息可见范围</FieldLabel>
+        <FieldLabel>{en ? 'Character profile visibility' : '角色信息可见范围'}</FieldLabel>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {visibilityOptions.map((opt) => (
             <label
@@ -77,7 +79,7 @@ export function PrivacySection({ settings }: { settings: AllSettings }) {
       </div>
 
       <div style={{ marginBottom: 16 }}>
-        <Toggle value={allowStats} onChange={setAllowStats} label="允许统计对话数据（用于排行榜）" />
+        <Toggle value={allowStats} onChange={setAllowStats} label={en ? 'Allow aggregated conversation statistics for rankings' : '允许统计对话数据（用于排行榜）'} />
       </div>
 
       <SaveButton onClick={() => void handleSave()} saving={saving} saved={saved} />

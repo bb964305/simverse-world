@@ -1,7 +1,6 @@
 """Crash-safe orchestration and static installation for the 25 sprite slots."""
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -18,6 +17,7 @@ from PIL import Image
 from pydantic import AwareDatetime, Field, StrictInt, field_validator, model_validator
 
 from app.services.resident_sprite_artifacts import load_run, read_artifact
+from app.services.file_lock import exclusive_file_lock
 from app.services.resident_sprite_generation import (
     CapabilityContract,
     CapabilityReceipt,
@@ -119,10 +119,9 @@ def _locked(path: Path) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
+        with exclusive_file_lock(fd):
+            yield
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
 
 

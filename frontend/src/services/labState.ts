@@ -40,17 +40,25 @@ const TASK_LABELS: Record<string, string> = {
   draft: '草稿', funded: '已资助', assigned: '已分派', running: '执行中', review: '待验收',
   completed: '完成', rejected: '已拒收', failed: '失败', expired: '过期', cancelled: '取消',
 }
+const TASK_LABELS_EN: Record<string, string> = {
+  draft: 'Draft', funded: 'Funded', assigned: 'Assigned', running: 'Running', review: 'Awaiting review',
+  completed: 'Completed', rejected: 'Rejected', failed: 'Failed', expired: 'Expired', cancelled: 'Cancelled',
+}
 const RUN_LABELS: Record<string, string> = {
   queued: '排队', running: '运行中', needs_approval: '待审批',
   succeeded: '成功', failed: '失败', cancelled: '取消',
 }
+const RUN_LABELS_EN: Record<string, string> = {
+  queued: 'Queued', running: 'Running', needs_approval: 'Awaiting approval',
+  succeeded: 'Succeeded', failed: 'Failed', cancelled: 'Cancelled',
+}
 const RUN_TERMINAL = new Set(['succeeded', 'failed', 'cancelled'])
 
-function badge(value: string | null | undefined, labels: Record<string, string>): Badge {
+function badge(value: string | null | undefined, labels: Record<string, string>, unknownLabel: string): Badge {
   const v = value ?? ''
   const label = labels[v]
   // rule 6: unknown → static "未知状态", flagged; never idle/running fallback.
-  return label ? { value: v, label, known: true } : { value: v || 'unknown', label: '未知状态', known: false }
+  return label ? { value: v, label, known: true } : { value: v || 'unknown', label: unknownLabel, known: false }
 }
 
 // ── Agent v1 approval authority (server-authoritative) ─────────────────
@@ -94,9 +102,12 @@ export function selectLabTask<T extends { id: string }>(
   return tasks.find((t) => t.id === selected)
 }
 
-export function resolveLabDisplay(input: LabDisplayInput): LabDisplay {
-  const task = badge(input.taskStatus, TASK_LABELS)
-  const run = input.runStatus == null || input.runStatus === '' ? null : badge(input.runStatus, RUN_LABELS)
+export function resolveLabDisplay(input: LabDisplayInput, locale: 'zh-CN' | 'en' = 'zh-CN'): LabDisplay {
+  const english = locale === 'en'
+  const task = badge(input.taskStatus, english ? TASK_LABELS_EN : TASK_LABELS, english ? 'Unknown status' : '未知状态')
+  const run = input.runStatus == null || input.runStatus === ''
+    ? null
+    : badge(input.runStatus, english ? RUN_LABELS_EN : RUN_LABELS, english ? 'Unknown status' : '未知状态')
 
   const runTerminal = !!(run && run.known && RUN_TERMINAL.has(run.value))
   const runRunning = !!(run && run.known && run.value === 'running')

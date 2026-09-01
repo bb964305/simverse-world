@@ -1,5 +1,6 @@
 import type Phaser from 'phaser'
 import type { CaravanState } from '../services/api/caravan'
+import type { Locale } from '../services/locale'
 
 /**
  * The four collision-open pockets reserved by the server-side market cohort.
@@ -114,13 +115,21 @@ export function marketPurchaseEventKey(message: MarketPurchaseMessage): string {
   ].join(':')
 }
 
-export function marketPurchaseCopy(message: MarketPurchaseMessage): MarketPurchaseCopy {
+function activeLocale(): Locale {
+  return document.documentElement.lang === 'en' ? 'en' : 'zh-CN'
+}
+
+function browsingCopy(locale: Locale): string {
+  return locale === 'en' ? '🛍️ Browsing…' : '🛍️ 挑选商品…'
+}
+
+export function marketPurchaseCopy(message: MarketPurchaseMessage, locale: Locale = 'zh-CN'): MarketPurchaseCopy {
   const item = message.item_name
     ? `${message.item_name}${message.quantity > 1 ? ` ×${message.quantity}` : ''}`
-    : '心仪商品'
+    : (locale === 'en' ? 'a favorite item' : '心仪商品')
   return {
-    bubble: `🛍️ 买下 ${item} ✓`,
-    float: message.amount_sc === null ? '🪙 成交' : `−${message.amount_sc} SC`,
+    bubble: locale === 'en' ? `🛍️ Bought ${item} ✓` : `🛍️ 买下 ${item} ✓`,
+    float: message.amount_sc === null ? (locale === 'en' ? '🪙 SOLD' : '🪙 成交') : `−${message.amount_sc} SC`,
   }
 }
 
@@ -228,7 +237,7 @@ export class MarketPurchaseRuntime {
       }
       if (shopper.feedbackUntilMs > 0 && nowMs >= shopper.feedbackUntilMs) {
         shopper.feedbackUntilMs = 0
-        shopper.bubble?.setText('🛍️ 挑选商品…').setBackgroundColor('#713f12dd')
+        shopper.bubble?.setText(browsingCopy(activeLocale())).setBackgroundColor('#713f12dd')
       }
     }
   }
@@ -252,7 +261,7 @@ export class MarketPurchaseRuntime {
     }
     this.ensureVisual(shopper)
     shopper.browsingVisibleAtMs = nowMs
-    this.playFeedback(shopper, marketPurchaseCopy(message), nowMs)
+    this.playFeedback(shopper, marketPurchaseCopy(message, activeLocale()), nowMs)
     return true
   }
 
@@ -272,7 +281,7 @@ export class MarketPurchaseRuntime {
       shopper.bubble = this.scene.add.text(
         shopper.sprite.x + bubbleOffset.x,
         shopper.sprite.y + bubbleOffset.y,
-        '🛍️ 挑选商品…', {
+        browsingCopy(activeLocale()), {
         fontSize: '11px',
         color: '#fff7d6',
         backgroundColor: '#713f12dd',

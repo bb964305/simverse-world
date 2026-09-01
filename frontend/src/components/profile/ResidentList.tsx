@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useGameStore } from '../../stores/gameStore'
 import { ResidentCard } from './ResidentCard'
 import { importSkill } from '../../services/api'
+import { useLocale } from '../../services/locale'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -27,6 +28,8 @@ interface ImportModalProps {
 }
 
 function ImportModal({ open, onClose, onSuccess }: ImportModalProps) {
+  const locale = useLocale((state) => state.locale)
+  const en = locale === 'en'
   const [file, setFile] = useState<File | null>(null)
   const [name, setName] = useState('')
   const [slug, setSlug] = useState('')
@@ -54,7 +57,7 @@ function ImportModal({ open, onClose, onSuccess }: ImportModalProps) {
   const handleFile = useCallback((f: File) => {
     const ext = f.name.toLowerCase()
     if (!ext.endsWith('.md') && !ext.endsWith('.txt') && !ext.endsWith('.zip')) {
-      setError('不支持的文件格式，请使用 .md 或 .zip 文件')
+      setError(en ? 'Unsupported file format. Use .md, .txt, or .zip.' : '不支持的文件格式，请使用 .md、.txt 或 .zip 文件')
       return
     }
     setFile(f)
@@ -64,7 +67,7 @@ function ImportModal({ open, onClose, onSuccess }: ImportModalProps) {
       setName(baseName)
       setSlug(generateSlug(baseName))
     }
-  }, [name])
+  }, [en, name])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -85,12 +88,12 @@ function ImportModal({ open, onClose, onSuccess }: ImportModalProps) {
         handleClose()
       }, 1200)
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : '导入失败'
+      const msg = err instanceof Error ? err.message : (en ? 'Import failed' : '导入失败')
       setError(msg)
     } finally {
       setUploading(false)
     }
-  }, [file, name, slug, onSuccess, handleClose])
+  }, [en, file, name, slug, onSuccess, handleClose])
 
   if (!open) return null
 
@@ -110,7 +113,7 @@ function ImportModal({ open, onClose, onSuccess }: ImportModalProps) {
         onClick={(e) => e.stopPropagation()}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-          <h3 style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>导入 Skill</h3>
+          <h3 style={{ fontSize: 16, fontWeight: 700, margin: 0 }}>{en ? 'Import Skill' : '导入 Skill'}</h3>
           <button
             onClick={handleClose}
             style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 18, cursor: 'pointer', padding: 4 }}
@@ -144,17 +147,17 @@ function ImportModal({ open, onClose, onSuccess }: ImportModalProps) {
             <div>
               <div style={{ fontSize: 14, fontWeight: 600, color: '#e94560' }}>{file.name}</div>
               <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
-                {(file.size / 1024).toFixed(1)} KB - 点击重新选择
+                {(file.size / 1024).toFixed(1)} KB · {en ? 'click to choose another' : '点击重新选择'}
               </div>
             </div>
           ) : (
             <div>
               <div style={{ fontSize: 28, marginBottom: 8 }}>+</div>
               <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-                拖拽文件到此处，或点击选择
+                {en ? 'Drop a file here or click to choose' : '拖拽文件到此处，或点击选择'}
               </div>
               <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4, opacity: 0.7 }}>
-                支持 .md / .zip
+                {en ? 'Supports .md / .txt / .zip' : '支持 .md / .txt / .zip'}
               </div>
             </div>
           )}
@@ -162,20 +165,20 @@ function ImportModal({ open, onClose, onSuccess }: ImportModalProps) {
 
         {/* Format info */}
         <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.6 }}>
-          支持格式：<br />
-          - 单个 SKILL.md（含 # Ability / # Persona / # Soul）<br />
-          - zip 包（ability.md + persona.md + soul.md + 可选 meta.json）<br />
-          - colleague-skill zip（work.md + persona.md）
+          {en ? 'Supported formats:' : '支持格式：'}<br />
+          - {en ? 'One SKILL.md with # Ability / # Persona / # Soul' : '单个 SKILL.md（含 # Ability / # Persona / # Soul）'}<br />
+          - {en ? 'zip with ability.md + persona.md + soul.md and optional meta.json' : 'zip 包（ability.md + persona.md + soul.md + 可选 meta.json）'}<br />
+          - colleague-skill zip (work.md + persona.md)
         </div>
 
         {/* Name field */}
         <div style={{ marginBottom: 12 }}>
-          <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>居民名称</label>
+          <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>{en ? 'Resident name' : '居民名称'}</label>
           <input
             type="text"
             value={name}
             onChange={(e) => { setName(e.target.value); setSlug(generateSlug(e.target.value)) }}
-            placeholder="例如: Python Expert"
+            placeholder={en ? 'Example: Python Expert' : '例如：Python Expert'}
             style={{
               width: '100%', padding: '8px 12px', background: '#09090b', border: '1px solid #27272a',
               borderRadius: 6, color: 'white', fontSize: 13, outline: 'none', boxSizing: 'border-box',
@@ -185,12 +188,12 @@ function ImportModal({ open, onClose, onSuccess }: ImportModalProps) {
 
         {/* Slug field */}
         <div style={{ marginBottom: 20 }}>
-          <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>Slug（唯一标识）</label>
+          <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'block', marginBottom: 4 }}>Slug ({en ? 'unique identifier' : '唯一标识'})</label>
           <input
             type="text"
             value={slug}
             onChange={(e) => setSlug(e.target.value)}
-            placeholder="例如: python-expert"
+            placeholder={en ? 'Example: python-expert' : '例如：python-expert'}
             style={{
               width: '100%', padding: '8px 12px', background: '#09090b', border: '1px solid #27272a',
               borderRadius: 6, color: 'white', fontSize: 13, outline: 'none', boxSizing: 'border-box',
@@ -208,7 +211,7 @@ function ImportModal({ open, onClose, onSuccess }: ImportModalProps) {
         {/* Success */}
         {success && (
           <div style={{ background: 'rgba(34,197,94,0.12)', border: '1px solid rgba(34,197,94,0.3)', borderRadius: 6, padding: '8px 12px', marginBottom: 16, fontSize: 13, color: '#22c55e' }}>
-            导入成功！
+            {en ? 'Imported successfully.' : '导入成功！'}
           </div>
         )}
 
@@ -218,7 +221,7 @@ function ImportModal({ open, onClose, onSuccess }: ImportModalProps) {
             onClick={handleClose}
             style={{ background: '#27272a', color: 'white', border: 'none', padding: '8px 18px', borderRadius: 'var(--radius)', fontSize: 13, cursor: 'pointer' }}
           >
-            取消
+            {en ? 'Cancel' : '取消'}
           </button>
           <button
             onClick={handleSubmit}
@@ -230,7 +233,7 @@ function ImportModal({ open, onClose, onSuccess }: ImportModalProps) {
               opacity: (!file || !name.trim() || !slug.trim() || uploading || success) ? 0.6 : 1,
             }}
           >
-            {uploading ? '导入中...' : '导入'}
+            {uploading ? (en ? 'Importing…' : '导入中…') : (en ? 'Import' : '导入')}
           </button>
         </div>
       </div>
@@ -239,6 +242,8 @@ function ImportModal({ open, onClose, onSuccess }: ImportModalProps) {
 }
 
 export function ResidentList({ onResidentCountChange, onEditResident }: { onResidentCountChange: (n: number) => void; onEditResident: (slug: string) => void }) {
+  const locale = useLocale((state) => state.locale)
+  const en = locale === 'en'
   const [residents, setResidents] = useState<ResidentItem[]>([])
   const [loading, setLoading] = useState(true)
   const [importOpen, setImportOpen] = useState(false)
@@ -255,29 +260,29 @@ export function ResidentList({ onResidentCountChange, onEditResident }: { onResi
 
   useEffect(() => { void fetchResidents() }, [fetchResidents])
 
-  if (loading) return <div style={{ color: 'var(--text-muted)', padding: 20, textAlign: 'center' }}>加载中...</div>
+  if (loading) return <div style={{ color: 'var(--text-muted)', padding: 20, textAlign: 'center' }}>{en ? 'Loading…' : '加载中…'}</div>
 
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-        <h2 style={{ fontSize: 18, fontWeight: 700 }}>我的居民</h2>
+        <h2 style={{ fontSize: 18, fontWeight: 700 }}>{en ? 'My residents' : '我的居民'}</h2>
         <div style={{ display: 'flex', gap: 10 }}>
           <button
             onClick={() => setImportOpen(true)}
             style={{ background: '#27272a', color: 'white', border: '1px solid #3f3f46', padding: '8px 18px', borderRadius: 'var(--radius)', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}
           >
-            导入 Skill
+            {en ? 'Import Skill' : '导入 Skill'}
           </button>
-          <button onClick={() => navigate('/forge')} style={{ background: 'var(--accent-red)', color: 'white', border: 'none', padding: '8px 18px', borderRadius: 'var(--radius)', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>+ 创建新居民</button>
+          <button onClick={() => navigate('/forge')} style={{ background: 'var(--accent-red)', color: 'white', border: 'none', padding: '8px 18px', borderRadius: 'var(--radius)', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>+ {en ? 'Create resident' : '创建新居民'}</button>
         </div>
       </div>
       {residents.length === 0 ? (
         <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-muted)' }}>
           <div style={{ fontSize: 48, marginBottom: 12 }}>🏘️</div>
-          <div>还没有创建任何居民</div>
+          <div>{en ? 'No residents created yet' : '还没有创建任何居民'}</div>
           <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 16 }}>
-            <button onClick={() => setImportOpen(true)} style={{ background: '#27272a', color: 'white', border: '1px solid #3f3f46', padding: '10px 24px', borderRadius: 'var(--radius)', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>导入 Skill</button>
-            <button onClick={() => navigate('/forge')} style={{ background: 'var(--accent-red)', color: 'white', border: 'none', padding: '10px 24px', borderRadius: 'var(--radius)', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>创建第一位居民</button>
+            <button onClick={() => setImportOpen(true)} style={{ background: '#27272a', color: 'white', border: '1px solid #3f3f46', padding: '10px 24px', borderRadius: 'var(--radius)', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>{en ? 'Import Skill' : '导入 Skill'}</button>
+            <button onClick={() => navigate('/forge')} style={{ background: 'var(--accent-red)', color: 'white', border: 'none', padding: '10px 24px', borderRadius: 'var(--radius)', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>{en ? 'Create first resident' : '创建第一位居民'}</button>
           </div>
         </div>
       ) : (

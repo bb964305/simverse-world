@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { TopNav } from '../components/TopNav'
 import { getRelationshipGraph } from '../services/api'
+import { useLocale } from '../services/locale'
 import { syncCanvasSize } from './syncCanvasSize'
 
 interface Sim { slug: string; name: string; x: number; y: number; vx: number; vy: number }
 
 export function GraphPage() {
+  const locale = useLocale((state) => state.locale)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const [empty, setEmpty] = useState(false)
@@ -121,7 +123,9 @@ export function GraphPage() {
       >
         {empty ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-muted)' }}>
-            还没有足够的关系可以画成图谱，多和居民互动看看吧。
+            {locale === 'zh-CN'
+              ? '还没有足够的关系可以画成图谱，多和居民互动看看吧。'
+              : 'There are not enough relationships to draw yet. Interact with more residents and check back.'}
           </div>
         ) : (
           <canvas ref={canvasRef} data-testid="graph-canvas" style={{ width: '100%', height: '100%', display: 'block' }} />

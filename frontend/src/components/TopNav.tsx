@@ -26,6 +26,7 @@ import { BrandLogo } from './BrandLogo'
 import { BrandSocialLinks } from './BrandSocialLinks'
 import { LanguageToggle } from './LanguageToggle'
 import { SIM_TOKEN } from '../config/simToken'
+import { localizeWorldEvent } from '../services/worldLocalization'
 
 const NAV_COPY = {
   en: {
@@ -34,6 +35,7 @@ const NAV_COPY = {
     hall: '🏛️ Town Hall', market: '🏬 Market', lab: '🧪 Lab', terminal: '📊 Lab terminal', observatory: '◫ Observatory',
     world: 'World', openWorld: 'Open world menu', closeWorld: 'Close world menu', digest: '📰 Town digest', guide: '◎ New player guide', economy: '◉ SIM economy', buy: 'Buy SIM',
     account: 'Account menu', profile: '👤 Profile', capsules: '💌 Capsules', logout: 'Exit wallet session', studio: '◇ Onchain Agent Studio', community: 'Official community', user: 'Wallet resident',
+    scBalance: 'Offchain game credits (SC)', streak: 'Login streak', streakDialog: 'Login streak and daily topic', streakDays: (days: number) => `${days}-day login streak 🔥`, dailyTopic: 'Daily topic', complete: '✅ Complete', active: 'In progress', topicReward: (turns: number, reward: number) => `Chat for ${turns} turns to earn ${reward} SC`, noTopic: 'No topic today', notifications: 'Notifications', closeEvent: 'Dismiss world event', caravan: 'Indigo Canopy Caravan', viewManifest: 'View goods', viewMarket: 'Open caravan market',
   },
   'zh-CN': {
     nav: '游戏主导航', home: '返回 Simverse World', forge: '＋ 炼化居民', agent: '◇ 链上 Agent',
@@ -41,6 +43,7 @@ const NAV_COPY = {
     hall: '🏛️ 市政厅', market: '🏬 集市', lab: '🧪 实验楼', terminal: '📊 实验楼终端', observatory: '◫ 小镇观测站',
     world: '世界', openWorld: '打开世界菜单', closeWorld: '关闭世界菜单', digest: '📰 村落日报', guide: '◎ 新手教程', economy: '◉ SIM 经济模型', buy: '购买 SIM',
     account: '账号菜单', profile: '👤 个人主页', capsules: '💌 时间胶囊', logout: '退出钱包登录', studio: '◇ 链上 Agent 工作台', community: '官方社区', user: '钱包居民',
+    scBalance: '链下游戏积分（SC）', streak: '连续登录', streakDialog: '连续登录与今日话题', streakDays: (days: number) => `连续登录 ${days} 天 🔥`, dailyTopic: '今日话题', complete: '✅ 已完成', active: '进行中', topicReward: (turns: number, reward: number) => `与 TA 聊满 ${turns} 轮可得 ${reward} SC`, noTopic: '今日暂无话题', notifications: '通知', closeEvent: '关闭世界事件', caravan: '靛篷商队', viewManifest: '查看货单', viewMarket: '查看商队集市',
   },
 } as const
 
@@ -182,7 +185,7 @@ export function TopNav() {
   // indexes with `eventIdx % events.length`, so no sync reset is needed when
   // the list shrinks; the fade timeout is left to fire (it only restores
   // visibility, a harmless no-op after unmount).
-  const caravanStatus = caravanBannerText(caravanState)
+  const caravanStatus = caravanBannerText(caravanState, locale)
   useEffect(() => {
     // The caravan is a single live status, so do not blink it while background
     // world events continue to accumulate/cycle.
@@ -236,6 +239,7 @@ export function TopNav() {
   const streakIdx = loginStreak > 0 ? (loginStreak - 1) % 7 : -1
   const quest = dailyData?.quest ?? null
   const currentEvent = events.length > 0 ? events[eventIdx % events.length] : null
+  const localizedEvent = currentEvent ? localizeWorldEvent(currentEvent, locale) : null
   const hasTopBanner = Boolean(caravanStatus || currentEvent)
 
   useEffect(() => {
@@ -365,13 +369,13 @@ export function TopNav() {
       <div className="game-topnav__actions">
         <a className="game-topnav__buy" href={SIM_TOKEN.tradeUrl} target="_blank" rel="noopener noreferrer">{copy.buy} ↗</a>
         <span className="game-topnav__status game-topnav__clock" style={{ fontVariantNumeric: 'tabular-nums' }}>🕐 {clock}</span>
-        <span className="game-topnav__status game-topnav__status--coin">🪙 {balance}</span>
+        <span className="game-topnav__status game-topnav__status--coin" title={copy.scBalance}>🪙 {balance} SC</span>
         {/* Login streak + daily quest (D3) */}
         <div ref={streakRef} className="game-topnav__control game-topnav__streak">
           <button
             ref={streakBtnRef}
             onClick={toggleStreak}
-            title="连续登录"
+            title={copy.streak}
             className="game-topnav__status"
             aria-expanded={streakOpen}
           >
@@ -382,10 +386,10 @@ export function TopNav() {
               className="game-nav-popover game-nav-popover--streak"
               style={{ top: streakPopupPos.top, right: streakPopupPos.right }}
               role="dialog"
-              aria-label="连续登录与今日话题"
+              aria-label={copy.streakDialog}
             >
               <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-primary)' }}>
-                连续登录 {loginStreak} 天 🔥
+                {copy.streakDays(loginStreak)}
               </div>
               {/* 7-day reward ladder — current day highlighted */}
               <div style={{ display: 'flex', gap: 4, marginTop: 12 }}>
@@ -409,7 +413,7 @@ export function TopNav() {
               <div style={{
                 marginTop: 12, background: 'var(--bg-input)', borderRadius: 8, padding: '10px 12px',
               }}>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>今日话题</div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>{copy.dailyTopic}</div>
                 {quest ? (
                   <>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -423,18 +427,18 @@ export function TopNav() {
                           ? { background: 'rgba(83,215,105,0.15)', color: 'var(--accent-green)' }
                           : { background: 'rgba(14,165,233,0.15)', color: 'var(--accent-blue)' }),
                       }}>
-                        {quest.status === 'done' ? '✅ 已完成' : '进行中'}
+                        {quest.status === 'done' ? copy.complete : copy.active}
                       </span>
                     </div>
                     <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 4, lineHeight: 1.5 }}>
                       {quest.quest.topic}
                     </div>
                     <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
-                      与TA聊满 {quest.quest.min_turns} 轮可得 {quest.reward_sc}🪙
+                      {copy.topicReward(quest.quest.min_turns, quest.reward_sc)}
                     </div>
                   </>
                 ) : (
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>今日暂无话题</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{copy.noTopic}</div>
                 )}
               </div>
             </div>
@@ -442,7 +446,7 @@ export function TopNav() {
         </div>
         <button
           onClick={() => { setDigestUnread(false); openModal('digest') }}
-          title="村落日报"
+          title={copy.digest}
           className="game-topnav__icon-button game-topnav__digest"
         >
           📰
@@ -453,7 +457,7 @@ export function TopNav() {
         <div ref={notifRef} className="game-topnav__control">
           <button
             onClick={() => setActivePopover((current) => current === 'notifications' ? null : 'notifications')}
-            title="通知"
+            title={copy.notifications}
             className="game-topnav__icon-button"
             aria-expanded={notifOpen}
           >
@@ -560,9 +564,9 @@ export function TopNav() {
       <div className="game-world-event" style={{ opacity: bannerVisible ? 1 : 0, transition: 'opacity 0.3s ease' }} role="status">
         <span>{caravanStatus ? '🛒' : '📣'}</span>
         <span className="game-world-event__copy">
-          <span style={{ fontWeight: 600 }}>{caravanStatus ? '靛篷商队' : currentEvent?.title}</span>
+          <span style={{ fontWeight: 600 }}>{caravanStatus ? copy.caravan : localizedEvent?.title}</span>
           <span className="game-world-event__description" style={{ color: '#d2c5c4' }}>
-            {' · '}{caravanStatus ?? currentEvent?.description.slice(0, 80)}
+            {' · '}{caravanStatus ?? localizedEvent?.description.slice(0, 120)}
           </span>
         </span>
         {!caravanStatus && events.length > 1 && (
@@ -573,7 +577,7 @@ export function TopNav() {
         {!caravanStatus && currentEvent && (
           <button
             onClick={() => dismissEvent(currentEvent.id)}
-            aria-label="关闭世界事件"
+            aria-label={copy.closeEvent}
             className="game-dialog-close"
           >✕</button>
         )}
@@ -581,9 +585,9 @@ export function TopNav() {
           <button
             onClick={() => openBridgePanel('market')}
             className="game-dialog-close"
-            aria-label="查看商队集市"
+            aria-label={copy.viewMarket}
             style={{ width: 'auto', padding: '0 8px', fontSize: 11 }}
-          >查看货单</button>
+          >{copy.viewManifest}</button>
         )}
       </div>
     )}

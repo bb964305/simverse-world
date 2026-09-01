@@ -1,8 +1,10 @@
 import { Component, type ReactNode } from 'react'
 import { captureError } from '../services/monitoring'
+import { useLocale } from '../services/locale'
 
 interface Props {
   children: ReactNode
+  en?: boolean
 }
 
 interface State {
@@ -50,7 +52,7 @@ function isDynamicImportFailure(error: Error | null | undefined): boolean {
  * reload-loop the page; the flag is cleared again once the boundary mounts
  * healthily (no error), so a later, unrelated deploy can still self-heal.
  */
-export class ErrorBoundary extends Component<Props, State> {
+class ErrorBoundaryCore extends Component<Props, State> {
   state: State = { error: null }
 
   static getDerivedStateFromError(error: Error): State {
@@ -111,6 +113,7 @@ export class ErrorBoundary extends Component<Props, State> {
   render() {
     if (!this.state.error) return this.props.children
     const staleChunk = isDynamicImportFailure(this.state.error)
+    const en = this.props.en === true
     return (
       <div
         role="alert"
@@ -126,13 +129,13 @@ export class ErrorBoundary extends Component<Props, State> {
         }}
       >
         <div style={{ fontSize: 40 }}>💥</div>
-        <div style={{ fontSize: 18, fontWeight: 600 }}>页面出错了</div>
+        <div style={{ fontSize: 18, fontWeight: 600 }}>{en ? 'Something went wrong' : '页面出错了'}</div>
         <div style={{ color: 'var(--text-muted)', fontSize: 13, maxWidth: 420, textAlign: 'center' }}>
           {this.state.error.message}
         </div>
         {staleChunk && (
           <div style={{ color: 'var(--text-muted)', fontSize: 13, maxWidth: 420, textAlign: 'center' }}>
-            检测到新版本已发布，自动刷新未能解决问题，请手动刷新页面重试。
+            {en ? 'A new version was detected, but automatic recovery failed. Refresh the page and try again.' : '检测到新版本已发布，自动刷新未能解决问题，请手动刷新页面重试。'}
           </div>
         )}
         <div style={{ display: 'flex', gap: 12 }}>
@@ -147,7 +150,7 @@ export class ErrorBoundary extends Component<Props, State> {
               cursor: 'pointer',
             }}
           >
-            重试
+            {en ? 'Retry' : '重试'}
           </button>
           <button
             onClick={this.handleGoHome}
@@ -160,10 +163,15 @@ export class ErrorBoundary extends Component<Props, State> {
               cursor: 'pointer',
             }}
           >
-            回到首页
+            {en ? 'Return to world' : '回到首页'}
           </button>
         </div>
       </div>
     )
   }
+}
+
+export function ErrorBoundary({ children }: { children: ReactNode }) {
+  const en = useLocale((state) => state.locale === 'en')
+  return <ErrorBoundaryCore en={en}>{children}</ErrorBoundaryCore>
 }

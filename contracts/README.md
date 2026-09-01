@@ -8,6 +8,7 @@ Upgradeable, non-economic contracts for wallet-owned Simverse Agents on Robinhoo
 - `scripts/deploy.ts`: deploy a proxy and write a chain deployment record.
 - `scripts/network.ts`: verify the selected Robinhood RPC, chain ID, deployer, balance, and gas price without writing onchain.
 - `scripts/upgrade.ts`: upgrade the existing proxy and update its record.
+- `scripts/migrate-governance.ts`: one-time, fail-closed migration of registry admin/upgrade roles to an immutable timelock controlled by a separate multisig.
 - `scripts/smoke.ts`: perform real JSON-RPC create/train/memory/save writes.
 
 There is deliberately no ERC-20, sale, staking, market, royalty, payment, or withdrawal logic.
@@ -18,3 +19,18 @@ Targets:
 - Robinhood Chain: chain ID `4663`, `npm run deploy:robinhood`
 
 See [`../docs/WEB3_GUIDE.md`](../docs/WEB3_GUIDE.md) for the complete workflow.
+
+Production governance migration requires a deployed multisig and deliberately
+cannot default to the deployer EOA:
+
+```bash
+SIMVERSE_AGENT_REGISTRY=0x... \
+GOVERNANCE_MULTISIG_ADDRESS=0x... \
+GOVERNANCE_DELAY_SECONDS=86400 \
+CONFIRM_GOVERNANCE_MIGRATION=YES \
+npm run governance:robinhood
+```
+
+Optionally set `WORLD_WRITER_ADDRESS` to a dedicated service signer. The
+deployer loses `DEFAULT_ADMIN_ROLE`, `UPGRADER_ROLE`, and `WORLD_WRITER_ROLE`
+after the migration succeeds; this action is intentionally irreversible.

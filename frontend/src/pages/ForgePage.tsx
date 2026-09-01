@@ -8,6 +8,7 @@ import { DeepForge } from '../components/forge/DeepForge'
 import { connectWS } from '../services/ws'
 import { useIsMobile } from '../hooks/useIsMobile'
 import type { ForgeStatusResponse, DeepForgeStatusResponse } from '../services/api'
+import { useLocale } from '../services/locale'
 
 type Mode = 'guided' | 'quick' | 'deep'
 // Mobile only: which half of the (now stacked) split is visible. Both halves
@@ -21,6 +22,8 @@ export function ForgePage() {
   const [mode, setMode] = useState<Mode>('guided')
   const isMobile = useIsMobile()
   const [mobilePane, setMobilePane] = useState<MobilePane>('edit')
+  const locale = useLocale((state) => state.locale)
+  const en = locale === 'en'
 
   // Forge progress now arrives over WS (P1-5). GamePage owns the socket, but
   // navigating to /forge unmounts GamePage and tears it down — so re-establish
@@ -68,7 +71,7 @@ export function ForgePage() {
             Simverse World
           </span>
           <span>/</span>
-          <span style={{ color: 'var(--text-primary)' }}>炼化新居民</span>
+          <span style={{ color: 'var(--text-primary)' }}>{en ? 'Create a resident' : '炼化新居民'}</span>
         </div>
 
         {/* Mode tabs — on mobile the row can't fit three labels at once, so
@@ -83,9 +86,9 @@ export function ForgePage() {
           maxWidth: isMobile ? '100%' : undefined,
         }}>
           {([
-            { key: 'guided', label: '📝 引导式炼化', desc: '5步问答引导' },
-            { key: 'quick',  label: '⚡ 快速炼化',   desc: '粘贴文本即提取' },
-            { key: 'deep',   label: '🧪 深度蒸馏',   desc: '多阶段 AI 管线' },
+            { key: 'guided', label: en ? '📝 Guided forge' : '📝 引导式炼化', desc: en ? 'Five-step interview' : '5步问答引导' },
+            { key: 'quick',  label: en ? '⚡ Quick forge' : '⚡ 快速炼化', desc: en ? 'Extract from pasted text' : '粘贴文本即提取' },
+            { key: 'deep',   label: en ? '🧪 Deep distill' : '🧪 深度蒸馏', desc: en ? 'Multi-stage AI pipeline' : '多阶段 AI 管线' },
           ] as { key: Mode; label: string; desc: string }[]).map((m) => (
             <button
               key={m.key}
@@ -124,8 +127,8 @@ export function ForgePage() {
           flexShrink: 0,
         }}>
           {([
-            { key: 'edit', label: '✏️ 编辑' },
-            { key: 'preview', label: '👁️ 预览' },
+            { key: 'edit', label: en ? '✏️ Edit' : '✏️ 编辑' },
+            { key: 'preview', label: en ? '👁️ Preview' : '👁️ 预览' },
           ] as { key: MobilePane; label: string }[]).map((p) => (
             <button
               key={p.key}

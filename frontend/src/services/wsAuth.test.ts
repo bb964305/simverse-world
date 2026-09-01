@@ -55,7 +55,7 @@ afterEach(() => {
 
 describe('401 disconnects the WebSocket (F9 cross-account socket reuse)', () => {
   it('an apiFetch 401 closes the authenticated socket without scheduling a reconnect', async () => {
-    localStorage.setItem('token', 'token-a')
+    sessionStorage.setItem('token', 'token-a')
     useGameStore.setState({ token: 'token-a' })
     connectWS()
     const ws = FakeWebSocket.instances[0]
@@ -63,7 +63,7 @@ describe('401 disconnects the WebSocket (F9 cross-account socket reuse)', () => 
     expect(ws.readyState).toBe(FakeWebSocket.OPEN)
 
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 401 })))
-    await expect(apiFetch('/me')).rejects.toThrow('Session expired')
+    await expect(apiFetch('/me')).rejects.toThrow('登录会话已过期')
 
     // Deliberate disconnect semantics: socket closed, no reconnect timer, no
     // 'reconnecting' banner, token cleared by the store logout.

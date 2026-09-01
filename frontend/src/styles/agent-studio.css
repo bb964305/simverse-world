@@ -55,3 +55,25 @@
 .agent-passports a { color: var(--accent-blue); font-size: 12px; }
 @media (max-width: 860px) { .agent-studio__status, .agent-studio__grid, .agent-passports__list { grid-template-columns: 1fr; } .agent-studio__chain-map > div { grid-template-columns: repeat(2, 1fr); } .agent-studio__chain-map article:nth-child(2) { border-right: 1px solid var(--border); } .agent-studio__status > div { border-right: 0; border-bottom: 1px solid var(--border); } .agent-studio__status > div:last-child { border-bottom: 0; } }
 @media (max-width: 560px) { .agent-studio { width: min(100% - 24px, 1180px); padding-top: calc(var(--nav-height) + 30px); } .agent-studio__chain-map > div { grid-template-columns: 1fr; } .agent-studio__chain-map article { border-right: 1px solid var(--border); } .agent-studio-card__row { grid-template-columns: 1fr; } .agent-studio-card__actions { flex-direction: column; } }
+.agent-runtime { margin-top: 24px; }
+.agent-runtime__heading { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; }
+.agent-runtime__heading > div { max-width: 760px; }
+.agent-runtime__empty, .agent-runtime__error { margin: 18px 0 0; padding: 14px; border: 1px solid var(--border); background: var(--bg-input); }
+.agent-runtime__error { color: #fb7185; border-color: rgba(251,113,133,.4); }
+.agent-runtime__item { margin-top: 18px; padding: 18px; border: 1px solid var(--border); display: grid; grid-template-columns: minmax(180px,1fr) 2fr auto; gap: 20px; align-items: center; }
+.agent-runtime__item > div { display: grid; gap: 6px; }
+.agent-runtime__item > div span { color: var(--text-muted); font-size: 12px; }
+.agent-runtime__item dl { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; margin: 0; }
+.agent-runtime__item dl div { display: grid; gap: 4px; }
+.agent-runtime__item dt { color: var(--text-muted); font-size: 10px; text-transform: uppercase; }
+.agent-runtime__item dd { margin: 0; font-weight: 700; }
+.agent-runtime__item dd[data-running="true"] { color: #a3ff12; }
+.agent-runtime__form { margin-top: 18px; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; }
+.agent-runtime__form label { display: grid; gap: 6px; }
+.agent-runtime__form label span, .agent-runtime__form small { color: var(--text-muted); font-size: 11px; }
+.agent-runtime__form input { width: 100%; box-sizing: border-box; background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border); padding: 11px 12px; }
+.agent-runtime__form button { align-self: end; min-height: 42px; }
+@media (max-width: 760px) {
+  .agent-runtime__heading, .agent-runtime__item { display: grid; grid-template-columns: 1fr; }
+  .agent-runtime__item dl, .agent-runtime__form { grid-template-columns: 1fr; }
+}

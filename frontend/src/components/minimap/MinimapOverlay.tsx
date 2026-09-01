@@ -5,6 +5,7 @@ import type { DistrictKey } from './districtZonesData'
 import { ResidentPanel } from './ResidentPanel'
 import { bridge } from '../../game/phaserBridge'
 import { MAP_TILES_H, MAP_TILES_W, mapHeightForWidth } from '../../game/worldGeometry'
+import { useLocale } from '../../services/locale'
 
 const SMALL_W = 180
 const SMALL_H = mapHeightForWidth(SMALL_W)
@@ -17,6 +18,7 @@ function getExpandedMapWidth(): number {
 }
 
 export function MinimapOverlay() {
+  const locale = useLocale((state) => state.locale)
   const [selectedDistrict, setSelectedDistrict] = useState<DistrictKey | null>(null)
   const [expanded, setExpanded] = useState(false)
   const [expandedMapWidth, setExpandedMapWidth] = useState(getExpandedMapWidth)
@@ -120,7 +122,7 @@ export function MinimapOverlay() {
             <button
               className="game-minimap__close"
               onClick={() => { setExpanded(false); setSelectedDistrict(null) }}
-              aria-label="关闭大地图"
+              aria-label={locale === 'en' ? 'Close expanded map' : '关闭大地图'}
             >
               ✕
             </button>

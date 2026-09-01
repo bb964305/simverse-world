@@ -33,7 +33,7 @@ interface PresetCard {
   tags?: string[]
 }
 
-type Phase = 'loading' | 'resident' | 'passport' | 'ready'
+type Phase = 'loading' | 'resident' | 'passport' | 'ready' | 'error'
 
 const COPY = {
   en: {
@@ -125,7 +125,8 @@ export function OnboardingPage() {
       setPhase('resident')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : copy.defaultError)
-      setPhase('resident')
+      // A failed identity check must never expose resident creation or minting.
+      setPhase('error')
     }
   }, [copy.defaultError, navigate, next, token])
 
@@ -188,6 +189,8 @@ export function OnboardingPage() {
         <ol className="onboarding-progress">{copy.steps.map((step, index) => <li data-state={index + 1 < completedStep ? 'done' : index + 1 === completedStep ? 'active' : 'next'} key={step}><span>{index + 1 < completedStep ? '✓' : `0${index + 1}`}</span><strong>{step}</strong></li>)}</ol>
 
         {phase === 'loading' && <section className="onboarding-panel onboarding-loading"><BrandLogo size={86} /><p>{copy.loading}</p></section>}
+
+        {phase === 'error' && <section className="onboarding-panel onboarding-loading"><BrandLogo size={86} /><p>{copy.defaultError}</p></section>}
 
         {phase === 'resident' && <section className="onboarding-panel"><div className="onboarding-panel__heading"><p>STEP 02 / RESIDENT</p><h2>{copy.residentTitle}</h2><span>{copy.residentLead}</span></div><label className="onboarding-name"><span>{copy.name}</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder={copy.namePlaceholder} maxLength={40} autoComplete="nickname" /></label><div className="onboarding-visual-label">{copy.visual}</div><div className="onboarding-presets">{presets.slice(0, 8).map((preset) => <button type="button" data-selected={selectedPreset?.slug === preset.slug} onClick={() => setSelectedSlug(preset.slug)} key={preset.slug}><span className="onboarding-sprite"><i style={{ backgroundImage: `url(${staticResidentSpriteUrl(preset.sprite_key)})` }} /></span><strong>{preset.name}</strong><small>{preset.vibe || preset.district}{preset.tags?.[0] ? ` · ${preset.tags[0]}` : ''}</small><em>{selectedPreset?.slug === preset.slug ? copy.selected : ''}</em></button>)}</div><div className="onboarding-actions"><button className="onboarding-primary" type="button" onClick={() => void createResident()} disabled={!selectedPreset || busy !== null}>{busy === 'resident' ? copy.creating : copy.create}</button><button className="onboarding-secondary" type="button" onClick={() => void createStarter()} disabled={busy !== null}>{busy === 'starter' ? copy.starterBusy : copy.starter}</button></div></section>}
 

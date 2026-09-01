@@ -21,6 +21,12 @@ Object.defineProperty(globalThis, 'sessionStorage', {
   value: new MemoryStorage(),
 })
 
+// Most legacy component assertions exercise the Chinese branch explicitly;
+// individual i18n/default-English tests override the Zustand locale. Keeping
+// this in the test harness avoids making production default-language behavior
+// depend on the order in which test files happen to import the locale store.
+localStorage.setItem('simverse-locale-v2', 'zh-CN')
+
 // jsdom does not implement matchMedia. Install a benign default (matches:false,
 // no-op listeners) so components/hooks that probe media queries degrade to the
 // "no preference / desktop" branch. Individual tests override via vi.stubGlobal.

@@ -8,6 +8,7 @@ import {
   pollForgeTerminalStatus,
   recoverForgeTerminalStatus,
 } from './terminalRecovery'
+import { useLocale } from '../../services/locale'
 
 interface QuickForgeProps {
   onStateUpdate: (state: ForgeStatusResponse) => void
@@ -22,6 +23,14 @@ const GENERATION_STAGES = [
   '评估质量 & 分配街区...',
 ]
 
+const GENERATION_STAGES_EN = [
+  'Analyzing the person’s history…',
+  'Extracting abilities…',
+  'Building a personality model…',
+  'Distilling the soul core…',
+  'Assessing quality and assigning a district…',
+]
+
 const PLACEHOLDER = `在这里粘贴任何关于这个人的文字，例如：
 
 • 个人简历 / LinkedIn 介绍
@@ -33,7 +42,19 @@ const PLACEHOLDER = `在这里粘贴任何关于这个人的文字，例如：
 系统会自动从文字中抽取：能力、人格、价值观。
 文字越丰富，炼化结果越精准。`
 
+const PLACEHOLDER_EN = `Paste any text about this person, such as:
+
+• A résumé or LinkedIn introduction
+• Chat excerpts
+• Other people’s observations
+• An interview or article
+• Your own character description
+
+The system extracts abilities, personality, and values. Richer source material produces a more faithful resident.`
+
 export function QuickForge({ onStateUpdate, onComplete }: QuickForgeProps) {
+  const locale = useLocale((state) => state.locale)
+  const en = locale === 'en'
   const [name, setName] = useState('')
   const [rawText, setRawText] = useState('')
   const [isGenerating, setIsGenerating] = useState(false)
@@ -108,7 +129,7 @@ export function QuickForge({ onStateUpdate, onComplete }: QuickForgeProps) {
         stopWatching()
         setIsGenerating(false)
         setProgress('')
-        setError(status.error ?? '生成失败，请重试')
+          setError(status.error ?? (en ? 'Generation failed. Please try again.' : '生成失败，请重试'))
         return true
       }
       return false
@@ -121,7 +142,7 @@ export function QuickForge({ onStateUpdate, onComplete }: QuickForgeProps) {
       stopWatching()
       setIsGenerating(false)
       setProgress('')
-      setError(wsFallbackError ?? FORGE_TERMINAL_RECOVERY_MESSAGE)
+      setError(wsFallbackError ?? (en ? 'The final result could not be recovered. Please try again.' : FORGE_TERMINAL_RECOVERY_MESSAGE))
     }
 
     const recoverTerminal = () => {
@@ -140,8 +161,9 @@ export function QuickForge({ onStateUpdate, onComplete }: QuickForgeProps) {
     unsubRef.current = onWSMessage((data) => {
       if (data.forge_id !== forgeId) return
       if (data.type === 'forge_progress') {
-        if (stageRef.current < GENERATION_STAGES.length) {
-          setProgress(GENERATION_STAGES[stageRef.current])
+        const stages = en ? GENERATION_STAGES_EN : GENERATION_STAGES
+        if (stageRef.current < stages.length) {
+          setProgress(stages[stageRef.current])
           stageRef.current++
         }
       } else if (data.type === 'forge_done' || data.type === 'forge_error') {
@@ -161,16 +183,16 @@ export function QuickForge({ onStateUpdate, onComplete }: QuickForgeProps) {
     ).then(applyStatus).catch((pollError: unknown) => {
       if (!isForgeRecoveryAbort(pollError)) showRecoveryFailure()
     })
-  }, [onStateUpdate, onComplete])
+  }, [en, onStateUpdate, onComplete])
 
   const handleSubmit = async () => {
     if (!name.trim() || !rawText.trim()) {
-      setError('请填写姓名和文字内容')
+      setError(en ? 'Enter a name and source text' : '请填写姓名和文字内容')
       return
     }
     setError(null)
     setIsGenerating(true)
-    setProgress('正在调用 AI 提取（约 20-60 秒）...')
+    setProgress(en ? 'Calling the AI extraction pipeline (about 20–60 seconds)…' : '正在调用 AI 提取（约 20-60 秒）…')
 
     try {
       // Submit — returns immediately with forge_id + "generating"
@@ -182,7 +204,7 @@ export function QuickForge({ onStateUpdate, onComplete }: QuickForgeProps) {
       subscribeStatus(forgeId)
     } catch (e) {
       setIsGenerating(false)
-      setError(e instanceof Error ? e.message : '请求失败')
+      setError(e instanceof Error ? e.message : (en ? 'Request failed' : '请求失败'))
     }
   }
 
@@ -194,9 +216,9 @@ export function QuickForge({ onStateUpdate, onComplete }: QuickForgeProps) {
         borderBottom: '1px solid var(--border)',
         flexShrink: 0,
       }}>
-        <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 2 }}>⚡ 快速提取</div>
+        <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 2 }}>⚡ {en ? 'Quick extraction' : '快速提取'}</div>
         <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-          粘贴任意文字 → 自动提炼三层 Skill
+          {en ? 'Paste source text → automatically distill a three-layer Skill' : '粘贴任意文字 → 自动提炼三层 Skill'}
         </div>
       </div>
 
@@ -206,12 +228,12 @@ export function QuickForge({ onStateUpdate, onComplete }: QuickForgeProps) {
         {/* Name */}
         <div style={{ marginBottom: 16 }}>
           <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'block', marginBottom: 6, fontWeight: 600 }}>
-            居民姓名 *
+            {en ? 'Resident name' : '居民姓名'} *
           </label>
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="例如：张三 / 埃隆·马斯克 / 诸葛亮"
+            placeholder={en ? 'Example: Ada Lovelace / an original character' : '例如：张三 / 埃隆·马斯克 / 诸葛亮'}
             disabled={isGenerating || isDone}
             style={{
               width: '100%', boxSizing: 'border-box',
@@ -225,12 +247,12 @@ export function QuickForge({ onStateUpdate, onComplete }: QuickForgeProps) {
         {/* Raw text */}
         <div style={{ marginBottom: 16 }}>
           <label style={{ fontSize: 12, color: 'var(--text-muted)', display: 'block', marginBottom: 6, fontWeight: 600 }}>
-            人物文字材料 *
+            {en ? 'Source material' : '人物文字材料'} *
           </label>
           <textarea
             value={rawText}
             onChange={(e) => setRawText(e.target.value)}
-            placeholder={PLACEHOLDER}
+            placeholder={en ? PLACEHOLDER_EN : PLACEHOLDER}
             disabled={isGenerating || isDone}
             rows={14}
             style={{
@@ -243,7 +265,7 @@ export function QuickForge({ onStateUpdate, onComplete }: QuickForgeProps) {
             }}
           />
           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, textAlign: 'right' }}>
-            {rawText.length} 字
+            {rawText.length} {en ? 'characters' : '字'}
           </div>
         </div>
 
@@ -254,8 +276,9 @@ export function QuickForge({ onStateUpdate, onComplete }: QuickForgeProps) {
             borderRadius: 8, padding: '12px 14px', marginBottom: 16,
             fontSize: 12, color: '#0ea5e9', lineHeight: 1.7,
           }}>
-            💡 <strong>提示：</strong>文字越丰富，结果越好。100字以上效果明显，500字以上效果极佳。
-            中英文都支持。
+            💡 <strong>{en ? 'Tip:' : '提示：'}</strong>{en
+              ? ' Richer material yields better results. 100+ characters is useful; 500+ is ideal. Chinese and English are supported.'
+              : '文字越丰富，结果越好。100字以上效果明显，500字以上效果极佳。中英文都支持。'}
           </div>
         )}
 
@@ -284,7 +307,7 @@ export function QuickForge({ onStateUpdate, onComplete }: QuickForgeProps) {
               animation: 'spin 0.8s linear infinite',
             }} />
             <div>
-              <div style={{ fontWeight: 600, fontSize: 13 }}>正在炼化中...</div>
+              <div style={{ fontWeight: 600, fontSize: 13 }}>{en ? 'Forging resident…' : '正在炼化中…'}</div>
               <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>{progress}</div>
             </div>
           </div>
@@ -297,15 +320,17 @@ export function QuickForge({ onStateUpdate, onComplete }: QuickForgeProps) {
             borderRadius: 10, padding: '16px 18px',
           }}>
             <div style={{ fontWeight: 700, color: 'var(--accent-green)', fontSize: 15, marginBottom: 6 }}>
-              ✅ 炼化完成！
+              ✅ {en ? 'Forge complete!' : '炼化完成！'}
             </div>
             <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-              <strong>{result.name}</strong> 已入住{' '}
-              {({ engineering: '工程街区', product: '产品街区', academy: '学院区', free: '自由区' })[result.district] ?? result.district}
+              <strong>{result.name}</strong> {en ? 'has moved into' : '已入住'}{' '}
+              {(en
+                ? ({ engineering: 'Engineering District', product: 'Product District', academy: 'Academy District', free: 'Free District' })
+                : ({ engineering: '工程街区', product: '产品街区', academy: '学院区', free: '自由区' }))[result.district] ?? result.district}
               <br />
-              质量评级：{'⭐'.repeat(result.star_rating)}
+              {en ? 'Quality rating' : '质量评级'}: {'⭐'.repeat(result.star_rating)}
               <br />
-              你获得了 <strong style={{ color: 'var(--accent-green)' }}>50 🪙</strong> 奖励！
+              {en ? 'You earned' : '你获得了'} <strong style={{ color: 'var(--accent-green)' }}>50 SC</strong> {en ? 'in offchain game credits.' : '链下游戏积分奖励！'}
             </div>
             <button
               onClick={() => onComplete(result.resident_id ?? '')}
@@ -315,7 +340,7 @@ export function QuickForge({ onStateUpdate, onComplete }: QuickForgeProps) {
                 fontSize: 13, fontWeight: 700, cursor: 'pointer', width: '100%',
               }}
             >
-              前往城市查看新居民 →
+              {en ? 'View the new resident in town →' : '前往城市查看新居民 →'}
             </button>
           </div>
         )}
@@ -343,7 +368,7 @@ export function QuickForge({ onStateUpdate, onComplete }: QuickForgeProps) {
               transition: 'background 0.2s',
             }}
           >
-            {isGenerating ? '炼化中...' : '⚡ 立即提取 Skill'}
+            {isGenerating ? (en ? 'Forging…' : '炼化中…') : (en ? '⚡ Extract Skill now' : '⚡ 立即提取 Skill')}
           </button>
         </div>
       )}

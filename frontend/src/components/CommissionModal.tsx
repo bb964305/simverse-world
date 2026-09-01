@@ -1,11 +1,16 @@
 import { useEffect, useState, useCallback } from 'react'
 import { getCommissions, acceptCommission, abandonCommission, type CommissionData } from '../services/api'
 import { bridge } from '../game/phaserBridge'
+import { useLocale } from '../services/locale'
 
-const KIND_LABEL: Record<string, string> = {
-  deliver_message: '带个话',
-  chat_topic: '聊个天',
-  visit_location: '去个地方',
+const KIND_LABEL: Record<string, readonly [string, string]> = {
+  deliver_message: ['Deliver message', '带个话'],
+  chat_topic: ['Have a conversation', '聊个天'],
+  visit_location: ['Visit a place', '去个地方'],
+}
+
+const STATUS_LABEL: Record<string, readonly [string, string]> = {
+  open: ['Open', '待接取'], accepted: ['Accepted', '已接取'], completed: ['Complete', '已完成'], abandoned: ['Abandoned', '已放弃'],
 }
 
 interface Props {
@@ -13,6 +18,9 @@ interface Props {
 }
 
 export function CommissionModal({ onClose }: Props) {
+  const locale = useLocale((state) => state.locale)
+  const isEn = locale === 'en'
+  const index = isEn ? 0 : 1
   const [tab, setTab] = useState<'open' | 'mine'>('open')
   const [items, setItems] = useState<CommissionData[]>([])
   const [loading, setLoading] = useState(true)
@@ -35,7 +43,9 @@ export function CommissionModal({ onClose }: Props) {
       bridge.emit('commissions:changed')
       load()
     } catch (e) {
-      setError(e instanceof Error && e.message.includes('409') ? '手慢了，已被别人接走' : '接取失败')
+      setError(e instanceof Error && e.message.includes('409')
+        ? (isEn ? 'Another player accepted this first' : '手慢了，已被别人接走')
+        : (isEn ? 'Could not accept commission' : '接取失败'))
     }
   }
 
@@ -54,42 +64,42 @@ export function CommissionModal({ onClose }: Props) {
         style={{ width: 'min(560px, calc(100vw - 32px))', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
       >
         <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)', display: 'flex', gap: 12, alignItems: 'center' }}>
-          <span id="commission-dialog-title" style={{ fontWeight: 700, fontSize: 15 }}>🗒️ 委托板</span>
+          <span id="commission-dialog-title" style={{ fontWeight: 700, fontSize: 15 }}>🗒️ {isEn ? 'Commission Board' : '委托板'}</span>
           <div style={{ display: 'flex', gap: 4, marginLeft: 8 }}>
             {(['open', 'mine'] as const).map((t) => (
               <button key={t} onClick={() => setTab(t)} style={{
                 background: tab === t ? 'var(--accent-red)' : 'transparent', border: 'none',
                 color: tab === t ? 'white' : 'var(--text-muted)', padding: '4px 12px',
                 borderRadius: 6, fontSize: 12, cursor: 'pointer',
-              }}>{t === 'open' ? '可接取' : '我接的'}</button>
+              }}>{t === 'open' ? (isEn ? 'Available' : '可接取') : (isEn ? 'Mine' : '我接的')}</button>
             ))}
           </div>
-          <button autoFocus onClick={onClose} className="game-dialog-close" style={{ marginLeft: 'auto' }} aria-label="关闭委托板">✕</button>
+          <button autoFocus onClick={onClose} className="game-dialog-close" style={{ marginLeft: 'auto' }} aria-label={isEn ? 'Close commission board' : '关闭委托板'}>✕</button>
         </div>
         {error && <div style={{ padding: '8px 20px', color: 'var(--accent-red)', fontSize: 12 }}>{error}</div>}
         <div style={{ overflowY: 'auto', flex: 1, padding: '8px 0' }}>
           {loading ? (
-            <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)' }}>加载中…</div>
+            <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)' }}>{isEn ? 'Loading…' : '加载中…'}</div>
           ) : items.length === 0 ? (
-            <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>暂无委托</div>
+            <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>{isEn ? 'No commissions' : '暂无委托'}</div>
           ) : items.map((c) => (
             <div key={c.id} style={{ padding: '12px 20px', borderBottom: '1px solid var(--border)', display: 'flex', gap: 12, alignItems: 'center' }}>
               <div style={{ minWidth: 0, flex: 1 }}>
                 <div style={{ fontSize: 13, fontWeight: 600 }}>{c.title}</div>
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
-                  {KIND_LABEL[c.kind] ?? c.kind} · 奖励 {c.reward_sc} 🪙 · {c.status}
+                  {KIND_LABEL[c.kind]?.[index] ?? c.kind} · {isEn ? 'Reward' : '奖励'} {c.reward_sc} SC · {STATUS_LABEL[c.status]?.[index] ?? c.status}
                 </div>
               </div>
               {tab === 'open' ? (
                 <button onClick={() => void onAccept(c.id)} style={{
                   background: 'var(--accent-green)', color: '#000', border: 'none',
                   padding: '6px 14px', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: 'pointer',
-                }}>接取</button>
+                }}>{isEn ? 'Accept' : '接取'}</button>
               ) : c.status === 'accepted' ? (
                 <button onClick={() => void onAbandon(c.id)} style={{
                   background: 'var(--bg-input)', color: 'var(--text-muted)', border: 'none',
                   padding: '6px 14px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
-                }}>放弃</button>
+                }}>{isEn ? 'Abandon' : '放弃'}</button>
               ) : null}
             </div>
           ))}

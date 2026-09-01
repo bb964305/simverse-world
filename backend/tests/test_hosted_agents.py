@@ -25,6 +25,7 @@ from app.models.hosted_agent import (
 )
 from app.models.resident import Resident
 from app.models.user import User
+from app.models.web3_agent_passport import Web3AgentPassport
 from app.routers.agent_players import _terminalize_hosted_npc_failure
 from app.services.auth_service import create_token
 from app.services.agent_player_service import (
@@ -118,6 +119,46 @@ def _assert_write_only_hosted_projection(payload, secret: str) -> None:
     assert secret not in encoded
     assert '"api_key"' not in encoded
     assert '"secret_envelope"' not in encoded
+
+
+@pytest.mark.anyio
+async def test_confirmed_passport_owner_can_access_personal_hosted_runtime(
+    client, db_session, hosted_settings
+):
+    user = User(
+        id=str(uuid.uuid4()), name="Wallet owner",
+        email=f"wallet-owner-{uuid.uuid4()}@test.com",
+        wallet_address="0x1111111111111111111111111111111111111111",
+        is_admin=False, is_banned=False,
+    )
+    db_session.add(user)
+    await db_session.flush()
+    resident = Resident(
+        id=str(uuid.uuid4()), slug=f"wallet-resident-{uuid.uuid4()}",
+        name="Wallet resident", creator_id=user.id,
+    )
+    db_session.add(resident)
+    await db_session.flush()
+    user.player_resident_id = resident.id
+    db_session.add(Web3AgentPassport(
+        user_id=user.id,
+        resident_id=resident.id,
+        chain_id=4663,
+        registry_address="0x2222222222222222222222222222222222222222",
+        agent_id="1",
+        resident_key="0x" + "33" * 32,
+        registration_tx_hash="0x" + "44" * 32,
+        metadata_uri="https://simverse.example/passport/1",
+        metadata_hash="0x" + "55" * 32,
+    ))
+    await db_session.commit()
+
+    response = await client.get(
+        "/admin/hosted-agents",
+        headers={"Authorization": f"Bearer {create_token(user.id)}"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"items": [], "total": 0}
 
 
 async def _register_test_agent(client, name: str):

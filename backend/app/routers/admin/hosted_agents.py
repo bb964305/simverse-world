@@ -17,8 +17,9 @@ from app.models.agent_player import AgentPlayer
 from app.models.hosted_agent import HostedAgentController
 from app.models.resident import Resident
 from app.models.user import User
+from app.models.web3_agent_passport import Web3AgentPassport
 from app.rate_limit import limiter
-from app.routers.admin.middleware import require_admin
+from app.services.auth_service import get_current_user
 from app.services.hosted_agent_provider import (
     HostedProviderError,
     hosted_identity_token_reservation,
@@ -43,6 +44,39 @@ from app.services.resident_placement import SPRITE_KEYS
 
 router = APIRouter(prefix="/hosted-agents", tags=["admin-hosted-agents"])
 MAX_HOSTED_AGENT_CREATE_BODY_BYTES = 16 * 1024
+
+
+async def require_hosted_agent_owner(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """Allow admins and wallet users with a confirmed onchain Passport.
+
+    Every controller query remains scoped to ``owner_user_id`` below; this
+    dependency only opens the existing self-service runtime to its owner.
+    """
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    user = await get_current_user(db, auth.removeprefix("Bearer "))
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    if user.is_banned:
+        raise HTTPException(status_code=403, detail="Account is banned")
+    if user.is_admin:
+        return user
+    if not user.wallet_address:
+        raise HTTPException(status_code=403, detail="Wallet identity required")
+    passport_id = (
+        await db.execute(
+            select(Web3AgentPassport.id)
+            .where(Web3AgentPassport.user_id == user.id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if passport_id is None:
+        raise HTTPException(status_code=403, detail="Confirmed Agent Passport required")
+    return user
 
 
 class HostedAgentCreate(BaseModel):
@@ -191,7 +225,7 @@ def _secret_reflected_in_public(secret: str, *values: Any) -> bool:
 @limiter.limit("5/minute")
 async def create_hosted_agent(
     request: Request,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_hosted_agent_owner),
     body: HostedAgentCreate = Depends(_parse_create_body),
     db: AsyncSession = Depends(get_db),
 ):
@@ -265,7 +299,7 @@ async def create_hosted_agent(
 @router.get("")
 async def list_hosted_agents(
     request: Request,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_hosted_agent_owner),
     db: AsyncSession = Depends(get_db),
 ):
     _require_enabled()
@@ -285,7 +319,7 @@ async def get_hosted_agent_state(
     controller_id: str,
     request: Request,
     after_log_seq: int = Query(default=0, ge=0),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_hosted_agent_owner),
     db: AsyncSession = Depends(get_db),
 ):
     _require_enabled()
@@ -304,7 +338,7 @@ async def get_hosted_agent_state(
 async def get_hosted_agent(
     controller_id: str,
     request: Request,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_hosted_agent_owner),
     db: AsyncSession = Depends(get_db),
 ):
     _require_enabled()
@@ -321,7 +355,7 @@ async def get_hosted_agent(
 async def patch_hosted_agent(
     controller_id: str,
     request: Request,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_hosted_agent_owner),
     body: HostedAgentPatch = Depends(_parse_patch_body),
     db: AsyncSession = Depends(get_db),
 ):
@@ -494,7 +528,7 @@ async def patch_hosted_agent(
 async def start_hosted_agent(
     controller_id: str,
     request: Request,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_hosted_agent_owner),
     db: AsyncSession = Depends(get_db),
 ):
     _require_enabled()
@@ -515,7 +549,7 @@ async def start_hosted_agent(
 async def stop_hosted_agent(
     controller_id: str,
     request: Request,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_hosted_agent_owner),
     db: AsyncSession = Depends(get_db),
 ):
     _require_enabled()

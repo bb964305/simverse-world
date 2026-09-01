@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react'
 import { LOCATIONS, MAP_TILES_W, MAP_TILES_H, inclusiveBoundsToTileRect, type LocationKey } from './districtZonesData'
 import { bridge } from '../../game/phaserBridge'
 import { getWorldLocations, type WorldLocation } from '../../services/api'
+import { useLocale } from '../../services/locale'
 
 function tileToMinimap(tileX: number, tileY: number, tileW: number, tileH: number, mapW: number, mapH: number) {
   return {
@@ -27,6 +28,7 @@ interface Props {
 const STATIC_SLUGS = new Set<string>(LOCATIONS.map((l) => l.key))
 
 export function DistrictZones({ selected, onSelect, mapWidth = 180, mapHeight = 130 }: Props) {
+  const locale = useLocale((state) => state.locale)
   const expanded = mapWidth > 200
   const [dynamic, setDynamic] = useState<WorldLocation[]>([])
 
@@ -56,7 +58,7 @@ export function DistrictZones({ selected, onSelect, mapWidth = 180, mapHeight = 
           <div
             key={d.key}
             onClick={(e) => { e.stopPropagation(); onSelect(d.key) }}
-            title={d.label}
+            title={locale === 'en' ? d.labelEn : d.label}
             style={{
               position: 'absolute',
               left: pos.left,
@@ -89,7 +91,7 @@ export function DistrictZones({ selected, onSelect, mapWidth = 180, mapHeight = 
         return (
           <div
             key={`dyn-${loc.slug}`}
-            title={`${loc.name ?? loc.slug}（新增）`}
+            title={`${loc.name ?? loc.slug} (${locale === 'en' ? 'new' : '新增'})`}
             style={{
               position: 'absolute',
               left: pos.left,

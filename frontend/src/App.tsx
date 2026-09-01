@@ -10,6 +10,7 @@ import { EncounterCard } from './components/EncounterCard'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { checkOnboarding, getMe, type MeResponse } from './services/api'
 import { loginPath, safeAuthReturnTo } from './services/authReturnTo'
+import { useLocale } from './services/locale'
 
 // Heavy pages are code-split so the login/first-load bundle stays lean:
 // GamePage pulls in Phaser (~1.4MB), ProfilePage pulls in @uiw/react-md-editor
@@ -104,8 +105,15 @@ function HomeRoute({ requireAuth = false }: { requireAuth?: boolean }) {
     let cancelled = false
     checkOnboarding(token)
       .then((result) => {
-        const missingPassport = !result.passport
-        if (!cancelled) setChecked({ token, needsOnboarding: result.needs_onboarding || missingPassport })
+        const passportMatchesResident = Boolean(
+          result.passport &&
+          result.player_resident_id &&
+          result.passport.resident_id === result.player_resident_id,
+        )
+        if (!cancelled) setChecked({
+          token,
+          needsOnboarding: result.needs_onboarding || !passportMatchesResident,
+        })
       })
       .catch(() => {
         if (!cancelled) setChecked({ token, needsOnboarding: true })
@@ -132,6 +140,7 @@ function LoginRoute() {
 }
 
 function PageFallback() {
+  const locale = useLocale((state) => state.locale)
   return (
     <div
       style={{
@@ -143,7 +152,7 @@ function PageFallback() {
         background: 'var(--bg-page)',
       }}
     >
-      加载中…
+      {locale === 'en' ? 'Loading…' : '加载中…'}
     </div>
   )
 }

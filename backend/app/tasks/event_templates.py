@@ -28,12 +28,28 @@ HOLIDAYS: dict[tuple[int, int], tuple[str, str, dict]] = {
     (12, 25): ("冬日庆典", "初雪落下，小镇点起暖光，居民们围炉夜话。", {"ambience": "cozy"}),
 }
 
+HOLIDAY_EN: dict[str, tuple[str, str]] = {
+    "元旦": ("New Year's Day", "A new year begins as the town lights up and residents exchange greetings."),
+    "情人节": ("Valentine's Day", "There is warmth in the air, and residents speak more freely about love and companionship."),
+    "儿童节": ("Children's Day", "The town rediscovers its playful side through childhood games."),
+    "丰收节": ("Harvest Festival", "Residents share the harvest with gratitude and good cheer."),
+    "万圣节": ("Halloween", "Jack-o’-lanterns glow while masked residents trade tricks and treats."),
+    "冬日庆典": ("Winter Festival", "The first snow falls as warm lights and fireside stories fill the town."),
+}
+
 NEWS_POOL: list[tuple[str, str]] = [
     ("神秘旅人", "一位神秘的旅人经过小镇，带来了远方的传闻。"),
     ("流星雨", "昨夜有流星划过，居民们都在讨论许了什么愿。"),
     ("集市日", "广场上办起了临时集市，热闹非凡。"),
     ("旧物展", "图书馆展出了一批小镇的旧物，勾起许多回忆。"),
 ]
+
+NEWS_EN: dict[str, tuple[str, str]] = {
+    "神秘旅人": ("Mysterious Traveler", "A traveler has passed through town carrying rumors from distant places."),
+    "流星雨": ("Meteor Shower", "Meteors crossed the sky last night, and everyone is comparing wishes."),
+    "集市日": ("Market Day", "Stalls are open and the market is alive with trade and conversation."),
+    "旧物展": ("Town Relics Exhibition", "Old objects on display at the library are stirring long-held memories."),
+}
 
 # market_day_venue="market_hall" swaps the market-day texts/venue; the defaults
 # above and in ensure_scheduled_events stay byte-identical to the plaza era.
@@ -91,8 +107,10 @@ async def ensure_scheduled_events(db, today: date_type | None = None) -> int:
         start = _world_day_real_start(day)
         if await _exists(db, title, start):
             continue
+        title_en, description_en = HOLIDAY_EN[title]
         db.add(WorldEvent(
-            type="festival", title=title, description=desc, payload_json=payload,
+            type="festival", title=title, description=desc,
+            payload_json={**payload, "title_en": title_en, "description_en": description_en},
             starts_at=start, ends_at=start + timedelta(days=HOLIDAY_WINDOW_DAYS), is_active=False,
         ))
         created += 1
@@ -122,7 +140,11 @@ async def ensure_scheduled_events(db, today: date_type | None = None) -> int:
         db.add(WorldEvent(
             type="festival", title=title,
             description=market_description,
-            payload_json={"market_day": True, "location_id": market_location_id, "ambience": "market"},
+            payload_json={
+                "market_day": True, "location_id": market_location_id, "ambience": "market",
+                "title_en": "Market Day",
+                "description_en": "The Market Hall is open for a full day of stalls, bargaining, and conversation.",
+            },
             starts_at=start, ends_at=start + timedelta(days=1), is_active=False,
         ))
         created += 1
@@ -134,8 +156,10 @@ async def ensure_scheduled_events(db, today: date_type | None = None) -> int:
             desc = _MARKET_HALL_NEWS_DESCRIPTION
         start = _world_day_real_start(today)
         if not await _exists(db, title, start):
+            title_en, description_en = NEWS_EN[title]
             db.add(WorldEvent(
-                type="news", title=title, description=desc, payload_json={},
+                type="news", title=title, description=desc,
+                payload_json={"title_en": title_en, "description_en": description_en},
                 starts_at=start, ends_at=start + timedelta(days=1), is_active=False,
             ))
             created += 1

@@ -1,5 +1,6 @@
 import { getCurrentCaravan, type CaravanPhase, type CaravanState } from './api/caravan'
 import { parseUTC } from '../utils/time'
+import type { Locale } from './locale'
 
 const PHASES = new Set<CaravanPhase>([
   'scheduled', 'waiting', 'inbound', 'trading', 'outbound', 'departed', 'cancelled',
@@ -220,8 +221,15 @@ export function caravanRenderMode(state: CaravanState | null): CaravanRenderMode
   return state.phase === 'trading' ? 'stall' : 'convoy'
 }
 
-export function caravanBannerText(state: CaravanState | null): string | null {
+export function caravanBannerText(state: CaravanState | null, locale: Locale = 'zh-CN'): string | null {
   if (!state?.visible) return null
+  if (locale === 'en') {
+    if (state.phase === 'inbound') return 'The caravan is entering through the south gate'
+    if (state.phase === 'trading') return 'The caravan is trading in the Market Hall'
+    if (state.phase === 'outbound') return 'Trading has ended and the caravan is leaving town'
+    if (state.phase === 'waiting') return 'The caravan is waiting outside the south gate'
+    return null
+  }
   if (state.phase === 'inbound') return '远方商队正从南门进镇'
   if (state.phase === 'trading') return '商队已在集市大厅开摊'
   if (state.phase === 'outbound') return '集市散场，商队正在离镇'

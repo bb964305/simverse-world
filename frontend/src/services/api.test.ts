@@ -29,7 +29,7 @@ describe('apiFetch', () => {
   })
 
   it('attaches Bearer token from localStorage when present', async () => {
-    localStorage.setItem('token', 'tok-abc')
+    sessionStorage.setItem('token', 'tok-abc')
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({}))
     vi.stubGlobal('fetch', fetchMock)
 
@@ -39,7 +39,7 @@ describe('apiFetch', () => {
   })
 
   it('lets an authorization gate pin /users/me to its current store token', async () => {
-    localStorage.setItem('token', 'newer-tab-token')
+    sessionStorage.setItem('token', 'newer-tab-token')
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
       id: 'admin-1',
       name: 'Admin',
@@ -57,11 +57,11 @@ describe('apiFetch', () => {
   })
 
   it('401 logs out through the store exactly once and throws', async () => {
-    localStorage.setItem('token', 'stale')
+    sessionStorage.setItem('token', 'stale')
     useGameStore.setState({ token: 'stale' })
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 401 })))
 
-    await expect(apiFetch('/me')).rejects.toThrow('Session expired')
+    await expect(apiFetch('/me')).rejects.toThrow('登录会话已过期')
     // store-centralized logout: token gone from both state and localStorage
     expect(useGameStore.getState().token).toBeNull()
     expect(localStorage.getItem('token')).toBeNull()

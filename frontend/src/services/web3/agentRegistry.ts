@@ -26,6 +26,14 @@ export interface ContentAnchor {
   recordedAt: bigint
 }
 
+export interface OwnedAgent {
+  id: bigint
+  uri: string
+  state: AgentChainState
+  residentKey?: `0x${string}`
+  worldProofCount: bigint
+}
+
 const registryAbi = [
   {
     type: 'function', name: 'agentsOf', stateMutability: 'view', inputs: [{ name: 'owner', type: 'address' }],
@@ -80,6 +88,15 @@ const registryAbi = [
     outputs: [{ name: 'revision', type: 'uint64' }],
   },
   {
+    type: 'function', name: 'recordWorldProof', stateMutability: 'nonpayable',
+    inputs: [{ name: 'agentId', type: 'uint256' }, { name: 'kind', type: 'bytes32' }, { name: 'dataHash', type: 'bytes32' }, { name: 'worldRevision', type: 'uint64' }],
+    outputs: [{ name: 'proofId', type: 'uint256' }],
+  },
+  {
+    type: 'function', name: 'worldProofCount', stateMutability: 'view', inputs: [{ name: 'agentId', type: 'uint256' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
     type: 'function', name: 'saveAnchorCount', stateMutability: 'view', inputs: [{ name: 'agentId', type: 'uint256' }],
     outputs: [{ name: '', type: 'uint256' }],
   },
@@ -109,22 +126,18 @@ function requireRegistry(): `0x${string}` {
   return AGENT_REGISTRY_ADDRESS
 }
 
-export async function loadOwnedAgents(owner: `0x${string}`): Promise<Array<{
-  id: bigint
-  uri: string
-  state: AgentChainState
-  residentKey?: `0x${string}`
-}>> {
+export async function loadOwnedAgents(owner: `0x${string}`): Promise<OwnedAgent[]> {
   const { config, core } = await getWeb3Runtime()
   const address = requireRegistry()
   const ids = await core.readContract(config, { address, abi: registryAbi, functionName: 'agentsOf', args: [owner] })
   return Promise.all(ids.map(async (id) => {
-    const [uri, state, residentKey] = await Promise.all([
+    const [uri, state, residentKey, worldProofCount] = await Promise.all([
       core.readContract(config, { address, abi: registryAbi, functionName: 'tokenURI', args: [id] }),
       core.readContract(config, { address, abi: registryAbi, functionName: 'agentState', args: [id] }),
       core.readContract(config, { address, abi: registryAbi, functionName: 'residentKeyOf', args: [id] }),
+      core.readContract(config, { address, abi: registryAbi, functionName: 'worldProofCount', args: [id] }),
     ])
-    return { id, uri, state: state as AgentChainState, residentKey }
+    return { id, uri, state: state as AgentChainState, residentKey, worldProofCount }
   }))
 }
 
@@ -159,7 +172,7 @@ export async function loadLatestSaveAnchor(agentId: bigint): Promise<ContentAnch
 async function write(
   locale: Locale,
   expectedAccount: `0x${string}`,
-  functionName: 'createAgentForResident' | 'updateMetadata' | 'publishVersion' | 'anchorMemory' | 'anchorSave',
+  functionName: 'createAgentForResident' | 'updateMetadata' | 'publishVersion' | 'anchorMemory' | 'anchorSave' | 'recordWorldProof',
   args: readonly unknown[],
 ): Promise<`0x${string}`> {
   const address = requireRegistry()
@@ -197,4 +210,15 @@ export function anchorMemory(locale: Locale, account: `0x${string}`, agentId: bi
 
 export function anchorSave(locale: Locale, account: `0x${string}`, agentId: bigint, uri: string, hash: `0x${string}`) {
   return write(locale, account, 'anchorSave', [agentId, uri, hash])
+}
+
+export function recordWorldProof(
+  locale: Locale,
+  account: `0x${string}`,
+  agentId: bigint,
+  kind: `0x${string}`,
+  hash: `0x${string}`,
+  worldRevision: bigint,
+) {
+  return write(locale, account, 'recordWorldProof', [agentId, kind, hash, worldRevision])
 }

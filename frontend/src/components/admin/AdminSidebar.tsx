@@ -17,27 +17,28 @@ export type AdminTab =
 interface NavItem {
   key: AdminTab
   icon: string
-  label: string
+  zh: string
+  en: string
 }
 
 const ANALYTICS_ITEMS: NavItem[] = [
-  { key: 'overview', icon: '◫', label: '发展总览' },
-  { key: 'society', icon: '◎', label: '居民与社会' },
-  { key: 'economy', icon: '◇', label: '经济运行' },
-  { key: 'governance', icon: '△', label: '治理与事件' },
+  { key: 'overview', icon: '◫', zh: '发展总览', en: 'Overview' },
+  { key: 'society', icon: '◎', zh: '居民与社会', en: 'Society' },
+  { key: 'economy', icon: '◇', zh: '经济运行', en: 'Economy' },
+  { key: 'governance', icon: '△', zh: '治理与事件', en: 'Governance' },
 ]
 
 const CONTROL_ITEMS: NavItem[] = [
-  { key: 'users', icon: '👥', label: '用户权限' },
-  { key: 'residents', icon: '🏠', label: '居民编辑' },
-  { key: 'hosted_agents', icon: '🤖', label: 'Agent 托管' },
-  { key: 'economy_control', icon: '🪙', label: '经济参数' },
-  { key: 'events', icon: '📣', label: '事件投放' },
-  { key: 'proposals', icon: '🌍', label: '提案审批' },
-  { key: 'forge', icon: '🔮', label: '炼化监控' },
-  { key: 'llm', icon: '💸', label: '模型用量' },
-  { key: 'lab_runs', icon: '🧪', label: '实验楼控制' },
-  { key: 'system', icon: '⚙️', label: '系统配置' },
+  { key: 'users', icon: '👥', zh: '用户权限', en: 'User access' },
+  { key: 'residents', icon: '🏠', zh: '居民编辑', en: 'Residents' },
+  { key: 'hosted_agents', icon: '🤖', zh: 'Agent 托管', en: 'Hosted Agents' },
+  { key: 'economy_control', icon: '🪙', zh: '经济参数', en: 'Economy controls' },
+  { key: 'events', icon: '📣', zh: '事件投放', en: 'World events' },
+  { key: 'proposals', icon: '🌍', zh: '提案审批', en: 'Proposals' },
+  { key: 'forge', icon: '🔮', zh: '炼化监控', en: 'Forge monitor' },
+  { key: 'llm', icon: '💸', zh: '模型用量', en: 'Model usage' },
+  { key: 'lab_runs', icon: '🧪', zh: '实验楼控制', en: 'Lab control' },
+  { key: 'system', icon: '⚙️', zh: '系统配置', en: 'System config' },
 ]
 
 interface AdminSidebarProps {
@@ -53,16 +54,17 @@ export function AdminSidebar({
   onControlToggle,
   onTabChange,
 }: AdminSidebarProps) {
+  const en = useLocale((state) => state.locale === 'en')
   return (
     <header className="admin-sidebar">
       <div className="admin-sidebar__inner">
         <div className="admin-sidebar__brand">
           <span className="admin-sidebar__mark" aria-hidden="true">S</span>
           <span className="admin-sidebar__title">Simverse</span>
-          <span className="admin-sidebar__subtitle">小镇观测站</span>
+          <span className="admin-sidebar__subtitle">{en ? 'WORLD OBSERVATORY' : '小镇观测站'}</span>
         </div>
 
-        <nav className="admin-sidebar__nav" aria-label="小镇分析导航">
+        <nav className="admin-sidebar__nav" aria-label={en ? 'World analytics navigation' : '小镇分析导航'}>
           {ANALYTICS_ITEMS.map((item) => (
             <button
               key={item.key}
@@ -70,7 +72,7 @@ export function AdminSidebar({
               className={`admin-nav-item${activeTab === item.key ? ' admin-nav-item--active' : ''}`}
               onClick={() => onTabChange(item.key)}
             >
-              {item.label}
+              {en ? item.en : item.zh}
             </button>
           ))}
         </nav>
@@ -78,7 +80,7 @@ export function AdminSidebar({
         <div className="admin-sidebar__controls">
           <div className="admin-sidebar__foot">
             <span className="admin-live-dot" aria-hidden="true" />
-            <span>数据已同步</span>
+            <span>{en ? 'Data synced' : '数据已同步'}</span>
           </div>
           <button
             type="button"
@@ -87,13 +89,13 @@ export function AdminSidebar({
             aria-expanded={controlOpen}
             aria-controls="admin-control-nav"
           >
-            <span className="admin-control-toggle__label">控制中心</span>
+            <span className="admin-control-toggle__label">{en ? 'Control center' : '控制中心'}</span>
             <span aria-hidden="true">{controlOpen ? '↑' : '↓'}</span>
           </button>
 
           {controlOpen && (
-            <nav id="admin-control-nav" className="admin-control-nav" aria-label="管理控制导航">
-              <div className="admin-control-nav__title">集中管理</div>
+            <nav id="admin-control-nav" className="admin-control-nav" aria-label={en ? 'Administrative control navigation' : '管理控制导航'}>
+              <div className="admin-control-nav__title">{en ? 'Operations' : '集中管理'}</div>
               {CONTROL_ITEMS.map((item) => (
                 <button
                   key={item.key}
@@ -102,7 +104,7 @@ export function AdminSidebar({
                   onClick={() => onTabChange(item.key)}
                 >
                   <span aria-hidden="true">{item.icon}</span>
-                  <span>{item.label}</span>
+                  <span>{en ? item.en : item.zh}</span>
                   <b aria-hidden="true">›</b>
                 </button>
               ))}
@@ -113,3 +115,4 @@ export function AdminSidebar({
     </header>
   )
 }
+import { useLocale } from '../../services/locale'

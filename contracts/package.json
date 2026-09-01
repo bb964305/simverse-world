@@ -16,6 +16,9 @@
     "upgrade:local": "hardhat run scripts/upgrade.ts --network localhost",
     "upgrade:robinhood-testnet": "hardhat run scripts/upgrade.ts --network robinhoodTestnet",
     "upgrade:robinhood": "hardhat run scripts/upgrade.ts --network robinhood",
+    "governance:robinhood": "hardhat run scripts/migrate-governance.ts --network robinhood",
+    "verify:robinhood": "node scripts/verify-blockscout.mjs",
+    "e2e:robinhood": "node scripts/mainnet-onboarding-e2e.mjs",
     "smoke:local": "hardhat run scripts/smoke.ts --network localhost",
     "smoke:robinhood-testnet": "hardhat run scripts/smoke.ts --network robinhoodTestnet"
   },

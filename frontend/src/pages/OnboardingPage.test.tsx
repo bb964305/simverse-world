@@ -27,7 +27,7 @@ beforeEach(() => {
   vi.mocked(createPlayerResident).mockResolvedValue({ id: 'resident-1', slug: 'p-nova', name: 'Nova', sprite_key: '埃迪', tile_x: 75, tile_y: 56 })
   vi.mocked(skipOnboarding).mockResolvedValue({ id: 'resident-2', slug: 'p-starter', name: 'Starter', sprite_key: '埃迪', tile_x: 75, tile_y: 56 })
   vi.mocked(registerResidentOnchain).mockResolvedValue({ agentId: 7n, transaction: `0x${'ab'.repeat(32)}` })
-  vi.mocked(loadOwnedAgents).mockReset().mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 7n, uri: 'https://example.invalid/metadata', state: {} as never }])
+  vi.mocked(loadOwnedAgents).mockReset().mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 7n, uri: 'https://example.invalid/metadata', state: {} as never, worldProofCount: 0n }])
 })
 
 afterEach(() => cleanup())

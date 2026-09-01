@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { SoulCard } from '../SoulCard'
+import { useLocale } from '../../services/locale'
+import { localizeDynamicText } from '../../services/worldLocalization'
 
 interface SbtiInfo {
   type: string
@@ -25,14 +27,16 @@ interface ResidentCardProps {
   lastWsMessage?: { type: string; resident_id: string; new_type: string; type_name: string } | null
 }
 
-const STATUS_LABELS: Record<string, string> = {
-  idle: '🟢 空闲',
-  chatting: '💬 对话中',
-  sleeping: '💤 沉睡',
-  popular: '🔥 热门',
+const STATUS_LABELS: Record<string, { zh: string; en: string }> = {
+  idle: { zh: '🟢 空闲', en: '🟢 Idle' },
+  chatting: { zh: '💬 对话中', en: '💬 Chatting' },
+  sleeping: { zh: '💤 沉睡', en: '💤 Sleeping' },
+  popular: { zh: '🔥 热门', en: '🔥 Popular' },
 }
 
 export function ResidentCard({ resident, onEdit, lastWsMessage }: ResidentCardProps) {
+  const locale = useLocale((state) => state.locale)
+  const en = locale === 'en'
   // flashSeq: 0 = idle; each accepted WS type-change bumps it so the timer
   // effect below re-arms (the old clearTimeout + setTimeout per message).
   const [flashSeq, setFlashSeq] = useState(0)
@@ -109,7 +113,7 @@ export function ResidentCard({ resident, onEdit, lastWsMessage }: ResidentCardPr
                 transform: isFlashing ? 'scale(1.15)' : 'scale(1)',
                 display: 'inline-block',
               }}
-              title={displayedType.type_name}
+              title={en ? displayedType.type : displayedType.type_name}
             >
               {displayedType.type}
             </span>
@@ -117,11 +121,11 @@ export function ResidentCard({ resident, onEdit, lastWsMessage }: ResidentCardPr
         </div>
 
         <div style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 2 }}>
-          {resident.meta_json?.role ?? ''} · {resident.district}
+          {localizeDynamicText(resident.meta_json?.role, locale)} · {localizeDynamicText(resident.district, locale)}
         </div>
 
         <div style={{ display: 'flex', gap: 12, marginTop: 4, fontSize: 11, color: 'var(--text-secondary)' }}>
-          <span>{STATUS_LABELS[resident.status] ?? resident.status}</span>
+          <span>{STATUS_LABELS[resident.status] ? STATUS_LABELS[resident.status][en ? 'en' : 'zh'] : resident.status}</span>
           <span>🔥 {resident.heat}</span>
           <span>💬 {resident.total_conversations}</span>
           {resident.avg_rating > 0 && <span>⭐ {resident.avg_rating.toFixed(1)}</span>}
@@ -136,7 +140,7 @@ export function ResidentCard({ resident, onEdit, lastWsMessage }: ResidentCardPr
           fontSize: 12, cursor: 'pointer', flexShrink: 0,
         }}
       >
-        分享卡片
+        {en ? 'Share card' : '分享卡片'}
       </button>
 
       <button
@@ -147,7 +151,7 @@ export function ResidentCard({ resident, onEdit, lastWsMessage }: ResidentCardPr
           fontSize: 12, cursor: 'pointer', flexShrink: 0,
         }}
       >
-        编辑
+        {en ? 'Edit' : '编辑'}
       </button>
 
       {shareOpen && <SoulCard slug={resident.slug} onClose={() => setShareOpen(false)} />}

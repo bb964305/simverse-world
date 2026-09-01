@@ -11,6 +11,7 @@ import {
   type PollData,
 } from '../services/api'
 import { parseUTC } from '../utils/time'
+import { useLocale, type Locale } from '../services/locale'
 
 // Pull the backend `detail` string out of an apiFetch error ("API 400: {json}").
 function errDetail(e: unknown): string {
@@ -29,23 +30,28 @@ function isNotFound(e: unknown): boolean {
   return e instanceof Error && e.message.startsWith('API 404')
 }
 
-function formatCountdown(endsAt: string, now: number): string {
+function formatCountdown(endsAt: string, now: number, locale: Locale): string {
   // ends_at 是后端 naive-UTC isoformat —— parseUTC 补 Z 防倒计时偏移
   const diff = parseUTC(endsAt).getTime() - now
   if (Number.isNaN(diff)) return '—'
-  if (diff <= 0) return '已结束'
+  if (diff <= 0) return locale === 'en' ? 'Ended' : '已结束'
   const d = Math.floor(diff / 86_400_000)
   const h = Math.floor((diff % 86_400_000) / 3_600_000)
   const m = Math.floor((diff % 3_600_000) / 60_000)
   const s = Math.floor((diff % 60_000) / 1000)
+  if (locale === 'en') {
+    if (d > 0) return `${d}d ${h}h ${m}m`
+    if (h > 0) return `${h}h ${m}m ${s}s`
+    return `${m}m ${s}s`
+  }
   if (d > 0) return `${d} 天 ${h} 小时 ${m} 分`
   if (h > 0) return `${h} 小时 ${m} 分 ${s} 秒`
   return `${m} 分 ${s} 秒`
 }
 
-const SEASON_STATUS_LABEL: Record<string, string> = {
-  active: '进行中',
-  settled: '已结算',
+const SEASON_STATUS_LABEL: Record<string, { en: string; zh: string }> = {
+  active: { en: 'Active', zh: '进行中' },
+  settled: { en: 'Settled', zh: '已结算' },
 }
 
 const cardStyle: React.CSSProperties = {
@@ -65,6 +71,8 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 
 // ── Season header ───────────────────────────────────────────────────
 function SeasonHeader({ season, loading, error }: { season: SeasonInfo | null; loading: boolean; error: string }) {
+  const locale = useLocale((state) => state.locale)
+  const en = locale === 'en'
   const [now, setNow] = useState(() => Date.now())
 
   useEffect(() => {
@@ -73,14 +81,14 @@ function SeasonHeader({ season, loading, error }: { season: SeasonInfo | null; l
     return () => clearInterval(id)
   }, [season?.ends_at])
 
-  if (loading) return <div style={{ ...cardStyle, color: 'var(--text-muted)', fontSize: 13 }}>加载中…</div>
+  if (loading) return <div style={{ ...cardStyle, color: 'var(--text-muted)', fontSize: 13 }}>{en ? 'Loading…' : '加载中…'}</div>
   if (error) return <div style={{ ...cardStyle, color: 'var(--text-muted)', fontSize: 13 }}>{error}</div>
   if (!season) {
     return (
       <div style={{ ...cardStyle, textAlign: 'center', padding: '36px 20px' }}>
         <div style={{ fontSize: 28, marginBottom: 8 }}>🍂</div>
-        <div style={{ color: 'var(--text-secondary)', fontSize: 14 }}>当前无进行中的赛季</div>
-        <div style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 6 }}>新赛季开启后将在这里公布，敬请期待。</div>
+        <div style={{ color: 'var(--text-secondary)', fontSize: 14 }}>{en ? 'No active season' : '当前无进行中的赛季'}</div>
+        <div style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 6 }}>{en ? 'The next season will be announced here.' : '新赛季开启后将在这里公布，敬请期待。'}</div>
       </div>
     )
   }
@@ -93,18 +101,18 @@ function SeasonHeader({ season, loading, error }: { season: SeasonInfo | null; l
           color: season.status === 'active' ? 'var(--accent-green)' : 'var(--text-muted)',
           border: `1px solid ${season.status === 'active' ? '#53d76944' : 'var(--border)'}`,
         }}>
-          {SEASON_STATUS_LABEL[season.status] ?? season.status}
+          {SEASON_STATUS_LABEL[season.status] ? (en ? SEASON_STATUS_LABEL[season.status].en : SEASON_STATUS_LABEL[season.status].zh) : season.status}
         </span>
       </div>
       {season.theme && (
         <div style={{ color: 'var(--text-secondary)', fontSize: 13, marginTop: 8, lineHeight: 1.6 }}>
-          主题：{season.theme}
+          {en ? 'Theme' : '主题'}: {season.theme}
         </div>
       )}
       <div style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 10 }}>
         {season.ends_at
-          ? <>⏳ 距离赛季结束还有 <span style={{ color: 'var(--accent-red)', fontVariantNumeric: 'tabular-nums' }}>{formatCountdown(season.ends_at, now)}</span></>
-          : '本赛季暂未设定结束时间'}
+          ? <>⏳ {en ? 'Season ends in' : '距离赛季结束还有'} <span style={{ color: 'var(--accent-red)', fontVariantNumeric: 'tabular-nums' }}>{formatCountdown(season.ends_at, now, locale)}</span></>
+          : (en ? 'No end time has been set for this season' : '本赛季暂未设定结束时间')}
       </div>
     </div>
   )
@@ -114,6 +122,8 @@ function SeasonHeader({ season, loading, error }: { season: SeasonInfo | null; l
 type PollVoteState = { kind: 'voted'; idx: number } | { kind: 'already' }
 
 function PollCard({ poll }: { poll: PollData }) {
+  const locale = useLocale((state) => state.locale)
+  const en = locale === 'en'
   // my_vote from the server restores the ✓已投 marker across reloads.
   const [state, setState] = useState<PollVoteState | null>(
     poll.my_vote != null ? { kind: 'voted', idx: poll.my_vote } : null,
@@ -133,7 +143,7 @@ function PollCard({ poll }: { poll: PollData }) {
       if (detail.includes('already voted')) {
         setState({ kind: 'already' })
       } else {
-        setErr(detail)
+        setErr(en && detail.includes('already voted') ? 'You have already voted' : detail)
       }
     } finally {
       setBusy(false)
@@ -148,14 +158,14 @@ function PollCard({ poll }: { poll: PollData }) {
           🗳️ {poll.question}
         </div>
         {state?.kind === 'already' && (
-          <span style={{ fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>已投过</span>
+          <span style={{ fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{en ? 'Already voted' : '已投过'}</span>
         )}
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 12 }}>
         {poll.options.map((opt, idx) => {
           // 后端已投影成 {label, npc_votes}；保留 string 分支，使后端未部署 /
           // 回滚到旧版本时页面仍然只是显示得糙，而不是整页崩。
-          const label = typeof opt === 'string' ? opt : (opt?.label ?? `选项 ${idx + 1}`)
+          const label = typeof opt === 'string' ? opt : (opt?.label ?? `${en ? 'Option' : '选项'} ${idx + 1}`)
           const chosen = state?.kind === 'voted' && state.idx === idx
           return (
             <button
@@ -177,14 +187,16 @@ function PollCard({ poll }: { poll: PollData }) {
                 if (!chosen) e.currentTarget.style.borderColor = 'var(--border)'
               }}
             >
-              {label}{chosen && <span style={{ marginLeft: 8, fontWeight: 600 }}>✓已投</span>}
+              {label}{chosen && <span style={{ marginLeft: 8, fontWeight: 600 }}>✓ {en ? 'Voted' : '已投'}</span>}
             </button>
           )
         })}
       </div>
       {err && <div style={{ color: 'var(--accent-red)', fontSize: 12, marginTop: 8 }}>{err}</div>}
       <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 10 }}>
-        {poll.closes_at ? `截止时间：${parseUTC(poll.closes_at).toLocaleString('zh-CN')}` : '长期开放'}
+        {poll.closes_at
+          ? `${en ? 'Closes' : '截止时间'}: ${parseUTC(poll.closes_at).toLocaleString(en ? 'en-US' : 'zh-CN')}`
+          : (en ? 'Open-ended' : '长期开放')}
       </div>
     </div>
   )
@@ -206,6 +218,8 @@ function truncateId(uid: string): string {
 function LeaderboardRowView({
   rank, userId, name, points, breakdown, isMe,
 }: { rank: number; userId: string; name?: string; points: number; breakdown?: Record<string, number>; isMe: boolean }) {
+  const locale = useLocale((state) => state.locale)
+  const en = locale === 'en'
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 12, padding: '8px 12px',
@@ -224,13 +238,13 @@ function LeaderboardRowView({
         color: isMe ? 'var(--accent-red)' : 'var(--text-primary)',
         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
       }} title={name || userId}>
-        {name || truncateId(userId)}{isMe && '（我）'}
+        {name || truncateId(userId)}{isMe && (en ? ' (me)' : '（我）')}
       </span>
       <span style={{
         width: 80, textAlign: 'right', fontVariantNumeric: 'tabular-nums',
         fontWeight: 600, fontSize: 13, color: 'var(--accent-green)',
       }}>
-        {points} 分
+        {points} {en ? 'pts' : '分'}
       </span>
       <span style={{ display: 'flex', gap: 6, flexWrap: 'wrap', flex: 1, justifyContent: 'flex-end' }}>
         {breakdown && Object.entries(breakdown).map(([cat, val]) => (
@@ -247,6 +261,8 @@ function LeaderboardRowView({
 }
 
 function LeaderboardSection() {
+  const locale = useLocale((state) => state.locale)
+  const en = locale === 'en'
   const user = useGameStore((s) => s.user)
   const myId = user?.id ?? ''
   const [lb, setLb] = useState<LeaderboardResponse | null>(null)
@@ -259,16 +275,16 @@ function LeaderboardSection() {
       .then((r) => setLb(r))
       .catch((e) => {
         if (isNotFound(e)) setNoSeason(true)
-        else setErr('排行榜加载失败，请稍后重试')
+        else setErr(en ? 'Unable to load the leaderboard. Please try again.' : '排行榜加载失败，请稍后重试')
       })
       .finally(() => setLoading(false))
-  }, [])
+  }, [en])
 
-  if (loading) return <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '8px 0' }}>加载中…</div>
-  if (noSeason) return <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '8px 0' }}>暂无排行榜 — 当前没有进行中的赛季。</div>
+  if (loading) return <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '8px 0' }}>{en ? 'Loading…' : '加载中…'}</div>
+  if (noSeason) return <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '8px 0' }}>{en ? 'No leaderboard — there is no active season.' : '暂无排行榜 — 当前没有进行中的赛季。'}</div>
   if (err) return <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '8px 0' }}>{err}</div>
   if (!lb || lb.top.length === 0) {
-    return <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '8px 0' }}>还没有人上榜，快去参与赛季活动赚取积分吧。</div>
+    return <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '8px 0' }}>{en ? 'The leaderboard is empty. Join season activities to earn points.' : '还没有人上榜，快去参与赛季活动赚取积分吧。'}</div>
   }
 
   const myRank = lb.around_me?.my_rank
@@ -308,7 +324,7 @@ function LeaderboardSection() {
       </div>
       {myRank != null && (
         <div style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 10, paddingLeft: 12 }}>
-          我的当前排名：<span style={{ color: 'var(--accent-red)', fontWeight: 600 }}>#{myRank}</span>
+          {en ? 'My current rank' : '我的当前排名'}: <span style={{ color: 'var(--accent-red)', fontWeight: 600 }}>#{myRank}</span>
         </div>
       )}
     </div>
@@ -317,6 +333,8 @@ function LeaderboardSection() {
 
 // ── Page ────────────────────────────────────────────────────────────
 export function SeasonsPage() {
+  const locale = useLocale((state) => state.locale)
+  const en = locale === 'en'
   const [season, setSeason] = useState<SeasonInfo | null>(null)
   const [seasonLoading, setSeasonLoading] = useState(true)
   const [seasonErr, setSeasonErr] = useState('')
@@ -326,12 +344,12 @@ export function SeasonsPage() {
   useEffect(() => {
     getCurrentSeason()
       .then((r) => setSeason(r.season))
-      .catch(() => setSeasonErr('赛季信息加载失败，请稍后重试'))
+      .catch(() => setSeasonErr(en ? 'Unable to load season information. Please try again.' : '赛季信息加载失败，请稍后重试'))
       .finally(() => setSeasonLoading(false))
     getOpenPolls()
       .then((r) => setPolls(r.polls))
-      .catch(() => setPollsErr('投票加载失败，请稍后重试'))
-  }, [])
+      .catch(() => setPollsErr(en ? 'Unable to load polls. Please try again.' : '投票加载失败，请稍后重试'))
+  }, [en])
 
   const elections = (polls ?? []).filter((p) => p.is_election)
   const proposals = (polls ?? []).filter((p) => !p.is_election)
@@ -346,25 +364,25 @@ export function SeasonsPage() {
         <div style={{ maxWidth: 860, margin: '0 auto', padding: '24px 16px 48px' }}>
           <SeasonHeader season={season} loading={seasonLoading} error={seasonErr} />
 
-          <SectionTitle>🗳️ 议案投票</SectionTitle>
-          {polls === null && !pollsErr && <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>加载中…</div>}
+          <SectionTitle>🗳️ {en ? 'Proposal voting' : '议案投票'}</SectionTitle>
+          {polls === null && !pollsErr && <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>{en ? 'Loading…' : '加载中…'}</div>}
           {pollsErr && <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>{pollsErr}</div>}
           {polls !== null && proposals.length === 0 && (
-            <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>暂无进行中的议案。</div>
+            <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>{en ? 'No active proposals.' : '暂无进行中的议案。'}</div>
           )}
           {proposals.length > 0 && <PollSection polls={proposals} />}
 
           {elections.length > 0 && (
             <>
-              <SectionTitle>🏛️ 镇长选举</SectionTitle>
+              <SectionTitle>🏛️ {en ? 'Mayor election' : '镇长选举'}</SectionTitle>
               <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 8 }}>
-                镇长选举与普通议案分开计票，当选者将获得全镇工资加成。
+                {en ? 'Mayor elections are counted separately from proposals. The elected mayor grants a town-wide wage bonus.' : '镇长选举与普通议案分开计票，当选者将获得全镇工资加成。'}
               </div>
               <PollSection polls={elections} />
             </>
           )}
 
-          <SectionTitle>🏅 排行榜</SectionTitle>
+          <SectionTitle>🏅 {en ? 'Leaderboard' : '排行榜'}</SectionTitle>
           <LeaderboardSection />
         </div>
       </div>

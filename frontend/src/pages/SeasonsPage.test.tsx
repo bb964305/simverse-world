@@ -95,13 +95,13 @@ describe('SeasonsPage', () => {
     renderPage()
     fireEvent.click(await screen.findByRole('button', { name: /赞成兴建/ }))
     await waitFor(() => expect(votePoll).toHaveBeenCalledWith('poll-civic', 0))
-    expect(await screen.findByText('✓已投')).toBeInTheDocument()
+    expect(await screen.findByText('✓ 已投')).toBeInTheDocument()
   })
 
   it('restores the voted marker from my_vote across reloads', async () => {
     getOpenPolls.mockResolvedValue({ polls: [{ ...CIVIC_POLL, my_vote: 1 }] })
     renderPage()
-    expect(await screen.findByText('✓已投')).toBeInTheDocument()
+    expect(await screen.findByText('✓ 已投')).toBeInTheDocument()
     expect(votePoll).not.toHaveBeenCalled()
   })
 

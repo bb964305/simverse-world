@@ -9,8 +9,8 @@ import { BrandLogo } from './BrandLogo'
 import { BrandSocialLinks } from './BrandSocialLinks'
 
 const COPY = {
-  en: { label: 'Web3 command deck', passport: 'Agent Passport', runtime: 'World runtime', online: 'ONLINE', checking: 'CHECKING', offline: 'CHECK', studio: 'Agent Studio', guide: 'New player guide', economy: 'SIM economy', community: 'Official community', close: 'Collapse Web3 deck', open: 'Open Web3 deck' },
-  'zh-CN': { label: 'Web3 控制台', passport: 'Agent Passport', runtime: '世界运行', online: '在线', checking: '检测中', offline: '待检测', studio: '链上工作台', guide: '新手教程', economy: 'SIM 经济模型', community: '官方社区', close: '收起 Web3 控制台', open: '打开 Web3 控制台' },
+  en: { label: 'Web3 command deck', passport: 'Agent Passport', runtime: 'World runtime', online: 'ONLINE', checking: 'CHECKING', offline: 'CHECK', unregistered: 'NOT REGISTERED', studio: 'Agent Studio', guide: 'New player guide', economy: 'SIM economy', community: 'Official community', close: 'Collapse Web3 deck', open: 'Open Web3 deck' },
+  'zh-CN': { label: 'Web3 控制台', passport: 'Agent Passport', runtime: '世界运行', online: '在线', checking: '检测中', offline: '待检测', unregistered: '尚未注册', studio: '链上工作台', guide: '新手教程', economy: 'SIM 经济模型', community: '官方社区', close: '收起 Web3 控制台', open: '打开 Web3 控制台' },
 } as const
 
 export function WorldWeb3Dock() {
@@ -43,7 +43,7 @@ export function WorldWeb3Dock() {
   return (
     <aside className="world-web3-dock" aria-label={copy.label}>
       <header><BrandLogo size={42} /><div><strong>SIMVERSE / WEB3</strong><span>{configuredChainName()}</span></div><button type="button" onClick={() => setOpen(false)} aria-label={copy.close}>×</button></header>
-      <div className="world-web3-dock__status"><div><span>{copy.passport}</span><strong>{agentCount === null ? '—' : agentCount > 0 ? `× ${agentCount}` : 'NOT REGISTERED'}</strong></div><div><span>{copy.runtime}</span><strong data-online={runtimeOnline === true}><i />{runtimeOnline === null ? copy.checking : runtimeOnline ? copy.online : copy.offline}</strong></div></div>
+      <div className="world-web3-dock__status"><div><span>{copy.passport}</span><strong>{agentCount === null ? '—' : agentCount > 0 ? `× ${agentCount}` : copy.unregistered}</strong></div><div><span>{copy.runtime}</span><strong data-online={runtimeOnline === true}><i />{runtimeOnline === null ? copy.checking : runtimeOnline ? copy.online : copy.offline}</strong></div></div>
       <nav><button type="button" onClick={() => navigate('/web3')}>{copy.studio}<span>↗</span></button><button type="button" onClick={() => navigate('/guide')}>{copy.guide}<span>↗</span></button><button type="button" onClick={() => navigate('/economy')}>{copy.economy}<span>↗</span></button></nav>
       <footer><span>{copy.community}</span><BrandSocialLinks /></footer>
     </aside>

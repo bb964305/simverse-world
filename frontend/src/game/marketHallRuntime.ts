@@ -1,5 +1,6 @@
 import Phaser from 'phaser'
 import type { CaravanState } from '../services/api/caravan'
+import type { Locale } from '../services/locale'
 import { computeCaravanDepth } from './caravanRenderRuntime'
 import { TILE_SIZE } from './worldGeometry'
 
@@ -91,12 +92,14 @@ export function marketHallVisualMode(
 
 export function marketHallVisualSpec(
   snapshot: Pick<CaravanState, 'phase' | 'visible'> | null,
+  locale: Locale = 'zh-CN',
 ): MarketHallVisualSpec {
+  const english = locale === 'en'
   switch (marketHallVisualMode(snapshot)) {
     case 'preopen':
       return {
         mode: 'preopen',
-        signText: '即将开市',
+        signText: english ? 'OPENING SOON' : '即将开市',
         signFill: '#7a4a19',
         signColor: '#fff4c9',
         signStroke: '#3a2510',
@@ -114,7 +117,7 @@ export function marketHallVisualSpec(
     case 'open':
       return {
         mode: 'open',
-        signText: '开市中',
+        signText: english ? 'MARKET OPEN' : '开市中',
         signFill: '#8f2d1f',
         signColor: '#fff2d6',
         signStroke: '#4a120b',
@@ -132,7 +135,7 @@ export function marketHallVisualSpec(
     case 'closing':
       return {
         mode: 'closing',
-        signText: '收摊中',
+        signText: english ? 'CLOSING' : '收摊中',
         signFill: '#5f3b20',
         signColor: '#f6ddbf',
         signStroke: '#2c1a0d',
@@ -151,7 +154,7 @@ export function marketHallVisualSpec(
     default:
       return {
         mode: 'closed',
-        signText: '闭市',
+        signText: english ? 'CLOSED' : '闭市',
         signFill: '#3b2f2f',
         signColor: '#efe0bc',
         signStroke: '#1f1717',
@@ -177,6 +180,7 @@ export class MarketHallRuntime {
   private readonly sign: Phaser.GameObjects.Text
   private emitter: Phaser.GameObjects.Particles.ParticleEmitter | null = null
   private currentMode: MarketHallVisualMode | null = null
+  private currentLocale: Locale | null = null
   private destroyed = false
 
   constructor(scene: Phaser.Scene) {
@@ -194,9 +198,11 @@ export class MarketHallRuntime {
 
   update(snapshot: Pick<CaravanState, 'phase' | 'visible'> | null, nowMs: number): void {
     if (this.destroyed) return
-    const spec = marketHallVisualSpec(snapshot)
-    if (this.currentMode !== spec.mode) {
+    const locale: Locale = document.documentElement.lang === 'en' ? 'en' : 'zh-CN'
+    const spec = marketHallVisualSpec(snapshot, locale)
+    if (this.currentMode !== spec.mode || this.currentLocale !== locale) {
       this.currentMode = spec.mode
+      this.currentLocale = locale
       this.redraw(spec)
     }
     this.syncEmitter(spec)

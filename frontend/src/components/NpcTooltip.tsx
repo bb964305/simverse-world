@@ -6,6 +6,8 @@ import { isFollowed, toggleFollow } from '../services/follows'
 import { getResidentGoals, getMe, investInGoal } from '../services/api'
 import type { ResidentGoalData } from '../services/api'
 import type { ResidentData } from '../game/GameScene'
+import { useLocale, type Locale } from '../services/locale'
+import { localizeDynamicText } from '../services/worldLocalization'
 
 // E1 mood word → emoji (backend label set in mood_service.label_for).
 const MOOD_EMOJI: Record<string, string> = {
@@ -29,15 +31,18 @@ interface InvestNotice {
 
 // apiFetch surfaces backend 400s as `API 400: {"detail":"..."}` — map the
 // known invest failures to short, human-readable Chinese.
-function investErrorText(err: unknown): string {
+function investErrorText(err: unknown, locale: Locale): string {
   const msg = err instanceof Error ? err.message : ''
-  if (msg.includes('Insufficient')) return '灵魂币不足'
-  if (msg.includes('pool cap')) return '该目标投资池已满'
-  if (msg.includes('not an active life goal')) return '该目标已结束，无法投资'
-  return '投资失败，请稍后重试'
+  const en = locale === 'en'
+  if (msg.includes('Insufficient')) return en ? 'Insufficient SC balance' : 'SC 余额不足'
+  if (msg.includes('pool cap')) return en ? 'This goal’s investment pool is full' : '该目标投资池已满'
+  if (msg.includes('not an active life goal')) return en ? 'This goal is no longer open for investment' : '该目标已结束，无法投资'
+  return en ? 'Investment failed. Please try again.' : '投资失败，请稍后重试'
 }
 
 export function NpcTooltip() {
+  const locale = useLocale((state) => state.locale)
+  const isEn = locale === 'en'
   const [npc, setNpc] = useState<ResidentData | null>(null)
   const [followed, setFollowedState] = useState(false)
   const [followBusy, setFollowBusy] = useState(false)
@@ -102,7 +107,9 @@ export function NpcTooltip() {
       setFollowedState(await toggleFollow(npc.slug))
     } catch (err) {
       const msg = err instanceof Error ? err.message : ''
-      setFollowError(msg.includes('follow limit') ? '关注已达上限（50 位）' : '操作失败，请稍后重试')
+      setFollowError(msg.includes('follow limit')
+        ? (isEn ? 'Follow limit reached (50 residents)' : '关注已达上限（50 位）')
+        : (isEn ? 'Action failed. Please try again.' : '操作失败，请稍后重试'))
     } finally {
       setFollowBusy(false)
     }
@@ -116,10 +123,10 @@ export function NpcTooltip() {
     setInvestNotice(null)
     try {
       await investInGoal(goal.id, amount)
-      setInvestNotice({ kind: 'ok', text: `已投资 ${amount} 🪙，目标达成享 1.5 倍分红` })
+      setInvestNotice({ kind: 'ok', text: isEn ? `Invested ${amount} SC · 1.5× payout if completed` : `已投资 ${amount} SC，目标达成享 1.5 倍分红` })
       getMe().then((me) => updateBalance(me.soul_coin_balance)).catch(() => {})
     } catch (err) {
-      setInvestNotice({ kind: 'err', text: investErrorText(err) })
+      setInvestNotice({ kind: 'err', text: investErrorText(err, locale) })
     } finally {
       setInvestBusy(false)
     }
@@ -141,7 +148,7 @@ export function NpcTooltip() {
         <div>
           <div style={{ color: '#fafafa', fontWeight: 700, fontSize: 14 }}>{npc.name}</div>
           <div style={{ color: '#71717a', fontSize: 12 }}>
-            {npc.meta_json?.role ?? ''}
+            {localizeDynamicText(npc.meta_json?.role, locale)}
             {npc.meta_json?.role && npc.meta_json?.sbti && ' · '}
             {npc.meta_json?.sbti && (
               <span style={{
@@ -152,7 +159,7 @@ export function NpcTooltip() {
           </div>
         </div>
         <span style={{ marginLeft: 'auto', fontSize: 11 }} title={npc.mood_label ?? 'calm'}>
-          {MOOD_EMOJI[npc.mood_label ?? 'calm'] ?? '😌'} {cfg.label}
+          {MOOD_EMOJI[npc.mood_label ?? 'calm'] ?? '😌'} {isEn ? cfg.labelEn : cfg.label}
         </span>
       </div>
       {/* Active life goal (A1) — only when the resident has one */}
@@ -174,7 +181,7 @@ export function NpcTooltip() {
               transition: 'width 0.3s ease',
             }} />
           </div>
-          <div style={{ marginTop: 3, fontSize: 10, color: 'var(--text-muted)' }}>进度 {goalPct}%</div>
+          <div style={{ marginTop: 3, fontSize: 10, color: 'var(--text-muted)' }}>{isEn ? 'Progress' : '进度'} {goalPct}%</div>
           {latestDoneMilestone && (
             <div style={{
               marginTop: 2, fontSize: 10, color: 'var(--text-muted)',
@@ -185,13 +192,13 @@ export function NpcTooltip() {
           )}
           {/* Goal investment (E13): pick an amount → invest → refresh balance */}
           <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
-            <span style={{ fontSize: 10, color: 'var(--text-muted)', marginRight: 2 }}>💰 投资</span>
+            <span style={{ fontSize: 10, color: 'var(--text-muted)', marginRight: 2 }}>💰 {isEn ? 'Invest' : '投资'}</span>
             {INVEST_AMOUNTS.map((amt) => (
               <button
                 key={amt}
                 onClick={() => void handleInvest(amt)}
                 disabled={investBusy}
-                title={`投资 ${amt} 灵魂币`}
+                title={isEn ? `Invest ${amt} SC` : `投资 ${amt} SC`}
                 style={{
                   flex: 1, padding: '2px 0', borderRadius: 4, fontSize: 10, fontWeight: 600,
                   cursor: investBusy ? 'default' : 'pointer', opacity: investBusy ? 0.5 : 1,
@@ -226,18 +233,18 @@ export function NpcTooltip() {
             color: followed ? 'var(--text-muted)' : 'var(--accent-red)',
           }}
         >
-          {followed ? '✓ 已关注' : '♥ 关注'}
+          {followed ? (isEn ? '✓ Following' : '✓ 已关注') : (isEn ? '♥ Follow' : '♥ 关注')}
         </button>
         <button
           onClick={() => bridge.emit('photo:take', { residentSlug: npc.slug })}
-          title="合影"
+          title={isEn ? 'Take photo' : '合影'}
           style={{
             padding: '4px 10px', borderRadius: 6, fontSize: 11, fontWeight: 600,
             cursor: 'pointer', background: 'var(--bg-input)',
             border: '1px solid var(--border)', color: 'var(--text-secondary)',
           }}
         >
-          📸 合影
+          📸 {isEn ? 'Photo' : '合影'}
         </button>
       </div>
       {followError && (
@@ -247,10 +254,10 @@ export function NpcTooltip() {
       )}
       <div style={{ color: '#52525b', fontSize: 11, marginTop: 6, textAlign: 'center' }}>
         {cfg.canChat
-          ? <span>按 <kbd style={{ background: '#27272a', padding: '1px 5px', borderRadius: 3, color: '#fafafa', fontSize: 10 }}>E</kbd> 开始对话</span>
-          : npc.status === 'sleeping' ? <span>💤 沉睡中 · 按 <kbd style={{ background: '#27272a', padding: '1px 5px', borderRadius: 3, color: '#fafafa', fontSize: 10 }}>E</kbd> 花费金币唤醒</span>
-          : npc.status === 'chatting' ? <span>💬 对话中 · 按 <kbd style={{ background: '#27272a', padding: '1px 5px', borderRadius: 3, color: '#fafafa', fontSize: 10 }}>E</kbd> 排队等候</span>
-          : '暂时无法对话'}
+          ? <span>{isEn ? 'Press' : '按'} <kbd style={{ background: '#27272a', padding: '1px 5px', borderRadius: 3, color: '#fafafa', fontSize: 10 }}>E</kbd> {isEn ? 'to talk' : '开始对话'}</span>
+          : npc.status === 'sleeping' ? <span>💤 {isEn ? 'Sleeping · Press' : '沉睡中 · 按'} <kbd style={{ background: '#27272a', padding: '1px 5px', borderRadius: 3, color: '#fafafa', fontSize: 10 }}>E</kbd> {isEn ? 'to spend SC and wake' : '花费 SC 唤醒'}</span>
+          : npc.status === 'chatting' ? <span>💬 {isEn ? 'Busy · Press' : '对话中 · 按'} <kbd style={{ background: '#27272a', padding: '1px 5px', borderRadius: 3, color: '#fafafa', fontSize: 10 }}>E</kbd> {isEn ? 'to join the queue' : '排队等候'}</span>
+          : (isEn ? 'Unavailable for conversation' : '暂时无法对话')}
       </div>
     </div>
   )

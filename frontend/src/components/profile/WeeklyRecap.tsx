@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { getWeeklyRecap, type WeeklyRecapData } from '../../services/api'
+import { useLocale } from '../../services/locale'
 
 function StatChip({ label, value, suffix }: { label: string; value: number; suffix?: string }) {
   return (
@@ -24,6 +25,7 @@ function renderInline(text: string) {
 }
 
 export function WeeklyRecap() {
+  const en = useLocale((state) => state.locale === 'en')
   const [recap, setRecap] = useState<WeeklyRecapData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -34,10 +36,10 @@ export function WeeklyRecap() {
     let cancelled = false
     getWeeklyRecap()
       .then((r) => { if (!cancelled) setRecap(r.digest) })
-      .catch(() => { if (!cancelled) setError('回顾生成失败，请稍后重试') })
+      .catch(() => { if (!cancelled) setError(en ? 'Could not generate your recap. Try again shortly.' : '回顾生成失败，请稍后重试') })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [attempt])
+  }, [attempt, en])
 
   const retry = () => {
     setLoading(true)
@@ -45,43 +47,48 @@ export function WeeklyRecap() {
     setAttempt((a) => a + 1)
   }
 
-  const paragraphs = (recap?.content_md ?? '')
-    .split(/\n\n+/)
-    .map((p) => p.replace(/^#+\s*/, '').trim())
-    .filter((p) => p && p !== recap?.title)
+  const paragraphs = en && recap
+    ? [
+        `You shared ${recap.stats.chats} conversations across ${recap.stats.distinct_residents} residents this week.`,
+        `Those conversations reached ${recap.stats.turns} total turns, while you unlocked ${recap.stats.achievements} achievements and explored ${recap.stats.explored} new places.`,
+      ]
+    : (recap?.content_md ?? '')
+        .split(/\n\n+/)
+        .map((p) => p.replace(/^#+\s*/, '').trim())
+        .filter((p) => p && p !== recap?.title)
 
   return (
     <div style={{ maxWidth: 640 }}>
-      <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4 }}>本周回顾</h2>
+      <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4 }}>{en ? 'Weekly recap' : '本周回顾'}</h2>
       <div style={{ color: 'var(--text-muted)', fontSize: 13, marginBottom: 20 }}>
-        这一周你在小镇留下的足迹
+        {en ? 'The trail you left across town this week' : '这一周你在小镇留下的足迹'}
       </div>
 
       {loading ? (
-        <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>生成中…（首次生成可能需要一点时间）</div>
+        <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>{en ? 'Generating… The first recap may take a moment.' : '生成中…（首次生成可能需要一点时间）'}</div>
       ) : error ? (
         <div style={{ fontSize: 13 }}>
           <span style={{ color: 'var(--accent-red)' }}>{error}</span>
           <button onClick={retry} style={{
             marginLeft: 10, background: 'none', border: 'none',
             color: 'var(--accent-blue)', fontSize: 13, cursor: 'pointer',
-          }}>重试</button>
+          }}>{en ? 'Retry' : '重试'}</button>
         </div>
       ) : recap && (
         <>
-          <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 14 }}>{recap.title}</div>
+          <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 14 }}>{en ? 'Your week in Simverse' : recap.title}</div>
 
           {/* Stats chips */}
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 16 }}>
-            <StatChip label="对话" value={recap.stats.chats} suffix="次" />
-            <StatChip label="轮次" value={recap.stats.turns} suffix="轮" />
-            <StatChip label="居民" value={recap.stats.distinct_residents} suffix="位" />
-            <StatChip label="成就" value={recap.stats.achievements} />
-            <StatChip label="探索" value={recap.stats.explored} />
+            <StatChip label={en ? 'Chats' : '对话'} value={recap.stats.chats} suffix={en ? undefined : '次'} />
+            <StatChip label={en ? 'Turns' : '轮次'} value={recap.stats.turns} suffix={en ? undefined : '轮'} />
+            <StatChip label={en ? 'Residents' : '居民'} value={recap.stats.distinct_residents} suffix={en ? undefined : '位'} />
+            <StatChip label={en ? 'Achievements' : '成就'} value={recap.stats.achievements} />
+            <StatChip label={en ? 'Explored' : '探索'} value={recap.stats.explored} />
           </div>
 
           {/* Personality tag badge */}
-          {recap.stats.tag && (
+          {recap.stats.tag && !en && (
             <div style={{ marginBottom: 16 }}>
               <span style={{
                 display: 'inline-block', padding: '4px 12px', borderRadius: 999,

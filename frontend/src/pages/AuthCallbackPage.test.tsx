@@ -54,7 +54,8 @@ describe('AuthCallbackPage return destination', () => {
       expect(screen.getByTestId('route-location')).toHaveTextContent('/onboarding?next=%2Fadmin')
     })
     expect(useGameStore.getState().token).toBe('oauth-token')
-    expect(sessionStorage.length).toBe(0)
+    expect(sessionStorage.getItem('token')).toBe('oauth-token')
+    expect(readOAuthReturnTo()).toBe('/play')
   })
 
   it('aborts and fences an in-flight identity request when the callback unmounts', async () => {

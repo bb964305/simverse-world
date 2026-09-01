@@ -9,6 +9,7 @@ import {
 } from '../services/api'
 import { onWSMessage } from '../services/ws'
 import { useGameStore } from '../stores/gameStore'
+import { useLocale, type Locale } from '../services/locale'
 
 const ACCENT = '#d97706'
 
@@ -19,25 +20,27 @@ function requestKey(): string {
   return `market:${Date.now()}:${Math.random().toString(36).slice(2)}`
 }
 
-function phaseLabel(phase: CurrentMarket['phase']): string {
-  if (!phase) return '闭市'
-  const labels: Record<NonNullable<CurrentMarket['phase']>, string> = {
-    waiting: '候场中', inbound: '进镇中', trading: '开市中', outbound: '离镇中',
+function phaseLabel(phase: CurrentMarket['phase'], locale: Locale): string {
+  if (!phase) return locale === 'en' ? 'CLOSED' : '闭市'
+  const labels: Record<NonNullable<CurrentMarket['phase']>, readonly [string, string]> = {
+    waiting: ['WAITING', '候场中'], inbound: ['ARRIVING', '进镇中'], trading: ['OPEN', '开市中'], outbound: ['DEPARTING', '离镇中'],
   }
-  return labels[phase]
+  return labels[phase][locale === 'en' ? 0 : 1]
 }
 
-function errorText(error: unknown): string {
+function errorText(error: unknown, locale: Locale): string {
   const message = error instanceof Error ? error.message : String(error)
-  if (message.includes('402') || message.includes('余额不足')) return 'Soul Coin 余额不足'
-  if (message.includes('售罄')) return '商品刚刚售罄，请刷新货架'
-  if (message.includes('限购')) return '本次到访已经购买过该项目'
-  if (message.includes('停止交易')) return '本次集市已经结束'
-  if (message.includes('灰度关闭')) return '玩家交易仍在灰度关闭中'
-  return '交易未完成，请刷新后重试'
+  const en = locale === 'en'
+  if (message.includes('402') || message.includes('余额不足')) return en ? 'Insufficient SC balance' : 'SC 余额不足'
+  if (message.includes('售罄')) return en ? 'Just sold out. Refresh the catalog.' : '商品刚刚售罄，请刷新货架'
+  if (message.includes('限购')) return en ? 'Already purchased during this visit' : '本次到访已经购买过该项目'
+  if (message.includes('停止交易')) return en ? 'This market visit has ended' : '本次集市已经结束'
+  if (message.includes('灰度关闭')) return en ? 'Player trading is not enabled yet' : '玩家交易仍在灰度关闭中'
+  return en ? 'Trade not completed. Refresh and try again.' : '交易未完成，请刷新后重试'
 }
 
 function Countdown({ closesAt }: { closesAt: string | null }) {
+  const locale = useLocale((state) => state.locale)
   const [seconds, setSeconds] = useState<number | null>(null)
   useEffect(() => {
     if (!closesAt) return
@@ -49,11 +52,19 @@ function Countdown({ closesAt }: { closesAt: string | null }) {
     return () => window.clearInterval(timer)
   }, [closesAt])
   if (!closesAt) return null
-  if (seconds === null) return <span>结算时间同步中</span>
+  if (seconds === null) return <span>{locale === 'en' ? 'Syncing close time' : '结算时间同步中'}</span>
   const hours = Math.floor(seconds / 3600)
   const minutes = Math.floor((seconds % 3600) / 60)
   const rest = seconds % 60
-  return <span style={{ fontVariantNumeric: 'tabular-nums' }}>剩余 {hours > 0 ? `${hours}:` : ''}{String(minutes).padStart(2, '0')}:{String(rest).padStart(2, '0')}</span>
+  return <span style={{ fontVariantNumeric: 'tabular-nums' }}>{locale === 'en' ? 'Closes in' : '剩余'} {hours > 0 ? `${hours}:` : ''}{String(minutes).padStart(2, '0')}:{String(rest).padStart(2, '0')}</span>
+}
+
+const OFFER_EN: Record<string, readonly [string, string]> = {
+  import_tea: ['Caravan Tea', 'Tea carried in from distant trade routes; becomes a placeable home collectible.'],
+  import_trinket: ['Travel Trinket', 'A curious item found deep in the caravan’s cargo; becomes a placeable home collectible.'],
+  import_cloth: ['Patterned Cloth', 'Foreign patterned cloth; becomes a placeable home collectible.'],
+  market_appraisal: ['Trade Route Appraisal', 'A caravan appraiser authenticates one of your resident works currently for sale.'],
+  market_artisan_lantern: ['Artisan Lantern Commission', 'Commission a limited home lantern from a traveling artisan.'],
 }
 
 function OfferCard({ offer, busy, onBuy }: {
@@ -61,10 +72,13 @@ function OfferCard({ offer, busy, onBuy }: {
   busy: boolean
   onBuy: (offer: MarketOffer) => void
 }) {
-  const label = offer.type === 'good' ? '进口商品' : offer.type === 'service' ? '限时服务' : '商路合同'
-  const reason = offer.purchased ? '本次已购'
-    : offer.stock <= 0 ? '已售罄'
-      : !offer.eligible ? offer.unavailable_reason || '暂不符合条件'
+  const locale = useLocale((state) => state.locale)
+  const isEn = locale === 'en'
+  const label = offer.type === 'good' ? (isEn ? 'Imported good' : '进口商品') : offer.type === 'service' ? (isEn ? 'Limited service' : '限时服务') : (isEn ? 'Trade contract' : '商路合同')
+  const localized = OFFER_EN[offer.code]
+  const reason = offer.purchased ? (isEn ? 'Purchased this visit' : '本次已购')
+    : offer.stock <= 0 ? (isEn ? 'Sold out' : '已售罄')
+      : !offer.eligible ? (isEn ? 'Requirements not met' : offer.unavailable_reason || '暂不符合条件')
         : null
   return (
     <div style={{
@@ -74,14 +88,14 @@ function OfferCard({ offer, busy, onBuy }: {
       <div style={{ display: 'flex', gap: 9, alignItems: 'center' }}>
         <span style={{ fontSize: 25 }}>{offer.icon}</span>
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 700 }}>{offer.name}</div>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>{isEn ? (localized?.[0] ?? offer.name) : offer.name}</div>
           <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{label}</div>
         </div>
       </div>
-      <div style={{ color: 'var(--text-secondary)', fontSize: 11, lineHeight: 1.55, flex: 1 }}>{offer.description}</div>
+      <div style={{ color: 'var(--text-secondary)', fontSize: 11, lineHeight: 1.55, flex: 1 }}>{isEn ? (localized?.[1] ?? offer.description) : offer.description}</div>
       <div style={{ display: 'flex', color: 'var(--text-muted)', fontSize: 10 }}>
-        <span>余量 {offer.stock}/{offer.stock_total}</span>
-        <span style={{ marginLeft: 'auto' }}>每人限购 {offer.per_user_limit}</span>
+        <span>{isEn ? 'Stock' : '余量'} {offer.stock}/{offer.stock_total}</span>
+        <span style={{ marginLeft: 'auto' }}>{isEn ? 'Limit' : '每人限购'} {offer.per_user_limit}</span>
       </div>
       <button
         onClick={() => onBuy(offer)}
@@ -94,13 +108,15 @@ function OfferCard({ offer, busy, onBuy }: {
           cursor: offer.available && !busy ? 'pointer' : 'default',
         }}
       >
-        {busy ? '交易中…' : reason ?? `🪙 ${offer.price_sc} 购买`}
+        {busy ? (isEn ? 'Trading…' : '交易中…') : reason ?? `🪙 ${offer.price_sc} ${isEn ? 'Buy' : '购买'}`}
       </button>
     </div>
   )
 }
 
 export function MarketHallPanel() {
+  const locale = useLocale((state) => state.locale)
+  const isEn = locale === 'en'
   const [open, setOpen] = useState(false)
   const [market, setMarket] = useState<CurrentMarket | null>(null)
   const [loading, setLoading] = useState(false)
@@ -116,11 +132,11 @@ export function MarketHallPanel() {
       setMarket(await getCurrentMarket())
     } catch {
       setMarket(null)
-      setNotice({ ok: false, text: '集市状态暂时不可用' })
+      setNotice({ ok: false, text: isEn ? 'Market status is temporarily unavailable' : '集市状态暂时不可用' })
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [isEn])
 
   useEffect(() => {
     const unsubOpen = bridge.on('market:open', () => {
@@ -164,12 +180,13 @@ export function MarketHallPanel() {
     setNotice(null)
     try {
       const result = await purchaseMarketOffer(market.visit_id, offer.code, requestKey())
-      setNotice({ ok: true, text: `已获得「${offer.name}」（-${result.total_sc} SC）` })
+      const name = isEn ? (OFFER_EN[offer.code]?.[0] ?? offer.name) : offer.name
+      setNotice({ ok: true, text: isEn ? `Received “${name}” (-${result.total_sc} SC)` : `已获得「${name}」（-${result.total_sc} SC）` })
       const me = await getMe()
       updateBalance(me.soul_coin_balance)
       await load()
     } catch (error) {
-      setNotice({ ok: false, text: errorText(error) })
+      setNotice({ ok: false, text: errorText(error, locale) })
       await load()
     } finally {
       setBusyCode(null)
@@ -188,49 +205,49 @@ export function MarketHallPanel() {
       >
         <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 12, background: '#d977060b' }}>
           <div>
-            <div id="market-dialog-title" style={{ fontSize: 15, fontWeight: 800, color: ACCENT }}>🏬 商队集市</div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>到访限定商品、服务与实验楼成果候选</div>
+            <div id="market-dialog-title" style={{ fontSize: 15, fontWeight: 800, color: ACCENT }}>🏬 {isEn ? 'Caravan Market' : '商队集市'}</div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>{isEn ? 'Visit-only goods, services, and Lab candidates' : '到访限定商品、服务与实验楼成果候选'}</div>
           </div>
           <div style={{ marginLeft: 'auto', textAlign: 'right', fontSize: 11, color: 'var(--text-secondary)' }}>
-            <div>{phaseLabel(market?.phase ?? null)} · 🪙 {balance}</div>
+            <div>{phaseLabel(market?.phase ?? null, locale)} · 🪙 {balance} SC</div>
             <Countdown closesAt={market?.closes_at ?? null} />
           </div>
-          <button ref={closeRef} onClick={() => setOpen(false)} className="game-dialog-close" aria-label="关闭商队集市">✕</button>
+          <button ref={closeRef} onClick={() => setOpen(false)} className="game-dialog-close" aria-label={isEn ? 'Close caravan market' : '关闭商队集市'}>✕</button>
         </div>
 
         <div style={{ overflowY: 'auto', padding: 18 }}>
           {notice && <div style={{ color: notice.ok ? 'var(--accent-green)' : 'var(--accent-red)', fontSize: 12, marginBottom: 12 }}>{notice.text}</div>}
           {loading && !market ? (
-            <div style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 28 }}>正在查看商队货单…</div>
+            <div style={{ textAlign: 'center', color: 'var(--text-muted)', padding: 28 }}>{isEn ? 'Loading caravan catalog…' : '正在查看商队货单…'}</div>
           ) : !market ? null : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
               <div style={{ border: `1px solid ${ACCENT}44`, background: '#d977060a', borderRadius: 9, padding: '10px 12px', fontSize: 12, lineHeight: 1.6 }}>
-                <b style={{ color: ACCENT }}>{market.message}</b>
-                {!market.enabled && <div style={{ color: 'var(--text-muted)' }}>货单保持可见；运维开闸后，交易阶段会自动开放购买。</div>}
+                <b style={{ color: ACCENT }}>{isEn ? phaseLabel(market.phase, locale) : market.message}</b>
+                {!market.enabled && <div style={{ color: 'var(--text-muted)' }}>{isEn ? 'The catalog remains visible. Purchases open automatically during trading once rollout is enabled.' : '货单保持可见；运维开闸后，交易阶段会自动开放购买。'}</div>}
               </div>
 
               {grouped.goods.length > 0 && <section>
-                <h3 style={{ fontSize: 13, margin: '0 0 9px' }}>远方货物</h3>
+                <h3 style={{ fontSize: 13, margin: '0 0 9px' }}>{isEn ? 'Goods from afar' : '远方货物'}</h3>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 10 }}>
                   {grouped.goods.map((offer) => <OfferCard key={offer.code} offer={offer} busy={busyCode === offer.code} onBuy={buy} />)}
                 </div>
               </section>}
 
               {grouped.services.length > 0 && <section>
-                <h3 style={{ fontSize: 13, margin: '0 0 9px' }}>本次限定服务</h3>
+                <h3 style={{ fontSize: 13, margin: '0 0 9px' }}>{isEn ? 'Visit-only services' : '本次限定服务'}</h3>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
                   {grouped.services.map((offer) => <OfferCard key={offer.code} offer={offer} busy={busyCode === offer.code} onBuy={buy} />)}
                 </div>
               </section>}
 
               <section>
-                <h3 style={{ fontSize: 13, margin: '0 0 9px' }}>🧪 实验楼市场候选</h3>
+                <h3 style={{ fontSize: 13, margin: '0 0 9px' }}>🧪 {isEn ? 'Lab market candidates' : '实验楼市场候选'}</h3>
                 {market.research_candidates.length === 0 ? (
-                  <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>暂无通过审核的研究成果候选。</div>
+                  <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>{isEn ? 'No approved research candidates yet.' : '暂无通过审核的研究成果候选。'}</div>
                 ) : market.research_candidates.map((candidate) => (
                   <div key={candidate.id} style={{ borderLeft: `2px solid ${ACCENT}`, padding: '5px 9px', marginBottom: 7 }}>
                     <div style={{ fontSize: 12, fontWeight: 700 }}>{candidate.title}</div>
-                    <div style={{ color: 'var(--text-muted)', fontSize: 10 }}>{candidate.summary || '待产品化评审'} · 建议 {candidate.suggested_price_sc} SC</div>
+                    <div style={{ color: 'var(--text-muted)', fontSize: 10 }}>{candidate.summary || (isEn ? 'Awaiting product review' : '待产品化评审')} · {isEn ? 'Suggested' : '建议'} {candidate.suggested_price_sc} SC</div>
                   </div>
                 ))}
               </section>

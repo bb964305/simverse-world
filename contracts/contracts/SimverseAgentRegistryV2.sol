@@ -19,8 +19,8 @@ contract SimverseAgentRegistryV2 is SimverseAgentRegistry {
     );
 
     mapping(address owner => mapping(bytes32 residentKey => uint256 agentId))
-        private _agentByResident;
-    mapping(uint256 agentId => bytes32 residentKey) private _residentKeyByAgent;
+        internal _agentByResident;
+    mapping(uint256 agentId => bytes32 residentKey) internal _residentKeyByAgent;
 
     /// @notice Legacy unscoped creation is disabled after the V2 upgrade.
     function createAgent(
@@ -37,7 +37,7 @@ contract SimverseAgentRegistryV2 is SimverseAgentRegistry {
         string calldata metadataURI,
         bytes32 metadataHash,
         bytes32 residentKey
-    ) external returns (uint256 agentId, bool created) {
+    ) external virtual returns (uint256 agentId, bool created) {
         if (residentKey == bytes32(0)) revert ResidentKeyRequired();
         agentId = _agentByResident[msg.sender][residentKey];
         if (agentId != 0) return (agentId, false);
@@ -50,7 +50,7 @@ contract SimverseAgentRegistryV2 is SimverseAgentRegistry {
     }
 
     /// @notice One-time migration helper for a Passport minted before V2.
-    function linkExistingAgent(uint256 agentId, bytes32 residentKey) external {
+    function linkExistingAgent(uint256 agentId, bytes32 residentKey) external virtual {
         if (residentKey == bytes32(0)) revert ResidentKeyRequired();
         _requireAgentOwner(agentId);
         uint256 existing = _agentByResident[msg.sender][residentKey];
@@ -73,7 +73,7 @@ contract SimverseAgentRegistryV2 is SimverseAgentRegistry {
         return _residentKeyByAgent[agentId];
     }
 
-    function implementationVersion() external pure returns (uint256) {
+    function implementationVersion() external pure virtual returns (uint256) {
         return 2;
     }
 }

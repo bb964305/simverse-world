@@ -144,14 +144,14 @@ describe('guided/quick Forge terminal recovery', () => {
     render(<ForgeChat onStateUpdate={vi.fn()} onComplete={vi.fn()} />)
 
     for (const answer of ['阿青', 'a2', 'a3', 'a4', 'a5']) {
-      const input = screen.getByPlaceholderText('输入你的回答...')
+      const input = screen.getByPlaceholderText('输入你的回答…')
       fireEvent.change(input, { target: { value: answer } })
       fireEvent.click(screen.getByRole('button', { name: '发送' }))
       await flushPromises()
     }
 
     expect(wsHandler).not.toBeNull()
-    expect(screen.getByText('开始炼化...')).toBeInTheDocument()
+    expect(screen.getByText('开始炼化…')).toBeInTheDocument()
     await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
 
     expect(screen.getByText(/炼化完成！阿青/)).toBeInTheDocument()
@@ -189,7 +189,7 @@ describe('guided/quick Forge terminal recovery', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(7600) })
 
     expect(screen.getByText(FORGE_TERMINAL_RECOVERY_MESSAGE)).toBeInTheDocument()
-    expect(screen.queryByText('正在炼化中...')).not.toBeInTheDocument()
+    expect(screen.queryByText('正在炼化中…')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /立即提取 Skill/ })).toBeEnabled()
   })
 
@@ -215,12 +215,12 @@ describe('guided/quick Forge terminal recovery', () => {
     await submitQuick()
     await act(async () => { await vi.advanceTimersByTimeAsync(15 * 60 * 1000) })
 
-    expect(screen.getByText('正在炼化中...')).toBeInTheDocument()
+    expect(screen.getByText('正在炼化中…')).toBeInTheDocument()
     expect(screen.queryByText(FORGE_TERMINAL_RECOVERY_MESSAGE)).not.toBeInTheDocument()
 
     await act(async () => { await vi.advanceTimersByTimeAsync(5 * 60 * 1000) })
     expect(screen.getByText(FORGE_TERMINAL_RECOVERY_MESSAGE)).toBeInTheDocument()
-    expect(screen.queryByText('正在炼化中...')).not.toBeInTheDocument()
+    expect(screen.queryByText('正在炼化中…')).not.toBeInTheDocument()
   })
 
   it('aborts polling, retry timers, and completion callbacks on unmount', async () => {
@@ -249,7 +249,7 @@ describe('deep Forge terminal recovery', () => {
 
   beforeEach(() => {
     vi.useFakeTimers()
-    localStorage.setItem('token', 'deep-token')
+    sessionStorage.setItem('token', 'deep-token')
     wsHandler = null
     unsubscribe = vi.fn<() => void>()
     vi.mocked(onWSMessage).mockImplementation((handler) => {

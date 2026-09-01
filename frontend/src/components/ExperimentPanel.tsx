@@ -17,6 +17,7 @@ import { resolveLabDisplay, selectLabTask, canDecideApproval, approvalId } from 
 import { artifactKindBadge, artifactStatusBadges } from '../services/labArtifactBadges'
 import { LabTimelineLive } from './LabTimelineLive'
 import { labInput, labTab, labChip, labPublishBtn, labTaskRow, labBtn, labClose } from './labControls'
+import { useLocale, type Locale } from '../services/locale'
 
 // ExperimentPanel — Lab / 实验楼 entry panel (spec §9). Self-mounted in TopNav.
 // Panel-local state (spec sanctions this over a store slice); live run steps come
@@ -31,24 +32,28 @@ const ACCENT = '#14b8a6'
 // placeholder that never fetches the remote resource.
 const INERT_MD_COMPONENTS: Components = {
   a: ({ children }) => <span style={{ textDecoration: 'underline', textUnderlineOffset: 2 }}>{children}</span>,
-  img: ({ alt }) => <span style={{ color: 'var(--text-muted)' }}>🖼️ {alt || '图片（远程加载已屏蔽）'}</span>,
+  img: ({ alt }) => <span style={{ color: 'var(--text-muted)' }}>🖼️ {alt || 'Remote image blocked / 远程图片已屏蔽'}</span>,
 }
-const TABS: { key: LabTab; label: string }[] = [
-  { key: 'visit', label: '参观 & 状态' },
-  { key: 'publish', label: '发布委托' },
-  { key: 'live', label: '运行直播' },
-  { key: 'artifacts', label: '产物 & 提案墙' },
+const TABS: { key: LabTab; label: readonly [string, string] }[] = [
+  { key: 'visit', label: ['Visit & status', '参观 & 状态'] },
+  { key: 'publish', label: ['Publish task', '发布委托'] },
+  { key: 'live', label: ['Live runtime', '运行直播'] },
+  { key: 'artifacts', label: ['Artifacts & proposals', '产物 & 提案墙'] },
 ]
 
-function errText(e: unknown): string {
+function errText(e: unknown, locale: Locale): string {
   const m = e instanceof Error ? e.message : String(e)
-  if (m.includes('402') || m.includes('balance')) return '余额不足'
-  if (m.includes('403') || m.includes('closed beta')) return '当前账号尚未获得封闭测试资格'
-  if (m.includes('503')) return '实验楼暂时关闭'
-  return '操作失败，请稍后重试'
+  const en = locale === 'en'
+  if (m.includes('402') || m.includes('balance')) return en ? 'Insufficient SC balance' : 'SC 余额不足'
+  if (m.includes('403') || m.includes('closed beta')) return en ? 'This account is not admitted to the closed beta' : '当前账号尚未获得封闭测试资格'
+  if (m.includes('503')) return en ? 'The Lab is temporarily closed' : '实验楼暂时关闭'
+  return en ? 'Action failed. Please try again.' : '操作失败，请稍后重试'
 }
 
 export function ExperimentPanel() {
+  const locale = useLocale((state) => state.locale)
+  const isEn = locale === 'en'
+  const index = isEn ? 0 : 1
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<LabTab>('visit')
   const [status, setStatus] = useState<LabStatus | null>(null)
@@ -98,9 +103,9 @@ export function ExperimentPanel() {
         background: '#14b8a608',
       }}>
         <div>
-          <div id="experiment-dialog-title" style={{ fontWeight: 800, fontSize: 15, color: ACCENT }}>🧪 实验楼</div>
+          <div id="experiment-dialog-title" style={{ fontWeight: 800, fontSize: 15, color: ACCENT }}>🧪 {isEn ? 'Experiment Lab' : '实验楼'}</div>
           <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 2 }}>
-            发布真实委托 · 观看研究员运行 · 领取产物与世界提案
+            {isEn ? 'Publish real tasks · watch researchers run · collect artifacts and world proposals' : '发布真实委托 · 观看研究员运行 · 领取产物与世界提案'}
           </div>
         </div>
         <span style={{
@@ -108,14 +113,14 @@ export function ExperimentPanel() {
           fontSize: 10, border: '1px solid var(--border)',
           color: status?.publish_allowed ? ACCENT : 'var(--text-muted)',
         }}>
-          {status?.publish_allowed ? '封闭测试可用' : status?.deploy_enabled ? '参观开放 · 发布受限' : '参观开放 · 筹备中'}
+          {status?.publish_allowed ? (isEn ? 'BETA ACCESS' : '封闭测试可用') : status?.deploy_enabled ? (isEn ? 'VIEW OPEN · PUBLISH RESTRICTED' : '参观开放 · 发布受限') : (isEn ? 'VIEW OPEN · PREPARING' : '参观开放 · 筹备中')}
         </span>
-        <button ref={closeButtonRef} onClick={() => setOpen(false)} className="game-dialog-close" style={labClose()} aria-label="关闭实验楼">✕</button>
+        <button ref={closeButtonRef} onClick={() => setOpen(false)} className="game-dialog-close" style={labClose()} aria-label={isEn ? 'Close Experiment Lab' : '关闭实验楼'}>✕</button>
       </div>
 
       <div style={{ display: 'flex', gap: 4, padding: '8px 20px 0', borderBottom: '1px solid var(--border)' }}>
         {TABS.filter((t) => t.key !== 'publish' || status?.publish_allowed).map((t) => (
-          <button key={t.key} onClick={() => setTab(t.key)} style={labTab(visibleTab === t.key)}>{t.label}</button>
+          <button key={t.key} onClick={() => setTab(t.key)} style={labTab(visibleTab === t.key)}>{t.label[index]}</button>
         ))}
       </div>
 
@@ -131,8 +136,10 @@ export function ExperimentPanel() {
 }
 
 function VisitTab({ status }: { status: LabStatus | null }) {
+  const locale = useLocale((state) => state.locale)
+  const isEn = locale === 'en'
   if (!status) {
-    return <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>正在读取实验楼运行状态…</div>
+    return <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>{isEn ? 'Reading Lab runtime status…' : '正在读取实验楼运行状态…'}</div>
   }
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -141,13 +148,13 @@ function VisitTab({ status }: { status: LabStatus | null }) {
         background: '#14b8a608', fontSize: 12, lineHeight: 1.7,
       }}>
         <div style={{ fontWeight: 800, color: ACCENT, marginBottom: 4 }}>
-          {status.publish_allowed ? '实验委托通道已为你开放' : '实验楼参观区已开放'}
+          {status.publish_allowed ? (isEn ? 'Lab task publishing is open for you' : '实验委托通道已为你开放') : (isEn ? 'The Lab visitor area is open' : '实验楼参观区已开放')}
         </div>
         {status.publish_allowed
-          ? '你可以发布 code 范围的真实研究委托。资金先进入托管，产物经过审核后再放款。'
+          ? (isEn ? 'You can publish real code-scope research tasks. Funds are held in escrow and released after artifact review.' : '你可以发布 code 范围的真实研究委托。资金先进入托管，产物经过审核后再放款。')
           : status.beta_mode && !status.beta_admitted
-            ? '当前处于封闭测试阶段。你仍可查看运行方式和已完成成果，发布权限由管理员准入。'
-            : '真实执行通道尚在筹备或暂停中。关闭状态不会影响已完成任务与产物读取。'}
+            ? (isEn ? 'The Lab is in closed beta. You can inspect runtime behavior and completed work; publishing requires admission.' : '当前处于封闭测试阶段。你仍可查看运行方式和已完成成果，发布权限由管理员准入。')
+            : (isEn ? 'The execution lane is preparing or paused. Completed tasks and released artifacts remain readable.' : '真实执行通道尚在筹备或暂停中。关闭状态不会影响已完成任务与产物读取。')}
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 }}>
         {status.checks.map((check) => (
@@ -161,7 +168,7 @@ function VisitTab({ status }: { status: LabStatus | null }) {
         ))}
       </div>
       <div style={{ color: 'var(--text-muted)', fontSize: 11, lineHeight: 1.7 }}>
-        当前适配器：{status.adapter} · 能力域：{status.available_scopes.join('、') || '暂无'}。研究成果只能进入审核队列，不会直接修改小镇。
+        {isEn ? 'Adapter' : '当前适配器'}: {status.adapter} · {isEn ? 'Scopes' : '能力域'}: {status.available_scopes.join(', ') || (isEn ? 'none' : '暂无')}. {isEn ? 'Research results enter a review queue and cannot directly modify the town.' : '研究成果只能进入审核队列，不会直接修改小镇。'}
       </div>
     </div>
   )
@@ -170,6 +177,8 @@ function VisitTab({ status }: { status: LabStatus | null }) {
 // ── Publish ───────────────────────────────────────────────────────────
 
 function PublishTab({ onPublished }: { onPublished: () => void }) {
+  const locale = useLocale((state) => state.locale)
+  const isEn = locale === 'en'
   const [researchers, setResearchers] = useState<LabResearcher[]>([])
   const [title, setTitle] = useState('')
   const [brief, setBrief] = useState('')
@@ -201,30 +210,30 @@ function PublishTab({ onPublished }: { onPublished: () => void }) {
     setScopes((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]))
 
   const submit = async () => {
-    if (!title.trim()) { setNotice({ ok: false, text: '请填写标题' }); return }
-    if (scopes.length === 0) { setNotice({ ok: false, text: '至少选择一个能力域' }); return }
-    if (reward <= 0) { setNotice({ ok: false, text: '悬赏需大于 0' }); return }
+    if (!title.trim()) { setNotice({ ok: false, text: isEn ? 'Enter a title' : '请填写标题' }); return }
+    if (scopes.length === 0) { setNotice({ ok: false, text: isEn ? 'Choose at least one scope' : '至少选择一个能力域' }); return }
+    if (reward <= 0) { setNotice({ ok: false, text: isEn ? 'Reward must be greater than zero' : '悬赏需大于 0' }); return }
     setBusy(true); setNotice(null)
     try {
       await createLabTask({
         title: title.trim(), brief_md: brief, scopes, reward_sc: reward,
         researcher_slug: researcher || null,
       })
-      setNotice({ ok: true, text: `委托已发布（冻结 ${reward} + 平台费）` })
+      setNotice({ ok: true, text: isEn ? `Task published (${reward} SC + platform fee held)` : `委托已发布（冻结 ${reward} SC + 平台费）` })
       setTitle(''); setBrief('')
       onPublished()
     } catch (e) {
-      setNotice({ ok: false, text: errText(e) })
+      setNotice({ ok: false, text: errText(e, locale) })
     } finally { setBusy(false) }
   }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <input style={labInput} placeholder="任务标题" value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} />
-      <textarea style={{ ...labInput, minHeight: 90, resize: 'vertical' }} placeholder="任务说明（自然语言描述你想让研究员做什么）"
+      <input style={labInput} placeholder={isEn ? 'Task title' : '任务标题'} value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)} />
+      <textarea style={{ ...labInput, minHeight: 90, resize: 'vertical' }} placeholder={isEn ? 'Task brief—describe what the researcher should do' : '任务说明（自然语言描述你想让研究员做什么）'}
         value={brief} onChange={(e) => setBrief(e.target.value)} />
       <div>
-        <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>当前执行环境允许的能力域</div>
+        <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>{isEn ? 'Scopes allowed by the current runtime' : '当前执行环境允许的能力域'}</div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {availableScopes.map((s) => (
             <label key={s} style={labChip(scopes.includes(s))}>
@@ -236,18 +245,18 @@ function PublishTab({ onPublished }: { onPublished: () => void }) {
       </div>
       <div style={{ display: 'flex', gap: 12 }}>
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>研究员</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>{isEn ? 'Researcher' : '研究员'}</div>
           <select style={labInput} value={researcher} onChange={(e) => setResearcher(e.target.value)}>
-            <option value="">公开招募（自动分派）</option>
+            <option value="">{isEn ? 'Open recruitment (automatic)' : '公开招募（自动分派）'}</option>
             {researchers.map((r) => (
               <option key={r.slug} value={r.slug} disabled={r.busy}>
-                {r.name}{r.tier ? `（${r.tier}）` : ''}{r.busy ? ' · 忙' : ''}
+                {r.name}{r.tier ? ` (${r.tier})` : ''}{r.busy ? (isEn ? ' · Busy' : ' · 忙') : ''}
               </option>
             ))}
           </select>
         </div>
         <div style={{ width: 140 }}>
-          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>悬赏 🪙</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>{isEn ? 'Reward' : '悬赏'} SC</div>
           <input style={labInput} type="number" min={1} value={reward}
             onChange={(e) => setReward(Math.max(1, parseInt(e.target.value || '0', 10)))} />
         </div>
@@ -260,27 +269,27 @@ function PublishTab({ onPublished }: { onPublished: () => void }) {
           gap: '6px 16px', fontSize: 12, overflowWrap: 'anywhere',
         }}>
           <div style={{ color: 'var(--text-secondary)' }}>
-            {quote.adapter} · {quote.model_tier === 'high' ? '高报酬档' : '低报酬档'} · <b>{quote.model_name}</b>
+            {quote.adapter} · {quote.model_tier === 'high' ? (isEn ? 'High-reward tier' : '高报酬档') : (isEn ? 'Base tier' : '低报酬档')} · <b>{quote.model_name}</b>
           </div>
           <div style={{ color: 'var(--text-secondary)' }}>
-            {quote.resource_cpu_cores} 核 · {formatLabMemory(quote.resource_memory_mb)}
+            {quote.resource_cpu_cores} {isEn ? 'cores' : '核'} · {formatLabMemory(quote.resource_memory_mb)}
           </div>
           <div style={{ color: 'var(--text-muted)' }}>
-            平台费 {quote.platform_fee_sc} SC · 共冻结 {quote.total_hold_sc} SC
+            {isEn ? 'Platform fee' : '平台费'} {quote.platform_fee_sc} SC · {isEn ? 'Total held' : '共冻结'} {quote.total_hold_sc} SC
           </div>
           <div style={{ color: quote.eligible ? 'var(--text-muted)' : '#ef4444' }}>
             {quote.unsupported_scopes.length > 0
-              ? `${quote.adapter} 暂不支持 ${quote.unsupported_scopes.join('、')}`
+              ? (isEn ? `${quote.adapter} does not support ${quote.unsupported_scopes.join(', ')}` : `${quote.adapter} 暂不支持 ${quote.unsupported_scopes.join('、')}`)
               : quote.eligible
               ? quote.model_tier === 'high'
-                ? '已启用高报酬模型与资源'
-                : `达到 ${quote.pro_min_reward_sc} SC 自动升级高报酬档`
-              : `当前能力域最低悬赏 ${quote.minimum_reward_sc} SC`}
+                ? (isEn ? 'High-reward model and resources enabled' : '已启用高报酬模型与资源')
+                : (isEn ? `Upgrade automatically at ${quote.pro_min_reward_sc} SC` : `达到 ${quote.pro_min_reward_sc} SC 自动升级高报酬档`)
+              : (isEn ? `Minimum reward for these scopes: ${quote.minimum_reward_sc} SC` : `当前能力域最低悬赏 ${quote.minimum_reward_sc} SC`)}
           </div>
         </div>
       )}
       {notice && <div style={{ fontSize: 12, color: notice.ok ? ACCENT : '#ef4444' }}>{notice.text}</div>}
-      <button onClick={() => void submit()} disabled={busy || !quote?.eligible} style={labPublishBtn(busy || !quote?.eligible)}>{busy ? '发布中…' : '发布委托'}</button>
+      <button onClick={() => void submit()} disabled={busy || !quote?.eligible} style={labPublishBtn(busy || !quote?.eligible)}>{busy ? (isEn ? 'Publishing…' : '发布中…') : (isEn ? 'Publish task' : '发布委托')}</button>
     </div>
   )
 }
@@ -288,6 +297,8 @@ function PublishTab({ onPublished }: { onPublished: () => void }) {
 // ── Live run ──────────────────────────────────────────────────────────
 
 function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
+  const locale = useLocale((state) => state.locale)
+  const isEn = locale === 'en'
   const [tasks, setTasks] = useState<LabTask[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const [run, setRun] = useState<LabRun | null>(null)
@@ -382,18 +393,18 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
   return (
     <div className="game-lab-split" style={{ display: 'flex', gap: 12 }}>
       <div style={{ width: 200, borderRight: '1px solid var(--border)', paddingRight: 12 }}>
-        <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>我的委托</div>
-        {tasks.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>还没有委托</div>}
+        <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>{isEn ? 'My tasks' : '我的委托'}</div>
+        {tasks.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{isEn ? 'No tasks yet' : '还没有委托'}</div>}
         {tasks.map((t) => (
           <button key={t.id} onClick={() => selectTask(t.id)} style={labTaskRow(selected === t.id)}>
             <div style={{ fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
-            {(() => { const b = resolveLabDisplay({ taskStatus: t.status }).task
+            {(() => { const b = resolveLabDisplay({ taskStatus: t.status }, locale).task
               return <div style={{ color: b.known ? ACCENT : 'var(--text-muted)', fontSize: 11 }}>{b.label}</div> })()}
           </button>
         ))}
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        {!selected && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>选择一个委托查看运行直播</div>}
+        {!selected && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{isEn ? 'Choose a task to view its live runtime' : '选择一个委托查看运行直播'}</div>}
         {selected && (
           <div>
             {run && (() => {
@@ -405,11 +416,11 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
               const d = resolveLabDisplay({
                 taskStatus: selectedTask?.status, runStatus: run.status,
                 eventPhase: latest?.phase === 'verifying' ? 'verifying' : null,
-              })
+              }, locale)
               return <div style={{ marginBottom: 8 }}>
                 <LabTimelineLive display={d} />
                 <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                  适配器 {run.adapter}{formatLabRunProfile(run) ? ` · ${formatLabRunProfile(run)}` : ''}
+                  {isEn ? 'Adapter' : '适配器'} {run.adapter}{formatLabRunProfile(run, locale) ? ` · ${formatLabRunProfile(run, locale)}` : ''}
                 </div>
               </div>
             })()}
@@ -424,10 +435,10 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
                 border: '1px solid #f59e0b66', background: '#f59e0b12', borderRadius: 8,
                 padding: 10, marginBottom: 8,
               }}>
-                <div style={{ fontSize: 12, marginBottom: 6 }}>⚠️ 敏感动作待批准：{a.summary || a.tool}</div>
+                <div style={{ fontSize: 12, marginBottom: 6 }}>⚠️ {isEn ? 'Sensitive action awaiting approval' : '敏感动作待批准'}: {a.summary || a.tool}</div>
                 <div style={{ display: 'flex', gap: 8 }}>
-                  <button onClick={async () => { if (aid) await respondLabApproval(run.id, aid, true); }} style={btn(ACCENT)}>批准</button>
-                  <button onClick={async () => { if (aid) await respondLabApproval(run.id, aid, false); }} style={btn('#ef4444')}>拒绝</button>
+                  <button onClick={async () => { if (aid) await respondLabApproval(run.id, aid, true); }} style={btn(ACCENT)}>{isEn ? 'Approve' : '批准'}</button>
+                  <button onClick={async () => { if (aid) await respondLabApproval(run.id, aid, false); }} style={btn('#ef4444')}>{isEn ? 'Deny' : '拒绝'}</button>
                 </div>
               </div>
               )
@@ -438,14 +449,14 @@ function LiveTab({ onBalanceChange }: { onBalanceChange: () => void }) {
                   <span style={{ color: ACCENT }}>[{s.phase}]</span>{s.tool ? ` ${s.tool}` : ''} {s.summary}
                 </div>
               ))}
-              {steps.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>暂无步骤</div>}
+              {steps.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{isEn ? 'No runtime steps' : '暂无步骤'}</div>}
             </div>
             {runArtifacts.length > 0 && (
               <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 4 }}>
                 {runArtifacts.map((artifact) => (
                   <div key={artifact.id} style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                    <span>{artifactKindBadge(artifact.kind).icon} {artifact.title}</span>
-                    {artifactStatusBadges(artifact).map((badge) => <span key={badge.key}>{badge.label}</span>)}
+                    <span>{artifactKindBadge(artifact.kind, locale).icon} {artifact.title}</span>
+                    {artifactStatusBadges(artifact, locale).map((badge) => <span key={badge.key}>{badge.label}</span>)}
                   </div>
                 ))}
               </div>
@@ -464,6 +475,7 @@ function TaskActions({ task, artifacts, onSettle, onCancel }: {
   onSettle: (id: string, accept: boolean) => void
   onCancel: (id: string) => void
 }) {
+  const isEn = useLocale((state) => state.locale) === 'en'
   if (!task) return null
   const productionArtifacts = artifacts.filter((artifact) => artifact.storage_status !== 'legacy')
   const artifactsReady = productionArtifacts.length === 0 || productionArtifacts
@@ -476,13 +488,13 @@ function TaskActions({ task, artifacts, onSettle, onCancel }: {
       {task.status === 'review' && (
         <>
           <button onClick={() => onSettle(task.id, true)} style={btn(ACCENT)} disabled={!artifactsReady}>
-            {artifactsReady ? '满意，放款' : '产物处理中'}
+            {artifactsReady ? (isEn ? 'Accept and release funds' : '满意，放款') : (isEn ? 'Artifacts processing' : '产物处理中')}
           </button>
-          <button onClick={() => onSettle(task.id, false)} style={btn('#ef4444')} disabled={task.reject_count >= 1}>拒收</button>
+          <button onClick={() => onSettle(task.id, false)} style={btn('#ef4444')} disabled={task.reject_count >= 1}>{isEn ? 'Reject' : '拒收'}</button>
         </>
       )}
       {['funded', 'assigned', 'running'].includes(task.status) && (
-        <button onClick={() => onCancel(task.id)} style={btn('#f59e0b')}>取消委托</button>
+        <button onClick={() => onCancel(task.id)} style={btn('#f59e0b')}>{isEn ? 'Cancel task' : '取消委托'}</button>
       )}
     </div>
   )
@@ -495,6 +507,8 @@ function btn(color: string): CSSProperties {
 // ── Artifacts & proposal wall ─────────────────────────────────────────
 
 function ArtifactsTab() {
+  const locale = useLocale((state) => state.locale)
+  const isEn = locale === 'en'
   const [tasks, setTasks] = useState<LabTask[]>([])
   const [artifacts, setArtifacts] = useState<Record<string, LabArtifact[]>>({})
   const [worldChanges, setWorldChanges] = useState<WorldLocation[]>([])
@@ -515,8 +529,8 @@ function ArtifactsTab() {
 
   const nominate = async (artifact: LabArtifact) => {
     const candidate = await nominateLabMarketCandidate(artifact.id, {
-      title: artifact.title || '实验楼成果',
-      summary: '由实验楼产物提交，等待市场产品化与安全审核。',
+      title: artifact.title || (isEn ? 'Lab artifact' : '实验楼成果'),
+      summary: isEn ? 'Submitted from a Lab artifact for product and safety review.' : '由实验楼产物提交，等待市场产品化与安全审核。',
       offer_type: 'service',
       suggested_price_sc: 5,
     })
@@ -527,10 +541,10 @@ function ArtifactsTab() {
 
   const wall = worldChanges.length > 0 && (
     <div style={{ border: '1px solid #14b8a644', borderRadius: 10, padding: 12, background: '#14b8a608' }}>
-      <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8, color: ACCENT }}>🌍 小镇因研究员而改变</div>
+      <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8, color: ACCENT }}>🌍 {isEn ? 'Research is changing the town' : '小镇因研究员而改变'}</div>
       {worldChanges.map((l) => (
         <div key={l.slug} style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>
-          · 新增了 <b>{l.name ?? l.slug}</b>{l.description ? ` —— ${l.description}` : ''}
+          · {isEn ? 'Added' : '新增了'} <b>{l.name ?? l.slug}</b>{l.description ? ` — ${l.description}` : ''}
         </div>
       ))}
     </div>
@@ -541,7 +555,7 @@ function ArtifactsTab() {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         {wall}
         <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.7 }}>
-          完成并放款的委托产物会陈列在这里；研究员产出并通过审核的世界变更在上方叙事化展示。
+          {isEn ? 'Artifacts from completed, settled tasks appear here. Approved world changes are shown above.' : '完成并放款的委托产物会陈列在这里；研究员产出并通过审核的世界变更在上方叙事化展示。'}
         </div>
       </div>
     )
@@ -556,10 +570,10 @@ function ArtifactsTab() {
           {(artifacts[t.id] || []).map((a) => (
             <div key={a.id} style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 8 }}>
               <div style={{ fontSize: 12, color: ACCENT, marginBottom: 6, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-                <span>{artifactKindBadge(a.kind).icon} {a.title}</span>
-                <span style={{ color: 'var(--text-muted)' }}>{artifactKindBadge(a.kind).label}</span>
-                {a.provenance && <span style={{ color: 'var(--text-muted)', fontSize: 10 }}>来源 {a.provenance}</span>}
-                {artifactStatusBadges(a).map((b) => (
+                <span>{artifactKindBadge(a.kind, locale).icon} {a.title}</span>
+                <span style={{ color: 'var(--text-muted)' }}>{artifactKindBadge(a.kind, locale).label}</span>
+                {a.provenance && <span style={{ color: 'var(--text-muted)', fontSize: 10 }}>{isEn ? 'Source' : '来源'} {a.provenance}</span>}
+                {artifactStatusBadges(a, locale).map((b) => (
                   <span key={b.key} style={{ fontSize: 10, border: '1px solid var(--border)', borderRadius: 4, padding: '0 4px' }}>{b.label}</span>
                 ))}
               </div>
@@ -581,6 +595,7 @@ function ArtifactContent({ artifact, candidate, onNominate }: {
   candidate?: LabMarketCandidate
   onNominate: () => Promise<void>
 }) {
+  const isEn = useLocale((state) => state.locale) === 'en'
   const [preview, setPreview] = useState<string | null>(null)
   const [busy, setBusy] = useState<'preview' | 'download' | 'nominate' | null>(null)
   const [error, setError] = useState(false)
@@ -627,7 +642,7 @@ function ArtifactContent({ artifact, candidate, onNominate }: {
     const pending = ['pending_upload', 'quarantined'].includes(artifact.storage_status || '')
       || ['pending', 'scanning'].includes(artifact.scan_status || '')
     return <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-      {pending ? '产物处理中' : artifact.storage_status === 'deleted' ? '产物已过期' : '放款后解锁'}
+      {pending ? (isEn ? 'Artifact processing' : '产物处理中') : artifact.storage_status === 'deleted' ? (isEn ? 'Artifact expired' : '产物已过期') : (isEn ? 'Unlocks after settlement' : '放款后解锁')}
     </div>
   }
 
@@ -635,23 +650,23 @@ function ArtifactContent({ artifact, candidate, onNominate }: {
     <div style={{ display: 'flex', gap: 8 }}>
       {canPreview && (
         <button onClick={() => void loadPreview()} disabled={busy !== null} style={btn(ACCENT)}>
-          {busy === 'preview' ? '加载中' : '预览'}
+          {busy === 'preview' ? (isEn ? 'Loading' : '加载中') : (isEn ? 'Preview' : '预览')}
         </button>
       )}
       <button onClick={() => void download()} disabled={busy !== null} style={btn(ACCENT)}>
-        {busy === 'download' ? '下载中' : '下载'}
+        {busy === 'download' ? (isEn ? 'Downloading' : '下载中') : (isEn ? 'Download' : '下载')}
       </button>
       {candidate ? (
         <span style={{ alignSelf: 'center', fontSize: 10, color: candidate.status === 'approved' ? ACCENT : 'var(--text-muted)' }}>
-          市场候选：{{ pending: '待审核', approved: '已通过', rejected: '未通过', published: '已发布' }[candidate.status]}
+          {isEn ? 'Market candidate' : '市场候选'}: {{ pending: isEn ? 'Pending' : '待审核', approved: isEn ? 'Approved' : '已通过', rejected: isEn ? 'Rejected' : '未通过', published: isEn ? 'Published' : '已发布' }[candidate.status]}
         </span>
       ) : artifact.scan_status === 'clean' && artifact.verification_status === 'verified' ? (
         <button onClick={() => void nominate()} disabled={busy !== null} style={btn('#d97706')}>
-          {busy === 'nominate' ? '提交中' : '提交为集市候选'}
+          {busy === 'nominate' ? (isEn ? 'Submitting' : '提交中') : (isEn ? 'Nominate for market' : '提交为集市候选')}
         </button>
       ) : null}
     </div>
-    {error && <div style={{ fontSize: 11, color: '#ef4444' }}>产物读取失败</div>}
+    {error && <div style={{ fontSize: 11, color: '#ef4444' }}>{isEn ? 'Could not read artifact' : '产物读取失败'}</div>}
     {preview !== null && (
       <div style={{ fontSize: 12, lineHeight: 1.6 }}>
         <ReactMarkdown components={INERT_MD_COMPONENTS}>{preview}</ReactMarkdown>

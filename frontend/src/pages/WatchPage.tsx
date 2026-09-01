@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
+import { BrandLogo } from '../components/BrandLogo'
+import { BrandSocialLinks } from '../components/BrandSocialLinks'
+import { LanguageToggle } from '../components/LanguageToggle'
 import {
   formatActorLocation,
   formatLocationName,
@@ -15,18 +18,50 @@ import {
   type SpectatorActor,
   type ViewerSnapshot,
 } from '../services/spectator'
+import { useLocale, type Locale } from '../services/locale'
 import '../styles/spectator-page.css'
 
 const REFRESH_MS = 3_000
 
-function readableTime(value: string): string {
+const COPY = {
+  en: {
+    home: 'Simverse World home', nav: 'Observer navigation', town: 'Town live', watch: 'Follow an Agent', enter: 'Enter game',
+    title: 'Follow an Agent', lead: 'See the location and actors visible to an Agent in-game, without receiving control access.', switch: 'End session and change view token',
+    gate: 'Enter a read-only view token', gateLead: 'A view token is completely separate from an Agent control token. It is submitted once and never stored in the URL or browser storage.',
+    rule1: 'Read only the linked Agent’s game view', rule2: 'Cannot move, speak, open private chats, or modify characters', rule3: 'Revoking the view token immediately ends this session',
+    verifying: 'Verifying…', start: 'Start following', checking: 'Checking for an existing viewer session…', interrupted: 'Viewer connection interrupted',
+    cookie: 'The token was accepted, but a viewer session could not be established. Your browser may be blocking cross-site cookies. Refresh, retry, or use another browser.',
+    invalid: 'The view token is invalid or has been revoked', endError: 'Unable to end the viewer session', undisclosedModel: 'Model not disclosed',
+    location: 'Location', goal: 'Current goal', status: 'Status', undisclosed: 'Not disclosed', online: 'Online', offline: 'Offline', view: 'Nearby view', viewLabel: 'read-only nearby view',
+    nearby: 'Nearby actors', noNearby: 'No other actors are nearby.', observations: 'Recent observations', noEvents: 'No new public events have been observed.',
+    refreshed: 'View refreshed at', privacy: 'The system never exposes hidden model reasoning, system prompts, private chats, or control tokens.', inTown: 'in town',
+    kinds: { npc: 'Resident', agent: 'Agent player', human: 'Human player' },
+  },
+  'zh-CN': {
+    home: 'Simverse World 首页', nav: '观察入口', town: '全镇实况', watch: '跟随 Agent', enter: '进入游戏',
+    title: '跟随一位 Agent', lead: '查看它在游戏中实际能看到的位置与角色，不会获得控制权限。', switch: '结束并更换查看码',
+    gate: '输入只读查看码', gateLead: '查看码与 Agent 的控制 token 完全不同。它只会被提交一次，不会写入地址栏或浏览器存储。',
+    rule1: '只能读取绑定 Agent 的游戏视角', rule2: '不能移动、发言、打开私聊或修改角色', rule3: '查看码被撤销后，当前会话立即失效',
+    verifying: '正在验证…', start: '开始跟随', checking: '正在检查已有查看会话…', interrupted: '查看连接中断',
+    cookie: '查看码验证通过，但查看会话未能建立。浏览器可能拦截了跨站 Cookie，请刷新重试或更换浏览器。',
+    invalid: '查看码无效或已撤销', endError: '无法结束查看会话', undisclosedModel: '未公开模型',
+    location: '所在位置', goal: '当前目标', status: '状态', undisclosed: '未公开', online: '在线', offline: '离线', view: '附近视野', viewLabel: '的只读附近视野',
+    nearby: '附近角色', noNearby: '附近暂时没有其他角色。', observations: '最近观察', noEvents: '尚未观察到新的公开事件。',
+    refreshed: '视角刷新于', privacy: '系统不会展示模型隐藏推理、系统提示、私聊内容或控制 token。', inTown: '小镇中',
+    kinds: { npc: '居民', agent: 'Agent 玩家', human: '真人玩家' },
+  },
+} as const
+
+function readableTime(value: string, locale: Locale): string {
   const date = new Date(value)
   return Number.isNaN(date.getTime())
     ? value
-    : new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(date)
+    : new Intl.DateTimeFormat(locale === 'en' ? 'en-US' : 'zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(date)
 }
 
 export function WatchPage() {
+  const locale = useLocale((state) => state.locale)
+  const copy = COPY[locale]
   const [viewToken, setViewToken] = useState('')
   const [snapshot, setSnapshot] = useState<ViewerSnapshot | null>(null)
   const [checking, setChecking] = useState(true)
@@ -65,7 +100,7 @@ export function WatchPage() {
         }
         return false
       }
-      setError(reason instanceof Error ? reason.message : '查看连接中断')
+      setError(reason instanceof Error ? reason.message : copy.interrupted)
       return true
     } finally {
       if (activeSnapshotControllerRef.current === controller) {
@@ -75,7 +110,7 @@ export function WatchPage() {
         setChecking(false)
       }
     }
-  }, [])
+  }, [copy.interrupted])
 
   useEffect(() => {
     void loadSnapshot()
@@ -122,10 +157,10 @@ export function WatchPage() {
       if (!ok) {
         setSessionActive(false)
         setSnapshot(null)
-        setError('查看码验证通过,但查看会话未能建立——浏览器可能拦截了跨站 Cookie(Safari 或开启第三方 Cookie 拦截时常见)。请刷新重试或更换浏览器。')
+        setError(copy.cookie)
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '查看码无效或已撤销')
+      setError(reason instanceof Error ? reason.message : copy.invalid)
       setSessionActive(false)
       setSnapshot(null)
     } finally {
@@ -143,7 +178,7 @@ export function WatchPage() {
     try {
       await deleteViewerSession()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '无法结束查看会话')
+      setError(reason instanceof Error ? reason.message : copy.endError)
     }
   }
 
@@ -156,13 +191,15 @@ export function WatchPage() {
   return (
     <main className="spectator-page">
       <header className="spectator-header">
-        <Link className="spectator-brand" to="/" aria-label="Simverse World 首页">
-          <span>S/</span> SIMVERSE
+        <Link className="spectator-brand" to="/" aria-label={copy.home}>
+          <BrandLogo size={34} eager /> <span>SIMVERSE</span>
         </Link>
-        <nav aria-label="观察入口">
-          <Link to="/town">全镇实况</Link>
-          <Link aria-current="page" to="/watch">跟随 Agent</Link>
-          <Link to="/login">进入游戏</Link>
+        <nav aria-label={copy.nav}>
+          <Link to="/town">{copy.town}</Link>
+          <Link aria-current="page" to="/watch">{copy.watch}</Link>
+          <Link to="/login">{copy.enter}</Link>
+          <BrandSocialLinks />
+          <LanguageToggle />
         </nav>
       </header>
 
@@ -170,12 +207,12 @@ export function WatchPage() {
         <section className="spectator-titlebar">
           <div>
             <p>PRIVATE READ-ONLY VIEW</p>
-            <h1>跟随一位 Agent</h1>
-            <span>查看它在游戏中实际能看到的位置与角色，不会获得控制权限。</span>
+            <h1>{copy.title}</h1>
+            <span>{copy.lead}</span>
           </div>
           {snapshot && (
             <button className="spectator-switch" type="button" onClick={() => void switchViewer()}>
-              结束并更换查看码
+              {copy.switch}
             </button>
           )}
         </section>
@@ -184,12 +221,12 @@ export function WatchPage() {
           <section className="viewer-gate" aria-labelledby="viewer-gate-title">
             <div className="viewer-gate__story">
               <p>VIEWER ACCESS</p>
-              <h2 id="viewer-gate-title">输入只读查看码</h2>
-              <span>查看码与 Agent 的控制 token 完全不同。它只会被提交一次，不会写入地址栏或浏览器存储。</span>
+              <h2 id="viewer-gate-title">{copy.gate}</h2>
+              <span>{copy.gateLead}</span>
               <ul>
-                <li>只能读取绑定 Agent 的游戏视角</li>
-                <li>不能移动、发言、打开私聊或修改角色</li>
-                <li>查看码被撤销后，当前会话立即失效</li>
+                <li>{copy.rule1}</li>
+                <li>{copy.rule2}</li>
+                <li>{copy.rule3}</li>
               </ul>
             </div>
             <form className="viewer-token-form" onSubmit={submit}>
@@ -209,9 +246,9 @@ export function WatchPage() {
               />
               {error && <div className="spectator-form-error" role="alert">{error}</div>}
               <button type="submit" disabled={submitting || !viewToken.trim()}>
-                {submitting ? '正在验证…' : '开始跟随'}
+                {submitting ? copy.verifying : copy.start}
               </button>
-              {checking && <span className="viewer-session-check">正在检查已有查看会话…</span>}
+              {checking && <span className="viewer-session-check">{copy.checking}</span>}
             </form>
           </section>
         )}
@@ -224,60 +261,60 @@ export function WatchPage() {
               <div>
                 <p>AGENT-CONTROLLED PLAYER</p>
                 <h2>{snapshot.agent.name}</h2>
-                <span>{snapshot.agent.model_label || '未公开模型'} · {snapshot.agent.status}</span>
+                <span>{snapshot.agent.model_label || copy.undisclosedModel} · {snapshot.agent.status}</span>
               </div>
               <dl>
-                <div><dt>所在位置</dt><dd>{formatLocationName(snapshot.location, formatActorLocation(snapshot.self))}</dd></div>
-                <div><dt>当前目标</dt><dd>{snapshot.agent.current_goal || '未公开'}</dd></div>
-                <div><dt>状态</dt><dd>{snapshot.agent.is_online === false ? '离线' : '在线'}</dd></div>
+                <div><dt>{copy.location}</dt><dd>{formatLocationName(snapshot.location, formatActorLocation(snapshot.self, copy.inTown, locale), locale)}</dd></div>
+                <div><dt>{copy.goal}</dt><dd>{snapshot.agent.current_goal || copy.undisclosed}</dd></div>
+                <div><dt>{copy.status}</dt><dd>{snapshot.agent.is_online === false ? copy.offline : copy.online}</dd></div>
               </dl>
             </section>
 
             <div className="spectator-grid spectator-grid--viewer">
               <section className="spectator-map-panel">
                 <div className="spectator-panel-heading">
-                  <div><p>AGENT VIEW</p><h2>附近视野</h2></div>
-                  <SpectatorLegend />
+                  <div><p>AGENT VIEW</p><h2>{copy.view}</h2></div>
+                  <SpectatorLegend locale={locale} />
                 </div>
-                <SpectatorMap actors={visibleActors} focusSlug={snapshot.self.slug} label={`${snapshot.agent.name} 的只读附近视野`} />
+                <SpectatorMap actors={visibleActors} focusSlug={snapshot.self.slug} locale={locale} label={`${snapshot.agent.name} ${copy.viewLabel}`} />
               </section>
 
               <aside className="spectator-sidebar">
                 <section>
                   <div className="spectator-panel-heading">
-                    <div><p>NEARBY</p><h2>附近角色</h2></div>
+                    <div><p>NEARBY</p><h2>{copy.nearby}</h2></div>
                     <span>{snapshot.nearby.residents.length + snapshot.nearby.players.length}</span>
                   </div>
                   <ul className="spectator-actor-list">
                     {[...snapshot.nearby.residents, ...snapshot.nearby.players].map((actor) => (
                       <li key={`${actor.kind}:${actor.slug}`}>
                         <span className="spectator-avatar" data-kind={actor.kind}>{actor.name.slice(0, 1)}</span>
-                        <div><strong>{actor.name}</strong><span>{SPECTATOR_KIND_LABELS[actor.kind]} · {formatActorLocation(actor)} · {actor.status}</span></div>
+                        <div><strong>{actor.name}</strong><span>{locale === 'en' ? copy.kinds[actor.kind] : SPECTATOR_KIND_LABELS[actor.kind]} · {formatActorLocation(actor, copy.inTown, locale)} · {actor.status}</span></div>
                       </li>
                     ))}
                   </ul>
                   {!snapshot.nearby.residents.length && !snapshot.nearby.players.length && (
-                    <p className="spectator-empty">附近暂时没有其他角色。</p>
+                    <p className="spectator-empty">{copy.noNearby}</p>
                   )}
                 </section>
 
                 <section>
                   <div className="spectator-panel-heading">
-                    <div><p>OBSERVED EVENTS</p><h2>最近观察</h2></div>
+                    <div><p>OBSERVED EVENTS</p><h2>{copy.observations}</h2></div>
                   </div>
                   {snapshot.recent_events?.length ? (
                     <ol className="spectator-timeline">
                       {snapshot.recent_events.slice(0, 8).map((entry, index) => (
-                        <li key={`${entry.at}:${index}`}><time>{readableTime(entry.at)}</time><span>{entry.summary}</span></li>
+                        <li key={`${entry.at}:${index}`}><time>{readableTime(entry.at, locale)}</time><span>{entry.summary}</span></li>
                       ))}
                     </ol>
-                  ) : <p className="spectator-empty">尚未观察到新的公开事件。</p>}
+                  ) : <p className="spectator-empty">{copy.noEvents}</p>}
                 </section>
               </aside>
             </div>
 
             <footer className="spectator-footnote">
-              视角刷新于 {readableTime(snapshot.generated_at)}。系统不会展示模型隐藏推理、系统提示、私聊内容或控制 token。
+              {copy.refreshed} {readableTime(snapshot.generated_at, locale)}. {copy.privacy}
             </footer>
           </>
         )}

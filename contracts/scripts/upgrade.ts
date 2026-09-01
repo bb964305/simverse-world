@@ -10,7 +10,17 @@ const { viem } = connection
 const upgradesApi = await upgrades(hre, connection)
 const [upgrader] = await viem.getWalletClients()
 if (!upgrader?.account) throw new Error('No upgrader account is configured')
-const gasPrice = BigInt(process.env.ROBINHOOD_GAS_PRICE_WEI ?? '660000000')
+const publicClient = await viem.getPublicClient()
+const networkGasPrice = await publicClient.getGasPrice()
+const configuredGasPrice = process.env.ROBINHOOD_GAS_PRICE_WEI
+  ? BigInt(process.env.ROBINHOOD_GAS_PRICE_WEI)
+  : 0n
+// Never submit a legacy gas price below the current base fee. Robinhood Chain's
+// base fee is dynamic, so stale hard-coded values can make an otherwise valid
+// upgrade fail before broadcast.
+const gasPrice = configuredGasPrice > networkGasPrice
+  ? configuredGasPrice
+  : (networkGasPrice * 125n) / 100n
 
 // Robinhood Chain's public RPC currently rejects automatic deployment gas
 // estimation with "contract creation code storage out of gas". Deploy the
@@ -19,7 +29,7 @@ const gasPrice = BigInt(process.env.ROBINHOOD_GAS_PRICE_WEI ?? '660000000')
 // creation-sized gas limit twice.
 const preparedImplementation = await upgradesApi.prepareUpgrade(
   proxyAddress,
-  'SimverseAgentRegistryV2',
+  'SimverseAgentRegistryV3',
   {
     kind: 'uups',
     client: upgrader,
@@ -29,7 +39,7 @@ const preparedImplementation = await upgradesApi.prepareUpgrade(
 )
 const upgraded = await upgradesApi.upgradeProxy(
   proxyAddress,
-  'SimverseAgentRegistryV2',
+  'SimverseAgentRegistryV3',
   {
     kind: 'uups',
     client: upgrader,
@@ -38,7 +48,6 @@ const upgraded = await upgradesApi.upgradeProxy(
     redeployImplementation: 'never',
   },
 )
-const publicClient = await viem.getPublicClient()
 const chainId = await publicClient.getChainId()
 const implementation = await upgradesApi.erc1967.getImplementationAddress(upgraded.address)
 await mkdir('deployments', { recursive: true })
@@ -47,7 +56,7 @@ await writeFile(`deployments/${chainId}.json`, `${JSON.stringify({
   proxy: upgraded.address,
   implementation,
   admin: upgrader?.account?.address ?? null,
-  contract: 'SimverseAgentRegistryV2',
+  contract: 'SimverseAgentRegistryV3',
   upgradeKind: 'uups',
   upgradedAt: new Date().toISOString(),
 }, null, 2)}\n`, 'utf8')
@@ -55,5 +64,5 @@ await writeFile(`deployments/${chainId}.json`, `${JSON.stringify({
 console.log(`SIMVERSE_AGENT_REGISTRY=${upgraded.address}`)
 console.log(`IMPLEMENTATION=${implementation}`)
 console.log(`PREPARED_IMPLEMENTATION=${preparedImplementation}`)
-console.log('IMPLEMENTATION_VERSION=2')
+console.log('IMPLEMENTATION_VERSION=3')
 console.log(`DEPLOYMENT_RECORD=deployments/${chainId}.json`)

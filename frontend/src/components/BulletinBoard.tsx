@@ -3,6 +3,8 @@ import { bridge } from '../game/phaserBridge'
 import { getBulletinPosts, type BulletinPostData } from '../services/api'
 import { parseUTC } from '../utils/time'
 import { Pager } from './Pager'
+import { useLocale, type Locale } from '../services/locale'
+import { localizeDynamicText } from '../services/worldLocalization'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 const POSTS_PAGE_SIZE = 10
@@ -27,21 +29,26 @@ interface BulletinData {
   recent_conversations_24h: number
 }
 
-const DISTRICT_NAMES: Record<string, string> = {
-  engineering: '工程街区',
-  product: '产品街区',
-  academy: '学院区',
-  free: '自由区',
+const DISTRICT_NAMES: Record<string, readonly [string, string]> = {
+  engineering: ['Engineering District', '工程街区'],
+  product: ['Product District', '产品街区'],
+  academy: ['Academy District', '学院区'],
+  free: ['Free District', '自由区'],
 }
 
 // A4 posts tab: kind filter chips ('' = no kind param = all kinds)
-const KIND_FILTERS: { value: string; label: string }[] = [
-  { value: '', label: '全部' },
-  { value: 'journal', label: '日志' },
-  { value: 'clue', label: '线索' },
-  { value: 'digest', label: '日报' },
-  { value: 'notice', label: '公告' },
+const KIND_FILTERS: { value: string; label: readonly [string, string] }[] = [
+  { value: '', label: ['All', '全部'] },
+  { value: 'journal', label: ['Journals', '日志'] },
+  { value: 'clue', label: ['Clues', '线索'] },
+  { value: 'digest', label: ['Digests', '日报'] },
+  { value: 'notice', label: ['Notices', '公告'] },
 ]
+
+const COPY = {
+  en: { title: '📋 Central Plaza Bulletin', recent: (n: number) => `Last 24 hours: ${n} conversations`, loading: 'Loading…', close: 'Close bulletin', plaza: 'Plaza', posts: 'Posts', failed: 'Could not load. Try again.', emptyPosts: 'No posts yet', more: 'Load more', hot: '🔥 Trending residents', newest: '✨ New arrivals', noData: 'No data', system: 'System' },
+  'zh-CN': { title: '📋 中央广场公告板', recent: (n: number) => `最近 24 小时：${n} 次对话`, loading: '加载中…', close: '关闭公告板', plaza: '广场', posts: '帖子', failed: '加载失败，请稍后重试', emptyPosts: '暂无帖子', more: '加载更多', hot: '🔥 热门居民', newest: '✨ 最新入住', noData: '暂无数据', system: '系统' },
+} as const
 
 /** Strip common markdown markers for a plain-text preview. */
 function stripMd(md: string): string {
@@ -59,20 +66,23 @@ function previewText(md: string): string {
   return text.length > 200 ? `${text.slice(0, 200)}…` : text
 }
 
-function relativeTime(iso: string | null): string {
+function relativeTime(iso: string | null, locale: Locale): string {
   if (!iso) return ''
   // 后端 naive-UTC isoformat —— 统一走 parseUTC 补 Z（原地内联版收编进 utils/time）
   const ts = parseUTC(iso).getTime()
   if (Number.isNaN(ts)) return ''
   const diffMin = Math.floor((Date.now() - ts) / 60000)
-  if (diffMin < 1) return '刚刚'
-  if (diffMin < 60) return `${diffMin}分钟前`
+  if (diffMin < 1) return locale === 'en' ? 'just now' : '刚刚'
+  if (diffMin < 60) return locale === 'en' ? `${diffMin}m ago` : `${diffMin}分钟前`
   const diffHour = Math.floor(diffMin / 60)
-  if (diffHour < 24) return `${diffHour}小时前`
-  return `${Math.floor(diffHour / 24)}天前`
+  if (diffHour < 24) return locale === 'en' ? `${diffHour}h ago` : `${diffHour}小时前`
+  return locale === 'en' ? `${Math.floor(diffHour / 24)}d ago` : `${Math.floor(diffHour / 24)}天前`
 }
 
 export function BulletinBoard() {
+  const locale = useLocale((state) => state.locale)
+  const copy = COPY[locale]
+  const localeIndex = locale === 'en' ? 0 : 1
   const [open, setOpen] = useState(false)
   const [data, setData] = useState<BulletinData | null>(null)
   const [loading, setLoading] = useState(false)
@@ -126,10 +136,10 @@ export function BulletinBoard() {
         setPosts(r.posts)
         setPostsCursor(r.next_cursor)
       })
-      .catch(() => { if (!cancelled) setPostsError('加载失败，请稍后重试') })
+      .catch(() => { if (!cancelled) setPostsError(copy.failed) })
       .finally(() => { if (!cancelled) setPostsLoading(false) })
     return () => { cancelled = true }
-  }, [open, tab, postKind])
+  }, [copy.failed, open, tab, postKind])
 
   const loadMorePosts = async () => {
     if (!postsCursor || postsLoadingMore) return
@@ -183,12 +193,12 @@ export function BulletinBoard() {
         background: '#f59e0b08',
       }}>
         <div>
-          <div id="bulletin-dialog-title" style={{ fontWeight: 800, fontSize: 15, color: '#f59e0b' }}>📋 中央广场公告板</div>
+          <div id="bulletin-dialog-title" style={{ fontWeight: 800, fontSize: 15, color: '#f59e0b' }}>{copy.title}</div>
           <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 2 }}>
-            {data ? `最近 24 小时：${data.recent_conversations_24h} 次对话` : '加载中...'}
+            {data ? copy.recent(data.recent_conversations_24h) : copy.loading}
           </div>
         </div>
-        <button ref={closeButtonRef} onClick={() => setOpen(false)} className="game-dialog-close" aria-label="关闭公告板">✕</button>
+        <button ref={closeButtonRef} onClick={() => setOpen(false)} className="game-dialog-close" aria-label={copy.close}>✕</button>
       </div>
 
       {/* Tabs: 广场 (legacy plaza view) | 帖子 (A4 posts) */}
@@ -196,7 +206,7 @@ export function BulletinBoard() {
         display: 'flex', gap: 4, padding: '8px 20px 0',
         borderBottom: '1px solid var(--border)',
       }}>
-        {([['plaza', '广场'], ['posts', '帖子']] as const).map(([key, label]) => (
+        {([['plaza', copy.plaza], ['posts', copy.posts]] as const).map(([key, label]) => (
           <button
             key={key}
             onClick={() => setTab(key)}
@@ -230,17 +240,17 @@ export function BulletinBoard() {
                   fontWeight: postKind === f.value ? 700 : 500,
                 }}
               >
-                {f.label}
+                {f.label[localeIndex]}
               </button>
             ))}
           </div>
 
           {postsLoading ? (
-            <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>加载中...</div>
+            <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>{copy.loading}</div>
           ) : postsError ? (
             <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>{postsError}</div>
           ) : posts.length === 0 ? (
-            <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>暂无帖子</div>
+            <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>{copy.emptyPosts}</div>
           ) : (
             <>
               {posts.slice((postsPage - 1) * POSTS_PAGE_SIZE, postsPage * POSTS_PAGE_SIZE).map((p) => (
@@ -266,9 +276,9 @@ export function BulletinBoard() {
                       }}>🤖</span>
                     )}
                     <span style={{ fontSize: 12, color: 'var(--text-secondary)', fontWeight: 600 }}>
-                      {p.author_name || '系统'}
+                      {p.author_name || copy.system}
                     </span>
-                    <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{relativeTime(p.created_at)}</span>
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{relativeTime(p.created_at, locale)}</span>
                   </div>
                   {p.content_md && (
                     <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6, marginTop: 6 }}>
@@ -301,21 +311,21 @@ export function BulletinBoard() {
                     cursor: 'pointer', opacity: postsLoadingMore ? 0.6 : 1,
                   }}
                 >
-                  {postsLoadingMore ? '加载中...' : '加载更多'}
+                  {postsLoadingMore ? copy.loading : copy.more}
                 </button>
               )}
             </>
           )}
         </div>
       ) : loading ? (
-        <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)' }}>加载中...</div>
+        <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)' }}>{copy.loading}</div>
       ) : data && (
         <div style={{ padding: '16px 20px' }}>
           {/* Hot Residents */}
           <div style={{ marginBottom: 20 }}>
-            <div style={{ fontWeight: 700, fontSize: 13, color: '#f59e0b', marginBottom: 10 }}>🔥 热门居民</div>
+            <div style={{ fontWeight: 700, fontSize: 13, color: '#f59e0b', marginBottom: 10 }}>{copy.hot}</div>
             {data.hot_residents.length === 0 && (
-              <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '8px 10px' }}>暂无数据</div>
+              <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '8px 10px' }}>{copy.noData}</div>
             )}
             {data.hot_residents.map((r, i) => (
               <div
@@ -337,7 +347,7 @@ export function BulletinBoard() {
                 <div style={{ flex: 1 }}>
                   <span style={{ fontWeight: 600, fontSize: 13 }}>{r.name}</span>
                   <span style={{ color: 'var(--text-muted)', fontSize: 11, marginLeft: 6 }}>
-                    {r.meta_json?.role ?? ''} · {DISTRICT_NAMES[r.district] ?? r.district}
+                    {localizeDynamicText(r.meta_json?.role, locale)} · {DISTRICT_NAMES[r.district]?.[localeIndex] ?? r.district}
                   </span>
                 </div>
                 <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>🔥 {r.heat}</span>
@@ -347,9 +357,9 @@ export function BulletinBoard() {
 
           {/* New Residents */}
           <div>
-            <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--accent-blue)', marginBottom: 10 }}>✨ 最新入住</div>
+            <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--accent-blue)', marginBottom: 10 }}>{copy.newest}</div>
             {data.new_residents.length === 0 && (
-              <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '8px 10px' }}>暂无数据</div>
+              <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: '8px 10px' }}>{copy.noData}</div>
             )}
             {data.new_residents.map((r) => (
               <div

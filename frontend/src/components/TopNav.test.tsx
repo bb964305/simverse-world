@@ -108,7 +108,7 @@ describe('TopNav overlay ownership', () => {
     expect(screen.queryByRole('region', { name: '通知面板' })).not.toBeInTheDocument()
     expect(screen.getByText('UI QA')).toBeInTheDocument()
 
-    await waitFor(() => expect(screen.getByText('🪙 110')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('🪙 110 SC')).toBeInTheDocument())
   })
 
   it('mounts menu dialogs outside nav and closes them with Escape', () => {

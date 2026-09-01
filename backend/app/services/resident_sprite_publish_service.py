@@ -6,7 +6,6 @@ import io
 import os
 import shutil
 import tempfile
-import fcntl
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,6 +17,7 @@ from app.config import settings
 from app.models.resident import Resident
 from app.models.resident_sprite_run import ResidentSpriteRun
 from app.schemas.resident_sprite import CHECKLIST_KEYS
+from app.services.file_lock import exclusive_file_lock
 from app.services.resident_sprite_generation import ResidentSpriteRequest, new_run_id
 from app.services.resident_sprite_qc import inspect_resident_sprite_atlas
 
@@ -87,17 +87,18 @@ def _atomic_write(path: Path, data: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        _fsync_directory(path.parent)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
 
 
 def _fsync_directory(path: Path) -> None:
+    # Windows does not allow opening a directory as a regular file descriptor.
+    # os.replace above is still atomic on the same volume; Linux production
+    # additionally fsyncs the directory so the rename survives a power loss.
+    if os.name == "nt":
+        return
     directory_fd = os.open(path, os.O_RDONLY)
     try:
         os.fsync(directory_fd)
@@ -112,28 +113,28 @@ def _publish_directory(parent: Path, digest: str, texture: bytes, portrait: byte
     lock_path = parent / ".publish.lock"
     try:
         with lock_path.open("a+b") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            if destination.exists():
-                expected = {"texture.png": texture, "portrait.png": portrait}
-                if not destination.is_dir() or any(
-                    not (destination / name).is_file()
-                    or hashlib.sha256((destination / name).read_bytes()).digest()
-                    != hashlib.sha256(data).digest()
-                    for name, data in expected.items()
-                ):
-                    raise _error(409, "IMMUTABLE_PATH_CONFLICT", "Published content directory already differs")
-                return destination
+            with exclusive_file_lock(lock.fileno()):
+                if destination.exists():
+                    expected = {"texture.png": texture, "portrait.png": portrait}
+                    if not destination.is_dir() or any(
+                        not (destination / name).is_file()
+                        or hashlib.sha256((destination / name).read_bytes()).digest()
+                        != hashlib.sha256(data).digest()
+                        for name, data in expected.items()
+                    ):
+                        raise _error(409, "IMMUTABLE_PATH_CONFLICT", "Published content directory already differs")
+                    return destination
 
-            staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=parent))
-            try:
-                _atomic_write(staging / "texture.png", texture)
-                _atomic_write(staging / "portrait.png", portrait)
-                _fsync_directory(staging)
-                os.rename(staging, destination)
-                _fsync_directory(parent)
-                return destination
-            finally:
-                shutil.rmtree(staging, ignore_errors=True)
+                staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=parent))
+                try:
+                    _atomic_write(staging / "texture.png", texture)
+                    _atomic_write(staging / "portrait.png", portrait)
+                    _fsync_directory(staging)
+                    os.rename(staging, destination)
+                    _fsync_directory(parent)
+                    return destination
+                finally:
+                    shutil.rmtree(staging, ignore_errors=True)
     except SpriteWorkflowError:
         raise
     except OSError as exc:

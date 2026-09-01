@@ -43,17 +43,17 @@ afterEach(() => {
 })
 
 describe('ProfilePage mobile layout', () => {
-  it('stacks the sidebar above content on narrow viewports', () => {
+  it('stacks the sidebar above content on narrow viewports', async () => {
     stubMatchMedia(true)
     render(<ProfilePage />)
     expect(screen.getByTestId('profile-layout').style.flexDirection).toBe('column')
-    expect(screen.getByText('residents-stub')).toBeInTheDocument()
+    expect(await screen.findByText('residents-stub')).toBeInTheDocument()
   })
 
-  it('keeps the desktop row layout at normal widths, unchanged', () => {
+  it('keeps the desktop row layout at normal widths, unchanged', async () => {
     stubMatchMedia(false)
     render(<ProfilePage />)
     expect(screen.getByTestId('profile-layout').style.flexDirection).toBe('row')
-    expect(screen.getByText('residents-stub')).toBeInTheDocument()
+    expect(await screen.findByText('residents-stub')).toBeInTheDocument()
   })
 })

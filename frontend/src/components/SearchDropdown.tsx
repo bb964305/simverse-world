@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect, useId } from 'react'
 import { bridge } from '../game/phaserBridge'
+import { useLocale } from '../services/locale'
+import { localizeDynamicText } from '../services/worldLocalization'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -8,11 +10,13 @@ interface SearchResult {
   heat: number; tile_x: number; tile_y: number; meta_json: { role?: string } | null;
 }
 
-const DISTRICT_NAMES: Record<string, string> = {
-  engineering: '工程街区', product: '产品街区', academy: '学院区', free: '自由区',
+const DISTRICT_NAMES: Record<string, readonly [string, string]> = {
+  engineering: ['Engineering District', '工程街区'], product: ['Product District', '产品街区'], academy: ['Academy District', '学院区'], free: ['Free District', '自由区'],
 }
 
 export function SearchDropdown() {
+  const locale = useLocale((state) => state.locale)
+  const isEn = locale === 'en'
   const listboxId = useId()
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -92,9 +96,9 @@ export function SearchDropdown() {
           onChange={(e) => handleInput(e.target.value)}
           onFocus={() => { setOpen(true); if (query) void search(query) }}
           onKeyDown={handleKeyDown}
-          placeholder="搜索居民..."
+          placeholder={isEn ? 'Search residents…' : '搜索居民…'}
           role="combobox"
-          aria-label="搜索居民"
+          aria-label={isEn ? 'Search residents' : '搜索居民'}
           aria-expanded={open}
           aria-controls={listboxId}
           aria-activedescendant={activeIndex >= 0 ? `${listboxId}-${results[activeIndex]?.id}` : undefined}
@@ -108,9 +112,9 @@ export function SearchDropdown() {
           background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8,
           boxShadow: '0 8px 24px rgba(0,0,0,0.3)', zIndex: 100, overflow: 'hidden', minWidth: 240,
         }}>
-          {loading && <div style={{ padding: '10px 14px', color: 'var(--text-muted)', fontSize: 12 }}>搜索中...</div>}
+          {loading && <div style={{ padding: '10px 14px', color: 'var(--text-muted)', fontSize: 12 }}>{isEn ? 'Searching…' : '搜索中…'}</div>}
           {!loading && results.length === 0 && query.trim() && (
-            <div style={{ padding: '10px 14px', color: 'var(--text-muted)', fontSize: 12 }}>没有找到居民</div>
+            <div style={{ padding: '10px 14px', color: 'var(--text-muted)', fontSize: 12 }}>{isEn ? 'No residents found' : '没有找到居民'}</div>
           )}
           {results.map((r, index) => (
             <button key={r.id} id={`${listboxId}-${r.id}`} role="option" aria-selected={activeIndex === index}
@@ -125,7 +129,7 @@ export function SearchDropdown() {
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 600, fontSize: 13 }}>{r.name}</div>
                 <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>
-                  {r.meta_json?.role ?? ''} · {DISTRICT_NAMES[r.district] ?? r.district}
+                  {localizeDynamicText(r.meta_json?.role, locale)} · {DISTRICT_NAMES[r.district]?.[isEn ? 0 : 1] ?? r.district}
                 </div>
               </div>
               <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>🔥{r.heat}</span>

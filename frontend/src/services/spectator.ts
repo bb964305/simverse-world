@@ -134,7 +134,7 @@ export function getPublicTownSnapshot(signal?: AbortSignal): Promise<PublicTownS
       headers: { Accept: 'application/json' },
       signal,
     },
-    '暂时无法读取小镇状态',
+    document.documentElement.lang === 'en' ? 'Town status is temporarily unavailable' : '暂时无法读取小镇状态',
   )
 }
 
@@ -153,7 +153,7 @@ export function createViewerSession(viewToken: string, signal?: AbortSignal): Pr
   }).then(async (response) => {
     if (!response.ok) {
       const detail = await readError(response)
-      throw new SpectatorApiError(response.status, detail || '查看码无效或已撤销')
+      throw new SpectatorApiError(response.status, detail || (document.documentElement.lang === 'en' ? 'Viewer code is invalid or revoked' : '查看码无效或已撤销'))
     }
     // Primary result is the HttpOnly cookie. The backend may also return a
     // short-lived viewer_session_token for the X-Viewer-Session header channel
@@ -182,7 +182,7 @@ export function getViewerSnapshot(signal?: AbortSignal): Promise<ViewerSnapshot>
       headers: viewerHeaders(),
       signal,
     },
-    '查看会话已失效',
+    document.documentElement.lang === 'en' ? 'Viewer session has expired' : '查看会话已失效',
   )
 }
 
@@ -197,6 +197,6 @@ export function deleteViewerSession(signal?: AbortSignal): Promise<{ ok: boolean
       headers: { Accept: 'application/json' },
       signal,
     },
-    '无法结束查看会话',
+    document.documentElement.lang === 'en' ? 'Could not end the viewer session' : '无法结束查看会话',
   )
 }

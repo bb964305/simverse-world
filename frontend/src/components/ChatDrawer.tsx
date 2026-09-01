@@ -5,6 +5,8 @@ import { sendWS, onWSMessage, sendPlayerChat } from '../services/ws'
 import { ttsSpeak, API_BASE } from '../services/api'
 import type { ResidentData } from '../game/GameScene'
 import { RatingPopup } from './RatingPopup'
+import { useLocale } from '../services/locale'
+import { localizeDynamicText } from '../services/worldLocalization'
 
 interface Message {
   role: 'user' | 'npc'
@@ -39,6 +41,8 @@ function playTtsAudio(url: string, handlers: { onEnded: () => void; onError: () 
 type TtsState = { idx: number; status: 'loading' | 'playing' | 'quota' | 'error' } | null
 
 export function ChatDrawer() {
+  const locale = useLocale((state) => state.locale)
+  const isEn = locale === 'en'
   const {
     chatOpen,
     chatResident,
@@ -199,7 +203,7 @@ export function ChatDrawer() {
   const send = () => {
     const text = input.trim()
     if (!text || !chatResident) return
-    setMessages((prev) => [...prev, { role: 'user', sender: '你', text }])
+    setMessages((prev) => [...prev, { role: 'user', sender: isEn ? 'You' : '你', text }])
     sendWS({ type: 'chat_msg', text })
     setInput('')
     setIsThinking(true)
@@ -209,7 +213,7 @@ export function ChatDrawer() {
     const text = playerInput.trim()
     if (!text || chatTarget?.type !== 'player') return
     useGameStore.getState().addPlayerChatMessage({
-      from: '你',
+      from: isEn ? 'You' : '你',
       text,
       isAuto: false,
       timestamp: Date.now(),
@@ -273,8 +277,8 @@ export function ChatDrawer() {
     ? chatTarget.name
     : (chatResident?.name ?? '')
   const headerSub = isPlayerChat
-    ? '在线玩家'
-    : (chatResident?.role ?? '')
+    ? (isEn ? 'Online player' : '在线玩家')
+    : localizeDynamicText(chatResident?.role, locale)
   const headerIcon = isPlayerChat ? '🧑‍🤝‍🧑' : '🧑‍💻'
 
   return (<>
@@ -298,7 +302,7 @@ export function ChatDrawer() {
           {/* Player Chat Messages */}
           <div style={{ flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
             {playerChatMessages.map((m, i) => {
-              const isSelf = m.from === '你'
+              const isSelf = m.from === '你' || m.from === 'You'
               return (
                 <div key={i} style={{
                   maxWidth: '85%', padding: '10px 14px', borderRadius: 12, fontSize: 13, lineHeight: 1.6,
@@ -313,7 +317,7 @@ export function ChatDrawer() {
                         <span style={{
                           fontSize: 10, background: 'rgba(139,92,246,0.3)', color: '#c4b5fd',
                           padding: '1px 6px', borderRadius: 4, fontWeight: 600,
-                        }}>AI 代答</span>
+                        }}>{isEn ? 'AI reply' : 'AI 代答'}</span>
                       )}
                     </div>
                   )}
@@ -332,7 +336,7 @@ export function ChatDrawer() {
               onFocus={() => setInputFocused(true)}
               onBlur={() => setInputFocused(false)}
               onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter') sendPlayer() }}
-              placeholder="发消息给玩家..."
+              placeholder={isEn ? 'Message this player…' : '发消息给玩家…'}
               style={{
                 flex: 1, background: 'var(--bg-input)', border: '1px solid var(--border)',
                 color: 'var(--text-primary)', padding: '10px 14px', borderRadius: 'var(--radius)',
@@ -342,7 +346,7 @@ export function ChatDrawer() {
             <button onClick={sendPlayer} style={{
               background: 'var(--accent-red)', color: 'white', border: 'none',
               padding: '10px 16px', borderRadius: 'var(--radius)', fontSize: 13, fontWeight: 700, cursor: 'pointer',
-            }}>发送</button>
+            }}>{isEn ? 'Send' : '发送'}</button>
           </div>
         </>
       ) : (
@@ -364,9 +368,9 @@ export function ChatDrawer() {
                       onClick={() => void handleTts(i, m.text)}
                       disabled={tts?.idx === i && tts.status === 'loading'}
                       title={
-                        tts?.idx === i && tts.status === 'error' ? '播放失败，请稍后重试'
-                          : tts?.idx === i && tts.status === 'playing' ? '停止朗读'
-                          : '朗读'
+                        tts?.idx === i && tts.status === 'error' ? (isEn ? 'Playback failed. Try again.' : '播放失败，请稍后重试')
+                          : tts?.idx === i && tts.status === 'playing' ? (isEn ? 'Stop playback' : '停止朗读')
+                          : (isEn ? 'Read aloud' : '朗读')
                       }
                       style={{
                         background: 'none', border: 'none', padding: 0, fontSize: 11,
@@ -382,7 +386,7 @@ export function ChatDrawer() {
                         : '🔊'}
                     </button>
                     {tts?.idx === i && tts.status === 'quota' && (
-                      <span style={{ fontSize: 10, color: 'var(--accent-red)' }}>今日配额已用完</span>
+                      <span style={{ fontSize: 10, color: 'var(--accent-red)' }}>{isEn ? 'Daily quota used' : '今日配额已用完'}</span>
                     )}
                   </div>
                 )}
@@ -392,7 +396,7 @@ export function ChatDrawer() {
             {isThinking && !streamingText && (
               <div style={{ maxWidth: '85%', padding: '10px 14px', borderRadius: 12, fontSize: 13, lineHeight: 1.6, background: 'var(--bg-input)', color: '#d4d4d8', alignSelf: 'flex-start', borderBottomLeftRadius: 4 }}>
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>{chatResident?.name ?? ''}</div>
-                <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>思考中<span className="thinking-dots">...</span></span>
+                <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>{isEn ? 'Thinking' : '思考中'}<span className="thinking-dots">…</span></span>
               </div>
             )}
             {streamingText && (
@@ -412,7 +416,7 @@ export function ChatDrawer() {
               onFocus={() => setInputFocused(true)}
               onBlur={() => setInputFocused(false)}
               onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter') send() }}
-              placeholder="输入消息..."
+              placeholder={isEn ? 'Type a message…' : '输入消息…'}
               style={{
                 flex: 1, background: 'var(--bg-input)', border: '1px solid var(--border)',
                 color: 'var(--text-primary)', padding: '10px 14px', borderRadius: 'var(--radius)',
@@ -422,8 +426,8 @@ export function ChatDrawer() {
             <button onClick={send} style={{
               background: 'var(--accent-red)', color: 'white', border: 'none',
               padding: '10px 16px', borderRadius: 'var(--radius)', fontSize: 13, fontWeight: 700, cursor: 'pointer',
-            }}>发送</button>
-            <span style={{ color: 'var(--text-muted)', fontSize: 11, whiteSpace: 'nowrap' }}>1🪙</span>
+            }}>{isEn ? 'Send' : '发送'}</button>
+            <span style={{ color: 'var(--text-muted)', fontSize: 11, whiteSpace: 'nowrap' }}>1 SC</span>
           </div>
         </>
       )}
@@ -450,9 +454,9 @@ export function ChatDrawer() {
           style={{ width: 'min(320px, calc(100vw - 24px))', padding: 24, textAlign: 'center' }}
         >
           <div style={{ fontSize: 32, marginBottom: 12 }}>💤</div>
-          <div id="wake-dialog-title" style={{ fontWeight: 700, fontSize: 15, marginBottom: 8 }}>{wakePrompt.name} 正在沉睡</div>
+          <div id="wake-dialog-title" style={{ fontWeight: 700, fontSize: 15, marginBottom: 8 }}>{isEn ? `${wakePrompt.name} is sleeping` : `${wakePrompt.name} 正在沉睡`}</div>
           <div style={{ color: 'var(--text-muted)', fontSize: 13, marginBottom: 16 }}>
-            花费 <span style={{ color: '#fbbf24', fontWeight: 700 }}>{wakePrompt.cost} 🪙</span> 唤醒并开始对话？
+            {isEn ? 'Spend ' : '花费 '}<span style={{ color: '#fbbf24', fontWeight: 700 }}>{wakePrompt.cost} SC</span>{isEn ? ' to wake them and start talking?' : ' 唤醒并开始对话？'}
           </div>
           <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
             <button
@@ -464,7 +468,7 @@ export function ChatDrawer() {
                 background: '#fbbf24', color: '#18181b', border: 'none',
                 padding: '8px 20px', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer',
               }}
-            >唤醒</button>
+            >{isEn ? 'Wake' : '唤醒'}</button>
             <button
               autoFocus
               onClick={() => { setWakePrompt(null) }}
@@ -472,7 +476,7 @@ export function ChatDrawer() {
                 background: 'var(--bg-input)', color: 'var(--text-muted)', border: '1px solid var(--border)',
                 padding: '8px 20px', borderRadius: 8, fontSize: 13, cursor: 'pointer',
               }}
-            >取消</button>
+            >{isEn ? 'Cancel' : '取消'}</button>
           </div>
         </div>
       </div>
@@ -488,9 +492,9 @@ export function ChatDrawer() {
       }}>
         <div style={{ fontSize: 24 }}>⏳</div>
         <div>
-          <div style={{ fontWeight: 700, fontSize: 13 }}>排队等候 {queueInfo.name}</div>
+          <div style={{ fontWeight: 700, fontSize: 13 }}>{isEn ? `Waiting for ${queueInfo.name}` : `排队等候 ${queueInfo.name}`}</div>
           <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>
-            当前排位：第 {queueInfo.position} 位
+            {isEn ? `Queue position: ${queueInfo.position}` : `当前排位：第 ${queueInfo.position} 位`}
           </div>
         </div>
         <button

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { onWSMessage } from '../services/ws'
 import { useGameStore } from '../stores/gameStore'
+import { useLocale } from '../services/locale'
 
 interface CoinNotif {
   id: number
@@ -10,16 +11,17 @@ interface CoinNotif {
 
 let notifCounter = 0
 
-const REASON_LABELS: Record<string, string> = {
-  daily_login_reward: '每日奖励',
-  creator_passive: '创作者收益',
-  skill_creation: 'Skill 炼化',
-  chat: '对话',
-  signup_bonus: '新手礼包',
-  good_rating: '好评奖励',
+const REASON_LABELS: Record<string, readonly [string, string]> = {
+  daily_login_reward: ['Daily reward', '每日奖励'],
+  creator_passive: ['Creator earnings', '创作者收益'],
+  skill_creation: ['Skill creation', 'Skill 炼化'],
+  chat: ['Conversation', '对话'],
+  signup_bonus: ['Welcome bonus', '新手礼包'],
+  good_rating: ['Rating reward', '好评奖励'],
 }
 
 export function CoinNotification() {
+  const locale = useLocale((state) => state.locale)
   const [notifications, setNotifications] = useState<CoinNotif[]>([])
   const timersRef = useRef(new Map<number, ReturnType<typeof setTimeout>>())
   const chatOpen = useGameStore((s) => s.chatOpen)
@@ -70,7 +72,7 @@ export function CoinNotification() {
         }}>
           🪙 {n.amount > 0 ? '+' : ''}{n.amount}
           <span style={{ color: 'var(--text-muted)', fontSize: 11, marginLeft: 8 }}>
-            {REASON_LABELS[n.reason] ?? n.reason}
+            {REASON_LABELS[n.reason]?.[locale === 'en' ? 0 : 1] ?? n.reason}
           </span>
         </div>
       ))}

@@ -1324,7 +1324,7 @@ class MainScene extends Phaser.Scene {
     const merchant = this.add.sprite(-24, -6, CARAVAN_MERCHANT_TEXTURE, 'down')
       .setOrigin(0.5, 0.5)
       .setDepth(1)
-    const label = this.add.text(0, -44, '靛篷商队', {
+    const label = this.add.text(0, -44, document.documentElement.lang === 'en' ? 'Indigo Canopy Caravan' : '靛篷商队', {
       fontSize: '12px',
       color: '#ffffff',
       backgroundColor: '#172f4fcc',
@@ -1383,7 +1383,9 @@ class MainScene extends Phaser.Scene {
     const placement = resolveCaravanWorldPlacement(pose, mode, this.caravanBlockedTiles)
     view.container.setPosition(placement.pixelX, placement.pixelY)
     view.container.setDepth(placement.depth)
-    view.label.setPosition(placement.pixelX, placement.pixelY - 44).setDepth(3)
+    view.label
+      .setText(document.documentElement.lang === 'en' ? 'Indigo Canopy Caravan' : '靛篷商队')
+      .setPosition(placement.pixelX, placement.pixelY - 44).setDepth(3)
     view.convoy.setVisible(mode === 'convoy')
     view.stall.setVisible(mode === 'stall')
 

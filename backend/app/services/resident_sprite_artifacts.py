@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import errno
-import fcntl
 import hashlib
 import os
 import re
@@ -26,6 +25,7 @@ from app.services.resident_sprite_generation import (
     validate_non_symlink_path,
     validate_run_id,
 )
+from app.services.file_lock import exclusive_file_lock
 
 
 MANIFEST_NAME = "manifest.json"
@@ -1024,8 +1024,8 @@ def _run_lock(run_dir: Path) -> Iterator[None]:
     try:
         if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
             raise ResidentSpriteContractError("RUN_LOCK_INVALID", "run lock is not a file")
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        yield
+        with exclusive_file_lock(lock_fd):
+            yield
     finally:
         os.close(lock_fd)
 

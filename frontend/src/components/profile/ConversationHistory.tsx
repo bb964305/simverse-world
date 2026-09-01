@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useGameStore } from '../../stores/gameStore'
 import { parseUTC } from '../../utils/time'
+import { useLocale } from '../../services/locale'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -10,6 +11,8 @@ interface ConvItem {
 }
 
 export function ConversationHistory() {
+  const locale = useLocale((state) => state.locale)
+  const en = locale === 'en'
   const [conversations, setConversations] = useState<ConvItem[]>([])
   const [loading, setLoading] = useState(true)
   const token = useGameStore((s) => s.token)
@@ -24,13 +27,13 @@ export function ConversationHistory() {
     })()
   }, [token])
 
-  if (loading) return <div style={{ color: 'var(--text-muted)', padding: 20 }}>加载中...</div>
+  if (loading) return <div style={{ color: 'var(--text-muted)', padding: 20 }}>{en ? 'Loading…' : '加载中…'}</div>
 
   return (
     <div>
-      <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 20 }}>对话历史</h2>
+      <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 20 }}>{en ? 'Conversation history' : '对话历史'}</h2>
       {conversations.length === 0 ? (
-        <div style={{ color: 'var(--text-muted)', textAlign: 'center', padding: 40 }}>暂无对话记录</div>
+        <div style={{ color: 'var(--text-muted)', textAlign: 'center', padding: 40 }}>{en ? 'No conversations yet' : '暂无对话记录'}</div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {conversations.map((c) => (
@@ -38,7 +41,7 @@ export function ConversationHistory() {
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 600, fontSize: 14 }}>{c.resident_name}</div>
                 <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 2 }}>
-                  {parseUTC(c.started_at).toLocaleDateString('zh-CN')} · {c.turns} 轮对话
+                  {parseUTC(c.started_at).toLocaleDateString(en ? 'en-US' : 'zh-CN')} · {c.turns} {en ? 'turns' : '轮对话'}
                 </div>
               </div>
               {c.rating != null && <span style={{ fontSize: 12 }}>{'⭐'.repeat(c.rating)}</span>}

@@ -3,6 +3,7 @@ import { deepForgeStart, deepForgeStatus, apiFetch } from '../../services/api'
 import type { DeepForgeStage, DeepForgeStatusResponse } from '../../services/api'
 import { useGameStore } from '../../stores/gameStore'
 import { onWSMessage } from '../../services/ws'
+import { useLocale } from '../../services/locale'
 import {
   DEEP_FORGE_TERMINAL_RECOVERY_MESSAGE,
   isForgeRecoveryAbort,
@@ -17,18 +18,19 @@ interface DeepForgeProps {
 
 interface StageInfo {
   key: DeepForgeStage
-  label: string
+  zh: string
+  en: string
   icon: string
 }
 
 const STAGES: StageInfo[] = [
-  { key: 'routing',     label: '路由中',  icon: '🔀' },
-  { key: 'researching', label: '调研中',  icon: '🔍' },
-  { key: 'extracting',  label: '提取中',  icon: '⚗️' },
-  { key: 'building',    label: '构建中',  icon: '🏗️' },
-  { key: 'validating',  label: '验证中',  icon: '✅' },
-  { key: 'refining',    label: '精炼中',  icon: '💎' },
-  { key: 'done',        label: '完成',    icon: '🎉' },
+  { key: 'routing', zh: '路由中', en: 'Routing', icon: '🔀' },
+  { key: 'researching', zh: '调研中', en: 'Researching', icon: '🔍' },
+  { key: 'extracting', zh: '提取中', en: 'Extracting', icon: '⚗️' },
+  { key: 'building', zh: '构建中', en: 'Building', icon: '🏗️' },
+  { key: 'validating', zh: '验证中', en: 'Validating', icon: '✅' },
+  { key: 'refining', zh: '精炼中', en: 'Refining', icon: '💎' },
+  { key: 'done', zh: '完成', en: 'Complete', icon: '🎉' },
 ]
 
 type UIStatus = 'idle' | 'running' | 'done' | 'error'
@@ -38,6 +40,7 @@ function getStageIndex(stage: DeepForgeStage): number {
 }
 
 export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
+  const en = useLocale((state) => state.locale === 'en')
   const [characterName, setCharacterName] = useState('')
   const [userMaterial, setUserMaterial] = useState('')
   const [uiStatus, setUiStatus] = useState<UIStatus>('idle')
@@ -72,7 +75,10 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
   // a short retry sequence so one cross-worker 404/network race cannot strand the
   // UI. Both paths share one AbortController and a 20-minute safety deadline.
   const subscribeStatus = useCallback((forgeId: string) => {
-    const token = localStorage.getItem('token') ?? ''
+    const token = sessionStorage.getItem('token') ?? ''
+    const recoveryMessage = en
+      ? 'The final deep-distillation result could not be confirmed. Refresh and check your resident list.'
+      : DEEP_FORGE_TERMINAL_RECOVERY_MESSAGE
     let recoveryInFlight: Promise<void> | null = null
     let wsFallbackError: string | null = null
 
@@ -130,7 +136,7 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
         stopWatching()
         setUiStatus('error')
         setCurrentStage('error')
-        setError(status.error ?? wsFallbackError ?? '深度蒸馏过程中出现错误')
+        setError(en ? 'Deep distillation failed. Your source material was not deleted.' : (status.error ?? wsFallbackError ?? '深度蒸馏过程中出现错误'))
         return true
       }
       return false
@@ -142,7 +148,7 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
       sessionController.abort()
       stopWatching()
       setUiStatus('error')
-      setError(wsFallbackError ?? DEEP_FORGE_TERMINAL_RECOVERY_MESSAGE)
+      setError(en ? recoveryMessage : (wsFallbackError ?? recoveryMessage))
     }
 
     const recoverTerminal = () => {
@@ -152,7 +158,7 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
           applyStatus(await recoverTerminalStatus(
             fetchStatus,
             sessionController.signal,
-            DEEP_FORGE_TERMINAL_RECOVERY_MESSAGE,
+            recoveryMessage,
           ))
         } catch (recoveryError) {
           if (!isForgeRecoveryAbort(recoveryError)) showRecoveryFailure()
@@ -179,11 +185,11 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
       fetchStatus,
       sessionController.signal,
       applyPending,
-      DEEP_FORGE_TERMINAL_RECOVERY_MESSAGE,
+      recoveryMessage,
     ).then(applyStatus).catch((pollError: unknown) => {
       if (!isForgeRecoveryAbort(pollError)) showRecoveryFailure()
     })
-  }, [onStateUpdate, onComplete])
+  }, [onStateUpdate, onComplete, en])
 
   const handleStart = async () => {
     if (!characterName.trim()) return
@@ -191,7 +197,7 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
     setUiStatus('running')
     setCurrentStage('routing')
 
-    const token = localStorage.getItem('token') ?? ''
+    const token = sessionStorage.getItem('token') ?? ''
 
     try {
       const resp = await deepForgeStart(token, {
@@ -204,7 +210,7 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
     } catch (e) {
       if (!mountedRef.current) return
       setUiStatus('error')
-      setError(e instanceof Error ? e.message : '请求失败，请重试')
+      setError(en ? 'Request failed. Check your connection and try again.' : (e instanceof Error ? e.message : '请求失败，请重试'))
     }
   }
 
@@ -229,9 +235,9 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
       {/* Header */}
       <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-        <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 2 }}>🧪 深度蒸馏</div>
+        <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 2 }}>🧪 {en ? 'Deep distillation' : '深度蒸馏'}</div>
         <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-          多阶段 AI 管线 · 全自动调研 + 萃取 + 精炼
+          {en ? 'Multi-stage AI pipeline · research + extraction + refinement' : '多阶段 AI 管线 · 全自动调研 + 萃取 + 精炼'}
         </div>
       </div>
 
@@ -246,12 +252,12 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
                 fontSize: 12, color: 'var(--text-muted)', display: 'block',
                 marginBottom: 6, fontWeight: 600, letterSpacing: '0.3px',
               }}>
-                角色名称 *
+                {en ? 'Character name *' : '角色名称 *'}
               </label>
               <input
                 value={characterName}
                 onChange={(e) => setCharacterName(e.target.value)}
-                placeholder="例如：埃隆·马斯克 / 诸葛亮 / 特斯拉"
+                placeholder={en ? 'For example: Ada Lovelace / Nikola Tesla' : '例如：埃隆·马斯克 / 诸葛亮 / 特斯拉'}
                 style={{
                   width: '100%', boxSizing: 'border-box',
                   background: 'var(--bg-input)', border: '1px solid var(--border)',
@@ -266,13 +272,15 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
                 fontSize: 12, color: 'var(--text-muted)', display: 'block',
                 marginBottom: 6, fontWeight: 600, letterSpacing: '0.3px',
               }}>
-                补充素材
-                <span style={{ fontWeight: 400, marginLeft: 6, opacity: 0.7 }}>（可选）</span>
+                {en ? 'Source material' : '补充素材'}
+                <span style={{ fontWeight: 400, marginLeft: 6, opacity: 0.7 }}>{en ? '(optional)' : '（可选）'}</span>
               </label>
               <textarea
                 value={userMaterial}
                 onChange={(e) => setUserMaterial(e.target.value)}
-                placeholder={`粘贴任何关于此角色的文字材料，例如：\n\n• 人物传记 / 维基百科摘要\n• 采访内容 / 语录集\n• 自传或书信\n• 别人对他/她的评价\n\n留空时系统将自动联网调研。`}
+                placeholder={en
+                  ? 'Paste source material about this character, such as:\n\n• Biography or encyclopedia summary\n• Interviews or quotations\n• Autobiography or letters\n• Commentary from others\n\nLeave blank to let the system research automatically.'
+                  : '粘贴任何关于此角色的文字材料，例如：\n\n• 人物传记 / 维基百科摘要\n• 采访内容 / 语录集\n• 自传或书信\n• 别人对他/她的评价\n\n留空时系统将自动联网调研。'}
                 rows={10}
                 style={{
                   width: '100%', boxSizing: 'border-box',
@@ -283,7 +291,7 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
                 }}
               />
               <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, textAlign: 'right' }}>
-                {userMaterial.length} 字
+                {userMaterial.length} {en ? 'characters' : '字'}
               </div>
             </div>
 
@@ -293,8 +301,9 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
               borderRadius: 8, padding: '12px 14px', marginBottom: 4,
               fontSize: 12, color: '#a78bfa', lineHeight: 1.7,
             }}>
-              🧪 <strong>深度蒸馏</strong>比快速炼化更彻底：系统将逐步调研、提取、验证并精炼角色的三层 Skill。
-              预计耗时 <strong>60–120 秒</strong>。
+              {en
+                ? <>🧪 <strong>Deep distillation</strong> researches, extracts, validates, and refines a three-layer Skill profile. Estimated time: <strong>60–120 seconds</strong>.</>
+                : <>🧪 <strong>深度蒸馏</strong>比快速炼化更彻底：系统将逐步调研、提取、验证并精炼角色的三层 Skill。预计耗时 <strong>60–120 秒</strong>。</>}
             </div>
           </>
         )}
@@ -311,8 +320,8 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
                 width: 28, height: 28, background: 'linear-gradient(135deg, #8b5cf6, #6d28d9)',
                 borderRadius: 6, display: 'flex', alignItems: 'center', justifyContent: 'center',
                 fontSize: 12, color: 'white', fontWeight: 700, flexShrink: 0,
-              }}>深</span>
-              正在蒸馏：{characterName}
+              }}>{en ? 'AI' : '深'}</span>
+              {en ? `Distilling: ${characterName}` : `正在蒸馏：${characterName}`}
             </div>
 
             {/* Stage list */}
@@ -364,7 +373,7 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
                             ? 'var(--text-muted)'
                             : 'var(--text-primary)',
                     }}>
-                      {s.label}
+                      {en ? s.en : s.zh}
                     </span>
 
                     {/* Status badge */}
@@ -378,7 +387,7 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
                       color: isActive ? '#a78bfa' : isDone ? 'var(--accent-green)' : 'transparent',
                       fontWeight: 600,
                     }}>
-                      {isActive ? '进行中' : isDone ? '完成' : ''}
+                      {isActive ? (en ? 'RUNNING' : '进行中') : isDone ? (en ? 'DONE' : '完成') : ''}
                     </span>
                   </div>
                 )
@@ -394,7 +403,7 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
             borderRadius: 10, padding: '16px 18px', marginBottom: 16,
           }}>
             <div style={{ fontWeight: 700, color: 'var(--accent-red)', fontSize: 14, marginBottom: 6 }}>
-              深度蒸馏失败
+              {en ? 'Deep distillation failed' : '深度蒸馏失败'}
             </div>
             <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
               {error}
@@ -409,15 +418,15 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
             borderRadius: 10, padding: '16px 18px', marginTop: 4,
           }}>
             <div style={{ fontWeight: 700, color: 'var(--accent-green)', fontSize: 15, marginBottom: 6 }}>
-              蒸馏完成！
+              {en ? 'Distillation complete!' : '蒸馏完成！'}
             </div>
             <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.7 }}>
-              <strong>{result.name}</strong> 已入住{' '}
-              {({ engineering: '工程街区', product: '产品街区', academy: '学院区', free: '自由区' })[result.district] ?? result.district}
+              <strong>{result.name}</strong> {en ? 'has moved into ' : '已入住'}{' '}
+              {({ engineering: en ? 'Engineering District' : '工程街区', product: en ? 'Product District' : '产品街区', academy: en ? 'Academy District' : '学院区', free: en ? 'Free District' : '自由区' })[result.district] ?? result.district}
               <br />
-              质量评级：{'⭐'.repeat(result.star_rating)}
+              {en ? 'Quality rating: ' : '质量评级：'}{'⭐'.repeat(result.star_rating)}
               <br />
-              你获得了 <strong style={{ color: 'var(--accent-green)' }}>50 🪙</strong> 奖励！
+              {en ? 'You received ' : '你获得了 '}<strong style={{ color: 'var(--accent-green)' }}>50 SC</strong>{en ? ' in offchain gameplay credits.' : ' 链下游戏积分奖励！'}
             </div>
             <button
               onClick={() => onComplete?.(result.resident_id ?? '')}
@@ -427,7 +436,7 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
                 fontSize: 13, fontWeight: 700, cursor: 'pointer', width: '100%',
               }}
             >
-              前往城市查看新居民 →
+              {en ? 'View the new resident in town →' : '前往城市查看新居民 →'}
             </button>
           </div>
         )}
@@ -445,7 +454,7 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
                 fontSize: 14, fontWeight: 700, cursor: 'pointer',
               }}
             >
-              重试
+              {en ? 'Retry' : '重试'}
             </button>
           ) : uiStatus === 'running' ? (
             <div style={{
@@ -460,7 +469,7 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
                 animation: 'deepSpin 0.8s linear infinite',
               }} />
               <span style={{ fontSize: 13, color: '#a78bfa', fontWeight: 600 }}>
-                深度蒸馏进行中，请耐心等待…
+                {en ? 'Deep distillation is running. Please keep this tab open…' : '深度蒸馏进行中，请耐心等待…'}
               </span>
             </div>
           ) : (
@@ -477,7 +486,7 @@ export function DeepForge({ onStateUpdate, onComplete }: DeepForgeProps) {
                 transition: 'opacity 0.2s',
               }}
             >
-              🧪 开始深度蒸馏
+              🧪 {en ? 'Start deep distillation' : '开始深度蒸馏'}
             </button>
           )}
         </div>

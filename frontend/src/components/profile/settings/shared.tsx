@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { useLocale } from '../../../services/locale'
 
 // ─── Shared sub-components ────────────────────────────────────────
 
@@ -57,6 +58,7 @@ export function SaveButton({
   saving: boolean
   saved: boolean
 }) {
+  const en = useLocale((state) => state.locale === 'en')
   return (
     <button
       onClick={onClick}
@@ -69,7 +71,7 @@ export function SaveButton({
         transition: 'background 0.2s ease', opacity: saving ? 0.7 : 1,
       }}
     >
-      {saving ? '保存中...' : saved ? '已保存 ✓' : '保存'}
+      {saving ? (en ? 'Saving…' : '保存中…') : saved ? (en ? 'Saved ✓' : '已保存 ✓') : (en ? 'Save' : '保存')}
     </button>
   )
 }

@@ -104,6 +104,33 @@ WEATHER_COPY: dict[str, dict[str, tuple[str, str]]] = {
     },
 }
 
+WEATHER_COPY_EN: dict[str, dict[str, tuple[str, str]]] = {
+    "sunny": {
+        "default": ("Clear Skies", "Sunlight fills the town. It is a fine day."),
+        "spring": ("Clear Spring Day", "Warm spring light draws residents toward the flower beds."),
+        "summer": ("High Summer Sun", "The summer sun is fierce; the shade is the place to be."),
+        "autumn": ("Crisp Autumn Sky", "The air is clear and cool—perfect weather for a walk."),
+        "winter": ("Winter Sunshine", "A rare patch of winter sun warms the town."),
+    },
+    "cloudy": {
+        "default": ("Cloudy", "The clouds are thickening and the sky has turned grey."),
+        "spring": ("Cloudy Spring Day", "Thin clouds cover the sun, but the breeze remains warm."),
+        "autumn": ("Autumn Overcast", "Low autumn clouds bring a chill on the wind."),
+        "winter": ("Winter Overcast", "Heavy grey clouds hang low, carrying the promise of snow."),
+    },
+    "rain": {
+        "default": ("Rain", "Steady rain taps across the rooftops."),
+        "spring": ("Spring Rain", "A gentle spring rain drips from every eave."),
+        "summer": ("Summer Shower", "A sudden summer shower sends everyone under cover."),
+        "winter": ("Freezing Rain", "Cold rain strikes the empty streets."),
+    },
+    "storm": {
+        "default": ("Storm", "Wind drives heavy rain through town as thunder rolls overhead."),
+        "summer": ("Summer Thunderstorm", "Lightning cuts across the sky and rain pours down."),
+    },
+    "snow": {"default": ("Snow", "Snowflakes settle over the town in a coat of white.")},
+}
+
 
 def season_for_month(month: int) -> str:
     """Map a real-world month (1-12) to the in-world season."""
@@ -174,12 +201,17 @@ async def ensure_weather_event(
     season = season_for_month(now.month)
     kind, intensity, duration_hours = sample_segment(prev_kind, season, rng)
     title, description = weather_copy(kind, season)
+    en_table = WEATHER_COPY_EN[kind]
+    title_en, description_en = en_table.get(season, en_table["default"])
 
     event = WorldEvent(
         type=WEATHER_EVENT_TYPE,
         title=title,
         description=description,
-        payload_json={"kind": kind, "intensity": intensity, "season": season},
+        payload_json={
+            "kind": kind, "intensity": intensity, "season": season,
+            "title_en": title_en, "description_en": description_en,
+        },
         starts_at=now,
         ends_at=now + timedelta(hours=duration_hours),
         is_active=False,

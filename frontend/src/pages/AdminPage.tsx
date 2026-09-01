@@ -16,28 +16,30 @@ import { LabRunsPanel } from '../components/admin/LabRunsPanel'
 import { ProposalsPanel } from '../components/admin/ProposalsPanel'
 import { SystemConfigPanel } from '../components/admin/SystemConfigPanel'
 import { useGameStore } from '../stores/gameStore'
+import { useLocale } from '../services/locale'
 import '../styles/admin-console.css'
 
-const TAB_TITLES: Record<AdminTab, { title: string; eyebrow: string; subtitle: string }> = {
-  overview: { title: '小镇发展总览', eyebrow: 'TOWN PULSE', subtitle: '观察变化方向，快速定位值得关注的趋势。' },
-  society: { title: '居民与社会结构', eyebrow: 'SOCIETY', subtitle: '理解居民构成、关系活力与社区传播。' },
-  economy: { title: '经济运行趋势', eyebrow: 'ECONOMY', subtitle: '追踪 Soul Coin 流通、消费与投资方向。' },
-  governance: { title: '治理与事件演化', eyebrow: 'GOVERNANCE', subtitle: '判断公职、政策、事件与社区共识。' },
-  users: { title: '用户权限', eyebrow: 'CONTROL CENTER', subtitle: '管理账号状态、权限与余额。' },
-  residents: { title: '居民编辑', eyebrow: 'CONTROL CENTER', subtitle: '维护居民档案、区域与运行状态。' },
-  hosted_agents: { title: 'Agent 托管', eyebrow: 'CONTROL CENTER', subtitle: '配置常驻 Agent 居民，并观察它们的地图位置、行动与用量。' },
-  economy_control: { title: '经济参数', eyebrow: 'CONTROL CENTER', subtitle: '调整会影响小镇经济行为的动态参数。' },
-  events: { title: '事件投放', eyebrow: 'CONTROL CENTER', subtitle: '创建和维护小镇世界事件。' },
-  proposals: { title: '提案审批', eyebrow: 'CONTROL CENTER', subtitle: '审查、应用或回退世界变更。' },
-  forge: { title: '炼化监控', eyebrow: 'CONTROL CENTER', subtitle: '观察角色炼化任务与服务状态。' },
-  llm: { title: '模型用量', eyebrow: 'CONTROL CENTER', subtitle: '分析模型调用、Token 与成本。' },
-  lab_runs: { title: '实验楼控制', eyebrow: 'CONTROL CENTER', subtitle: '监督实验任务与运行开关。' },
-  system: { title: '系统配置', eyebrow: 'CONTROL CENTER', subtitle: '维护运行时配置与功能参数。' },
+const TAB_TITLES: Record<AdminTab, { zh: string; en: string; eyebrow: string; zhSub: string; enSub: string }> = {
+  overview: { zh: '小镇发展总览', en: 'Town overview', eyebrow: 'TOWN PULSE', zhSub: '观察变化方向，快速定位值得关注的趋势。', enSub: 'Track change and locate trends that need attention.' },
+  society: { zh: '居民与社会结构', en: 'Residents and society', eyebrow: 'SOCIETY', zhSub: '理解居民构成、关系活力与社区传播。', enSub: 'Understand population, relationships, and community activity.' },
+  economy: { zh: '经济运行趋势', en: 'Economy trends', eyebrow: 'ECONOMY', zhSub: '追踪 SC 游戏积分的流通、消费与投资方向。', enSub: 'Track offchain SC gameplay credits, spending, and allocation.' },
+  governance: { zh: '治理与事件演化', en: 'Governance and events', eyebrow: 'GOVERNANCE', zhSub: '判断公职、政策、事件与社区共识。', enSub: 'Review offices, policies, world events, and consensus.' },
+  users: { zh: '用户权限', en: 'User access', eyebrow: 'CONTROL CENTER', zhSub: '管理账号状态、权限与余额。', enSub: 'Manage account state, permissions, and SC credits.' },
+  residents: { zh: '居民编辑', en: 'Resident editor', eyebrow: 'CONTROL CENTER', zhSub: '维护居民档案、区域与运行状态。', enSub: 'Maintain resident profiles, districts, and runtime state.' },
+  hosted_agents: { zh: 'Agent 托管', en: 'Hosted Agents', eyebrow: 'CONTROL CENTER', zhSub: '配置常驻 Agent 居民，并观察它们的地图位置、行动与用量。', enSub: 'Configure resident Agents and monitor location, actions, and usage.' },
+  economy_control: { zh: '经济参数', en: 'Economy controls', eyebrow: 'CONTROL CENTER', zhSub: '调整会影响小镇经济行为的动态参数。', enSub: 'Adjust runtime parameters that affect the town economy.' },
+  events: { zh: '事件投放', en: 'World events', eyebrow: 'CONTROL CENTER', zhSub: '创建和维护小镇世界事件。', enSub: 'Create and maintain live world events.' },
+  proposals: { zh: '提案审批', en: 'Proposal review', eyebrow: 'CONTROL CENTER', zhSub: '审查、应用或回退世界变更。', enSub: 'Review, apply, or roll back world changes.' },
+  forge: { zh: '炼化监控', en: 'Forge monitor', eyebrow: 'CONTROL CENTER', zhSub: '观察角色炼化任务与服务状态。', enSub: 'Monitor resident Forge jobs and service health.' },
+  llm: { zh: '模型用量', en: 'Model usage', eyebrow: 'CONTROL CENTER', zhSub: '分析模型调用、Token 与成本。', enSub: 'Analyze model calls, tokens, and cost.' },
+  lab_runs: { zh: '实验楼控制', en: 'Lab control', eyebrow: 'CONTROL CENTER', zhSub: '监督实验任务与运行开关。', enSub: 'Supervise lab runs and runtime gates.' },
+  system: { zh: '系统配置', en: 'System configuration', eyebrow: 'CONTROL CENTER', zhSub: '维护运行时配置与功能参数。', enSub: 'Maintain runtime configuration and feature parameters.' },
 }
 
 const ANALYTICS_TABS: AdminTab[] = ['overview', 'society', 'economy', 'governance']
 
 export function AdminPage() {
+  const en = useLocale((state) => state.locale === 'en')
   const user = useGameStore((s) => s.user)
   const token = useGameStore((s) => s.token)
   const navigate = useNavigate()
@@ -104,19 +106,19 @@ export function AdminPage() {
           {analysisMode && (
             <div className="admin-header__status">
               <span className="admin-live-dot" aria-hidden="true" />
-              小镇运行良好
+              {en ? 'World systems healthy' : '小镇运行良好'}
             </div>
           )}
           <div>
             <div className="admin-header__eyebrow">{heading.eyebrow}</div>
-            <h1 className="admin-header__title">{heading.title}</h1>
-            <p className="admin-header__subtitle">{heading.subtitle}</p>
+            <h1 className="admin-header__title">{en ? heading.en : heading.zh}</h1>
+            <p className="admin-header__subtitle">{en ? heading.enSub : heading.zhSub}</p>
           </div>
           <div className="admin-header__actions">
-            {!analysisMode && <span className="admin-control-badge">写操作区域</span>}
+            {!analysisMode && <span className="admin-control-badge">{en ? 'WRITE OPERATIONS' : '写操作区域'}</span>}
             <span className="admin-header__user">{user.name.slice(0, 1).toUpperCase()}</span>
             <button type="button" className="admin-back-button" onClick={() => navigate('/play')}>
-              返回小镇 ↗
+              {en ? 'Back to town ↗' : '返回小镇 ↗'}
             </button>
           </div>
         </header>

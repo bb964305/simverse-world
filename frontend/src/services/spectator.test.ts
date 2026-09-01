@@ -24,7 +24,7 @@ afterEach(() => {
 
 describe('spectator API isolation', () => {
   it('never sends a signed-in player bearer token to the public town endpoint', async () => {
-    localStorage.setItem('token', 'player-control-token')
+    sessionStorage.setItem('token', 'player-control-token')
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
       generated_at: '2026-08-13T12:00:00Z',
       world_time: null,

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useLocale } from '../services/locale'
 
 interface RatingPopupProps {
   residentName: string
@@ -8,6 +9,8 @@ interface RatingPopupProps {
 }
 
 export function RatingPopup({ residentName, onRate, onSkip }: RatingPopupProps) {
+  const locale = useLocale((state) => state.locale)
+  const isEn = locale === 'en'
   const [hovered, setHovered] = useState(0)
   const [selected, setSelected] = useState(0)
   const skipButtonRef = useRef<HTMLButtonElement>(null)
@@ -35,9 +38,9 @@ export function RatingPopup({ residentName, onRate, onSkip }: RatingPopupProps) 
         style={{ padding: 28, width: 'min(320px, calc(100vw - 24px))', textAlign: 'center' }}
       >
         <div style={{ fontSize: 32, marginBottom: 8 }}>💬</div>
-        <div id="rating-dialog-title" style={{ fontWeight: 700, fontSize: 16, marginBottom: 4 }}>对话结束了</div>
+        <div id="rating-dialog-title" style={{ fontWeight: 700, fontSize: 16, marginBottom: 4 }}>{isEn ? 'Conversation complete' : '对话结束了'}</div>
         <div style={{ color: 'var(--text-muted)', fontSize: 13, marginBottom: 20 }}>
-          和 {residentName} 的对话怎么样？
+          {isEn ? `How was your conversation with ${residentName}?` : `和 ${residentName} 的对话怎么样？`}
         </div>
 
         {/* Star rating */}
@@ -63,7 +66,7 @@ export function RatingPopup({ residentName, onRate, onSkip }: RatingPopupProps) 
 
         {selected > 0 && (
           <div style={{ color: 'var(--text-secondary)', fontSize: 12, marginBottom: 12 }}>
-            {['', '很一般', '还不错', '挺好的', '非常好', '完美！'][selected]}
+            {(isEn ? ['', 'Poor', 'Fair', 'Good', 'Great', 'Perfect!'] : ['', '很一般', '还不错', '挺好的', '非常好', '完美！'])[selected]}
           </div>
         )}
 
@@ -73,7 +76,7 @@ export function RatingPopup({ residentName, onRate, onSkip }: RatingPopupProps) 
             border: '1px solid var(--border)', padding: '10px 16px',
             borderRadius: 'var(--radius)', fontSize: 13, cursor: 'pointer',
           }}>
-            跳过
+            {isEn ? 'Skip' : '跳过'}
           </button>
           <button onClick={submit} disabled={selected === 0} style={{
             flex: 1, background: selected > 0 ? 'var(--accent-red)' : 'var(--bg-input)',
@@ -81,7 +84,7 @@ export function RatingPopup({ residentName, onRate, onSkip }: RatingPopupProps) 
             border: 'none', padding: '10px 16px', borderRadius: 'var(--radius)',
             fontSize: 13, fontWeight: 700, cursor: selected > 0 ? 'pointer' : 'not-allowed',
           }}>
-            提交评分
+            {isEn ? 'Submit rating' : '提交评分'}
           </button>
         </div>
       </div>

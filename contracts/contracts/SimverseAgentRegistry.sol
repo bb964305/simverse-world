@@ -61,7 +61,7 @@ contract SimverseAgentRegistry is
 
     uint256 private _nextAgentId;
     mapping(uint256 agentId => AgentState state) private _agentState;
-    mapping(address owner => uint256[] agentIds) private _agentsByOwner;
+    mapping(address owner => uint256[] agentIds) internal _agentsByOwner;
     mapping(uint256 agentId => WorldProof[] proofs) private _worldProofs;
     mapping(uint256 agentId => ContentAnchor[] anchors) private _memoryAnchors;
     mapping(uint256 agentId => ContentAnchor[] anchors) private _saveAnchors;
@@ -252,8 +252,8 @@ contract SimverseAgentRegistry is
         bytes32 kind,
         bytes32 dataHash,
         uint64 worldRevision
-    ) external onlyRole(WORLD_WRITER_ROLE) returns (uint256 proofId) {
-        _requireOwned(agentId);
+    ) external returns (uint256 proofId) {
+        _requireAgentOwnerOrWorldWriter(agentId);
         if (kind == bytes32(0) || dataHash == bytes32(0)) revert EmptyHash();
         proofId = _worldProofs[agentId].length;
         _worldProofs[agentId].push(WorldProof({
@@ -344,7 +344,7 @@ contract SimverseAgentRegistry is
         if (ownerOf(agentId) != msg.sender) revert NotAgentOwner();
     }
 
-    function _requireAgentOwnerOrWorldWriter(uint256 agentId) private view {
+    function _requireAgentOwnerOrWorldWriter(uint256 agentId) internal view {
         address owner = ownerOf(agentId);
         if (owner != msg.sender && !hasRole(WORLD_WRITER_ROLE, msg.sender)) {
             revert NotAgentOwner();

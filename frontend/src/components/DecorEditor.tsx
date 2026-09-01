@@ -6,6 +6,13 @@ import {
   decorEmoji, DECOR_MAX_ITEMS, HOUSING_BOUNDS, HOUSING_NAMES,
 } from '../services/api'
 import type { DecorItem, ShopInventoryRow } from '../services/api'
+import { useLocale } from '../services/locale'
+
+const DECOR_EN: Record<string, string> = {
+  decor_lamp: 'Floor Lamp', decor_plant: 'Potted Plant', decor_rug: 'Rug',
+  market_tea_chest: 'Travel Tea Chest', market_trinket_display: 'Foreign Trinket',
+  market_cloth_roll: 'Patterned Cloth Roll', market_foreign_lantern: 'Artisan Lantern',
+}
 
 interface MyResident {
   slug: string
@@ -21,6 +28,7 @@ interface MyResident {
  * simplified to click-place (recorded deviation).
  */
 export function DecorEditor() {
+  const isEn = useLocale((state) => state.locale) === 'en'
   const token = useGameStore((s) => s.token)
   const tileX = useGameStore((s) => s.playerTileX)
   const tileY = useGameStore((s) => s.playerTileY)
@@ -89,7 +97,7 @@ export function DecorEditor() {
       setBounds(resp.bounds)
       setOpen(true)
     } catch (e) {
-      setError(e instanceof Error ? e.message : '装修数据加载失败')
+      setError(e instanceof Error ? e.message : (isEn ? 'Could not load home decorations' : '装修数据加载失败'))
     } finally {
       setBusy(false)
     }
@@ -105,15 +113,15 @@ export function DecorEditor() {
       return
     }
     if (!selected) {
-      setError('先在右侧选择一件家具')
+      setError(isEn ? 'Choose an item on the right first' : '先在右侧选择一件家具')
       return
     }
     if (items.length >= DECOR_MAX_ITEMS) {
-      setError(`最多摆放 ${DECOR_MAX_ITEMS} 件`)
+      setError(isEn ? `You can place up to ${DECOR_MAX_ITEMS} items` : `最多摆放 ${DECOR_MAX_ITEMS} 件`)
       return
     }
     if (ownedOf(selected) - placedOf(selected) <= 0) {
-      setError('该物品数量不足，先去杂货铺购买')
+      setError(isEn ? 'You do not own another copy. Buy one at the General Store.' : '该物品数量不足，先去杂货铺购买')
       return
     }
     setError(null)
@@ -128,7 +136,7 @@ export function DecorEditor() {
       await putHomeDecor(mine.slug, items)
       setOpen(false)
     } catch (e) {
-      setError(e instanceof Error ? e.message : '保存失败')
+      setError(e instanceof Error ? e.message : (isEn ? 'Save failed' : '保存失败'))
     } finally {
       setBusy(false)
     }
@@ -137,7 +145,7 @@ export function DecorEditor() {
   if (!mine) return null
 
   const showButton = !open && (insideHome || !mine.home)
-  const buttonLabel = mine.home ? '🛋️ 装修' : '🏠 认领住房并装修'
+  const buttonLabel = mine.home ? (isEn ? '🛋️ Decorate' : '🛋️ 装修') : (isEn ? '🏠 Claim and decorate a home' : '🏠 认领住房并装修')
 
   return (
     <>
@@ -153,7 +161,7 @@ export function DecorEditor() {
             cursor: busy ? 'wait' : 'pointer', boxShadow: '0 4px 16px rgba(0,0,0,0.35)',
           }}
         >
-          {busy ? '加载中…' : buttonLabel}
+          {busy ? (isEn ? 'Loading…' : '加载中…') : buttonLabel}
         </button>
       )}
       {!open && error && (
@@ -176,10 +184,10 @@ export function DecorEditor() {
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
               <div id="decor-dialog-title" style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)' }}>
-                🛋️ 装修{mine.home ? ` · ${HOUSING_NAMES[mine.home] ?? mine.home}` : ''}
+                🛋️ {isEn ? 'Home decoration' : '装修'}{mine.home ? ` · ${isEn ? 'Home' : (HOUSING_NAMES[mine.home] ?? mine.home)}` : ''}
               </div>
               <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                {items.length}/{DECOR_MAX_ITEMS} 件
+                {items.length}/{DECOR_MAX_ITEMS} {isEn ? 'items' : '件'}
               </div>
             </div>
             <div className="game-decor-layout" style={{ display: 'flex', gap: 14 }}>
@@ -198,7 +206,7 @@ export function DecorEditor() {
                       <button
                         key={`${x}-${y}`}
                         onClick={() => cellClick(x, y)}
-                        title={placed ? `移除 ${placed.item_code}` : `(${x},${y})`}
+                        title={placed ? (isEn ? `Remove ${placed.item_code}` : `移除 ${placed.item_code}`) : `(${x},${y})`}
                         style={{
                           width: 26, height: 26, padding: 0, fontSize: 15, lineHeight: '26px',
                           background: placed ? '#f59e0b22' : 'var(--bg-input)',
@@ -212,14 +220,14 @@ export function DecorEditor() {
                   })}
                 </div>
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
-                  点击空格摆放所选家具，点击已摆放的家具移除
+                  {isEn ? 'Select an empty cell to place the chosen item; select a placed item to remove it.' : '点击空格摆放所选家具，点击已摆放的家具移除'}
                 </div>
               </div>
               <div className="game-decor-inventory" style={{ width: 170, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>我的家具</div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>{isEn ? 'My furniture' : '我的家具'}</div>
                 {inventory.length === 0 && (
                   <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                    还没有装饰品，去杂货铺（🛒）购买 decor 类商品吧
+                    {isEn ? 'No decorations yet. Buy decor items at the General Store (🛒).' : '还没有装饰品，去杂货铺（🛒）购买 decor 类商品吧'}
                   </div>
                 )}
                 {inventory.map((row) => {
@@ -236,9 +244,9 @@ export function DecorEditor() {
                         color: 'var(--text-primary)',
                       }}
                     >
-                      <span>{decorEmoji(row.item_code)} {row.name}</span>
+                      <span>{decorEmoji(row.item_code)} {isEn ? (DECOR_EN[row.item_code] ?? row.name) : row.name}</span>
                       <span style={{ fontSize: 11, color: remaining > 0 ? 'var(--text-muted)' : '#f87171' }}>
-                        剩 {remaining}
+                        {isEn ? 'Left' : '剩'} {remaining}
                       </span>
                     </button>
                   )
@@ -256,7 +264,7 @@ export function DecorEditor() {
                     cursor: busy ? 'wait' : 'pointer',
                   }}
                 >
-                  {busy ? '保存中…' : '保存'}
+                  {busy ? (isEn ? 'Saving…' : '保存中…') : (isEn ? 'Save' : '保存')}
                 </button>
                 <button
                   onClick={() => { setOpen(false); setError(null) }}
@@ -265,7 +273,7 @@ export function DecorEditor() {
                     padding: '8px', borderRadius: 8, fontSize: 13, cursor: 'pointer',
                   }}
                 >
-                  取消
+                  {isEn ? 'Cancel' : '取消'}
                 </button>
               </div>
             </div>

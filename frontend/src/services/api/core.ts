@@ -1,4 +1,5 @@
 import { useGameStore } from '../../stores/gameStore'
+import { useLocale } from '../locale'
 import { disconnectWS } from '../ws'
 
 export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
@@ -7,7 +8,7 @@ export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 const DEFAULT_TIMEOUT_MS = 15000
 
 export function getToken(): string | null {
-  return localStorage.getItem('token')
+  return sessionStorage.getItem('token')
 }
 
 function authHeaders(): Record<string, string> {
@@ -43,7 +44,10 @@ export async function apiFetchResponse(path: string, options: RequestInit = {}):
   } catch (err) {
     // Timeout fires as a TimeoutError; a caller unmount fires as AbortError.
     if (err instanceof DOMException && err.name === 'TimeoutError') {
-      throw new Error(`请求超时（${DEFAULT_TIMEOUT_MS / 1000}s）：${path}`)
+      const seconds = DEFAULT_TIMEOUT_MS / 1000
+      throw new Error(useLocale.getState().locale === 'en'
+        ? `Request timed out (${seconds}s): ${path}`
+        : `请求超时（${seconds}s）：${path}`)
     }
     throw err
   }
@@ -54,10 +58,10 @@ export async function apiFetchResponse(path: string, options: RequestInit = {}):
       // identity's socket (F9). Safe on repeat — disconnectWS is idempotent.
       disconnectWS()
       // Centralize logout through the store: it clears token + user (state and
-      // localStorage) once. ProtectedRoute then redirects to /login, avoiding
+      // sessionStorage) once. ProtectedRoute then redirects to /login, avoiding
       // the multiple hard `window.location` jumps concurrent 401s used to cause.
       useGameStore.getState().logout()
-      throw new Error('Session expired')
+      throw new Error(useLocale.getState().locale === 'en' ? 'Session expired' : '登录会话已过期')
     }
     const body = await resp.text()
     throw new Error(`API ${resp.status}: ${body}`)

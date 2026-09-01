@@ -1,6 +1,7 @@
 import { useEffect, useCallback } from 'react'
 import { useGameStore } from '../stores/gameStore'
 import { getNotifications, markNotificationsRead } from '../services/api'
+import { useLocale } from '../services/locale'
 
 const KIND_ICON: Record<string, string> = {
   resident_greeting: '👋',
@@ -16,6 +17,8 @@ interface Props {
 }
 
 export function NotificationDrawer({ onClose }: Props) {
+  const locale = useLocale((state) => state.locale)
+  const isEn = locale === 'en'
   const notifications = useGameStore((s) => s.notifications)
   const setNotifications = useGameStore((s) => s.setNotifications)
 
@@ -40,7 +43,7 @@ export function NotificationDrawer({ onClose }: Props) {
   }, [notifications, setNotifications])
 
   return (
-    <div role="region" aria-label="通知" style={{
+    <div role="region" aria-label={isEn ? 'Notifications' : '通知'} style={{
       position: 'absolute', top: 38, right: 0, width: 'min(320px, calc(100vw - 16px))', maxHeight: 'min(420px, calc(100dvh - 64px))',
       background: 'var(--bg-card)', border: '1px solid var(--border)',
       borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.3)', zIndex: 100,
@@ -50,16 +53,16 @@ export function NotificationDrawer({ onClose }: Props) {
         padding: '10px 14px', borderBottom: '1px solid var(--border)',
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
       }}>
-        <span style={{ fontWeight: 700, fontSize: 13 }}>通知</span>
+        <span style={{ fontWeight: 700, fontSize: 13 }}>{isEn ? 'Notifications' : '通知'}</span>
         <button onClick={() => void markAllRead()} style={{
           background: 'none', border: 'none', color: 'var(--accent-blue)',
           fontSize: 12, cursor: 'pointer',
-        }}>全部已读</button>
+        }}>{isEn ? 'Mark all read' : '全部已读'}</button>
       </div>
       <div style={{ overflowY: 'auto', flex: 1 }}>
         {notifications.length === 0 ? (
           <div style={{ padding: '24px 14px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
-            暂无通知
+            {isEn ? 'No notifications' : '暂无通知'}
           </div>
         ) : notifications.map((n) => (
           <div key={n.id} style={{
@@ -81,7 +84,7 @@ export function NotificationDrawer({ onClose }: Props) {
         padding: '8px', background: 'var(--bg-input)', border: 'none',
         borderTop: '1px solid var(--border)', color: 'var(--text-muted)',
         fontSize: 12, cursor: 'pointer',
-      }}>关闭</button>
+      }}>{isEn ? 'Close' : '关闭'}</button>
     </div>
   )
 }

@@ -3,6 +3,7 @@ import { TopNav } from '../components/TopNav'
 import { connectWS, onWSMessage } from '../services/ws'
 import { useGameStore } from '../stores/gameStore'
 import { useIsMobile } from '../hooks/useIsMobile'
+import { useLocale, type Locale } from '../services/locale'
 import {
   getDebates,
   getDebate,
@@ -19,25 +20,25 @@ import {
 const STAKE_MIN = 10
 const STAKE_MAX = 200
 
-const STATUS_META: Record<string, { label: string; color: string; pulse?: boolean }> = {
-  announced: { label: '下注中', color: 'var(--accent-green)' },
-  live: { label: '辩论中', color: 'var(--accent-red)', pulse: true },
-  voting: { label: '投票中', color: 'var(--accent-blue)' },
-  settled: { label: '已结束', color: 'var(--text-muted)' },
+const STATUS_META: Record<string, { en: string; zh: string; color: string; pulse?: boolean }> = {
+  announced: { en: 'Staking open', zh: '下注中', color: 'var(--accent-green)' },
+  live: { en: 'Live debate', zh: '辩论中', color: 'var(--accent-red)', pulse: true },
+  voting: { en: 'Voting open', zh: '投票中', color: 'var(--accent-blue)' },
+  settled: { en: 'Settled', zh: '已结束', color: 'var(--text-muted)' },
 }
 
 // Map the backend DebateError detail strings to Chinese; unknown ones show raw.
-const DETAIL_ZH: [string, string][] = [
-  ['already staked on this debate', '你已在本场辩论下过注'],
-  ['already voted on this debate', '你已在本场辩论投过票'],
-  ['debate is not open for staking', '本场辩论当前不可下注'],
-  ['debate is not open for voting', '本场辩论当前不可投票'],
-  ['Insufficient Soul Coins', '灵魂币余额不足'],
-  ['amount must be', `金额需在 ${STAKE_MIN}-${STAKE_MAX} 🪙 之间`],
+const DETAIL_COPY: [string, string, string][] = [
+  ['already staked on this debate', 'You already staked on this debate', '你已在本场辩论下过注'],
+  ['already voted on this debate', 'You already voted on this debate', '你已在本场辩论投过票'],
+  ['debate is not open for staking', 'Staking is not open for this debate', '本场辩论当前不可下注'],
+  ['debate is not open for voting', 'Voting is not open for this debate', '本场辩论当前不可投票'],
+  ['Insufficient Soul Coins', 'Insufficient Soul Credits (SC)', '灵魂积分（SC）不足'],
+  ['amount must be', `Amount must be between ${STAKE_MIN} and ${STAKE_MAX} SC`, `金额需在 ${STAKE_MIN}-${STAKE_MAX} SC 之间`],
 ]
 
 // Pull the backend `detail` string out of an apiFetch error ("API 400: {json}").
-function errDetail(e: unknown): string {
+function errDetail(e: unknown, locale: Locale): string {
   const msg = e instanceof Error ? e.message : String(e)
   const m = msg.match(/^API \d+: ([\s\S]*)$/)
   let detail = msg
@@ -47,14 +48,15 @@ function errDetail(e: unknown): string {
       if (typeof parsed.detail === 'string') detail = parsed.detail
     } catch { /* raw body wasn't JSON — fall through */ }
   }
-  for (const [en, zh] of DETAIL_ZH) {
-    if (detail.includes(en)) return zh
+  for (const [match, en, zh] of DETAIL_COPY) {
+    if (detail.includes(match)) return locale === 'en' ? en : zh
   }
   return detail
 }
 
 function StatusBadge({ status }: { status: string }) {
-  const meta = STATUS_META[status] ?? { label: status, color: 'var(--text-muted)' }
+  const locale = useLocale((state) => state.locale)
+  const meta = STATUS_META[status] ?? { en: status, zh: status, color: 'var(--text-muted)' }
   return (
     <span style={{
       display: 'inline-flex', alignItems: 'center', gap: 5,
@@ -64,7 +66,7 @@ function StatusBadge({ status }: { status: string }) {
       animation: meta.pulse ? 'debateLivePulse 1.2s ease-in-out infinite' : undefined,
     }}>
       {meta.pulse && <span style={{ width: 6, height: 6, borderRadius: '50%', background: meta.color }} />}
-      {meta.label}
+      {locale === 'en' ? meta.en : meta.zh}
     </span>
   )
 }
@@ -80,8 +82,8 @@ function SideBar({ a, b, unit }: { a: number; b: number; unit: string }) {
         <div style={{ width: `${100 - pctA}%`, background: 'var(--accent-blue)', transition: 'width 0.4s' }} />
       </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
-        <span style={{ color: 'var(--accent-red)' }}>{unit === '🪙' ? `🪙 ${a}` : `${a} ${unit}`}</span>
-        <span style={{ color: 'var(--accent-blue)' }}>{unit === '🪙' ? `🪙 ${b}` : `${b} ${unit}`}</span>
+        <span style={{ color: 'var(--accent-red)' }}>{`${a} ${unit}`}</span>
+        <span style={{ color: 'var(--accent-blue)' }}>{`${b} ${unit}`}</span>
       </div>
     </div>
   )
@@ -89,6 +91,8 @@ function SideBar({ a, b, unit }: { a: number; b: number; unit: string }) {
 
 // ── Debate list (left pane) ─────────────────────────────────────────
 function DebateListItem({ d, selected, onClick }: { d: DebateView; selected: boolean; onClick: () => void }) {
+  const locale = useLocale((state) => state.locale)
+  const en = locale === 'en'
   return (
     <div
       onClick={onClick}
@@ -110,11 +114,11 @@ function DebateListItem({ d, selected, onClick }: { d: DebateView; selected: boo
         {d.resident_a_slug} vs {d.resident_b_slug}
       </div>
       <div style={{ display: 'flex', gap: 12, fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
-        <span>奖池 🪙 {d.pool_a + d.pool_b}</span>
-        <span>票数 {d.votes_a + d.votes_b}</span>
+        <span>{en ? 'Pool' : '奖池'} {d.pool_a + d.pool_b} SC</span>
+        <span>{en ? 'Votes' : '票数'} {d.votes_a + d.votes_b}</span>
         {d.status === 'settled' && d.winner && (
           <span style={{ color: 'var(--text-secondary)' }}>
-            {d.winner === 'draw' ? '平局' : `胜者：${d.winner === 'a' ? d.resident_a_slug : d.resident_b_slug}`}
+            {d.winner === 'draw' ? (en ? 'Draw' : '平局') : `${en ? 'Winner' : '胜者'}: ${d.winner === 'a' ? d.resident_a_slug : d.resident_b_slug}`}
           </span>
         )}
       </div>
@@ -124,6 +128,7 @@ function DebateListItem({ d, selected, onClick }: { d: DebateView; selected: boo
 
 // ── Transcript ──────────────────────────────────────────────────────
 function TranscriptBubble({ turn }: { turn: DebateTurn }) {
+  const locale = useLocale((state) => state.locale)
   const isA = turn.side === 'a'
   const accent = isA ? 'var(--accent-red)' : 'var(--accent-blue)'
   return (
@@ -134,7 +139,7 @@ function TranscriptBubble({ turn }: { turn: DebateTurn }) {
         borderRadius: 10, padding: '8px 12px',
       }}>
         <div style={{ fontSize: 11, color: accent, fontWeight: 600, marginBottom: 4 }}>
-          第 {turn.round} 轮 · {turn.speaker}
+          {locale === 'en' ? `Round ${turn.round}` : `第 ${turn.round} 轮`} · {turn.speaker}
         </div>
         <div style={{ fontSize: 13, color: 'var(--text-primary)', lineHeight: 1.6 }}>{turn.text}</div>
       </div>
@@ -144,6 +149,8 @@ function TranscriptBubble({ turn }: { turn: DebateTurn }) {
 
 // ── Detail pane (right) ─────────────────────────────────────────────
 function DebateDetail({ debate, onChanged }: { debate: DebateView; onChanged: () => void }) {
+  const locale = useLocale((state) => state.locale)
+  const en = locale === 'en'
   const [stakeSide, setStakeSide] = useState<DebateSide>('a')
   const [stakeAmount, setStakeAmount] = useState(String(STAKE_MIN))
   const [busy, setBusy] = useState(false)
@@ -169,7 +176,7 @@ function DebateDetail({ debate, onChanged }: { debate: DebateView; onChanged: ()
   const doStake = async () => {
     const amount = Number(stakeAmount)
     if (!Number.isInteger(amount) || amount < STAKE_MIN || amount > STAKE_MAX) {
-      setActionErr(`金额需为 ${STAKE_MIN}-${STAKE_MAX} 之间的整数`)
+      setActionErr(en ? `Amount must be a whole number from ${STAKE_MIN} to ${STAKE_MAX}` : `金额需为 ${STAKE_MIN}-${STAKE_MAX} 之间的整数`)
       return
     }
     setBusy(true)
@@ -177,13 +184,15 @@ function DebateDetail({ debate, onChanged }: { debate: DebateView; onChanged: ()
     setActionOk('')
     try {
       await stakeDebate(debate.id, stakeSide, amount)
-      setActionOk(`下注成功：${stakeSide === 'a' ? '正方' : '反方'} 🪙 ${amount}`)
+      setActionOk(en
+        ? `Stake confirmed: ${stakeSide === 'a' ? 'Side A' : 'Side B'} · ${amount} SC`
+        : `下注成功：${stakeSide === 'a' ? '正方' : '反方'} · ${amount} SC`)
       // Stakes charge coins server-side without a coin_update WS frame —
       // refresh so the TopNav balance doesn't go stale.
       getMe().then((me) => useGameStore.getState().updateBalance(me.soul_coin_balance)).catch(() => {})
       onChanged()
     } catch (e) {
-      setActionErr(errDetail(e))
+      setActionErr(errDetail(e, locale))
     } finally {
       setBusy(false)
     }
@@ -195,10 +204,10 @@ function DebateDetail({ debate, onChanged }: { debate: DebateView; onChanged: ()
     setActionOk('')
     try {
       await voteDebate(debate.id, side)
-      setActionOk(`已投给${side === 'a' ? '正方' : '反方'}`)
+      setActionOk(en ? `Vote cast for Side ${side.toUpperCase()}` : `已投给${side === 'a' ? '正方' : '反方'}`)
       onChanged()
     } catch (e) {
-      setActionErr(errDetail(e))
+      setActionErr(errDetail(e, locale))
     } finally {
       setBusy(false)
     }
@@ -224,7 +233,7 @@ function DebateDetail({ debate, onChanged }: { debate: DebateView; onChanged: ()
           borderRadius: 'var(--radius)',
         }}
       >
-        {side === 'a' ? `正方 ${nameA}` : `反方 ${nameB}`}
+        {side === 'a' ? `${en ? 'Side A' : '正方'} ${nameA}` : `${en ? 'Side B' : '反方'} ${nameB}`}
       </button>
     )
   }
@@ -248,12 +257,12 @@ function DebateDetail({ debate, onChanged }: { debate: DebateView; onChanged: ()
           <span style={{ color: 'var(--accent-blue)' }}>{nameB}</span>
         </div>
         <div style={{ marginTop: 10 }}>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>奖池</div>
-          <SideBar a={debate.pool_a} b={debate.pool_b} unit="🪙" />
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{en ? 'Stake pool (offchain SC)' : '奖池（链下 SC）'}</div>
+          <SideBar a={debate.pool_a} b={debate.pool_b} unit="SC" />
         </div>
         <div style={{ marginTop: 10 }}>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>票数</div>
-          <SideBar a={debate.votes_a} b={debate.votes_b} unit="票" />
+          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{en ? 'Votes' : '票数'}</div>
+          <SideBar a={debate.votes_a} b={debate.votes_b} unit={en ? 'votes' : '票'} />
         </div>
 
         {debate.status === 'settled' && (
@@ -265,8 +274,8 @@ function DebateDetail({ debate, onChanged }: { debate: DebateView; onChanged: ()
             color: debate.winner === 'draw' ? 'var(--text-secondary)' : 'var(--accent-red)',
           }}>
             {debate.winner === 'draw'
-              ? '⚖️ 平局 — 所有赌注已全额退还'
-              : `🏆 ${winnerName ?? '?'} 获胜！败方奖池按比例分给胜方下注者`}
+              ? (en ? '⚖️ Draw — every stake was refunded in full' : '⚖️ 平局 — 所有赌注已全额退还')
+              : (en ? `🏆 ${winnerName ?? '?'} wins. The losing pool is distributed proportionally to winning stakers.` : `🏆 ${winnerName ?? '?'} 获胜！败方奖池按比例分给胜方下注者`)}
           </div>
         )}
 
@@ -274,7 +283,9 @@ function DebateDetail({ debate, onChanged }: { debate: DebateView; onChanged: ()
         {debate.status === 'announced' && (
           <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border)' }}>
             <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
-              押注支持一方（{STAKE_MIN}-{STAKE_MAX} 🪙，每人限一注，下注即计一票）
+              {en
+                ? `Back one side with ${STAKE_MIN}-${STAKE_MAX} offchain SC. One stake per player; a stake also counts as one vote.`
+                : `押注支持一方（${STAKE_MIN}-${STAKE_MAX} 链下 SC，每人限一注，下注即计一票）`}
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               {sideBtn('a')}
@@ -292,7 +303,7 @@ function DebateDetail({ debate, onChanged }: { debate: DebateView; onChanged: ()
                   border: '1px solid var(--border)', borderRadius: 'var(--radius)',
                 }}
               />
-              <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>🪙</span>
+              <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>SC</span>
               <button
                 onClick={doStake}
                 disabled={busy}
@@ -303,7 +314,7 @@ function DebateDetail({ debate, onChanged }: { debate: DebateView; onChanged: ()
                   opacity: busy ? 0.6 : 1,
                 }}
               >
-                下注
+                {en ? 'Stake' : '下注'}
               </button>
             </div>
           </div>
@@ -313,7 +324,7 @@ function DebateDetail({ debate, onChanged }: { debate: DebateView; onChanged: ()
         {debate.status === 'voting' && (
           <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border)' }}>
             <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
-              辩论结束，投出你的一票（每人一票，已下注则自动计入）
+              {en ? 'The debate is over. Cast one vote; an existing stake already counts.' : '辩论结束，投出你的一票（每人一票，已下注则自动计入）'}
             </div>
             <div style={{ display: 'flex', gap: 10 }}>
               <button
@@ -326,7 +337,7 @@ function DebateDetail({ debate, onChanged }: { debate: DebateView; onChanged: ()
                   cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.6 : 1,
                 }}
               >
-                投A票（{nameA}）
+                {en ? `Vote A (${nameA})` : `投A票（${nameA}）`}
               </button>
               <button
                 onClick={() => doVote('b')}
@@ -338,7 +349,7 @@ function DebateDetail({ debate, onChanged }: { debate: DebateView; onChanged: ()
                   cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.6 : 1,
                 }}
               >
-                投B票（{nameB}）
+                {en ? `Vote B (${nameB})` : `投B票（${nameB}）`}
               </button>
             </div>
           </div>
@@ -346,7 +357,7 @@ function DebateDetail({ debate, onChanged }: { debate: DebateView; onChanged: ()
 
         {debate.status === 'live' && (
           <div style={{ marginTop: 12, fontSize: 12, color: 'var(--text-muted)' }}>
-            辩论进行中，下注已截止；结束后将开放投票。
+            {en ? 'The debate is live. Staking is closed; voting opens after the final turn.' : '辩论进行中，下注已截止；结束后将开放投票。'}
           </div>
         )}
 
@@ -357,18 +368,20 @@ function DebateDetail({ debate, onChanged }: { debate: DebateView; onChanged: ()
       {/* Transcript */}
       <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10, padding: 20 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', marginBottom: 12 }}>
-          💬 辩论实录
+          💬 {en ? 'Debate transcript' : '辩论实录'}
         </div>
         {debate.transcript.length === 0 ? (
           <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>
-            {debate.status === 'announced' ? '辩论尚未开始，先押注支持你看好的一方吧。' : '暂无发言记录。'}
+            {debate.status === 'announced'
+              ? (en ? 'The debate has not started. Back the side you expect to win.' : '辩论尚未开始，先押注支持你看好的一方吧。')
+              : (en ? 'No transcript yet.' : '暂无发言记录。')}
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {debate.transcript.map((t, i) => <TranscriptBubble key={`${t.round}-${t.side}-${i}`} turn={t} />)}
             {debate.status === 'live' && (
               <div style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center' }}>
-                ⏳ 等待下一位发言…
+                ⏳ {en ? 'Waiting for the next speaker…' : '等待下一位发言…'}
               </div>
             )}
             <div ref={transcriptEndRef} />
@@ -381,6 +394,8 @@ function DebateDetail({ debate, onChanged }: { debate: DebateView; onChanged: ()
 
 // ── Page ────────────────────────────────────────────────────────────
 export function DebatesPage() {
+  const locale = useLocale((state) => state.locale)
+  const en = locale === 'en'
   const [debates, setDebates] = useState<DebateView[] | null>(null)
   const [listErr, setListErr] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -398,14 +413,14 @@ export function DebatesPage() {
   const loadList = useCallback(() => {
     getDebates()
       .then((r) => { setDebates(r.debates); setListErr('') })
-      .catch(() => setListErr('辩论列表加载失败，请稍后重试'))
-  }, [])
+      .catch(() => setListErr(en ? 'Unable to load debates. Please try again.' : '辩论列表加载失败，请稍后重试'))
+  }, [en])
 
   const loadDetail = useCallback((id: string) => {
     getDebate(id)
       .then((d) => { setDetail(d); setDetailErr('') })
-      .catch(() => setDetailErr('辩论详情加载失败，请稍后重试'))
-  }, [])
+      .catch(() => setDetailErr(en ? 'Unable to load debate details. Please try again.' : '辩论详情加载失败，请稍后重试'))
+  }, [en])
 
   useEffect(() => { loadList() }, [loadList])
 
@@ -475,12 +490,12 @@ export function DebatesPage() {
             display: 'flex', flexDirection: 'column', gap: 10,
           }}>
             <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)', marginBottom: 4 }}>
-              ⚔️ 辩论擂台
+              ⚔️ {en ? 'Debate arena' : '辩论擂台'}
             </div>
-            {debates === null && !listErr && <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>加载中…</div>}
+            {debates === null && !listErr && <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>{en ? 'Loading…' : '加载中…'}</div>}
             {listErr && <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>{listErr}</div>}
             {debates !== null && debates.length === 0 && (
-              <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>暂无辩论，等居民们吵起来再来看吧。</div>
+              <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>{en ? 'No debates yet. Return when residents take opposing positions.' : '暂无辩论，等居民们吵起来再来看吧。'}</div>
             )}
             {debates?.map((d) => (
               <DebateListItem
@@ -505,7 +520,7 @@ export function DebatesPage() {
                   display: 'flex', alignItems: 'center', gap: 4,
                 }}
               >
-                ← 返回列表
+                ← {en ? 'Back to list' : '返回列表'}
               </button>
             )}
             {!selectedId && (
@@ -513,11 +528,11 @@ export function DebatesPage() {
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 height: '100%', color: 'var(--text-muted)', fontSize: 13,
               }}>
-                从左侧选择一场辩论查看详情
+                {en ? 'Choose a debate from the list to view details' : '从左侧选择一场辩论查看详情'}
               </div>
             )}
             {selectedId && !currentDetail && !detailErr && (
-              <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>加载中…</div>
+              <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>{en ? 'Loading…' : '加载中…'}</div>
             )}
             {selectedId && detailErr && !currentDetail && (
               <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>{detailErr}</div>

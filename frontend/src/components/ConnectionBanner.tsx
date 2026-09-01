@@ -1,4 +1,5 @@
 import { useGameStore } from '../stores/gameStore'
+import { useLocale } from '../services/locale'
 
 /**
  * Thin top-of-viewport strip shown while the WS connection is down and the
@@ -7,6 +8,7 @@ import { useGameStore } from '../stores/gameStore'
  * covered; renders nothing when connected or after a deliberate disconnect.
  */
 export function ConnectionBanner() {
+  const locale = useLocale((state) => state.locale)
   const wsStatus = useGameStore((s) => s.wsStatus)
   const chatOpen = useGameStore((s) => s.chatOpen)
   if (wsStatus !== 'reconnecting') return null
@@ -22,7 +24,7 @@ export function ConnectionBanner() {
         letterSpacing: 0,
       }}
     >
-      连接已断开，正在重连…
+      {locale === 'en' ? 'Connection lost. Reconnecting…' : '连接已断开，正在重连…'}
     </div>
   )
 }

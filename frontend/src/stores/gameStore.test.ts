@@ -30,6 +30,7 @@ const onlinePlayer = { player_id: 'p1', name: 'A', x: 0, y: 0, direction: 'down'
 
 function resetStore() {
   localStorage.clear()
+  sessionStorage.clear()
   useGameStore.setState({
     user: null,
     token: null,
@@ -49,12 +50,14 @@ function resetStore() {
 describe('auth slice', () => {
   beforeEach(resetStore)
 
-  it('setAuth persists token+user to localStorage and state', () => {
+  it('setAuth keeps token+user in tab-scoped sessionStorage and state', () => {
     useGameStore.getState().setAuth(testUser, 'tok-123')
     expect(useGameStore.getState().token).toBe('tok-123')
     expect(useGameStore.getState().user?.name).toBe('Jimmy')
-    expect(localStorage.getItem('token')).toBe('tok-123')
-    expect(JSON.parse(localStorage.getItem('user')!)).toMatchObject({ id: 'u1' })
+    expect(sessionStorage.getItem('token')).toBe('tok-123')
+    expect(JSON.parse(sessionStorage.getItem('user')!)).toMatchObject({ id: 'u1' })
+    expect(localStorage.getItem('token')).toBeNull()
+    expect(localStorage.getItem('user')).toBeNull()
   })
 
   it('logout clears auth and ephemeral gameplay UI', () => {
@@ -108,6 +111,8 @@ describe('auth slice', () => {
     expect(useGameStore.getState().onlinePlayers.size).toBe(0)
     expect(localStorage.getItem('token')).toBeNull()
     expect(localStorage.getItem('user')).toBeNull()
+    expect(sessionStorage.getItem('token')).toBeNull()
+    expect(sessionStorage.getItem('user')).toBeNull()
   })
 
   it('setAuth starts a clean session when the account changes', () => {

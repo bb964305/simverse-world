@@ -3,6 +3,7 @@ import { getFeed, unfollowResident, type FeedEventData } from '../../services/ap
 import { setFollowed } from '../../services/follows'
 import { onWSMessage } from '../../services/ws'
 import { parseUTC } from '../../utils/time'
+import { useLocale } from '../../services/locale'
 
 // Feed kinds and their payloads (backend feed_service.push call sites):
 //   creation           { post_id, title }        bulletin_service.maybe_create_journal_post
@@ -10,23 +11,24 @@ import { parseUTC } from '../../utils/time'
 //   goal_milestone     { title, verdict }        goal_service
 //   personality_shift  { old, new }              personality/evolution.py
 //   mood* / debate*    reserved kinds (feed.py model comment) — no push site yet
-const KIND_META: { match: (k: string) => boolean; icon: string; label: string }[] = [
-  { match: (k) => k === 'creation', icon: '🎨', label: '发布了新创作' },
-  { match: (k) => k === 'goal_achieved', icon: '🎯', label: '达成目标' },
-  { match: (k) => k === 'goal_milestone', icon: '🚩', label: '目标里程碑' },
-  { match: (k) => k.startsWith('mood'), icon: '💫', label: '心情波动' },
-  { match: (k) => k.startsWith('personality'), icon: '🧬', label: '人格演化' },
-  { match: (k) => k.startsWith('debate'), icon: '⚔️', label: '辩论动态' },
-  { match: (k) => k === 'wage', icon: '🪙', label: '领取了工作报酬' },
-  { match: (k) => k === 'meal_income', icon: '🍲', label: '获得了餐饮收入' },
-  { match: (k) => k === 'npc_purchase', icon: '🛍️', label: '完成了一笔镇民交易' },
-  { match: (k) => k === 'npc_commission_taken', icon: '🗒️', label: '接下了一份委托' },
-  { match: (k) => k === 'npc_commission_done', icon: '✅', label: '完成了一份委托' },
-  { match: (k) => k === 'caravan_purchase', icon: '🛒', label: '作品被商队收购' },
+const KIND_META: { match: (k: string) => boolean; icon: string; zh: string; en: string }[] = [
+  { match: (k) => k === 'creation', icon: '🎨', zh: '发布了新创作', en: 'published a new creation' },
+  { match: (k) => k === 'goal_achieved', icon: '🎯', zh: '达成目标', en: 'achieved a goal' },
+  { match: (k) => k === 'goal_milestone', icon: '🚩', zh: '目标里程碑', en: 'reached a goal milestone' },
+  { match: (k) => k.startsWith('mood'), icon: '💫', zh: '心情波动', en: 'experienced a mood shift' },
+  { match: (k) => k.startsWith('personality'), icon: '🧬', zh: '人格演化', en: 'evolved their personality' },
+  { match: (k) => k.startsWith('debate'), icon: '⚔️', zh: '辩论动态', en: 'joined a debate' },
+  { match: (k) => k === 'wage', icon: '🪙', zh: '领取了工作报酬', en: 'received work credits' },
+  { match: (k) => k === 'meal_income', icon: '🍲', zh: '获得了餐饮收入', en: 'received dining income' },
+  { match: (k) => k === 'npc_purchase', icon: '🛍️', zh: '完成了一笔镇民交易', en: 'completed a resident trade' },
+  { match: (k) => k === 'npc_commission_taken', icon: '🗒️', zh: '接下了一份委托', en: 'accepted a commission' },
+  { match: (k) => k === 'npc_commission_done', icon: '✅', zh: '完成了一份委托', en: 'completed a commission' },
+  { match: (k) => k === 'caravan_purchase', icon: '🛒', zh: '作品被商队收购', en: 'sold a creation to the caravan' },
 ]
 
-function kindMeta(kind: string): { icon: string; label: string } {
-  return KIND_META.find((m) => m.match(kind)) ?? { icon: '📌', label: kind }
+function kindMeta(kind: string, en: boolean): { icon: string; label: string } {
+  const meta = KIND_META.find((m) => m.match(kind))
+  return meta ? { icon: meta.icon, label: en ? meta.en : meta.zh } : { icon: '📌', label: kind }
 }
 
 function payloadSummary(kind: string, payload: Record<string, unknown>): string {
@@ -52,20 +54,21 @@ function payloadSummary(kind: string, payload: Record<string, unknown>): string 
   return ''
 }
 
-function relativeTime(iso: string | null): string {
+function relativeTime(iso: string | null, en: boolean): string {
   if (!iso) return ''
   // 后端 naive-UTC isoformat —— 统一走 parseUTC 补 Z（原地内联版收编进 utils/time）
   const ts = parseUTC(iso).getTime()
   if (Number.isNaN(ts)) return ''
   const diffMin = Math.floor((Date.now() - ts) / 60000)
-  if (diffMin < 1) return '刚刚'
-  if (diffMin < 60) return `${diffMin}分钟前`
+  if (diffMin < 1) return en ? 'just now' : '刚刚'
+  if (diffMin < 60) return en ? `${diffMin}m ago` : `${diffMin}分钟前`
   const diffHour = Math.floor(diffMin / 60)
-  if (diffHour < 24) return `${diffHour}小时前`
-  return `${Math.floor(diffHour / 24)}天前`
+  if (diffHour < 24) return en ? `${diffHour}h ago` : `${diffHour}小时前`
+  return en ? `${Math.floor(diffHour / 24)}d ago` : `${Math.floor(diffHour / 24)}天前`
 }
 
 export function FeedList() {
+  const en = useLocale((state) => state.locale === 'en')
   const [events, setEvents] = useState<FeedEventData[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -81,10 +84,10 @@ export function FeedList() {
         setEvents(r.events)
         setNextCursor(r.next_cursor)
       })
-      .catch((e: unknown) => { if (!cancelled) setError(e instanceof Error ? e.message : '加载失败') })
+      .catch((e: unknown) => { if (!cancelled) setError(e instanceof Error ? e.message : (en ? 'Could not load feed' : '加载失败')) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [])
+  }, [en])
 
   // Live: a followed resident just did something — prepend a synthesized row.
   useEffect(() => {
@@ -129,13 +132,13 @@ export function FeedList() {
 
   return (
     <div>
-      <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4 }}>动态</h2>
+      <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4 }}>{en ? 'Activity' : '动态'}</h2>
       <div style={{ color: 'var(--text-muted)', fontSize: 13, marginBottom: 20 }}>
-        你关注的居民的最新动向
+        {en ? 'Recent activity from residents you follow' : '你关注的居民的最新动向'}
       </div>
 
       {loading ? (
-        <div style={{ color: 'var(--text-muted)' }}>加载中…</div>
+        <div style={{ color: 'var(--text-muted)' }}>{en ? 'Loading…' : '加载中…'}</div>
       ) : error ? (
         <div style={{ color: 'var(--accent-red)', fontSize: 13 }}>{error}</div>
       ) : events.length === 0 ? (
@@ -143,13 +146,13 @@ export function FeedList() {
           background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 10,
           padding: '32px 20px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 13,
         }}>
-          还没有新动态 — 关注居民后，他们的创作和变化会出现在这里（在地图上与居民互动时点击关注）
+          {en ? 'No activity yet. Follow residents from their map interaction panel to see their creations and changes here.' : '还没有新动态 — 关注居民后，他们的创作和变化会出现在这里（在地图上与居民互动时点击关注）'}
         </div>
       ) : (
         <>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 640 }}>
             {events.map((e) => {
-              const meta = kindMeta(e.kind)
+              const meta = kindMeta(e.kind, en)
               const summary = payloadSummary(e.kind, e.payload)
               return (
                 <div key={e.id} style={{
@@ -169,7 +172,7 @@ export function FeedList() {
                       }}>{summary}</div>
                     )}
                     <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
-                      {relativeTime(e.created_at)}
+                      {relativeTime(e.created_at, en)}
                     </div>
                   </div>
                   <button
@@ -190,7 +193,7 @@ export function FeedList() {
                       ev.currentTarget.style.color = 'var(--text-muted)'
                     }}
                   >
-                    取消关注
+                    {en ? 'Unfollow' : '取消关注'}
                   </button>
                 </div>
               )
@@ -207,7 +210,7 @@ export function FeedList() {
                 opacity: loadingMore ? 0.6 : 1,
               }}
             >
-              {loadingMore ? '加载中…' : '加载更多'}
+              {loadingMore ? (en ? 'Loading…' : '加载中…') : (en ? 'Load more' : '加载更多')}
             </button>
           )}
         </>

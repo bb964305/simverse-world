@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { forgeStart, forgeAnswer, forgeStatus } from '../../services/api'
 import type { ForgeStatusResponse } from '../../services/api'
 import { onWSMessage } from '../../services/ws'
+import { useLocale } from '../../services/locale'
 import {
   FORGE_TERMINAL_RECOVERY_MESSAGE,
   isForgeRecoveryAbort,
@@ -20,12 +21,30 @@ interface ChatMessage {
 }
 
 const TOTAL_STEPS = 5
-const STEP_LABELS = ['', '命名', '能力', '性格', '灵魂', '素材']
+const STEP_LABELS = [
+  { zh: '', en: '' },
+  { zh: '命名', en: 'Name' },
+  { zh: '能力', en: 'Skills' },
+  { zh: '性格', en: 'Persona' },
+  { zh: '灵魂', en: 'Soul' },
+  { zh: '素材', en: 'Sources' },
+]
+
+const QUESTIONS_EN: Record<number, string> = {
+  2: 'What is this resident best at? Include work skills, life skills, or any special talent. Be specific.\n\nExample: “Backend architecture, especially high-concurrency systems and Go middleware.”',
+  3: 'Describe their personality and speaking style. What role do they play in a team?\n\nExample: “Quiet but precise, asks decisive questions in reviews, and quietly looks after teammates.”',
+  4: 'What are their core values? Which experiences shaped them, and what matters most?\n\nExample: “Believes code should be crafted with care; a failed startup made maintainability a priority.”',
+  5: 'Optional: add articles, chat excerpts, quotations, or other source material. Type “skip” if you have nothing to add.',
+}
 
 export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    { role: 'bot', text: '欢迎来到炼化器！在这里，你可以创造一位独一无二的 AI 居民。\n\n让我们开始吧 —— 给这位居民起个名字？' },
-  ])
+  const en = useLocale((state) => state.locale === 'en')
+  const [messages, setMessages] = useState<ChatMessage[]>(() => [{
+    role: 'bot',
+    text: en
+      ? 'Welcome to the Forge. Here you can create a unique AI resident.\n\nLet’s begin—what should this resident be called?'
+      : '欢迎来到炼化器！在这里，你可以创造一位独一无二的 AI 居民。\n\n让我们开始吧 —— 给这位居民起个名字？',
+  }])
   const [input, setInput] = useState('')
   const [forgeId, setForgeId] = useState<string | null>(null)
   const [currentStep, setCurrentStep] = useState(1)
@@ -70,11 +89,11 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
   // terminal frame is enough even if its first API worker returns 400/404.
   const subscribeStatus = useCallback((fid: string) => {
     const STAGES = [
-      '正在分析能力描述...',
-      '正在构建人格模型...',
-      '正在提炼灵魂内核...',
-      '正在评估质量等级...',
-      '正在分配街区...',
+      en ? 'Analyzing skill descriptions…' : '正在分析能力描述…',
+      en ? 'Building the persona model…' : '正在构建人格模型…',
+      en ? 'Refining the soul layer…' : '正在提炼灵魂内核…',
+      en ? 'Evaluating quality…' : '正在评估质量等级…',
+      en ? 'Assigning a district…' : '正在分配街区…',
     ]
     let stageIdx = 0
     let recoveryInFlight: Promise<void> | null = null
@@ -105,15 +124,14 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
 
         const stars = '⭐'.repeat(status.star_rating)
         const districtMap: Record<string, string> = {
-          engineering: '工程街区', product: '产品街区',
-          academy: '学院区', free: '自由区',
+          engineering: en ? 'Engineering District' : '工程街区', product: en ? 'Product District' : '产品街区',
+          academy: en ? 'Academy District' : '学院区', free: en ? 'Free District' : '自由区',
         }
         setMessages(prev => [...prev, {
           role: 'bot',
-          text: `炼化完成！${status.name} 已成功入住 Simverse World！\n\n` +
-                `评级：${stars}\n` +
-                `街区：${districtMap[status.district] ?? status.district}\n\n` +
-                `你获得了 50 🪙 Soul Coin 奖励！`,
+          text: en
+            ? `Forge complete! ${status.name} has moved into Simverse World.\n\nRating: ${stars}\nDistrict: ${districtMap[status.district] ?? status.district}\n\nYou received 50 SC in offchain gameplay credits.`
+            : `炼化完成！${status.name} 已成功入住 Simverse World！\n\n评级：${stars}\n街区：${districtMap[status.district] ?? status.district}\n\n你获得了 50 SC 链下游戏积分奖励！`,
         }])
 
         if (status.resident_id) {
@@ -131,11 +149,11 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
         stopWatching()
         setIsGenerating(false)
         setGeneratingProgress('')
-        const message = status.error ?? '生成过程中出现错误'
+        const message = en ? 'Resident generation failed. Your answers were not deleted.' : (status.error ?? '生成过程中出现错误')
         setError(message)
         setMessages(prev => [...prev, {
           role: 'bot',
-          text: `抱歉，炼化过程出现了问题：${message}。`,
+          text: en ? `The Forge encountered a problem: ${message}` : `抱歉，炼化过程出现了问题：${message}。`,
         }])
         return true
       }
@@ -149,9 +167,11 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
       stopWatching()
       setIsGenerating(false)
       setGeneratingProgress('')
-      const message = wsFallbackError ?? FORGE_TERMINAL_RECOVERY_MESSAGE
+      const message = en
+        ? 'The final Forge result could not be confirmed. Refresh and check your resident list.'
+        : (wsFallbackError ?? FORGE_TERMINAL_RECOVERY_MESSAGE)
       setError(message)
-      setMessages(prev => [...prev, { role: 'bot', text: `出错了：${message}` }])
+      setMessages(prev => [...prev, { role: 'bot', text: en ? `Error: ${message}` : `出错了：${message}` }])
     }
 
     const recoverTerminal = () => {
@@ -193,7 +213,7 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
     ).then(applyStatus).catch((pollError: unknown) => {
       if (!isForgeRecoveryAbort(pollError)) showRecoveryFailure()
     })
-  }, [onStateUpdate, onComplete])
+  }, [onStateUpdate, onComplete, en])
 
   const send = async () => {
     const text = input.trim()
@@ -209,7 +229,7 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
         const resp = await forgeStart(text)
         setForgeId(resp.forge_id)
         setCurrentStep(2)
-        setMessages(prev => [...prev, { role: 'bot', text: resp.question }])
+        setMessages(prev => [...prev, { role: 'bot', text: en ? QUESTIONS_EN[2] : resp.question }])
         const status = await forgeStatus(resp.forge_id)
         onStateUpdate(status)
       } else {
@@ -220,22 +240,22 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
         if (resp.next_step === null) {
           // All answered — trigger generation
           setIsGenerating(true)
-          setGeneratingProgress('开始炼化...')
+          setGeneratingProgress(en ? 'Starting the Forge…' : '开始炼化…')
           setMessages(prev => [...prev, {
             role: 'bot',
-            text: '所有信息已收集完毕！正在为你炼化这位居民，请稍等（约 30-60 秒）...',
+            text: en ? 'All information is ready. Your resident is being forged now—this usually takes 30–60 seconds.' : '所有信息已收集完毕！正在为你炼化这位居民，请稍等（约 30–60 秒）…',
           }])
           subscribeStatus(forgeId)
         } else {
-          setMessages(prev => [...prev, { role: 'bot', text: resp.question! }])
+          setMessages(prev => [...prev, { role: 'bot', text: en ? QUESTIONS_EN[resp.next_step ?? 2] : resp.question! }])
           const status = await forgeStatus(forgeId)
           onStateUpdate(status)
         }
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : '请求失败'
+      const msg = en ? 'Request failed. Check your connection and try again.' : (err instanceof Error ? err.message : '请求失败')
       setError(msg)
-      setMessages(prev => [...prev, { role: 'bot', text: `出错了：${msg}` }])
+      setMessages(prev => [...prev, { role: 'bot', text: en ? `Error: ${msg}` : `出错了：${msg}` }])
     }
   }
 
@@ -259,7 +279,7 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
           ))}
         </div>
         <span style={{ fontSize: 11, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
-          {STEP_LABELS[Math.min(currentStep, TOTAL_STEPS)] ?? ''}
+          {STEP_LABELS[Math.min(currentStep, TOTAL_STEPS)]?.[en ? 'en' : 'zh'] ?? ''}
         </span>
       </div>
 
@@ -277,7 +297,7 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
                   display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                   fontSize: 9, color: 'white', fontWeight: 700,
                 }}>AI</span>
-                炼化师
+                {en ? 'Forge AI' : '炼化师'}
               </div>
             )}
             <div style={{
@@ -300,7 +320,7 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
                 display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                 fontSize: 9, color: 'white', fontWeight: 700,
               }}>AI</span>
-              炼化师
+              {en ? 'Forge AI' : '炼化师'}
             </div>
             <div style={{
               padding: '12px 16px', borderRadius: 12, fontSize: 14,
@@ -335,7 +355,7 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
             padding: '12px 20px', borderRadius: 'var(--radius)', fontSize: 14,
             fontWeight: 700, cursor: 'pointer',
           }}>
-            前往城市查看新居民 →
+            {en ? 'View the new resident in town →' : '前往城市查看新居民 →'}
           </button>
         ) : (
           <>
@@ -344,7 +364,7 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send() } }}
-              placeholder={isGenerating ? '正在炼化中...' : '输入你的回答...'}
+              placeholder={isGenerating ? (en ? 'Forging resident…' : '正在炼化中…') : (en ? 'Type your answer…' : '输入你的回答…')}
               disabled={isGenerating}
               style={{
                 flex: 1, background: 'var(--bg-input)', border: '1px solid var(--border)',
@@ -363,7 +383,7 @@ export function ForgeChat({ onStateUpdate, onComplete }: ForgeChatProps) {
                 transition: 'background 0.2s',
               }}
             >
-              发送
+              {en ? 'Send' : '发送'}
             </button>
           </>
         )}

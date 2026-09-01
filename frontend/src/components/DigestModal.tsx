@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { getLatestDigest, type DigestData } from '../services/api'
+import { useLocale } from '../services/locale'
 
 interface Props {
   onClose: () => void
@@ -25,6 +26,7 @@ function hasRealDigestBody(contentMd: string): boolean {
 }
 
 export function DigestModal({ onClose }: Props) {
+  const isEn = useLocale((state) => state.locale) === 'en'
   const [digest, setDigest] = useState<DigestData | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -57,21 +59,21 @@ export function DigestModal({ onClose }: Props) {
           padding: '14px 20px', borderBottom: '1px solid var(--border)',
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         }}>
-          <span id="digest-dialog-title" style={{ fontWeight: 700, fontSize: 15 }}>📰 村落日报</span>
-          <button autoFocus onClick={onClose} className="game-dialog-close" aria-label="关闭村落日报">✕</button>
+          <span id="digest-dialog-title" style={{ fontWeight: 700, fontSize: 15 }}>📰 {isEn ? 'Town Daily' : '村落日报'}</span>
+          <button autoFocus onClick={onClose} className="game-dialog-close" aria-label={isEn ? 'Close Town Daily' : '关闭村落日报'}>✕</button>
         </div>
         <div style={{ padding: '20px 24px', overflowY: 'auto', lineHeight: 1.75, fontSize: 14 }}>
           {loading ? (
-            <div style={{ color: 'var(--text-muted)' }}>加载中…</div>
+            <div style={{ color: 'var(--text-muted)' }}>{isEn ? 'Loading…' : '加载中…'}</div>
           ) : digest && hasRealDigestBody(digest.content_md) ? (
             <div className="digest-md">
               <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 12 }}>{digest.date}</div>
               <ReactMarkdown>{digest.content_md}</ReactMarkdown>
             </div>
           ) : digest ? (
-            <div style={{ color: 'var(--text-muted)' }}>今天的日报内容还没准备好，晚点再来看看吧。</div>
+            <div style={{ color: 'var(--text-muted)' }}>{isEn ? 'Today’s edition is not ready yet. Check back later.' : '今天的日报内容还没准备好，晚点再来看看吧。'}</div>
           ) : (
-            <div style={{ color: 'var(--text-muted)' }}>还没有日报，明天早上再来看看吧。</div>
+            <div style={{ color: 'var(--text-muted)' }}>{isEn ? 'No edition has been published yet. Check again tomorrow.' : '还没有日报，明天早上再来看看吧。'}</div>
           )}
         </div>
       </div>

@@ -3,6 +3,8 @@ import { bridge } from '../../game/phaserBridge'
 import type { ResidentData } from '../../game/GameScene'
 import { STATUS_CONFIG } from '../../game/StatusVisuals'
 import { DISTRICTS, type DistrictKey } from './districtZonesData'
+import { useLocale } from '../../services/locale'
+import { localizeDynamicText } from '../../services/worldLocalization'
 
 const API = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
@@ -13,6 +15,7 @@ interface Props {
 }
 
 export function ResidentPanel({ district, onClose, variant }: Props) {
+  const locale = useLocale((state) => state.locale)
   const [residents, setResidents] = useState<ResidentData[]>([])
   const config = DISTRICTS.find((d) => d.key === district)!
 
@@ -50,7 +53,7 @@ export function ResidentPanel({ district, onClose, variant }: Props) {
         alignItems: 'center',
       }}>
         <span style={{ fontWeight: 'bold', color: config.color }}>
-          {config.icon} {config.label}
+          {config.icon} {locale === 'en' ? config.labelEn : config.label}
         </span>
         <span
           onClick={onClose}
@@ -62,7 +65,7 @@ export function ResidentPanel({ district, onClose, variant }: Props) {
       <div className="game-minimap__resident-list">
         {residents.length === 0 && (
           <div style={{ padding: 16, textAlign: 'center', color: '#475569', fontSize: 11 }}>
-            该街区暂无居民
+            {locale === 'en' ? 'No residents in this district' : '该街区暂无居民'}
           </div>
         )}
         {residents.map((r) => {
@@ -98,7 +101,7 @@ export function ResidentPanel({ district, onClose, variant }: Props) {
                   {r.name}
                 </div>
                 <div style={{ fontSize: 9, color: '#64748b' }}>
-                  {r.meta_json?.role || '居民'}
+                  {localizeDynamicText(r.meta_json?.role, locale, locale === 'en' ? 'Resident' : '居民')}
                 </div>
               </div>
               <div style={{
@@ -119,7 +122,7 @@ export function ResidentPanel({ district, onClose, variant }: Props) {
         color: '#475569',
         textAlign: 'center',
       }}>
-        点击居民传送到其身边
+        {locale === 'en' ? 'Select a resident to teleport nearby' : '点击居民传送到其身边'}
       </div>
     </div>
   )

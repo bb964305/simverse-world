@@ -8,8 +8,10 @@ import {
 import { FieldLabel, SaveButton, SectionCard, SectionHeader, TextInput } from './shared'
 import { useSectionForm } from './useSectionForm'
 import { staticResidentSpriteUrl } from '../../../game/residentSpriteRuntime'
+import { useLocale } from '../../../services/locale'
 
 export function CharacterSection({ settings }: { settings: AllSettings }) {
+  const en = useLocale((state) => state.locale === 'en')
   const character = settings.character
   const [sprites, setSprites] = useState<SpriteTemplate[]>([])
   const [selectedSprite, setSelectedSprite] = useState(character?.sprite_key ?? '')
@@ -34,9 +36,9 @@ export function CharacterSection({ settings }: { settings: AllSettings }) {
   if (!character) {
     return (
       <SectionCard>
-        <SectionHeader icon="🧑‍🎤" title="角色" />
+        <SectionHeader icon="🧑‍🎤" title={en ? 'Player character' : '角色'} />
         <div style={{ color: 'var(--text-muted)', fontSize: 13, textAlign: 'center', padding: '20px 0' }}>
-          暂无绑定角色。前往地图创建你的居民后再来设置。
+          {en ? 'No player character is linked yet. Create your resident, then return here.' : '暂无绑定角色。前往地图创建你的居民后再来设置。'}
         </div>
       </SectionCard>
     )
@@ -44,12 +46,12 @@ export function CharacterSection({ settings }: { settings: AllSettings }) {
 
   return (
     <SectionCard>
-      <SectionHeader icon="🧑‍🎤" title="角色" />
+      <SectionHeader icon="🧑‍🎤" title={en ? 'Player character' : '角色'} />
 
       <div style={{ display: 'flex', gap: 24, marginBottom: 20 }}>
         {/* Current sprite preview */}
         <div style={{ flexShrink: 0 }}>
-          <FieldLabel>当前形象</FieldLabel>
+          <FieldLabel>{en ? 'Current avatar' : '当前形象'}</FieldLabel>
           <div style={{
             width: 72, height: 72,
             background: 'var(--bg-input)', border: '1px solid var(--border)',
@@ -76,16 +78,16 @@ export function CharacterSection({ settings }: { settings: AllSettings }) {
 
         {/* Character name */}
         <div style={{ flex: 1 }}>
-          <FieldLabel>角色名称</FieldLabel>
-          <TextInput value={characterName} onChange={setCharacterName} placeholder="输入角色名称" />
+          <FieldLabel>{en ? 'Character name' : '角色名称'}</FieldLabel>
+          <TextInput value={characterName} onChange={setCharacterName} placeholder={en ? 'Enter character name' : '输入角色名称'} />
         </div>
       </div>
 
       {/* Sprite selection grid */}
       <div>
-        <FieldLabel>选择形象（点击切换）</FieldLabel>
+        <FieldLabel>{en ? 'Choose an avatar' : '选择形象（点击切换）'}</FieldLabel>
         {loadingSprites ? (
-          <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>加载形象列表...</div>
+          <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>{en ? 'Loading avatars…' : '加载形象列表…'}</div>
         ) : (
           <div style={{
             display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(56px, 1fr))',
@@ -94,7 +96,7 @@ export function CharacterSection({ settings }: { settings: AllSettings }) {
             {sprites.map((sprite) => (
               <div
                 key={sprite.key}
-                title={`${sprite.key} · ${sprite.vibe}`}
+                title={en ? sprite.key : `${sprite.key} · ${sprite.vibe}`}
                 onClick={() => setSelectedSprite(sprite.key)}
                 style={{
                   width: 56, height: 56,
@@ -124,7 +126,7 @@ export function CharacterSection({ settings }: { settings: AllSettings }) {
         )}
         {selectedSprite && (
           <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-muted)' }}>
-            已选：{selectedSprite}
+            {en ? 'Selected: ' : '已选：'}{selectedSprite}
           </div>
         )}
       </div>

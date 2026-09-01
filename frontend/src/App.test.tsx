@@ -87,7 +87,7 @@ beforeEach(() => {
     passport: { resident_id: 'resident-1', agent_id: '1', chain_id: 4663, registry_address: '0x1111111111111111111111111111111111111111', transaction_hash: null },
   })
   vi.mocked(getMe).mockReset().mockResolvedValue({ ...user, is_admin: false })
-  vi.mocked(loadOwnedAgents).mockReset().mockResolvedValue([{ id: 1n, uri: 'https://example.invalid/agent/1', state: {} as never }])
+  vi.mocked(loadOwnedAgents).mockReset().mockResolvedValue([{ id: 1n, uri: 'https://example.invalid/agent/1', state: {} as never, worldProofCount: 0n }])
 })
 
 afterEach(() => {
