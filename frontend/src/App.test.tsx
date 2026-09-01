@@ -115,7 +115,7 @@ describe('public and authenticated routes', () => {
 
   it('redirects /play to login when logged out', async () => {
     renderRoute('/play')
-    expect(await screen.findByRole('heading', { name: '进入 Simverse' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: /连接你的链上身份|Connect your onchain identity/ })).toBeInTheDocument()
     expect(screen.queryByTestId('game-page')).not.toBeInTheDocument()
   })
 
@@ -199,7 +199,7 @@ describe('admin route authorization', () => {
   it('sends a logged-out visitor to login with /admin as the return destination', async () => {
     renderRoute('/admin')
 
-    expect(await screen.findByRole('heading', { name: '进入 Simverse' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: /连接你的链上身份|Connect your onchain identity/ })).toBeInTheDocument()
     expect(screen.getByTestId('route-location')).toHaveTextContent('/login?next=%2Fadmin')
     expect(screen.queryByTestId('game-page')).not.toBeInTheDocument()
   })
@@ -274,7 +274,7 @@ describe('admin route authorization', () => {
 
     renderRoute('/admin')
 
-    expect(await screen.findByRole('heading', { name: '进入 Simverse' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: /连接你的链上身份|Connect your onchain identity/ })).toBeInTheDocument()
     expect(screen.getByTestId('route-location')).toHaveTextContent('/login?next=%2Fadmin')
   })
 

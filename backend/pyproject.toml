@@ -23,6 +23,7 @@ dependencies = [
     "sentry-sdk>=2.0",
     "pillow>=10.4",
     "cryptography>=43.0",
+    "eth-account>=0.13.7,<0.15",
 ]
 
 [project.optional-dependencies]

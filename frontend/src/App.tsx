@@ -27,6 +27,7 @@ const DebatesPage = lazy(() => import('./pages/DebatesPage').then((m) => ({ defa
 const CapsulesPage = lazy(() => import('./pages/CapsulesPage').then((m) => ({ default: m.CapsulesPage })))
 const TownPage = lazy(() => import('./pages/TownPage').then((m) => ({ default: m.TownPage })))
 const WatchPage = lazy(() => import('./pages/WatchPage').then((m) => ({ default: m.WatchPage })))
+const AgentStudioPage = lazy(() => import('./pages/AgentStudioPage').then((m) => ({ default: m.AgentStudioPage })))
 
 function normalizePathname(pathname: string): string {
   if (pathname === '/') return pathname
@@ -183,6 +184,7 @@ export function AppRoutes() {
                 Without this route React Router matches nothing → blank screen. */}
             <Route path="/play" element={<ProtectedRoute><GamePage /></ProtectedRoute>} />
             <Route path="/forge" element={<ProtectedRoute><ForgePage /></ProtectedRoute>} />
+            <Route path="/web3" element={<ProtectedRoute><AgentStudioPage /></ProtectedRoute>} />
             <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
             <Route path="/admin" element={<ProtectedRoute><AdminRoute /></ProtectedRoute>} />
             <Route path="/graph" element={<ProtectedRoute><GraphPage /></ProtectedRoute>} />

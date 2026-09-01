@@ -9,10 +9,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import get_db
 from app.rate_limit import limiter
-from app.schemas.user import RegisterRequest, LoginRequest, AuthResponse, UserResponse
+from app.schemas.user import (
+    RegisterRequest,
+    LoginRequest,
+    AuthResponse,
+    UserResponse,
+    WalletChallengeRequest,
+    WalletChallengeResponse,
+    WalletVerifyRequest,
+)
 from app.services.auth_service import register_user, login_user, create_token
 from app.services.linuxdo_auth import LinuxDoOAuth, find_or_create_user
 from app.services.github_auth import GitHubOAuth, find_or_create_github_user
+from app.services.wallet_auth_service import (
+    WalletAuthError,
+    create_wallet_challenge,
+    trusted_origin,
+    verify_wallet_signature,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -97,33 +111,86 @@ def _validate_and_delete_state(state: str) -> bool:
 # Routes
 # ---------------------------------------------------------------------------
 
+
+def _auth_response(user, token: str) -> AuthResponse:
+    return AuthResponse(
+        access_token=token,
+        user=UserResponse(
+            id=user.id,
+            name=user.name,
+            email=user.email,
+            avatar=user.avatar,
+            soul_coin_balance=user.soul_coin_balance,
+            is_admin=user.is_admin,
+            wallet_address=user.wallet_address,
+            lab_enabled=settings.lab_enabled,
+        ),
+    )
+
+
+def _require_legacy_auth() -> None:
+    if not settings.web2_auth_enabled and not settings.debug:
+        raise HTTPException(status_code=404, detail="Wallet authentication required")
+
 @router.post("/register", response_model=AuthResponse)
 @limiter.limit(lambda: f"{settings.rest_rate_limit_register_per_minute}/minute")
 async def register(request: Request, req: RegisterRequest, db: AsyncSession = Depends(get_db)):
+    _require_legacy_auth()
     user, token = await register_user(db, req.name, req.email, req.password)
-    return AuthResponse(access_token=token, user=UserResponse(
-        id=user.id, name=user.name, email=user.email,
-        avatar=user.avatar, soul_coin_balance=user.soul_coin_balance,
-        is_admin=user.is_admin, lab_enabled=settings.lab_enabled
-    ))
+    return _auth_response(user, token)
 
 @router.post("/login", response_model=AuthResponse)
 @limiter.limit(lambda: f"{settings.rest_rate_limit_register_per_minute}/minute")
 async def login(request: Request, req: LoginRequest, db: AsyncSession = Depends(get_db)):
+    _require_legacy_auth()
     result = await login_user(db, req.email, req.password)
     if not result:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     user, token = result
-    return AuthResponse(access_token=token, user=UserResponse(
-        id=user.id, name=user.name, email=user.email,
-        avatar=user.avatar, soul_coin_balance=user.soul_coin_balance,
-        is_admin=user.is_admin, lab_enabled=settings.lab_enabled
-    ))
+    return _auth_response(user, token)
+
+
+@router.post("/wallet/challenge", response_model=WalletChallengeResponse)
+@limiter.limit(lambda: f"{settings.rest_rate_limit_register_per_minute}/minute")
+async def wallet_challenge(request: Request, req: WalletChallengeRequest):
+    """Issue a short-lived, address-bound message for wallet signing."""
+    try:
+        origin = trusted_origin(request.headers.get("Origin"))
+        return await create_wallet_challenge(
+            address=req.address,
+            chain_id=req.chain_id,
+            origin=origin,
+        )
+    except WalletAuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/wallet/verify", response_model=AuthResponse)
+@limiter.limit(lambda: f"{settings.rest_rate_limit_register_per_minute}/minute")
+async def wallet_verify(
+    request: Request,
+    req: WalletVerifyRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Verify an EOA signature once, then return the normal application JWT."""
+    try:
+        user, token = await verify_wallet_signature(
+            db,
+            address=req.address,
+            message=req.message,
+            signature=req.signature,
+            nonce=req.nonce,
+            chain_id=req.chain_id,
+        )
+        return _auth_response(user, token)
+    except WalletAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 
 @router.get("/linuxdo/login")
 async def linuxdo_login():
     """Redirect to LinuxDo OAuth2 authorize page."""
+    _require_legacy_auth()
     if not settings.linuxdo_client_id or not settings.linuxdo_client_secret:
         raise HTTPException(501, "LinuxDo OAuth not configured")
 
@@ -146,6 +213,7 @@ async def linuxdo_callback(
     db: AsyncSession = Depends(get_db),
 ):
     """LinuxDo OAuth2 callback. Exchanges code for user info, creates/finds user, returns JWT."""
+    _require_legacy_auth()
     # Validate state (CSRF)
     if not _validate_and_delete_state(state):
         raise HTTPException(400, "Invalid or expired state parameter")
@@ -184,6 +252,7 @@ async def linuxdo_callback(
 @router.get("/github/login")
 async def github_login():
     """Redirect to GitHub OAuth2 authorize page."""
+    _require_legacy_auth()
     if not settings.github_client_id or not settings.github_client_secret:
         raise HTTPException(501, "GitHub OAuth not configured")
 
@@ -204,6 +273,7 @@ async def github_callback(
     db: AsyncSession = Depends(get_db),
 ):
     """GitHub OAuth2 callback."""
+    _require_legacy_auth()
     if not _validate_and_delete_state(state):
         raise HTTPException(400, "Invalid or expired state parameter")
 

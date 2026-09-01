@@ -19,5 +19,6 @@ async def me(request: Request, db: AsyncSession = Depends(get_db)):
     return UserResponse(
         id=user.id, name=user.name, email=user.email,
         avatar=user.avatar, soul_coin_balance=user.soul_coin_balance,
-        is_admin=user.is_admin, lab_enabled=settings.lab_enabled
+        is_admin=user.is_admin, wallet_address=user.wallet_address,
+        lab_enabled=settings.lab_enabled
     )

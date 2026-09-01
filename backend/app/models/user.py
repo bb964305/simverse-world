@@ -12,6 +12,9 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     hashed_password: Mapped[str | None] = mapped_column(String(255), nullable=True)
     github_id: Mapped[str | None] = mapped_column(String(50), unique=True, nullable=True)
+    # Lower-case EVM address. Checksummed display form is reconstructed at the
+    # boundary; lower-case storage makes uniqueness independent of casing.
+    wallet_address: Mapped[str | None] = mapped_column(String(42), unique=True, index=True, nullable=True)
     avatar: Mapped[str | None] = mapped_column(String(500), nullable=True)
     soul_coin_balance: Mapped[int] = mapped_column(Integer, default=100)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))

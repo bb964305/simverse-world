@@ -8,6 +8,7 @@ interface User {
   soul_coin_balance: number
   is_admin?: boolean
   lab_enabled?: boolean
+  wallet_address?: string | null
 }
 
 export interface OnlinePlayer {

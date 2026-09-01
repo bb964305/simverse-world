@@ -1,25 +1,50 @@
-import { useEffect, useState, type FormEvent } from 'react'
-import { Link, useNavigate, useSearchParams } from 'react-router-dom'
-import { useGameStore } from '../stores/gameStore'
-import {
-  clearOAuthReturnTo,
-  onboardingPath,
-  rememberOAuthReturnTo,
-  safeAuthReturnTo,
-} from '../services/authReturnTo'
+import { useEffect } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
+import { WalletLoginButton } from '../components/WalletLoginButton'
+import { safeAuthReturnTo } from '../services/authReturnTo'
+import { LanguageToggle } from '../components/LanguageToggle'
+import { useLocale } from '../services/locale'
+import { configuredChainName } from '../services/web3/wallet'
 import '../styles/login-page.css'
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const COPY = {
+  'zh-CN': {
+    brandLabel: '返回 Simverse World 官网',
+    back: '返回官网',
+    node: '钱包身份 / 城市节点 07',
+    title: <>回到一座<br />持续生活的城市。</>,
+    story: '居民、关系与记忆都在继续。用钱包证明你是谁，从上次离开的地方重新进入。',
+    kicker: 'WEB3 CITY ACCESS',
+    heading: '连接你的链上身份',
+    lead: '连接钱包并签署一次性登录消息。签名免费，不会发起交易或授权资产。',
+    identity: '一个钱包就是一个持续身份',
+    identityCopy: '首次连接自动创建城市身份；再次连接会恢复同一位居民、记忆和存档。',
+    storage: '内容链下保存，证明链上保存',
+    storageCopy: '训练文件、记忆与存档保留原始内容；哈希、URI、版本和所有权写入可升级合约。',
+    network: '目标网络',
+    note: '首次进入后将继续完成居民创建与世界引导。请只签署域名与内容均正确的登录消息。',
+  },
+  en: {
+    brandLabel: 'Back to the Simverse World site',
+    back: 'Back to site',
+    node: 'WALLET IDENTITY / CITY NODE 07',
+    title: <>Return to a city<br />that keeps living.</>,
+    story: 'Residents, relationships, and memories continue. Prove your identity with your wallet and resume where you left off.',
+    kicker: 'WEB3 CITY ACCESS',
+    heading: 'Connect your onchain identity',
+    lead: 'Connect a wallet and sign a one-time login message. Signing is free and never submits a transaction or asset approval.',
+    identity: 'One wallet, one persistent identity',
+    identityCopy: 'Your first connection creates a city identity. Returning with the same wallet restores your residents, memories, and saves.',
+    storage: 'Content offchain, proof onchain',
+    storageCopy: 'Training files, memories, and saves keep their full content while hashes, URIs, versions, and ownership live in an upgradeable contract.',
+    network: 'Network',
+    note: 'New players continue to resident creation and world onboarding. Only sign when the domain and message are correct.',
+  },
+} as const
 
 export function LoginPage() {
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [name, setName] = useState('')
-  const [isRegister, setIsRegister] = useState(false)
-  const [isSubmitting, setIsSubmitting] = useState(false)
-  const [error, setError] = useState('')
-  const setAuth = useGameStore((state) => state.setAuth)
-  const navigate = useNavigate()
+  const locale = useLocale((state) => state.locale)
+  const copy = COPY[locale]
   const [params] = useSearchParams()
   const next = safeAuthReturnTo(params.get('next'))
 
@@ -28,152 +53,53 @@ export function LoginPage() {
     return () => document.body.classList.remove('auth-page-open')
   }, [])
 
-  const submit = async () => {
-    if (isSubmitting) return
-    setError('')
-    setIsSubmitting(true)
-    const endpoint = isRegister ? '/auth/register' : '/auth/login'
-    const body = isRegister ? { name, email, password } : { email, password }
-
-    try {
-      const response = await fetch(`${API}${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      if (!response.ok) {
-        const responseBody = await response.json().catch(() => ({}))
-        const detail = responseBody?.detail
-        const message = typeof detail === 'string'
-          ? detail
-          : Array.isArray(detail)
-            ? detail.map((item) => item?.msg).filter(Boolean).join('；')
-            : ''
-        setError(message || '操作失败')
-        return
-      }
-
-      const data = await response.json()
-      clearOAuthReturnTo()
-      setAuth(data.user, data.access_token)
-      navigate(onboardingPath(next), { replace: true })
-    } catch {
-      setError('网络错误，请重试')
-    } finally {
-      setIsSubmitting(false)
-    }
-  }
-
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    void submit()
-  }
-
   return (
     <main className="auth-page">
       <img className="auth-page__backdrop" src="/marketing/world-hero.jpg" alt="" />
       <div className="auth-page__shade" />
 
       <header className="auth-header">
-        <Link className="auth-brand" to="/" aria-label="返回 Simverse World 官网">
+        <Link className="auth-brand" to="/" aria-label={copy.brandLabel}>
           <span className="auth-brand__mark" aria-hidden="true">S/</span>
           <span>SIMVERSE</span>
         </Link>
-        <Link className="auth-header__back" to="/">返回官网</Link>
+        <div className="auth-header__actions">
+          <LanguageToggle className="language-toggle language-toggle--auth" />
+          <Link className="auth-header__back" to="/">{copy.back}</Link>
+        </div>
       </header>
 
       <section className="auth-story" aria-labelledby="auth-page-title">
-        <p>YOUR CITY ACCESS / NODE 07</p>
-        <h1 id="auth-page-title">回到一座<br />持续生活的城市。</h1>
-        <span>居民、关系与记忆都在继续。登录后从上次离开的地方重新进入。</span>
+        <p>{copy.node}</p>
+        <h1 id="auth-page-title">{copy.title}</h1>
+        <span>{copy.story}</span>
       </section>
 
       <section className="auth-panel" aria-labelledby="auth-form-title">
-        <div className="auth-mode" role="group" aria-label="认证模式">
-          <button
-            type="button"
-            aria-pressed={!isRegister}
-            onClick={() => { setIsRegister(false); setError('') }}
-          >
-            登录
-          </button>
-          <button
-            type="button"
-            aria-pressed={isRegister}
-            onClick={() => { setIsRegister(true); setError('') }}
-          >
-            注册
-          </button>
-        </div>
-
         <div className="auth-panel__heading">
-          <p>CITY ACCESS</p>
-          <h2 id="auth-form-title">{isRegister ? '创建通行身份' : '进入 Simverse'}</h2>
-          <span>{isRegister ? '完成注册后开始创建你的第一位居民。' : '选择一种方式继续进入城市。'}</span>
+          <p>{copy.kicker}</p>
+          <h2 id="auth-form-title">{copy.heading}</h2>
+          <span>{copy.lead}</span>
         </div>
 
-        <div className="auth-oauth">
-          <a href={`${API}/auth/github/login`} onClick={() => rememberOAuthReturnTo(next)}>
-            <svg aria-hidden="true"><use href="/icons.svg#github-icon" /></svg>
-            GitHub 登录
-          </a>
-          <a href={`${API}/auth/linuxdo/login`} onClick={() => rememberOAuthReturnTo(next)}>
-            <span className="auth-oauth__linuxdo" aria-hidden="true">L</span>
-            LinuxDo 登录
-          </a>
+        <div className="wallet-benefits">
+          <article>
+            <span aria-hidden="true">01</span>
+            <div><strong>{copy.identity}</strong><p>{copy.identityCopy}</p></div>
+          </article>
+          <article>
+            <span aria-hidden="true">02</span>
+            <div><strong>{copy.storage}</strong><p>{copy.storageCopy}</p></div>
+          </article>
         </div>
 
-        <div className="auth-divider"><span>或使用邮箱</span></div>
+        <div className="wallet-network">
+          <span>{copy.network}</span>
+          <strong><i aria-hidden="true" />{configuredChainName()}</strong>
+        </div>
 
-        <form className="auth-form" onSubmit={handleSubmit}>
-          {isRegister && (
-            <label>
-              <span>名字</span>
-              <input
-                name="name"
-                autoComplete="name"
-                placeholder="名字"
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                required
-              />
-            </label>
-          )}
-
-          <label>
-            <span>邮箱</span>
-            <input
-              name="email"
-              type="email"
-              autoComplete="email"
-              placeholder="邮箱"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              required
-            />
-          </label>
-
-          <label>
-            <span>密码</span>
-            <input
-              name="password"
-              type="password"
-              autoComplete={isRegister ? 'new-password' : 'current-password'}
-              placeholder="密码"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              required
-            />
-          </label>
-
-          {error && <div className="auth-error" role="alert">{error}</div>}
-
-          <button className="auth-submit" type="submit" disabled={isSubmitting}>
-            {isSubmitting ? '正在连接…' : isRegister ? '注册并进入城市' : '进入城市'}
-          </button>
-        </form>
-
-        <p className="auth-panel__note">首次进入后将继续完成居民创建与世界引导。</p>
+        <WalletLoginButton next={next} />
+        <p className="auth-panel__note">{copy.note}</p>
       </section>
     </main>
   )

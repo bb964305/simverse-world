@@ -47,6 +47,18 @@ class Settings(BaseSettings):
     github_client_id: str = ""
     github_client_secret: str = ""
     github_redirect_uri: str = ""
+    # Public deployments are wallet-first. Enable only for an explicit legacy
+    # migration window; DEBUG keeps existing development/test fixtures working.
+    web2_auth_enabled: bool = False
+    # --- Web3 identity (EIP-4361-style, EOA signatures) ---
+    # Wallet login proves address control and then issues the same application
+    # JWT used by email/OAuth. It never asks the wallet to submit a transaction.
+    web3_enabled: bool = True
+    web3_chain_id: int = 84532
+    web3_chain_name: str = "Base Sepolia"
+    web3_uri: str = ""
+    web3_content_dir: str = "data/web3-content"
+    web3_content_max_bytes: int = 25 * 1024 * 1024
     anthropic_api_key: str = ""
     # Custom LLM endpoint (overrides anthropic_api_key if set)
     llm_api_key: str = ""

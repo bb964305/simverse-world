@@ -20,6 +20,7 @@ import {
 } from '../services/caravanProjection'
 import type { CaravanState } from '../services/api'
 import '../styles/game-ui.css'
+import { disconnectWallet } from '../services/web3/wallet'
 
 // Streak reward ladder (D3): SC amounts for each day of the 7-day cycle.
 const STREAK_LADDER = [10, 15, 20, 25, 30, 40, 50]
@@ -268,6 +269,7 @@ export function TopNav() {
 
   const handleLogout = () => {
     disconnectWS()
+    void disconnectWallet()
     logout()
     navigate('/login')
   }
@@ -281,6 +283,7 @@ export function TopNav() {
         </button>
         <div className="game-topnav__links">
           <button onClick={() => navigateTo('/forge')} className="game-nav-link game-nav-link--primary">＋ 炼化居民</button>
+          <button onClick={() => navigateTo('/web3')} className="game-nav-link game-nav-link--teal">◇ 链上 Agent</button>
           <button onClick={() => openBridgePanel('bulletin')} className="game-nav-link game-nav-link--gold">📋 公告板</button>
           <button onClick={() => navigateTo('/seasons')} className="game-nav-link game-nav-link--gold">🏆 赛季</button>
           <button onClick={() => navigateTo('/debates')} className="game-nav-link game-nav-link--violet">⚔️ 辩论</button>
@@ -310,6 +313,7 @@ export function TopNav() {
             <div id="game-world-menu" className="game-nav-menu" role="menu">
               <div className="game-nav-menu__search"><SearchDropdown /></div>
               <button onClick={() => navigateTo('/forge')} className="game-nav-link game-nav-link--primary" role="menuitem">＋ 炼化居民</button>
+              <button onClick={() => navigateTo('/web3')} className="game-nav-link game-nav-link--teal" role="menuitem">◇ 链上 Agent</button>
               <button onClick={() => openBridgePanel('bulletin')} className="game-nav-link game-nav-link--gold" role="menuitem">📋 公告板</button>
               <button onClick={() => navigateTo('/seasons')} className="game-nav-link game-nav-link--gold" role="menuitem">🏆 赛季</button>
               <button onClick={() => navigateTo('/debates')} className="game-nav-link game-nav-link--violet" role="menuitem">⚔️ 辩论</button>
@@ -447,7 +451,23 @@ export function TopNav() {
                 color: 'var(--text-primary)', borderBottom: '1px solid var(--border)',
               }}>
                 {user?.name ?? '用户'}
+                {user?.wallet_address && (
+                  <div style={{ marginTop: 4, color: 'var(--text-muted)', fontSize: 10, fontFamily: 'monospace' }}>
+                    {user.wallet_address.slice(0, 8)}…{user.wallet_address.slice(-6)}
+                  </div>
+                )}
               </div>
+              <button
+                onClick={() => navigateTo('/web3')}
+                style={{
+                  display: 'block', width: '100%', textAlign: 'left',
+                  padding: '9px 14px', fontSize: 13,
+                  color: '#2dd4bf', background: 'none', border: 'none',
+                  cursor: 'pointer',
+                }}
+              >
+                ◇ 链上 Agent 工作台
+              </button>
               <button
                 onClick={() => navigateTo('/profile')}
                 style={{

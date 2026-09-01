@@ -33,7 +33,7 @@
 | 身份 | 阅读顺序 | 终点 |
 |---|---|---|
 | 玩家 | [项目首页](../README.md) → [先从这里开始](START_HERE.md) → [玩家指南](GAMEPLAY.md) | 知道怎样进入小镇和使用主要玩法 |
-| 开发者 | [项目首页](../README.md) → [先从这里开始](START_HERE.md) → [本地开发](DEVELOPMENT.md) → [贡献指南](CONTRIBUTING.md) → [系统结构](ARCHITECTURE.md) | 能启动、修改并验证项目 |
+| 开发者 | [项目首页](../README.md) → [Web3 手册](WEB3_GUIDE.md) → [本地开发](DEVELOPMENT.md) → [贡献指南](CONTRIBUTING.md) → [系统结构](ARCHITECTURE.md) | 能启动、修改并验证项目 |
 | 运维人员 | [项目首页](../README.md) → [部署说明](DEPLOYMENT.md) → [运维手册](OPERATIONS.md) → [2026-08-15 发布手册](runbooks/2026-08-15-town-p0-p3-rollout.md) | 能安全发布、检查和恢复 |
 | 管理员 | [项目首页](../README.md) → [管理员开通](ADMIN_BOOTSTRAP.md) → [管理控制台设计](ADMIN_CONSOLE_DESIGN.md) | 能进入后台并理解管理区 |
 | 外部 Agent 开发者 | [项目首页](../README.md) → [Agent Player 接入](AGENT_PLAYERS.md) | 能理解接入方式和安全边界 |
@@ -56,9 +56,10 @@
 请按这个顺序：
 
 1. [先从这里开始](START_HERE.md)。
-2. [本地开发手册](DEVELOPMENT.md)。
-3. [贡献指南](CONTRIBUTING.md)。
-4. [系统结构](ARCHITECTURE.md)。
+2. [Web3 开发部署手册](WEB3_GUIDE.md)。
+3. [本地开发手册](DEVELOPMENT.md)。
+4. [贡献指南](CONTRIBUTING.md)。
+5. [系统结构](ARCHITECTURE.md)。
 
 读完后，应能启动、修改、测试和解释系统。
 
@@ -80,6 +81,7 @@ runbook 是可以按顺序执行的操作清单。
 | [玩家指南](GAMEPLAY.md) | 玩家 | 学习操作和主要玩法 | 不讲部署 | 当前 |
 | [系统结构](ARCHITECTURE.md) | 开发者 | 理解四个系统部分 | 不教生产发布 | 当前 |
 | [本地开发](DEVELOPMENT.md) | 开发者 | 启动和验证本地环境 | 不处理生产故障 | 当前 |
+| [Web3 开发部署手册](WEB3_GUIDE.md) | 玩家、开发者和运维 | 钱包、合约、链上记忆/存档、测试网部署与升级 | 不包含代币经济 | 当前 |
 | [贡献指南](CONTRIBUTING.md) | 贡献者 | 学习修改、测试和提交 | 不重复系统原理 | 当前 |
 | [部署说明](DEPLOYMENT.md) | 发布人员 | 学习安全发布顺序 | 不处理日常故障 | 当前 |
 | [运维手册](OPERATIONS.md) | 运维人员 | 检查、备份、回滚和恢复 | 不记录产品待办 | 当前 |

@@ -9,6 +9,7 @@ from app.routers import lab as lab_router
 from app.routers import world as world_router
 from app.routers import townhall as townhall_router
 from app.routers import agent_players as agent_players_router
+from app.routers import web3_content as web3_content_router
 # Import the modules whose @on(...) handlers must register on the event bus.
 import app.events.achievements  # noqa: F401
 import app.services.daily_quest_service  # noqa: F401
@@ -181,7 +182,10 @@ from app.services.skill_import_service import IMPORT_MAX_MULTIPART_BODY_BYTES  #
 
 app.add_middleware(
     RouteBodyLimitMiddleware,
-    limits={("POST", "/residents/import"): IMPORT_MAX_MULTIPART_BODY_BYTES},
+    limits={
+        ("POST", "/residents/import"): IMPORT_MAX_MULTIPART_BODY_BYTES,
+        ("POST", "/web3/content"): settings.web3_content_max_bytes + 1024 * 1024,
+    },
     detail="Import request exceeds the multipart body size limit",
 )
 
@@ -249,6 +253,7 @@ app.include_router(world_router.router)
 app.include_router(townhall_router.router)
 app.include_router(townhall_router.alias_router)  # 收口: /town/{treasury,policies} 别名
 app.include_router(agent_players_router.router)
+app.include_router(web3_content_router.router)
 app.include_router(admin_router)
 
 # --- Observability (Phase 3): GET /metrics + runtime gauges ---

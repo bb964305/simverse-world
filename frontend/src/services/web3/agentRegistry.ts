@@ -1,0 +1,125 @@
+import type { Locale } from '../locale'
+import { getWeb3Runtime, requireWalletAccount } from './wallet'
+
+const addressValue = import.meta.env.VITE_AGENT_REGISTRY_ADDRESS || ''
+export const AGENT_REGISTRY_ADDRESS = addressValue as `0x${string}`
+
+export interface AgentChainState {
+  metadataHash: `0x${string}`
+  latestArtifactHash: `0x${string}`
+  trainingRoot: `0x${string}`
+  latestMemoryHash: `0x${string}`
+  latestSaveHash: `0x${string}`
+  version: bigint
+  memoryRevision: bigint
+  saveRevision: bigint
+  createdAt: bigint
+  updatedAt: bigint
+}
+
+const registryAbi = [
+  {
+    type: 'function', name: 'agentsOf', stateMutability: 'view', inputs: [{ name: 'owner', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256[]' }],
+  },
+  {
+    type: 'function', name: 'tokenURI', stateMutability: 'view', inputs: [{ name: 'tokenId', type: 'uint256' }],
+    outputs: [{ name: '', type: 'string' }],
+  },
+  {
+    type: 'function', name: 'agentState', stateMutability: 'view', inputs: [{ name: 'agentId', type: 'uint256' }],
+    outputs: [{
+      name: '', type: 'tuple', components: [
+        { name: 'metadataHash', type: 'bytes32' }, { name: 'latestArtifactHash', type: 'bytes32' },
+        { name: 'trainingRoot', type: 'bytes32' }, { name: 'latestMemoryHash', type: 'bytes32' },
+        { name: 'latestSaveHash', type: 'bytes32' }, { name: 'version', type: 'uint64' },
+        { name: 'memoryRevision', type: 'uint64' }, { name: 'saveRevision', type: 'uint64' },
+        { name: 'createdAt', type: 'uint64' }, { name: 'updatedAt', type: 'uint64' },
+      ],
+    }],
+  },
+  {
+    type: 'function', name: 'createAgent', stateMutability: 'nonpayable',
+    inputs: [{ name: 'metadataURI', type: 'string' }, { name: 'metadataHash', type: 'bytes32' }], outputs: [{ name: 'agentId', type: 'uint256' }],
+  },
+  {
+    type: 'function', name: 'publishVersion', stateMutability: 'nonpayable',
+    inputs: [{ name: 'agentId', type: 'uint256' }, { name: 'artifactURI', type: 'string' }, { name: 'artifactHash', type: 'bytes32' }, { name: 'trainingRoot', type: 'bytes32' }],
+    outputs: [{ name: 'version', type: 'uint64' }],
+  },
+  {
+    type: 'function', name: 'anchorMemory', stateMutability: 'nonpayable',
+    inputs: [{ name: 'agentId', type: 'uint256' }, { name: 'contentURI', type: 'string' }, { name: 'contentHash', type: 'bytes32' }],
+    outputs: [{ name: 'revision', type: 'uint64' }],
+  },
+  {
+    type: 'function', name: 'anchorSave', stateMutability: 'nonpayable',
+    inputs: [{ name: 'agentId', type: 'uint256' }, { name: 'contentURI', type: 'string' }, { name: 'contentHash', type: 'bytes32' }],
+    outputs: [{ name: 'revision', type: 'uint64' }],
+  },
+] as const
+
+export function registryConfigured(): boolean {
+  return /^0x[0-9a-fA-F]{40}$/.test(AGENT_REGISTRY_ADDRESS)
+}
+
+function requireRegistry(): `0x${string}` {
+  if (!registryConfigured()) throw new Error('VITE_AGENT_REGISTRY_ADDRESS is not configured')
+  return AGENT_REGISTRY_ADDRESS
+}
+
+export async function loadOwnedAgents(owner: `0x${string}`): Promise<Array<{
+  id: bigint
+  uri: string
+  state: AgentChainState
+}>> {
+  const { config, core } = await getWeb3Runtime()
+  const address = requireRegistry()
+  const ids = await core.readContract(config, { address, abi: registryAbi, functionName: 'agentsOf', args: [owner] })
+  return Promise.all(ids.map(async (id) => {
+    const [uri, state] = await Promise.all([
+      core.readContract(config, { address, abi: registryAbi, functionName: 'tokenURI', args: [id] }),
+      core.readContract(config, { address, abi: registryAbi, functionName: 'agentState', args: [id] }),
+    ])
+    return { id, uri, state: state as AgentChainState }
+  }))
+}
+
+async function write(
+  locale: Locale,
+  expectedAccount: `0x${string}`,
+  functionName: 'createAgent' | 'publishVersion' | 'anchorMemory' | 'anchorSave',
+  args: readonly unknown[],
+): Promise<`0x${string}`> {
+  const address = requireRegistry()
+  const { address: account, runtime } = await requireWalletAccount(locale)
+  if (account.toLowerCase() !== expectedAccount.toLowerCase()) {
+    throw new Error(locale === 'en' ? 'Connected wallet does not match this session.' : '当前钱包与登录身份不一致')
+  }
+  const hash = await runtime.core.writeContract(runtime.config, {
+    account,
+    address,
+    abi: registryAbi,
+    functionName,
+    args,
+  } as never)
+  const receipt = await runtime.core.waitForTransactionReceipt(runtime.config, { hash })
+  if (receipt.status !== 'success') throw new Error('Contract transaction reverted')
+  return hash
+}
+
+export function createAgentPassport(locale: Locale, account: `0x${string}`, uri: string, hash: `0x${string}`) {
+  return write(locale, account, 'createAgent', [uri, hash])
+}
+
+export function publishTrainingVersion(locale: Locale, account: `0x${string}`, agentId: bigint, uri: string, hash: `0x${string}`, trainingRoot: `0x${string}`) {
+  return write(locale, account, 'publishVersion', [agentId, uri, hash, trainingRoot])
+}
+
+export function anchorMemory(locale: Locale, account: `0x${string}`, agentId: bigint, uri: string, hash: `0x${string}`) {
+  return write(locale, account, 'anchorMemory', [agentId, uri, hash])
+}
+
+export function anchorSave(locale: Locale, account: `0x${string}`, agentId: bigint, uri: string, hash: `0x${string}`) {
+  return write(locale, account, 'anchorSave', [agentId, uri, hash])
+}

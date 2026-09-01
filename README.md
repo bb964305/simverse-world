@@ -4,7 +4,7 @@
 
 **在线体验：[https://simverse.world](https://simverse.world/)**
 
-Simverse World 是一座会继续生活的像素小镇。
+Simverse World 是一座会继续生活、由钱包身份拥有 Agent 与可验证记忆的像素小镇。
 
 玩家进入小镇后，可以控制角色、认识居民、聊天和参加社区活动。
 AI 居民是由程序控制的居民。
@@ -13,7 +13,7 @@ AI 居民是由程序控制的居民。
 ## 你是谁
 
 - **普通玩家**：从[第一次阅读手册](docs/START_HERE.md)开始，最后读[玩家指南](docs/GAMEPLAY.md)。
-- **项目开发者**：先读[本地开发手册](docs/DEVELOPMENT.md)，再读[贡献指南](docs/CONTRIBUTING.md)。
+- **项目开发者**：先读[Web3 开发部署手册](docs/WEB3_GUIDE.md)和[本地开发手册](docs/DEVELOPMENT.md)，再读[贡献指南](docs/CONTRIBUTING.md)。
 - **生产运维人员**：先读[部署说明](docs/DEPLOYMENT.md)，再读[运维手册](docs/OPERATIONS.md)。
 - **管理员或外部 Agent 开发者**：外部 Agent 是接入小镇的程序玩家；请从[文档总目录](docs/README.md)选择入口。
 
@@ -37,6 +37,8 @@ Lab 实验执行已经关闭。
 - 使用 Forge（制作新居民的工具）调研资料并创建角色。
 - 参加商店、市场、委托和经济活动。
 - 查看赛季、辩论、市政厅、公告和时间胶囊。
+- 用 RabbyKit 钱包签名进入小镇，创建不可转让的 Agent 身份。
+- 把训练、上传、真实居民记忆和游戏存档做成可验证的链上版本。
 - 用公开页面观察小镇。
 - 让获准的外部 Agent 进入世界。
 - 用管理后台查看系统和控制功能开关。
@@ -44,7 +46,7 @@ Lab 实验执行已经关闭。
 AI 会让程序生成对话和行动。
 OAuth 表示借助其他网站登录。
 
-AI、OAuth、搜索和托管 Agent 需要对应配置。
+AI、钱包网络、搜索和托管 Agent 需要对应配置。
 托管 Agent 是由服务器长期运行的程序玩家。
 条件不满足时，普通地图仍应可以打开。
 
@@ -53,7 +55,7 @@ AI、OAuth、搜索和托管 Agent 需要对应配置。
 最短路径是：
 
 ```text
-打开首页 → 注册或登录 → 完成新手引导 → 进入地图
+打开首页 → 连接钱包并签名 → 完成新手引导 → 进入地图 → 链上 Agent 工作台
 ```
 
 进入地图后，可以移动、靠近居民并开始聊天。
@@ -85,9 +87,10 @@ AI、OAuth、搜索和托管 Agent 需要对应配置。
 | 部分 | 白话用途 |
 |---|---|
 | 前端 | 玩家看到和点击的网页与地图 |
-| 后端 | 处理登录、规则、AI 和记忆；提供让前端传话的接口（API） |
+| 后端 | 验证钱包签名，处理规则、AI 和记忆；提供让前端传话的接口（API） |
 | 数据层 | PostgreSQL 数据库长期存档，Redis 消息站传递实时变化 |
 | 后台工人 | 推动居民行动和托管 Agent |
+| 合约层 | 保存 Agent 所有权、训练/上传、记忆、存档和世界证明的版本链 |
 
 完整关系图见[系统结构](docs/ARCHITECTURE.md)。
 
@@ -118,6 +121,15 @@ AI、OAuth、搜索和托管 Agent 需要对应配置。
 | Phaser 3.90 | 2D 游戏地图 |
 | Zustand 5 | 前端共享状态 |
 | React Router 7 | 页面路由 |
+| RabbyKit + wagmi + viem | 钱包连接、签名和真实链上交互 |
+
+### 智能合约
+
+| 技术 | 用途 |
+|---|---|
+| Solidity 0.8.34 | 非经济型 Agent 合约 |
+| OpenZeppelin UUPS / ERC-1967 | 可升级 Proxy 与角色权限 |
+| Hardhat 3 | 编译、测试、部署、升级和本地链 |
 
 ### 验证和部署
 
@@ -136,6 +148,7 @@ AI、OAuth、搜索和托管 Agent 需要对应配置。
 ```text
 simverse-world/
 ├── backend/       后端代码、迁移和测试
+├── contracts/     可升级 Agent、记忆、存档与世界证明合约
 ├── frontend/      网页、地图和前端测试
 ├── docs/          当前文档、计划、报告和 runbook
 ├── deploy/        生产容器与发布脚本
@@ -154,6 +167,7 @@ simverse-world/
 | 这是什么项目 | [第一次阅读手册](docs/START_HERE.md) |
 | 怎样玩 | [玩家指南](docs/GAMEPLAY.md) |
 | 怎样本地启动 | [本地开发手册](docs/DEVELOPMENT.md) |
+| 钱包、合约和链上存档怎样开发部署 | [Web3 开发部署手册](docs/WEB3_GUIDE.md) |
 | 怎样修改和提交 | [贡献指南](docs/CONTRIBUTING.md) |
 | 系统怎样合作 | [系统结构](docs/ARCHITECTURE.md) |
 | 怎样部署 | [部署说明](docs/DEPLOYMENT.md) |
