@@ -14,7 +14,10 @@ const RPC_URL = import.meta.env.VITE_WEB3_RPC_URL || (
   CHAIN_ID === ROBINHOOD_MAINNET_CHAIN_ID ? 'https://rpc.mainnet.chain.robinhood.com' :
     CHAIN_ID === ROBINHOOD_TESTNET_CHAIN_ID ? 'https://rpc.testnet.chain.robinhood.com' : 'http://127.0.0.1:8545'
 )
-const WALLETCONNECT_PROJECT_ID = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID || ''
+// Simverse intentionally exposes only injected/EIP-6963 wallets. RabbyKit's
+// config type still requires a projectId string, but WalletConnect stays
+// permanently hidden and this sentinel is never a production credential.
+const WALLETCONNECT_DISABLED_PROJECT_ID = 'simverse-walletconnect-disabled'
 
 export interface WalletUser {
   id: string
@@ -101,7 +104,7 @@ async function createRuntime(): Promise<Web3Runtime> {
     appName: 'Simverse World',
     appDesc: 'A persistent AI world with wallet-owned Agents and verifiable memories.',
     appUrl: window.location.origin,
-    projectId: WALLETCONNECT_PROJECT_ID || 'simverse-injected-wallets-only',
+    projectId: WALLETCONNECT_DISABLED_PROJECT_ID,
     chains: [chain],
     transports: { [chain.id]: core.http(RPC_URL) },
   }))
@@ -109,7 +112,7 @@ async function createRuntime(): Promise<Web3Runtime> {
     wagmi: config,
     language: 'en',
     theme: 'dark',
-    showWalletConnect: Boolean(WALLETCONNECT_PROJECT_ID),
+    showWalletConnect: false,
     themeVariables: {
       '--rk-font-family': '"Segoe UI Variable", Inter, "Noto Sans SC", "Microsoft YaHei UI", system-ui, sans-serif',
       '--rk-primary-button-bg': '#d9ff3f',

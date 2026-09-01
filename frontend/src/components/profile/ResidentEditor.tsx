@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import MDEditor from '@uiw/react-md-editor'
+import { useLocale } from '../../services/locale'
 import { useGameStore } from '../../stores/gameStore'
 import { parseUTC } from '../../utils/time'
 
@@ -8,15 +9,19 @@ const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 type Layer = 'ability' | 'persona' | 'soul'
 
 interface ResidentDetail {
+  id: string
   slug: string
   name: string
+  sprite_key: string
+  district: string
+  status: string
   ability_md: string
   persona_md: string
   soul_md: string
   star_rating: number
   total_conversations: number
   avg_rating: number
-  meta_json: { role?: string } | null
+  meta_json: ({ role?: string } & Record<string, unknown>) | null
 }
 
 interface VersionSnapshot {
@@ -32,14 +37,44 @@ interface ResidentEditorProps {
   onBack: () => void
 }
 
-const LAYER_CONFIG: { key: Layer; icon: string; label: string; description: string }[] = [
-  { key: 'ability', icon: '📋', label: 'Ability', description: '能力层 — 这个人能做什么' },
-  { key: 'persona', icon: '🎭', label: 'Persona', description: '人格层 — 怎么做、怎么说' },
-  { key: 'soul', icon: '💎', label: 'Soul', description: '灵魂层 — 为什么这样做' },
+const COPY = {
+  en: {
+    back: 'Back', history: 'Version history', save: 'Save & sync Passport', saving: 'Saving…', saved: 'Saved',
+    loading: 'Loading resident…', missing: 'Resident not found', noHistory: 'No saved versions yet', restore: 'Restore this version',
+    chainSyncing: 'Waiting for wallet to sync public Passport metadata…', chainSynced: 'Passport metadata is synced onchain.',
+    noPassport: 'Saved offchain. This resident has no Agent Passport yet.', noWallet: 'Saved offchain. Wallet identity is required for onchain sync.',
+    saveFailed: 'Resident could not be saved.',
+    layers: {
+      ability: ['Ability', 'Ability layer — what this resident can do'],
+      persona: ['Persona', 'Persona layer — how this resident acts and speaks'],
+      soul: ['Soul', 'Soul layer — why this resident chooses to act'],
+    },
+  },
+  'zh-CN': {
+    back: '返回', history: '历史版本', save: '保存并同步 Passport', saving: '保存中…', saved: '已保存',
+    loading: '正在读取居民…', missing: '找不到居民', noHistory: '暂无历史版本', restore: '恢复此版本',
+    chainSyncing: '等待钱包确认并同步公开 Passport 元数据…', chainSynced: 'Passport 元数据已同步上链。',
+    noPassport: '链下资料已保存；该居民尚未登记 Agent Passport。', noWallet: '链下资料已保存；连接钱包后才能同步上链。',
+    saveFailed: '居民资料保存失败。',
+    layers: {
+      ability: ['能力', '能力层 — 这个居民能做什么'],
+      persona: ['人格', '人格层 — 怎么做、怎么说'],
+      soul: ['灵魂', '灵魂层 — 为什么这样做'],
+    },
+  },
+} as const
+
+const LAYERS: { key: Layer; icon: string }[] = [
+  { key: 'ability', icon: '📋' },
+  { key: 'persona', icon: '🎭' },
+  { key: 'soul', icon: '💎' },
 ]
 
 export function ResidentEditor({ slug, onBack }: ResidentEditorProps) {
   const token = useGameStore((s) => s.token)
+  const wallet = useGameStore((s) => s.user?.wallet_address) as `0x${string}` | undefined
+  const locale = useLocale((state) => state.locale)
+  const copy = COPY[locale]
   const [resident, setResident] = useState<ResidentDetail | null>(null)
   const [activeLayer, setActiveLayer] = useState<Layer>('ability')
   const [drafts, setDrafts] = useState<Record<Layer, string>>({ ability: '', persona: '', soul: '' })
@@ -47,6 +82,8 @@ export function ResidentEditor({ slug, onBack }: ResidentEditorProps) {
   const [showVersions, setShowVersions] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [notice, setNotice] = useState('')
+  const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -73,6 +110,8 @@ export function ResidentEditor({ slug, onBack }: ResidentEditorProps) {
   const handleSave = async () => {
     setSaving(true)
     setSaved(false)
+    setNotice('')
+    setError('')
     try {
       const resp = await fetch(`${API}/residents/${slug}`, {
         method: 'PUT',
@@ -83,13 +122,34 @@ export function ResidentEditor({ slug, onBack }: ResidentEditorProps) {
         const updated: ResidentDetail = await resp.json()
         setResident(updated)
         setSaved(true)
-        setTimeout(() => setSaved(false), 2000)
+        if (wallet) {
+          try {
+            setNotice(copy.chainSyncing)
+            const [{ loadAgentForResident }, { syncResidentMetadataOnchain }] = await Promise.all([
+              import('../../services/web3/agentRegistry'),
+              import('../../services/web3/passport'),
+            ])
+            const passport = await loadAgentForResident(wallet, updated.id)
+            if (passport) {
+              await syncResidentMetadataOnchain(locale, wallet, updated, passport.id)
+              setNotice(copy.chainSynced)
+            } else {
+              setNotice(copy.noPassport)
+            }
+          } catch (reason) {
+            setError(reason instanceof Error ? reason.message : copy.saveFailed)
+          }
+        } else {
+          setNotice(copy.noWallet)
+        }
         const verResp = await fetch(`${API}/residents/${slug}/versions`, {
           headers: { Authorization: `Bearer ${token ?? ''}` },
         })
         if (verResp.ok) setVersions(await verResp.json())
+      } else {
+        setError(copy.saveFailed)
       }
-    } catch { /* ignore */ }
+    } catch { setError(copy.saveFailed) }
     finally { setSaving(false) }
   }
 
@@ -98,8 +158,8 @@ export function ResidentEditor({ slug, onBack }: ResidentEditorProps) {
     setShowVersions(false)
   }
 
-  if (loading) return <div style={{ color: 'var(--text-muted)', padding: 40, textAlign: 'center' }}>加载中...</div>
-  if (!resident) return <div style={{ color: 'var(--accent-red)', padding: 40, textAlign: 'center' }}>找不到居民</div>
+  if (loading) return <div style={{ color: 'var(--text-muted)', padding: 40, textAlign: 'center' }}>{copy.loading}</div>
+  if (!resident) return <div style={{ color: 'var(--accent-red)', padding: 40, textAlign: 'center' }}>{copy.missing}</div>
 
   return (
     <div style={{ display: 'flex', minHeight: 'calc(100vh - var(--nav-height))' }}>
@@ -110,7 +170,7 @@ export function ResidentEditor({ slug, onBack }: ResidentEditorProps) {
             background: 'var(--bg-input)', border: '1px solid var(--border)',
             color: 'var(--text-secondary)', padding: '6px 12px', borderRadius: 6,
             fontSize: 13, cursor: 'pointer',
-          }}>← 返回</button>
+          }}>← {copy.back}</button>
           <div style={{ flex: 1 }}>
             <div style={{ fontWeight: 700, fontSize: 18 }}>{resident.name}</div>
             <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>
@@ -122,18 +182,21 @@ export function ResidentEditor({ slug, onBack }: ResidentEditorProps) {
             background: 'var(--bg-input)', border: '1px solid var(--border)',
             color: 'var(--text-secondary)', padding: '6px 14px', borderRadius: 6,
             fontSize: 12, cursor: 'pointer',
-          }}>📜 历史版本 ({versions.length})</button>
+          }}>📜 {copy.history} ({versions.length})</button>
           <button onClick={() => void handleSave()} disabled={saving} style={{
             background: saved ? 'var(--accent-green)' : 'var(--accent-red)',
             color: 'white', border: 'none', padding: '8px 20px', borderRadius: 6,
             fontSize: 13, fontWeight: 600, cursor: saving ? 'default' : 'pointer',
             transition: 'background 0.2s ease',
-          }}>{saving ? '保存中...' : saved ? '已保存!' : '保存'}</button>
+          }}>{saving ? copy.saving : saved ? copy.saved : copy.save}</button>
         </div>
+
+        {notice && <div role="status" style={{ marginBottom: 14, color: 'var(--accent-cyan)', fontSize: 12 }}>{notice}</div>}
+        {error && <div role="alert" style={{ marginBottom: 14, color: 'var(--accent-red)', fontSize: 12 }}>{error}</div>}
 
         {/* Layer tabs */}
         <div style={{ display: 'flex', gap: 4, marginBottom: 16 }}>
-          {LAYER_CONFIG.map((layer) => (
+          {LAYERS.map((layer) => (
             <button key={layer.key} onClick={() => setActiveLayer(layer.key)} style={{
               display: 'flex', alignItems: 'center', gap: 6,
               padding: '8px 16px', borderRadius: '8px 8px 0 0',
@@ -142,11 +205,11 @@ export function ResidentEditor({ slug, onBack }: ResidentEditorProps) {
               borderBottom: activeLayer === layer.key ? '1px solid var(--bg-card)' : '1px solid var(--border)',
               color: activeLayer === layer.key ? 'var(--text-primary)' : 'var(--text-muted)',
               fontSize: 13, fontWeight: activeLayer === layer.key ? 600 : 400, cursor: 'pointer',
-            }}>{layer.icon} {layer.label}</button>
+            }}>{layer.icon} {copy.layers[layer.key][0]}</button>
           ))}
         </div>
         <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 12 }}>
-          {LAYER_CONFIG.find((l) => l.key === activeLayer)?.description}
+          {copy.layers[activeLayer][1]}
         </div>
 
         {/* Markdown editor */}
@@ -166,9 +229,9 @@ export function ResidentEditor({ slug, onBack }: ResidentEditorProps) {
           width: 300, borderLeft: '1px solid var(--border)',
           background: 'var(--bg-card)', padding: '24px 16px', overflowY: 'auto',
         }}>
-          <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 16 }}>历史版本</h3>
+          <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 16 }}>{copy.history}</h3>
           {versions.length === 0 ? (
-            <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>暂无历史版本</div>
+            <div style={{ color: 'var(--text-muted)', fontSize: 13 }}>{copy.noHistory}</div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {versions.map((v) => (
@@ -179,10 +242,10 @@ export function ResidentEditor({ slug, onBack }: ResidentEditorProps) {
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <span style={{ fontWeight: 600, fontSize: 13 }}>v{v.version_number}</span>
                     <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
-                      {parseUTC(v.created_at).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })}
+                      {parseUTC(v.created_at).toLocaleDateString(locale === 'en' ? 'en-US' : 'zh-CN', { month: 'short', day: 'numeric' })}
                     </span>
                   </div>
-                  <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 4 }}>点击恢复此版本</div>
+                  <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 4 }}>{copy.restore}</div>
                 </div>
               ))}
             </div>
