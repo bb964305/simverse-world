@@ -25,20 +25,21 @@ import { useLocale, type Locale } from '../services/locale'
 import { BrandLogo } from './BrandLogo'
 import { BrandSocialLinks } from './BrandSocialLinks'
 import { LanguageToggle } from './LanguageToggle'
+import { SIM_TOKEN } from '../config/simToken'
 
 const NAV_COPY = {
   en: {
     nav: 'Game navigation', home: 'Simverse World home', forge: '＋ Forge resident', agent: '◇ Onchain Agent',
     board: '📋 Bulletin', seasons: '🏆 Seasons', debates: '⚔️ Debates', shop: '🛒 Shop', commissions: '🗒️ Commissions',
     hall: '🏛️ Town Hall', market: '🏬 Market', lab: '🧪 Lab', terminal: '📊 Lab terminal', observatory: '◫ Observatory',
-    world: 'World', openWorld: 'Open world menu', closeWorld: 'Close world menu', digest: '📰 Town digest', guide: '◎ New player guide', economy: '◉ SIM economy',
+    world: 'World', openWorld: 'Open world menu', closeWorld: 'Close world menu', digest: '📰 Town digest', guide: '◎ New player guide', economy: '◉ SIM economy', buy: 'Buy SIM',
     account: 'Account menu', profile: '👤 Profile', capsules: '💌 Capsules', logout: 'Exit wallet session', studio: '◇ Onchain Agent Studio', community: 'Official community', user: 'Wallet resident',
   },
   'zh-CN': {
     nav: '游戏主导航', home: '返回 Simverse World', forge: '＋ 炼化居民', agent: '◇ 链上 Agent',
     board: '📋 公告板', seasons: '🏆 赛季', debates: '⚔️ 辩论', shop: '🛒 商店', commissions: '🗒️ 委托',
     hall: '🏛️ 市政厅', market: '🏬 集市', lab: '🧪 实验楼', terminal: '📊 实验楼终端', observatory: '◫ 小镇观测站',
-    world: '世界', openWorld: '打开世界菜单', closeWorld: '关闭世界菜单', digest: '📰 村落日报', guide: '◎ 新手教程', economy: '◉ SIM 经济模型',
+    world: '世界', openWorld: '打开世界菜单', closeWorld: '关闭世界菜单', digest: '📰 村落日报', guide: '◎ 新手教程', economy: '◉ SIM 经济模型', buy: '购买 SIM',
     account: '账号菜单', profile: '👤 个人主页', capsules: '💌 时间胶囊', logout: '退出钱包登录', studio: '◇ 链上 Agent 工作台', community: '官方社区', user: '钱包居民',
   },
 } as const
@@ -340,6 +341,7 @@ export function TopNav() {
               <button onClick={() => navigateTo('/web3')} className="game-nav-link game-nav-link--teal" role="menuitem">{copy.agent}</button>
               <button onClick={() => navigateTo('/guide')} className="game-nav-link game-nav-link--teal" role="menuitem">{copy.guide}</button>
               <button onClick={() => navigateTo('/economy')} className="game-nav-link game-nav-link--gold" role="menuitem">{copy.economy}</button>
+              <a href={SIM_TOKEN.tradeUrl} target="_blank" rel="noopener noreferrer" className="game-nav-link game-nav-link--buy" role="menuitem" onClick={() => setActivePopover(null)}>{copy.buy} ↗</a>
               <button onClick={() => openBridgePanel('bulletin')} className="game-nav-link game-nav-link--gold" role="menuitem">{copy.board}</button>
               <button onClick={() => navigateTo('/seasons')} className="game-nav-link game-nav-link--gold" role="menuitem">{copy.seasons}</button>
               <button onClick={() => navigateTo('/debates')} className="game-nav-link game-nav-link--violet" role="menuitem">{copy.debates}</button>
@@ -361,6 +363,7 @@ export function TopNav() {
       </div>
       <div className="game-topnav__search"><SearchDropdown /></div>
       <div className="game-topnav__actions">
+        <a className="game-topnav__buy" href={SIM_TOKEN.tradeUrl} target="_blank" rel="noopener noreferrer">{copy.buy} ↗</a>
         <span className="game-topnav__status game-topnav__clock" style={{ fontVariantNumeric: 'tabular-nums' }}>🕐 {clock}</span>
         <span className="game-topnav__status game-topnav__status--coin">🪙 {balance}</span>
         {/* Login streak + daily quest (D3) */}

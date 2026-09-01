@@ -95,7 +95,7 @@ npm run deploy:local
 VITE_API_URL=http://localhost:8000
 VITE_WEB3_CHAIN_ID=31337
 VITE_WEB3_CHAIN_NAME=Simverse Local
-VITE_WEB3_RPC_URL=http://127.0.0.1:8545
+VITE_WEB3_RPC_URL=http://localhost:8545
 VITE_AGENT_REGISTRY_ADDRESS=0x部署输出地址
 ```
 

@@ -4,6 +4,7 @@ import { staticResidentPortraitUrl } from '../game/residentSpriteRuntime'
 import { LanguageToggle } from '../components/LanguageToggle'
 import { BrandSocialLinks } from '../components/BrandSocialLinks'
 import { BrandLogo } from '../components/BrandLogo'
+import { SIM_TOKEN } from '../config/simToken'
 import { useLocale } from '../services/locale'
 import '../styles/landing-page.css'
 
@@ -18,7 +19,7 @@ const HERO_RESIDENTS = [
 const COPY = {
   'zh-CN': {
     homeLabel: 'Simverse World 首页', navLabel: '官网导航', world: '世界', residents: '居民', forge: '锻造', memory: '记忆',
-    watch: '观察小镇', guide: '使用教程', economy: 'SIM 经济模型', enter: '连接钱包', menuOpen: '打开导航菜单', menuClose: '关闭导航菜单',
+    watch: '观察小镇', guide: '使用教程', economy: 'SIM 经济模型', buy: '购买 SIM', enter: '连接钱包', menuOpen: '打开导航菜单', menuClose: '关闭导航菜单',
     chainKicker: 'PERSISTENT AI WORLD / BUILT ON ROBINHOOD CHAIN',
     heroLead: '一座由 AI 居民持续生活、记忆与演化的链上开放世界。', live: '观看小镇实况',
     worldTitle: <>这里没有等待触发的剧本，<br />只有正在发生的生活。</>,
@@ -45,7 +46,7 @@ const COPY = {
   },
   en: {
     homeLabel: 'Simverse World home', navLabel: 'Site navigation', world: 'World', residents: 'Residents', forge: 'Forge', memory: 'Memory',
-    watch: 'Watch town', guide: 'How to play', economy: 'SIM economy', enter: 'Connect wallet', menuOpen: 'Open navigation menu', menuClose: 'Close navigation menu',
+    watch: 'Watch town', guide: 'How to play', economy: 'SIM economy', buy: 'Buy SIM', enter: 'Connect wallet', menuOpen: 'Open navigation menu', menuClose: 'Close navigation menu',
     chainKicker: 'PERSISTENT AI WORLD / BUILT ON ROBINHOOD CHAIN',
     heroLead: 'An onchain open world where AI residents keep living, remembering, and evolving.', live: 'Watch the town live',
     worldTitle: <>There is no script waiting to fire.<br />Only life already in motion.</>,
@@ -127,11 +128,12 @@ export function LandingPage() {
         <nav className="site-nav" data-open={menuOpen} aria-label={copy.navLabel} aria-hidden={compactNav && !menuOpen} inert={compactNav && !menuOpen ? true : undefined}>
           <a href="#world" onClick={closeMenu}>{copy.world}</a><a href="#residents" onClick={closeMenu}>{copy.residents}</a>
           <a href="#forge" onClick={closeMenu}>{copy.forge}</a><a href="#memory" onClick={closeMenu}>{copy.memory}</a>
-          <Link to="/town" onClick={closeMenu}>{copy.watch}</Link><Link to="/guide" onClick={closeMenu}>{copy.guide}</Link><Link to="/economy" onClick={closeMenu}>{copy.economy}</Link><Link className="site-nav__mobile-entry" to="/login" onClick={closeMenu}>{copy.enter}</Link>
+          <Link to="/town" onClick={closeMenu}>{copy.watch}</Link><Link to="/guide" onClick={closeMenu}>{copy.guide}</Link><Link to="/economy" onClick={closeMenu}>{copy.economy}</Link><a className="site-nav__mobile-entry site-nav__mobile-buy" href={SIM_TOKEN.tradeUrl} target="_blank" rel="noopener noreferrer" onClick={closeMenu}>{copy.buy}</a><Link className="site-nav__mobile-entry" to="/login" onClick={closeMenu}>{copy.enter}</Link>
         </nav>
         <div className="site-header__actions">
           <BrandSocialLinks className="brand-socials--header" />
           <LanguageToggle className="language-toggle language-toggle--site" />
+          <a className="site-header__buy" href={SIM_TOKEN.tradeUrl} target="_blank" rel="noopener noreferrer">{copy.buy}</a>
           <Link className="site-header__login" to="/login">{copy.enter}</Link>
           <button ref={menuButtonRef} className="site-menu-button" type="button" aria-label={menuOpen ? copy.menuClose : copy.menuOpen} aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}><MenuIcon open={menuOpen} /></button>
         </div>
@@ -144,7 +146,7 @@ export function LandingPage() {
             <p className="site-kicker site-kicker--light">{copy.chainKicker}</p>
             <h1 className="site-hero__title" id="hero-title" aria-label="Simverse World"><span>SIMVERSE</span><span>WORLD</span></h1>
             <p className="site-hero__lead">{copy.heroLead}</p>
-            <div className="site-hero__actions"><Link className="site-button site-button--primary" to="/login">{copy.enter} <span aria-hidden="true">-&gt;</span></Link><Link className="site-button site-button--ghost" to="/town">{copy.live}</Link></div>
+            <div className="site-hero__actions"><a className="site-button site-button--primary" href={SIM_TOKEN.tradeUrl} target="_blank" rel="noopener noreferrer">{copy.buy} <span aria-hidden="true">↗</span></a><Link className="site-button site-button--ghost" to="/login">{copy.enter}</Link><Link className="site-button site-button--ghost" to="/town">{copy.live}</Link></div>
           </div>
           <div className="site-hero__residents" aria-hidden="true">{HERO_RESIDENTS.map((resident) => <img className={`hero-resident ${resident.className}`} src={resident.src} alt="" key={resident.src} />)}</div>
           <div className="site-hero__index" aria-hidden="true"><span>001</span><span>THE CITY IS ALREADY AWAKE</span></div>
@@ -175,12 +177,12 @@ export function LandingPage() {
 
         <section className="life-loop-section"><div className="section-shell" data-reveal><p className="site-kicker">THE LIVING LOOP</p><h2 className="display-heading display-heading--dark">{copy.loopTitle}</h2><div className="life-loop life-loop--web3">{copy.loops.map((loop, index) => <div key={loop[0]}><span>0{index + 1}</span><h3>{loop[0]}</h3><p>{loop[1]}</p></div>)}</div></div></section>
 
-        <section className="final-callout"><img className="final-callout__backdrop" src="/marketing/world-map.jpg" alt="" loading="lazy" /><div className="final-callout__shade" /><div className="section-shell final-callout__content" data-reveal><p className="site-kicker site-kicker--light">YOUR STORY STARTS MID-SCENE</p><h2 className="display-heading">{copy.finalTitle}</h2><p>{copy.finalLead}</p><Link className="site-button site-button--primary" to="/login">{copy.finalButton} <span aria-hidden="true">-&gt;</span></Link></div></section>
+        <section className="final-callout"><img className="final-callout__backdrop" src="/marketing/world-map.jpg" alt="" loading="lazy" /><div className="final-callout__shade" /><div className="section-shell final-callout__content" data-reveal><p className="site-kicker site-kicker--light">YOUR STORY STARTS MID-SCENE</p><h2 className="display-heading">{copy.finalTitle}</h2><p>{copy.finalLead}</p><div className="site-hero__actions site-hero__actions--center"><Link className="site-button site-button--primary" to="/login">{copy.finalButton} <span aria-hidden="true">-&gt;</span></Link><a className="site-button site-button--ghost" href={SIM_TOKEN.tradeUrl} target="_blank" rel="noopener noreferrer">{copy.buy} <span aria-hidden="true">↗</span></a></div></div></section>
       </main>
 
       <footer className="site-footer">
         <div className="site-footer__brand"><BrandLogo className="site-brand__mark" size={58} /><strong>SIMVERSE WORLD</strong><p>{copy.footerLead}</p></div>
-        <div className="site-footer__links"><div><span>WORLD</span><a href="#world">{copy.city}</a><a href="#residents">{copy.residents}</a><a href="#memory">{copy.memory}</a></div><div><span>CREATE</span><a href="#forge">{copy.forge}</a><Link to="/guide">{copy.guide}</Link><Link to="/economy">{copy.economy}</Link><Link to="/login">{copy.login}</Link></div><div><span>COMMUNITY</span><BrandSocialLinks className="brand-socials--footer" /></div></div>
+        <div className="site-footer__links"><div><span>WORLD</span><a href="#world">{copy.city}</a><a href="#residents">{copy.residents}</a><a href="#memory">{copy.memory}</a></div><div><span>CREATE</span><a href="#forge">{copy.forge}</a><Link to="/guide">{copy.guide}</Link><Link to="/economy">{copy.economy}</Link><a href={SIM_TOKEN.tradeUrl} target="_blank" rel="noopener noreferrer">{copy.buy}</a><Link to="/login">{copy.login}</Link></div><div><span>COMMUNITY</span><BrandSocialLinks className="brand-socials--footer" /></div></div>
         <div className="site-footer__meta"><span>SIMVERSE WORLD / 2026</span><a href="#top">{copy.top}</a></div>
       </footer>
     </div>

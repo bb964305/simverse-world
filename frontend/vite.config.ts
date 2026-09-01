@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import { visualizer } from 'rollup-plugin-visualizer'
 import { existsSync, readFileSync } from 'node:fs'
@@ -43,8 +43,27 @@ function caravanAssetVersion(): string {
   }
 }
 
+const PRODUCTION_WEB3_ENV = {
+  VITE_API_URL: 'https://simverse.space/api',
+  VITE_WEB3_CHAIN_ID: '4663',
+  VITE_WEB3_CHAIN_NAME: 'Robinhood Chain',
+  VITE_WEB3_RPC_URL: 'https://rpc.mainnet.chain.robinhood.com',
+  VITE_AGENT_REGISTRY_ADDRESS: '0x24f6f6bE48066cbE0B54d741cd4B52862Bb4b05c',
+} as const
+
 // https://vite.dev/config/
-export default defineConfig({
+export default defineConfig(({ mode }) => {
+  if (mode === 'production') {
+    const fileEnv = loadEnv(mode, process.cwd(), '')
+    for (const [key, expected] of Object.entries(PRODUCTION_WEB3_ENV)) {
+      const received = process.env[key] || fileEnv[key]
+      if (received !== expected) {
+        throw new Error(`Production build refused: ${key} must be ${expected}, received ${received || '<missing>'}`)
+      }
+    }
+  }
+
+  return {
   define: {
     __RESIDENT_SPRITE_ASSET_VERSION__: JSON.stringify(residentSpriteAssetVersion()),
     __CARAVAN_ASSET_VERSION__: JSON.stringify(caravanAssetVersion()),
@@ -72,4 +91,5 @@ export default defineConfig({
       },
     },
   },
+  }
 })

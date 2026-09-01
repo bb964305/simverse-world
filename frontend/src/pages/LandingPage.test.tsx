@@ -29,6 +29,7 @@ describe('LandingPage', () => {
     expect(screen.getAllByRole('link', { name: '使用教程' })[0]).toHaveAttribute('href', '/guide')
     expect(screen.getAllByRole('link', { name: 'Simverse on X' })[0]).toHaveAttribute('href', 'https://x.com/SIM_VERSESPACE')
     expect(screen.getAllByRole('link', { name: 'Simverse on Telegram' })[0]).toHaveAttribute('href', 'https://t.me/SIM_VERSESPACE')
+    expect(screen.getAllByRole('link', { name: /购买 SIM/ })[0]).toHaveAttribute('href', 'https://gmgn.ai/robinhood/token/0xff70581e7794079597a61d45a41cdea27846d780')
     expect(screen.getByRole('heading', { level: 2, name: /不是 NPC/ })).toBeInTheDocument()
   })
 
@@ -54,6 +55,7 @@ describe('LandingPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'EN' }))
     expect(screen.getByText(/An onchain open world/)).toBeInTheDocument()
     expect(screen.getAllByRole('link', { name: /Connect wallet/ })[0]).toHaveAttribute('href', '/login')
+    expect(screen.getAllByRole('link', { name: /Buy SIM/ })[0]).toHaveAttribute('href', 'https://gmgn.ai/robinhood/token/0xff70581e7794079597a61d45a41cdea27846d780')
     expect(screen.getByRole('heading', { level: 2, name: /Not NPCs/ })).toBeInTheDocument()
   })
 })

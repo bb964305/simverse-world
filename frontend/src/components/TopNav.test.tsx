@@ -85,6 +85,11 @@ function renderNav() {
 }
 
 describe('TopNav overlay ownership', () => {
+  it('keeps the official SIM market reachable inside the game', () => {
+    renderNav()
+    expect(screen.getByRole('link', { name: /购买 SIM/ })).toHaveAttribute('href', 'https://gmgn.ai/robinhood/token/0xff70581e7794079597a61d45a41cdea27846d780')
+  })
+
   it('shows the live caravan banner and removes it on a terminal snapshot', () => {
     renderNav()
     act(() => caravanHarness.listener?.({ snapshot: { visible: true, phase: 'trading' } }))

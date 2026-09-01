@@ -89,7 +89,8 @@ body.marketing-page-open #root {
 }
 
 .site-nav a,
-.site-header__login {
+.site-header__login,
+.site-header__buy {
   position: relative;
   color: rgba(255, 255, 255, 0.78);
   font-size: 13px;
@@ -113,7 +114,9 @@ body.marketing-page-open #root {
 .site-nav a:hover,
 .site-nav a:focus-visible,
 .site-header__login:hover,
-.site-header__login:focus-visible {
+.site-header__login:focus-visible,
+.site-header__buy:hover,
+.site-header__buy:focus-visible {
   color: #ffffff;
 }
 
@@ -142,6 +145,21 @@ body.marketing-page-open #root {
 
 .site-header__login:hover,
 .site-header__login:focus-visible {
+  color: var(--site-ink);
+  background: #ffffff;
+}
+
+.site-header__buy {
+  padding: 10px 16px;
+  border: 1px solid var(--site-acid);
+  border-radius: 4px;
+  color: var(--site-ink);
+  background: var(--site-acid);
+  transition: color 160ms ease, background-color 160ms ease;
+}
+
+.site-header__buy:hover,
+.site-header__buy:focus-visible {
   color: var(--site-ink);
   background: #ffffff;
 }
@@ -273,6 +291,8 @@ body.marketing-page-open #root {
   gap: 12px;
   margin-top: 28px;
 }
+
+.site-hero__actions--center { justify-content: center; }
 
 .site-button {
   display: inline-flex;
@@ -858,6 +878,8 @@ body.marketing-page-open #root {
 
   .site-nav a::after { display: none; }
   .site-nav__mobile-entry { display: block; color: var(--site-acid) !important; }
+  .site-nav__mobile-buy { color: var(--site-cyan) !important; }
+  .site-header__buy { display: none; }
   .site-menu-button { display: inline-grid; place-items: center; }
 
   .site-hero__title { font-size: 92px; }

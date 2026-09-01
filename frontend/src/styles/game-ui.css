@@ -176,6 +176,25 @@
 .game-nav-link--green { color: #77dda2; }
 .game-nav-link--teal { color: #63d5d0; }
 .game-nav-link--danger { color: #ff8d85; }
+.game-nav-link--buy { border-color: rgba(200, 255, 61, .55); color: #c8ff3d; text-decoration: none; }
+
+.game-topnav__buy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  padding: 0 11px;
+  border: 1px solid #c8ff3d;
+  border-radius: 999px;
+  color: #07100a;
+  background: #c8ff3d;
+  font-size: 11px;
+  font-weight: 850;
+  text-decoration: none;
+}
+
+.game-topnav__buy:hover,
+.game-topnav__buy:focus-visible { background: #fff; }
 
 .game-topnav__menu-button { display: none; }
 
@@ -436,7 +455,8 @@
   .game-topnav__brand-word { display: none; }
   .game-topnav__links .game-nav-link--primary,
   .game-topnav__streak,
-  .game-topnav__digest { display: none; }
+  .game-topnav__digest,
+  .game-topnav__buy { display: none; }
   .game-topnav__status { padding: 0 8px; }
   .game-nav-menu { top: calc(var(--nav-height) + 6px); right: 8px; width: calc(100vw - 16px); }
   .game-world-event { padding: 0 8px; }

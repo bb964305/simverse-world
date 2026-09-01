@@ -12,7 +12,7 @@ const CHAIN_NAME = import.meta.env.VITE_WEB3_CHAIN_NAME || (
 )
 const RPC_URL = import.meta.env.VITE_WEB3_RPC_URL || (
   CHAIN_ID === ROBINHOOD_MAINNET_CHAIN_ID ? 'https://rpc.mainnet.chain.robinhood.com' :
-    CHAIN_ID === ROBINHOOD_TESTNET_CHAIN_ID ? 'https://rpc.testnet.chain.robinhood.com' : 'http://127.0.0.1:8545'
+    CHAIN_ID === ROBINHOOD_TESTNET_CHAIN_ID ? 'https://rpc.testnet.chain.robinhood.com' : 'http://localhost:8545'
 )
 // Simverse intentionally exposes only injected/EIP-6963 wallets. RabbyKit's
 // config type still requires a projectId string, but WalletConnect stays

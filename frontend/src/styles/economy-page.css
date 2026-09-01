@@ -23,6 +23,8 @@ body:has(.sim-economy) { overflow-x: hidden; overflow-y: auto; background: #0709
 .economy-header .language-toggle button { border: 0; color: inherit; background: none; cursor: pointer; }
 .economy-header .language-toggle button[aria-pressed='true'] { color: var(--eco-acid); }
 .economy-enter { padding: 10px 14px; border: 1px solid var(--eco-acid); color: var(--eco-acid) !important; }
+.economy-buy { padding: 10px 14px; border: 1px solid var(--eco-acid) !important; color: #07100a !important; background: var(--eco-acid); font-weight: 850 !important; }
+.economy-buy:hover, .economy-buy:focus-visible { color: #07100a !important; background: #fff; }
 
 .sim-economy main > section { width: min(1180px, calc(100% - 40px)); margin: 0 auto; }
 .economy-hero { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(300px, .75fr); align-items: end; gap: clamp(40px, 8vw, 110px); padding: clamp(90px, 13vw, 170px) 0 80px; }
@@ -33,6 +35,11 @@ body:has(.sim-economy) { overflow-x: hidden; overflow-y: auto; background: #0709
 .economy-hero aside { padding: 28px; border: 1px solid rgba(200,255,61,.45); background: rgba(200,255,61,.055); box-shadow: 12px 12px 0 rgba(82,232,255,.08); }
 .economy-hero aside strong { display: block; color: var(--eco-acid); font-size: 17px; }
 .economy-hero aside p { margin-top: 12px; color: #c5cbc8; line-height: 1.7; }
+.economy-hero aside code { display: block; margin-top: 18px; padding: 10px 12px; overflow-wrap: anywhere; border: 1px solid #2f3b3f; color: var(--eco-cyan); background: #090d11; font: 700 11px/1.5 var(--font-mono); }
+.economy-token-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.economy-token-actions a { display: inline-flex; align-items: center; min-height: 42px; padding: 0 15px; border: 1px solid #465055; color: #fff; text-decoration: none; font-size: 12px; font-weight: 800; }
+.economy-token-actions a:first-child { border-color: var(--eco-acid); color: #07100a; background: var(--eco-acid); }
+.economy-token-actions a:hover, .economy-token-actions a:focus-visible { border-color: var(--eco-cyan); color: #07100a; background: #fff; }
 
 .economy-facts { display: grid; grid-template-columns: repeat(4, 1fr); border-block: 1px solid #2a3034; }
 .economy-facts div { min-height: 118px; padding: 26px 22px; border-right: 1px solid #2a3034; }
@@ -60,7 +67,8 @@ body:has(.sim-economy) { overflow-x: hidden; overflow-y: auto; background: #0709
 .economy-burn-grid h3 { margin: 38px 0 10px; }
 .economy-trade { display: grid; grid-template-columns: .65fr 1.35fr; gap: 60px; align-items: start; }
 .economy-trade h2 { margin-top: 16px; }
-.economy-trade > p { padding-top: 26px; font-size: 18px; }
+.economy-trade > div { padding-top: 26px; }
+.economy-trade > div > p { margin: 0; color: #9fa8aa; font-size: 18px; line-height: 1.7; }
 .economy-rollout { margin: 0; padding: 0; list-style: none; }
 .economy-rollout li { display: grid; grid-template-columns: 130px 260px 1fr; gap: 32px; padding: 28px 0; border-top: 1px solid #31383c; }
 .economy-rollout li > span { color: var(--eco-acid); font: 800 11px var(--font-mono); text-transform: uppercase; }
@@ -74,7 +82,7 @@ body:has(.sim-economy) { overflow-x: hidden; overflow-y: auto; background: #0709
 .economy-cta .brand-socials a { color: #fff; }
 
 @media (max-width: 900px) {
-  .economy-header nav > a:not(.economy-enter), .economy-header .brand-socials { display: none; }
+  .economy-header nav > a:not(.economy-enter):not(.economy-buy), .economy-header .brand-socials { display: none; }
   .economy-hero, .economy-split, .economy-trade { grid-template-columns: 1fr; }
   .economy-facts, .economy-loop { grid-template-columns: repeat(2, 1fr); }
   .economy-loop article:nth-child(2) { border-right: 1px solid #2d3438; }
