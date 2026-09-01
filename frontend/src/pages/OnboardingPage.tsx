@@ -19,6 +19,7 @@ import { registryConfigured } from '../services/web3/agentRegistry'
 import { checkAgentRuntime } from '../services/web3/connectivity'
 import { registerResidentOnchain, type PassportResident } from '../services/web3/passport'
 import { configuredChainId, configuredChainName } from '../services/web3/wallet'
+import { web3ErrorMessage } from '../services/web3/errors'
 import { useGameStore } from '../stores/gameStore'
 import '../styles/onboarding-page.css'
 
@@ -167,7 +168,7 @@ export function OnboardingPage() {
       setTransaction(result.transaction)
       setAgentId(result.agentId.toString())
       setPhase('ready')
-    } catch (reason) { setError(reason instanceof Error ? reason.message : copy.defaultError) }
+    } catch (reason) { setError(web3ErrorMessage(reason, locale, copy.defaultError)) }
     finally { setBusy(null) }
   }
 

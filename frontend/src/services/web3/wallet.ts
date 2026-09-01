@@ -1,6 +1,7 @@
 import type { Config } from '@wagmi/core'
 import type { Chain } from 'viem'
 import type { Locale } from '../locale'
+import { friendlyWeb3Error } from './errors'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 const ROBINHOOD_TESTNET_CHAIN_ID = 46630
@@ -173,32 +174,40 @@ async function responseJson<T>(response: Response): Promise<T> {
 }
 
 export async function signInWithWallet(locale: Locale): Promise<WalletAuthResult> {
-  const { address, runtime } = await requireWalletAccount(locale)
+  try {
+    const { address, runtime } = await requireWalletAccount(locale)
 
-  const challengeResponse = await fetch(`${API}/auth/wallet/challenge`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address, chain_id: runtime.chain.id }),
-  })
-  const challenge = await responseJson<{
-    message: string
-    nonce: string
-    chain_id: number
-  }>(challengeResponse)
-  const signature = await runtime.core.signMessage(runtime.config, {
-    account: address,
-    message: challenge.message,
-  })
-  const verifyResponse = await fetch(`${API}/auth/wallet/verify`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      address,
+    const challengeResponse = await fetch(`${API}/auth/wallet/challenge`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ address, chain_id: runtime.chain.id }),
+    })
+    const challenge = await responseJson<{
+      message: string
+      nonce: string
+      chain_id: number
+    }>(challengeResponse)
+    const signature = await runtime.core.signMessage(runtime.config, {
+      account: address,
       message: challenge.message,
-      signature,
-      nonce: challenge.nonce,
-      chain_id: challenge.chain_id,
-    }),
-  })
-  return responseJson<WalletAuthResult>(verifyResponse)
+    })
+    const verifyResponse = await fetch(`${API}/auth/wallet/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        address,
+        message: challenge.message,
+        signature,
+        nonce: challenge.nonce,
+        chain_id: challenge.chain_id,
+      }),
+    })
+    return responseJson<WalletAuthResult>(verifyResponse)
+  } catch (reason) {
+    throw friendlyWeb3Error(
+      reason,
+      locale,
+      locale === 'en' ? 'Wallet sign-in failed. Please try again.' : '钱包登录失败，请重试。',
+    )
+  }
 }

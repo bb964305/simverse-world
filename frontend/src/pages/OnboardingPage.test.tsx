@@ -48,4 +48,20 @@ describe('OnboardingPage onchain city registration', () => {
     expect(await screen.findByText('AGENT PASSPORT #7')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Enter Simverse World' })).toBeInTheDocument()
   })
+
+  it('shows a concise message when the wallet rejects Passport registration', async () => {
+    vi.mocked(registerResidentOnchain).mockRejectedValueOnce(new Error(`User rejected the request.
+Request Arguments: from: 0x5E807ae9C82bA691Fca0CC1f56EB01eb58d6f04C data: 0xa3dcc39c...
+Details: Request Signature: User denied request signature. Version: viem@2.56.1`))
+    render(<MemoryRouter initialEntries={['/onboarding?next=%2Fplay']}><OnboardingPage /></MemoryRouter>)
+
+    fireEvent.change(await screen.findByLabelText('Resident name'), { target: { value: 'Nova' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create resident' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Register identity onchain' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Request cancelled in your wallet. Nothing was submitted and no gas was spent.')
+    expect(alert).not.toHaveTextContent('0x5E807')
+    expect(alert).not.toHaveTextContent('viem')
+  })
 })

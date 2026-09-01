@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { onboardingPath } from '../services/authReturnTo'
 import { useLocale } from '../services/locale'
 import { signInWithWallet } from '../services/web3/wallet'
+import { web3ErrorMessage } from '../services/web3/errors'
 import { useGameStore } from '../stores/gameStore'
 
 export function WalletLoginButton({ next }: { next: string }) {
@@ -21,7 +22,7 @@ export function WalletLoginButton({ next }: { next: string }) {
       setAuth(result.user, result.access_token)
       navigate(onboardingPath(next), { replace: true })
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : (locale === 'en' ? 'Wallet sign-in failed.' : '钱包登录失败'))
+      setError(web3ErrorMessage(reason, locale, locale === 'en' ? 'Wallet sign-in failed.' : '钱包登录失败。'))
     } finally {
       setPending(false)
     }

@@ -19,7 +19,7 @@ const HERO_RESIDENTS = [
 const COPY = {
   'zh-CN': {
     homeLabel: 'Simverse World 首页', navLabel: '官网导航', world: '世界', residents: '居民', forge: '锻造', memory: '记忆',
-    watch: '观察小镇', guide: '使用教程', economy: 'SIM 经济模型', buy: '购买 SIM', enter: '连接钱包', menuOpen: '打开导航菜单', menuClose: '关闭导航菜单',
+    watch: '观察小镇', guide: '使用教程', economy: 'SIM 经济模型', buy: '购买 SIM', enter: '连接钱包', menuOpen: '打开导航菜单', menuClose: '关闭导航菜单', tokenLive: 'SIM 已在 Robinhood Chain 上线', officialContract: '官方合约', verify: '核对合约',
     chainKicker: 'PERSISTENT AI WORLD / BUILT ON ROBINHOOD CHAIN',
     heroLead: '一座由 AI 居民持续生活、记忆与演化的链上开放世界。', live: '观看小镇实况',
     worldTitle: <>这里没有等待触发的剧本，<br />只有正在发生的生活。</>,
@@ -46,7 +46,7 @@ const COPY = {
   },
   en: {
     homeLabel: 'Simverse World home', navLabel: 'Site navigation', world: 'World', residents: 'Residents', forge: 'Forge', memory: 'Memory',
-    watch: 'Watch town', guide: 'How to play', economy: 'SIM economy', buy: 'Buy SIM', enter: 'Connect wallet', menuOpen: 'Open navigation menu', menuClose: 'Close navigation menu',
+    watch: 'Watch town', guide: 'How to play', economy: 'SIM economy', buy: 'Buy SIM', enter: 'Connect wallet', menuOpen: 'Open navigation menu', menuClose: 'Close navigation menu', tokenLive: 'SIM is live on Robinhood Chain', officialContract: 'Official contract', verify: 'Verify contract',
     chainKicker: 'PERSISTENT AI WORLD / BUILT ON ROBINHOOD CHAIN',
     heroLead: 'An onchain open world where AI residents keep living, remembering, and evolving.', live: 'Watch the town live',
     worldTitle: <>There is no script waiting to fire.<br />Only life already in motion.</>,
@@ -147,6 +147,12 @@ export function LandingPage() {
             <h1 className="site-hero__title" id="hero-title" aria-label="Simverse World"><span>SIMVERSE</span><span>WORLD</span></h1>
             <p className="site-hero__lead">{copy.heroLead}</p>
             <div className="site-hero__actions"><a className="site-button site-button--primary" href={SIM_TOKEN.tradeUrl} target="_blank" rel="noopener noreferrer">{copy.buy} <span aria-hidden="true">↗</span></a><Link className="site-button site-button--ghost" to="/login">{copy.enter}</Link><Link className="site-button site-button--ghost" to="/town">{copy.live}</Link></div>
+            <div className="site-hero__token" aria-label={copy.officialContract}>
+              <span className="site-hero__token-status"><i aria-hidden="true" />{copy.tokenLive}</span>
+              <code title={SIM_TOKEN.address}>{SIM_TOKEN.address.slice(0, 8)}…{SIM_TOKEN.address.slice(-6)}</code>
+              <a href={SIM_TOKEN.explorerUrl} target="_blank" rel="noopener noreferrer">{copy.verify} ↗</a>
+              <a className="site-hero__token-buy" href={SIM_TOKEN.tradeUrl} target="_blank" rel="noopener noreferrer">{copy.buy} ↗</a>
+            </div>
           </div>
           <div className="site-hero__residents" aria-hidden="true">{HERO_RESIDENTS.map((resident) => <img className={`hero-resident ${resident.className}`} src={resident.src} alt="" key={resident.src} />)}</div>
           <div className="site-hero__index" aria-hidden="true"><span>001</span><span>THE CITY IS ALREADY AWAKE</span></div>

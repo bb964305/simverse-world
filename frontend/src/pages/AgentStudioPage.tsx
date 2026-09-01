@@ -6,6 +6,7 @@ import { PersonalAgentRuntime } from '../components/PersonalAgentRuntime'
 import { updateCharacter, updatePlayerPosition } from '../services/api'
 import { API_BASE } from '../services/api/core'
 import { useLocale } from '../services/locale'
+import { web3ErrorMessage } from '../services/web3/errors'
 import {
   anchorMemory,
   anchorSave,
@@ -139,11 +140,11 @@ export function AgentStudioPage() {
       const next = await loadOwnedAgents(wallet)
       setAgents(next)
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Unable to read contract')
+      setError(web3ErrorMessage(reason, locale, locale === 'en' ? 'Unable to read the contract.' : '无法读取链上合约。'))
     } finally {
       setBusy(null)
     }
-  }, [contractReady, wallet])
+  }, [contractReady, locale, wallet])
 
   useEffect(() => {
     setAgentId((current) => current && linkedAgents.some((agent) => agent.id.toString() === current)
@@ -183,7 +184,7 @@ export function AgentStudioPage() {
       setAgentId(result.agentId.toString())
       await refreshAgents()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Agent creation failed')
+      setError(web3ErrorMessage(reason, locale, locale === 'en' ? 'Agent creation failed.' : 'Agent 身份创建失败。'))
     } finally { setBusy(null) }
   }
 
@@ -195,7 +196,7 @@ export function AgentStudioPage() {
       setTransaction(hash)
       await refreshAgents()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Metadata update failed')
+      setError(web3ErrorMessage(reason, locale, locale === 'en' ? 'Metadata update failed.' : '元数据更新失败。'))
     } finally { setBusy(null) }
   }
 
@@ -225,7 +226,7 @@ export function AgentStudioPage() {
     try {
       const hash = await writeAnchor(file)
       setTransaction(hash || null); setFile(null); await refreshAgents()
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Anchor failed') }
+    } catch (reason) { setError(web3ErrorMessage(reason, locale, locale === 'en' ? 'Anchor failed.' : '链上锚定失败。')) }
     finally { setBusy(null) }
   }
 
@@ -239,7 +240,7 @@ export function AgentStudioPage() {
       const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' })
       const hash = await writeAnchor(blob, `simverse-save-${Date.now()}.json`, 'save')
       setTransaction(hash || null); await refreshAgents()
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Save failed') }
+    } catch (reason) { setError(web3ErrorMessage(reason, locale, locale === 'en' ? 'Save failed.' : '存档上链失败。')) }
     finally { setBusy(null) }
   }
 
@@ -258,7 +259,7 @@ export function AgentStudioPage() {
       setPlayerTile(snapshot.player.tile_x, snapshot.player.tile_y)
       setPlayerSpriteKey(snapshot.player.sprite_key)
       setRestored(true)
-    } catch (reason) { setError(reason instanceof Error ? reason.message : copy.invalidSave) }
+    } catch (reason) { setError(web3ErrorMessage(reason, locale, copy.invalidSave)) }
     finally { setBusy(null) }
   }
 
@@ -269,7 +270,7 @@ export function AgentStudioPage() {
       const content = await snapshotGameMemory(selectedResident.id)
       const hash = await anchorMemory(locale, wallet, BigInt(agentId), content.content_uri, content.content_hash)
       setTransaction(hash); await refreshAgents()
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Memory snapshot failed') }
+    } catch (reason) { setError(web3ErrorMessage(reason, locale, locale === 'en' ? 'Memory snapshot failed.' : '记忆快照上链失败。')) }
     finally { setBusy(null) }
   }
 
@@ -304,7 +305,7 @@ export function AgentStudioPage() {
       )
       setTransaction(hash)
       await refreshAgents()
-    } catch (reason) { setError(reason instanceof Error ? reason.message : 'World proof failed') }
+    } catch (reason) { setError(web3ErrorMessage(reason, locale, locale === 'en' ? 'World proof failed.' : '世界证明上链失败。')) }
     finally { setBusy(null) }
   }
 

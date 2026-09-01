@@ -1,6 +1,7 @@
 import type { Locale } from '../locale'
 import { keccak256, toHex } from 'viem'
 import { getWeb3Runtime, requireWalletAccount } from './wallet'
+import { friendlyWeb3Error } from './errors'
 
 const addressValue = import.meta.env.VITE_AGENT_REGISTRY_ADDRESS || ''
 export const AGENT_REGISTRY_ADDRESS = addressValue as `0x${string}`
@@ -175,21 +176,31 @@ async function write(
   functionName: 'createAgentForResident' | 'updateMetadata' | 'publishVersion' | 'anchorMemory' | 'anchorSave' | 'recordWorldProof',
   args: readonly unknown[],
 ): Promise<`0x${string}`> {
-  const address = requireRegistry()
-  const { address: account, runtime } = await requireWalletAccount(locale)
-  if (account.toLowerCase() !== expectedAccount.toLowerCase()) {
-    throw new Error(locale === 'en' ? 'Connected wallet does not match this session.' : '当前钱包与登录身份不一致')
+  try {
+    const address = requireRegistry()
+    const { address: account, runtime } = await requireWalletAccount(locale)
+    if (account.toLowerCase() !== expectedAccount.toLowerCase()) {
+      throw new Error(locale === 'en' ? 'Connected wallet does not match this session.' : '当前钱包与登录身份不一致')
+    }
+    const hash = await runtime.core.writeContract(runtime.config, {
+      account,
+      address,
+      abi: registryAbi,
+      functionName,
+      args,
+    } as never)
+    const receipt = await runtime.core.waitForTransactionReceipt(runtime.config, { hash })
+    if (receipt.status !== 'success') {
+      throw new Error(locale === 'en' ? 'The contract transaction reverted.' : '合约交易已回滚。')
+    }
+    return hash
+  } catch (reason) {
+    throw friendlyWeb3Error(
+      reason,
+      locale,
+      locale === 'en' ? 'The onchain request could not be completed.' : '链上请求未能完成。',
+    )
   }
-  const hash = await runtime.core.writeContract(runtime.config, {
-    account,
-    address,
-    abi: registryAbi,
-    functionName,
-    args,
-  } as never)
-  const receipt = await runtime.core.waitForTransactionReceipt(runtime.config, { hash })
-  if (receipt.status !== 'success') throw new Error('Contract transaction reverted')
-  return hash
 }
 
 export function createAgentPassport(locale: Locale, account: `0x${string}`, residentId: string, uri: string, hash: `0x${string}`) {

@@ -30,6 +30,8 @@ describe('LandingPage', () => {
     expect(screen.getAllByRole('link', { name: 'Simverse on X' })[0]).toHaveAttribute('href', 'https://x.com/SIM_VERSESPACE')
     expect(screen.getAllByRole('link', { name: 'Simverse on Telegram' })[0]).toHaveAttribute('href', 'https://t.me/SIM_VERSESPACE')
     expect(screen.getAllByRole('link', { name: /购买 SIM/ })[0]).toHaveAttribute('href', 'https://gmgn.ai/robinhood/token/0xff70581e7794079597a61d45a41cdea27846d780')
+    expect(screen.getByText('0xff7058…46d780')).toHaveAttribute('title', '0xff70581e7794079597a61d45a41cdea27846d780')
+    expect(screen.getByRole('link', { name: /核对合约/ })).toHaveAttribute('href', 'https://robinhoodchain.blockscout.com/token/0xff70581e7794079597a61d45a41cdea27846d780')
     expect(screen.getByRole('heading', { level: 2, name: /不是 NPC/ })).toBeInTheDocument()
   })
 
@@ -56,6 +58,7 @@ describe('LandingPage', () => {
     expect(screen.getByText(/An onchain open world/)).toBeInTheDocument()
     expect(screen.getAllByRole('link', { name: /Connect wallet/ })[0]).toHaveAttribute('href', '/login')
     expect(screen.getAllByRole('link', { name: /Buy SIM/ })[0]).toHaveAttribute('href', 'https://gmgn.ai/robinhood/token/0xff70581e7794079597a61d45a41cdea27846d780')
+    expect(screen.getByRole('link', { name: /Verify contract/ })).toHaveAttribute('href', 'https://robinhoodchain.blockscout.com/token/0xff70581e7794079597a61d45a41cdea27846d780')
     expect(screen.getByRole('heading', { level: 2, name: /Not NPCs/ })).toBeInTheDocument()
   })
 })
