@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     web3_uri: str = ""
     web3_content_dir: str = "data/web3-content"
     web3_content_max_bytes: int = 25 * 1024 * 1024
+    # Public API base used for immutable on-chain content URIs. This is
+    # intentionally separate from WEB3_URI: the wallet-signing origin is the
+    # frontend origin, while production commonly publishes FastAPI below /api.
+    web3_public_api_base_url: str = ""
     anthropic_api_key: str = ""
     # Custom LLM endpoint (overrides anthropic_api_key if set)
     llm_api_key: str = ""

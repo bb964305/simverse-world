@@ -53,6 +53,12 @@ def _user_root(user_id: str) -> Path:
     return target
 
 
+def _public_content_uri(request: Request, content_id: str) -> str:
+    configured = settings.web3_public_api_base_url.strip().rstrip("/")
+    base_url = configured or str(request.base_url).rstrip("/")
+    return f"{base_url}/web3/content/{content_id}"
+
+
 def _store_snapshot(
     *, request: Request, user: User, payload: bytes, filename: str, media_type: str
 ) -> ContentUploadResponse:
@@ -72,7 +78,7 @@ def _store_snapshot(
     }, ensure_ascii=False), encoding="utf-8")
     return ContentUploadResponse(
         content_id=content_id,
-        content_uri=f"{str(request.base_url).rstrip('/')}/web3/content/{content_id}",
+        content_uri=_public_content_uri(request, content_id),
         content_hash=f"0x{digest}",
         filename=filename,
         media_type=media_type,
@@ -122,7 +128,7 @@ async def upload_content(
     finally:
         await file.close()
 
-    content_uri = f"{str(request.base_url).rstrip('/')}/web3/content/{content_id}"
+    content_uri = _public_content_uri(request, content_id)
     return ContentUploadResponse(
         content_id=content_id,
         content_uri=content_uri,

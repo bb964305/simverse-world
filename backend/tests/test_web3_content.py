@@ -39,6 +39,35 @@ async def test_wallet_user_uploads_and_downloads_private_anchor(client, db_sessi
 
 
 @pytest.mark.anyio
+async def test_upload_uses_configured_public_api_prefix(client, db_session, tmp_path, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "web3_content_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "web3_public_api_base_url", "https://simverse.space/api/")
+    user = User(
+        id="wallet-public-uri-user",
+        name="Wallet Public URI User",
+        email="wallet-public-uri@identity.simverse.world",
+        hashed_password=None,
+        wallet_address="0x2234567890123456789012345678901234567890",
+    )
+    db_session.add(user)
+    await db_session.commit()
+    headers = {"Authorization": f"Bearer {create_token(user.id)}"}
+
+    uploaded = await client.post(
+        "/web3/content",
+        headers=headers,
+        files={"file": ("training.json", b'{"skill":"builder"}', "application/json")},
+    )
+
+    assert uploaded.status_code == 200
+    assert uploaded.json()["content_uri"] == (
+        f'https://simverse.space/api/web3/content/{uploaded.json()["content_id"]}'
+    )
+
+
+@pytest.mark.anyio
 async def test_web2_identity_cannot_use_web3_content_store(client):
     registered = await client.post(
         "/auth/register",
