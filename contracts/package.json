@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "compile": "hardhat compile",
+    "validate:upgrade": "hardhat run scripts/validate-upgrade.ts",
     "test": "hardhat test solidity --chain-type op",
     "network:robinhood-testnet": "hardhat run scripts/network.ts --network robinhoodTestnet",
     "network:robinhood": "hardhat run scripts/network.ts --network robinhood",

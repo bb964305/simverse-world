@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     # intentionally separate from WEB3_URI: the wallet-signing origin is the
     # frontend origin, while production commonly publishes FastAPI below /api.
     web3_public_api_base_url: str = ""
+    # Read-only RPC + deployed UUPS proxy used to verify Passport confirmations.
+    web3_rpc_url: str = "https://rpc.testnet.chain.robinhood.com"
+    web3_agent_registry_address: str = ""
     anthropic_api_key: str = ""
     # Custom LLM endpoint (overrides anthropic_api_key if set)
     llm_api_key: str = ""

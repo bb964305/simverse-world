@@ -127,7 +127,15 @@ contract SimverseAgentRegistry is
     function createAgent(
         string calldata metadataURI,
         bytes32 metadataHash
-    ) external returns (uint256 agentId) {
+    ) external virtual returns (uint256 agentId) {
+        return _createAgent(msg.sender, metadataURI, metadataHash);
+    }
+
+    function _createAgent(
+        address owner,
+        string calldata metadataURI,
+        bytes32 metadataHash
+    ) internal returns (uint256 agentId) {
         _validateURI(metadataURI);
         if (metadataHash == bytes32(0)) revert EmptyHash();
 
@@ -145,10 +153,10 @@ contract SimverseAgentRegistry is
             createdAt: timestamp,
             updatedAt: timestamp
         });
-        _agentsByOwner[msg.sender].push(agentId);
-        _mint(msg.sender, agentId);
+        _agentsByOwner[owner].push(agentId);
+        _mint(owner, agentId);
         _setTokenURI(agentId, metadataURI);
-        emit AgentCreated(agentId, msg.sender, metadataURI, metadataHash);
+        emit AgentCreated(agentId, owner, metadataURI, metadataHash);
     }
 
     function updateMetadata(
@@ -332,7 +340,7 @@ contract SimverseAgentRegistry is
 
     function _authorizeUpgrade(address) internal override onlyRole(UPGRADER_ROLE) {}
 
-    function _requireAgentOwner(uint256 agentId) private view {
+    function _requireAgentOwner(uint256 agentId) internal view {
         if (ownerOf(agentId) != msg.sender) revert NotAgentOwner();
     }
 

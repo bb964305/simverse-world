@@ -26,7 +26,7 @@ beforeEach(() => {
   vi.mocked(getSpriteTemplates).mockResolvedValue([{ key: '埃迪', gender: 'neutral', age_group: 'adult', vibe: 'builder', tags: ['cyber'] }])
   vi.mocked(createPlayerResident).mockResolvedValue({ id: 'resident-1', slug: 'p-nova', name: 'Nova', sprite_key: '埃迪', tile_x: 75, tile_y: 56 })
   vi.mocked(skipOnboarding).mockResolvedValue({ id: 'resident-2', slug: 'p-starter', name: 'Starter', sprite_key: '埃迪', tile_x: 75, tile_y: 56 })
-  vi.mocked(registerResidentOnchain).mockResolvedValue(`0x${'ab'.repeat(32)}`)
+  vi.mocked(registerResidentOnchain).mockResolvedValue({ agentId: 7n, transaction: `0x${'ab'.repeat(32)}` })
   vi.mocked(loadOwnedAgents).mockReset().mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 7n, uri: 'https://example.invalid/metadata', state: {} as never }])
 })
 

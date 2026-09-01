@@ -129,6 +129,8 @@ services:
       # Number of uvicorn workers; scale to CPU. Read by the Dockerfile CMD.
       UVICORN_WORKERS: "${UVICORN_WORKERS:-2}"
       WEB3_CONTENT_DIR: /var/lib/simverse/web3-content
+      WEB3_RPC_URL: ${WEB3_RPC_URL:-https://rpc.mainnet.chain.robinhood.com}
+      WEB3_AGENT_REGISTRY_ADDRESS: ${WEB3_AGENT_REGISTRY_ADDRESS:-0x24f6f6bE48066cbE0B54d741cd4B52862Bb4b05c}
     # Persist served static files (uploaded media + AI portraits) across
     # rebuilds; /app/static is the STATIC_DIR the app mounts at GET /static.
     # The lab_artifact_released read-only mount + receipt-trust secret come from

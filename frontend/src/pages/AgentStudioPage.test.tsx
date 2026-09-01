@@ -5,8 +5,9 @@ import { MemoryRouter } from 'react-router-dom'
 import { AgentStudioPage } from './AgentStudioPage'
 import { useLocale } from '../services/locale'
 import { updateCharacter, updatePlayerPosition } from '../services/api'
-import { createAgentPassport, loadLatestSaveAnchor, loadOwnedAgents } from '../services/web3/agentRegistry'
-import { readPrivateAnchoredJson, uploadWeb3Content } from '../services/web3/content'
+import { loadLatestSaveAnchor, loadOwnedAgents } from '../services/web3/agentRegistry'
+import { readPrivateAnchoredJson } from '../services/web3/content'
+import { registerResidentOnchain } from '../services/web3/passport'
 import { useGameStore } from '../stores/gameStore'
 
 vi.mock('../components/TopNav', () => ({ TopNav: () => <nav data-testid="top-nav" /> }))
@@ -21,12 +22,16 @@ vi.mock('../services/web3/wallet', () => ({
 vi.mock('../services/web3/agentRegistry', () => ({
   AGENT_REGISTRY_ADDRESS: '0x1111111111111111111111111111111111111111',
   registryConfigured: () => true,
+  residentKeyFor: () => `0x${'11'.repeat(32)}`,
   loadOwnedAgents: vi.fn().mockResolvedValue([]),
   loadLatestSaveAnchor: vi.fn(),
-  createAgentPassport: vi.fn().mockResolvedValue(`0x${'ab'.repeat(32)}`),
   publishTrainingVersion: vi.fn(),
   anchorMemory: vi.fn(),
   anchorSave: vi.fn(),
+}))
+vi.mock('../services/web3/passport', () => ({
+  registerResidentOnchain: vi.fn().mockResolvedValue({ agentId: 7n, transaction: `0x${'ab'.repeat(32)}` }),
+  syncResidentMetadataOnchain: vi.fn(),
 }))
 vi.mock('../services/web3/content', () => ({
   uploadWeb3Content: vi.fn().mockResolvedValue({
@@ -73,12 +78,10 @@ describe('AgentStudioPage', () => {
     expect(await screen.findByRole('option', { name: /赛博灵魂/ })).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: '创建链上身份' }))
-    await waitFor(() => expect(uploadWeb3Content).toHaveBeenCalled())
-    await waitFor(() => expect(createAgentPassport).toHaveBeenCalledWith(
+    await waitFor(() => expect(registerResidentOnchain).toHaveBeenCalledWith(
       'zh-CN',
       '0x1234567890123456789012345678901234567890',
-      'http://test/web3/content/content-1',
-      `0x${'12'.repeat(32)}`,
+      expect.objectContaining({ id: 'resident-1' }),
     ))
     expect(await screen.findByRole('status')).toHaveTextContent('交易已确认')
   })
@@ -93,6 +96,7 @@ describe('AgentStudioPage', () => {
   it('verifies and restores the latest onchain save into the game profile', async () => {
     vi.mocked(loadOwnedAgents).mockResolvedValue([{
       id: 7n,
+      residentKey: `0x${'11'.repeat(32)}`,
       uri: 'http://test/web3/content/metadata',
       state: {
         metadataHash: `0x${'01'.repeat(32)}`, latestArtifactHash: `0x${'00'.repeat(32)}`,

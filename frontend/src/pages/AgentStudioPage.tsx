@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from 'react'
 import { Link } from 'react-router-dom'
+import { concatHex, keccak256, toHex } from 'viem'
 import { TopNav } from '../components/TopNav'
 import { updateCharacter, updatePlayerPosition } from '../services/api'
 import { API_BASE } from '../services/api/core'
@@ -11,11 +12,12 @@ import {
   loadLatestSaveAnchor,
   loadOwnedAgents,
   publishTrainingVersion,
+  residentKeyFor,
   registryConfigured,
   type AgentChainState,
 } from '../services/web3/agentRegistry'
 import { readPrivateAnchoredJson, snapshotGameMemory, uploadWeb3Content } from '../services/web3/content'
-import { registerResidentOnchain } from '../services/web3/passport'
+import { registerResidentOnchain, syncResidentMetadataOnchain } from '../services/web3/passport'
 import { configuredChainId, configuredChainName } from '../services/web3/wallet'
 import { useGameStore } from '../stores/gameStore'
 import '../styles/agent-studio.css'
@@ -37,6 +39,7 @@ interface ChainAgent {
   id: bigint
   uri: string
   state: AgentChainState
+  residentKey?: `0x${string}`
 }
 
 interface SaveSnapshot {
@@ -53,8 +56,8 @@ const COPY = {
     lead: '把现有居民铸造成不可转让的链上身份，并为训练、上传、记忆与游戏存档建立可验证的版本链。',
     account: '钱包身份', network: '网络', contract: '可升级合约', runtime: 'Agent 挂机循环', online: '24/7 在线', checking: '检测中', connected: '已接通', missing: '尚未配置地址',
     mapTitle: '哪些动作会真正上链', mapItems: [['身份注册', '钱包所有权 + Agent ID + 元数据哈希'], ['训练上传', '文件哈希 + 训练根 + 递增版本'], ['记忆快照', '内容哈希 + 父哈希 + 修订号'], ['游戏存档', '状态哈希 + 父哈希 + 可验证恢复']], guide: '新手教程', economy: 'SIM 经济模型', explorer: '链上浏览器',
-    createTitle: '01 / 创建 Agent 身份', createLead: '选择你在游戏中锻造的居民。元数据先保存到私有内容层，哈希与所有权由钱包写入链上。',
-    resident: '游戏居民', noResident: '请先在炼化工坊创建一位居民', create: '创建链上身份', creating: '正在上传并等待钱包…',
+    createTitle: '01 / 创建 Agent 身份', createLead: '选择你在游戏中锻造的居民。公开身份元数据供钱包与浏览器读取，私密训练和记忆仍只对钱包会话开放。',
+    resident: '游戏居民', noResident: '请先在炼化工坊创建一位居民', create: '创建链上身份', creating: '正在上传并等待钱包…', syncMetadata: '同步最新身份资料',
     anchorTitle: '02 / 保存与确权', anchorLead: '选择 Agent 和内容类型。每次写入都会形成不可篡改的新版本，不会转移资金。',
     agent: '链上 Agent', kind: '内容类型', file: '选择内容文件', training: '训练 / 上传版本', memory: '记忆快照', save: '游戏存档',
     anchor: '上传并写入链上', anchoring: '正在等待链上确认…', quickSave: '保存当前游戏状态', memorySync: '同步居民记忆上链', restoreSave: '恢复最新链上存档', restoring: '正在校验并恢复…', restored: '链上存档已恢复', noSave: '这个 Agent 还没有链上存档', invalidSave: '链上存档内容无效',
@@ -66,8 +69,8 @@ const COPY = {
     lead: 'Turn an existing resident into a non-transferable onchain identity, then build verifiable version chains for training, uploads, memories, and game saves.',
     account: 'Wallet identity', network: 'Network', contract: 'Upgradeable contract', runtime: 'Agent world loop', online: 'Online 24/7', checking: 'Checking', connected: 'Connected', missing: 'Address not configured',
     mapTitle: 'What is actually written onchain', mapItems: [['Identity registration', 'Wallet ownership + Agent ID + metadata hash'], ['Training upload', 'File hash + training root + incremental version'], ['Memory snapshot', 'Content hash + parent hash + revision'], ['Game save', 'State hash + parent hash + verified restore']], guide: 'New player guide', economy: 'SIM economy', explorer: 'Block explorer',
-    createTitle: '01 / Create Agent identity', createLead: 'Choose a resident forged in the game. Metadata enters the private content layer first; your wallet anchors its hash and ownership onchain.',
-    resident: 'Game resident', noResident: 'Create a resident in the Forge first', create: 'Create onchain identity', creating: 'Uploading and waiting for wallet…',
+    createTitle: '01 / Create Agent identity', createLead: 'Choose a resident forged in the game. Public identity metadata stays readable by wallets and explorers; private training and memories remain wallet-session protected.',
+    resident: 'Game resident', noResident: 'Create a resident in the Forge first', create: 'Create onchain identity', creating: 'Uploading and waiting for wallet…', syncMetadata: 'Sync latest identity metadata',
     anchorTitle: '02 / Save and prove', anchorLead: 'Choose an Agent and content type. Every write creates an immutable version without moving funds.',
     agent: 'Onchain Agent', kind: 'Content type', file: 'Choose content file', training: 'Training / upload version', memory: 'Memory snapshot', save: 'Game save',
     anchor: 'Upload and anchor', anchoring: 'Waiting for onchain confirmation…', quickSave: 'Save current game state', memorySync: 'Anchor resident memory', restoreSave: 'Restore latest onchain save', restoring: 'Verifying and restoring…', restored: 'Onchain save restored', noSave: 'This Agent has no onchain save yet', invalidSave: 'The onchain save is invalid',
@@ -123,6 +126,12 @@ export function AgentStudioPage() {
   const [runtimeOnline, setRuntimeOnline] = useState<boolean | null>(null)
 
   const selectedResident = useMemo(() => residents.find((resident) => resident.id === residentId), [residentId, residents])
+  const linkedAgents = useMemo(() => {
+    if (!residentId) return []
+    const key = residentKeyFor(residentId).toLowerCase()
+    return agents.filter((agent) => agent.residentKey?.toLowerCase() === key)
+  }, [agents, residentId])
+  const selectedAgent = useMemo(() => linkedAgents.find((agent) => agent.id.toString() === agentId), [agentId, linkedAgents])
   const contractReady = registryConfigured()
 
   const refreshAgents = useCallback(async () => {
@@ -131,13 +140,18 @@ export function AgentStudioPage() {
     try {
       const next = await loadOwnedAgents(wallet)
       setAgents(next)
-      setAgentId((current) => current && next.some((agent) => agent.id.toString() === current) ? current : next[0]?.id.toString() || '')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Unable to read contract')
     } finally {
       setBusy(null)
     }
   }, [contractReady, wallet])
+
+  useEffect(() => {
+    setAgentId((current) => current && linkedAgents.some((agent) => agent.id.toString() === current)
+      ? current
+      : linkedAgents[0]?.id.toString() || '')
+  }, [linkedAgents])
 
   useEffect(() => {
     if (!token) return
@@ -166,19 +180,42 @@ export function AgentStudioPage() {
     if (!selectedResident || !wallet) return
     setBusy('create'); setError(''); setTransaction(null); setRestored(false)
     try {
-      const hash = await registerResidentOnchain(locale, wallet, selectedResident)
-      setTransaction(hash)
+      const result = await registerResidentOnchain(locale, wallet, selectedResident)
+      setTransaction(result.transaction)
+      setAgentId(result.agentId.toString())
       await refreshAgents()
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Agent creation failed')
     } finally { setBusy(null) }
   }
 
+  const syncMetadata = async () => {
+    if (!selectedResident || !wallet || !selectedAgent) return
+    setBusy('create'); setError(''); setTransaction(null); setRestored(false)
+    try {
+      const hash = await syncResidentMetadataOnchain(locale, wallet, selectedResident, selectedAgent.id)
+      setTransaction(hash)
+      await refreshAgents()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Metadata update failed')
+    } finally { setBusy(null) }
+  }
+
   const writeAnchor = async (contentFile: File | Blob, filename?: string, operation: AnchorKind = kind) => {
-    if (!wallet || !agentId) return
+    if (!wallet || !agentId || !selectedResident || !selectedAgent) throw new Error(locale === 'en' ? 'Select the Passport linked to this resident.' : '请选择与当前居民绑定的 Passport。')
     const content = await uploadWeb3Content(contentFile, filename)
     const id = BigInt(agentId)
-    if (operation === 'training') return publishTrainingVersion(locale, wallet, id, content.content_uri, content.content_hash, content.content_hash)
+    if (operation === 'training') {
+      const descriptorHash = keccak256(toHex(JSON.stringify({
+        schema: 'simverse-training-provenance-v1',
+        resident_id: selectedResident.id,
+        agent_id: agentId,
+        filename: filename || (contentFile instanceof File ? contentFile.name : content.filename),
+        size: content.size,
+      })))
+      const trainingRoot = keccak256(concatHex([content.content_hash, descriptorHash]))
+      return publishTrainingVersion(locale, wallet, id, content.content_uri, content.content_hash, trainingRoot)
+    }
     if (operation === 'memory') return anchorMemory(locale, wallet, id, content.content_uri, content.content_hash)
     return anchorSave(locale, wallet, id, content.content_uri, content.content_hash)
   }
@@ -260,13 +297,16 @@ export function AgentStudioPage() {
           <section className="agent-studio-card">
             <p className="agent-studio-card__index">{copy.createTitle}</p><h2>{copy.resident}</h2><span>{copy.createLead}</span>
             <label><span>{copy.resident}</span><select value={residentId} onChange={(event) => setResidentId(event.target.value)} disabled={!residents.length}>{residents.length ? residents.map((resident) => <option value={resident.id} key={resident.id}>{resident.name} / {resident.slug}</option>) : <option>{copy.noResident}</option>}</select></label>
-            <button type="button" onClick={() => void createPassport()} disabled={!selectedResident || !wallet || !contractReady || busy !== null}>{busy === 'create' ? copy.creating : copy.create}</button>
+            <div className="agent-studio-card__actions">
+              <button type="button" onClick={() => void createPassport()} disabled={!selectedResident || !wallet || !contractReady || linkedAgents.length > 0 || busy !== null}>{busy === 'create' ? copy.creating : copy.create}</button>
+              <button className="secondary" type="button" onClick={() => void syncMetadata()} disabled={!selectedAgent || busy !== null}>{copy.syncMetadata}</button>
+            </div>
           </section>
 
           <section className="agent-studio-card">
             <p className="agent-studio-card__index">{copy.anchorTitle}</p><h2>{copy.kind}</h2><span>{copy.anchorLead}</span>
             <div className="agent-studio-card__row">
-              <label><span>{copy.agent}</span><select value={agentId} onChange={(event) => setAgentId(event.target.value)} disabled={!agents.length}>{agents.length ? agents.map((agent) => <option value={agent.id.toString()} key={agent.id.toString()}>Agent #{agent.id.toString()}</option>) : <option>{copy.empty}</option>}</select></label>
+              <label><span>{copy.agent}</span><select value={agentId} onChange={(event) => setAgentId(event.target.value)} disabled={!linkedAgents.length}>{linkedAgents.length ? linkedAgents.map((agent) => <option value={agent.id.toString()} key={agent.id.toString()}>Agent #{agent.id.toString()}</option>) : <option>{copy.empty}</option>}</select></label>
               <label><span>{copy.kind}</span><select value={kind} onChange={(event) => setKind(event.target.value as AnchorKind)}><option value="training">{copy.training}</option><option value="memory">{copy.memory}</option><option value="save">{copy.save}</option></select></label>
             </div>
             <label className="agent-studio-file"><span>{copy.file}</span><input type="file" onChange={onFile} /></label>

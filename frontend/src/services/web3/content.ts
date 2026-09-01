@@ -24,6 +24,18 @@ export async function uploadWeb3Content(file: File | Blob, filename?: string): P
   return body as AnchoredContent
 }
 
+export async function createPassportMetadata(residentId: string): Promise<AnchoredContent> {
+  const token = getToken()
+  if (!token) throw new Error('Wallet session required')
+  const response = await fetch(`${API_BASE}/web3/content/passport-metadata/${encodeURIComponent(residentId)}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(typeof body?.detail === 'string' ? body.detail : `Metadata upload failed (${response.status})`)
+  return body as AnchoredContent
+}
+
 export async function snapshotGameMemory(residentId: string): Promise<AnchoredContent> {
   const token = getToken()
   if (!token) throw new Error('Wallet session required')

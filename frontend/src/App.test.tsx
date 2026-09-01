@@ -84,6 +84,7 @@ beforeEach(() => {
   vi.mocked(checkOnboarding).mockReset().mockResolvedValue({
     needs_onboarding: false,
     player_resident_id: 'resident-1',
+    passport: { resident_id: 'resident-1', agent_id: '1', chain_id: 4663, registry_address: '0x1111111111111111111111111111111111111111', transaction_hash: null },
   })
   vi.mocked(getMe).mockReset().mockResolvedValue({ ...user, is_admin: false })
   vi.mocked(loadOwnedAgents).mockReset().mockResolvedValue([{ id: 1n, uri: 'https://example.invalid/agent/1', state: {} as never }])
@@ -313,7 +314,7 @@ describe('HomeRoute onboarding gate', () => {
   })
 
   it('renders the game when the backend says onboarding is already done', async () => {
-    vi.mocked(checkOnboarding).mockResolvedValue({ needs_onboarding: false, player_resident_id: 'resident-1' })
+    vi.mocked(checkOnboarding).mockResolvedValue({ needs_onboarding: false, player_resident_id: 'resident-1', passport: { resident_id: 'resident-1', agent_id: '1', chain_id: 4663, registry_address: '0x1111111111111111111111111111111111111111', transaction_hash: null } })
     useGameStore.setState({ user, token: 'token' })
 
     renderRoute('/')
@@ -323,27 +324,23 @@ describe('HomeRoute onboarding gate', () => {
   })
 
   it('requires wallet users without an Agent Passport to finish onchain registration', async () => {
-    vi.mocked(checkOnboarding).mockResolvedValue({ needs_onboarding: false, player_resident_id: 'resident-1' })
-    vi.mocked(loadOwnedAgents).mockResolvedValue([])
+    vi.mocked(checkOnboarding).mockResolvedValue({ needs_onboarding: false, player_resident_id: 'resident-1', passport: null })
     useGameStore.setState({ user: walletUser, token: 'token' })
 
     renderRoute('/')
 
     expect(await screen.findByTestId('onboarding-page')).toBeInTheDocument()
-    expect(loadOwnedAgents).toHaveBeenCalledWith(walletUser.wallet_address)
     expect(screen.queryByTestId('game-page')).not.toBeInTheDocument()
   })
 
-  it('fails open into the game when the onboarding check errors', async () => {
+  it('fails closed into onboarding when the onboarding check errors', async () => {
     vi.mocked(checkOnboarding).mockRejectedValue(new Error('network error'))
     useGameStore.setState({ user, token: 'token' })
 
     renderRoute('/')
 
-    // Must not strand the player on the loading fallback just because the
-    // network call failed — fail open rather than fail closed.
-    expect(await screen.findByTestId('game-page')).toBeInTheDocument()
-    expect(screen.queryByTestId('onboarding-page')).not.toBeInTheDocument()
+    expect(await screen.findByTestId('onboarding-page')).toBeInTheDocument()
+    expect(screen.queryByTestId('game-page')).not.toBeInTheDocument()
   })
 
   it('does not flash the game before the onboarding check resolves', async () => {

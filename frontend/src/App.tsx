@@ -10,7 +10,6 @@ import { EncounterCard } from './components/EncounterCard'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { checkOnboarding, getMe, type MeResponse } from './services/api'
 import { loginPath, safeAuthReturnTo } from './services/authReturnTo'
-import { loadOwnedAgents, registryConfigured } from './services/web3/agentRegistry'
 
 // Heavy pages are code-split so the login/first-load bundle stays lean:
 // GamePage pulls in Phaser (~1.4MB), ProfilePage pulls in @uiw/react-md-editor
@@ -91,11 +90,10 @@ function AdminRoute() {
 // /login and /onboarding routes' checkOnboarding call entirely, so a player
 // who never picked a resident would fall straight into GamePage with the
 // default skin (E2E-01). Re-run the same check here before rendering the
-// game. Network failures fail OPEN (render GamePage) rather than stranding
-// an otherwise-fine player on a spinner.
+// game. The gate fails closed: a temporary API/RPC issue must never bypass
+// the durable resident-to-Passport registration requirement.
 function HomeRoute({ requireAuth = false }: { requireAuth?: boolean }) {
   const token = useGameStore((s) => s.token)
-  const user = useGameStore((s) => s.user)
   // "Checking" is derived, not stored: the check for the current token is in
   // flight exactly while `checked.token` doesn't match it, so a token change
   // shows the spinner again without any synchronous setState in the effect.
@@ -104,22 +102,18 @@ function HomeRoute({ requireAuth = false }: { requireAuth?: boolean }) {
   useEffect(() => {
     if (!token) return
     let cancelled = false
-    const wallet = user?.wallet_address as `0x${string}` | undefined
-    Promise.all([
-      checkOnboarding(token),
-      wallet && registryConfigured() ? loadOwnedAgents(wallet).catch(() => null) : Promise.resolve(null),
-    ])
-      .then(([result, agents]) => {
-        const missingPassport = Array.isArray(agents) && agents.length === 0
+    checkOnboarding(token)
+      .then((result) => {
+        const missingPassport = !result.passport
         if (!cancelled) setChecked({ token, needsOnboarding: result.needs_onboarding || missingPassport })
       })
       .catch(() => {
-        if (!cancelled) setChecked({ token, needsOnboarding: false })
+        if (!cancelled) setChecked({ token, needsOnboarding: true })
       })
     return () => {
       cancelled = true
     }
-  }, [token, user?.wallet_address])
+  }, [token])
 
   if (!token) return requireAuth ? <Navigate to={loginPath('/play')} replace /> : <LandingPage />
   if (checked?.token !== token) return <PageFallback />

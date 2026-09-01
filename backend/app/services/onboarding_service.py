@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agent.map_data import get_location_by_id
 from app.models.user import User
 from app.models.resident import Resident
+from app.models.web3_agent_passport import Web3AgentPassport
 from app.services.resident_placement import allocate_resident_location
 
 # Central Plaza spawn point (tile coordinates)
@@ -28,9 +29,27 @@ async def check_onboarding_needed(db: AsyncSession, user_id: str) -> dict:
     if not user:
         raise ValueError(f"User {user_id} not found")
 
+    passport = None
+    if user.player_resident_id:
+        passport_row = (await db.execute(
+            select(Web3AgentPassport).where(
+                Web3AgentPassport.user_id == user.id,
+                Web3AgentPassport.resident_id == user.player_resident_id,
+            )
+        )).scalar_one_or_none()
+        if passport_row:
+            passport = {
+                "agent_id": passport_row.agent_id,
+                "resident_id": passport_row.resident_id,
+                "chain_id": passport_row.chain_id,
+                "registry_address": passport_row.registry_address,
+                "transaction_hash": passport_row.registration_tx_hash,
+            }
+
     return {
         "needs_onboarding": user.player_resident_id is None,
         "player_resident_id": user.player_resident_id,
+        "passport": passport,
     }
 
 

@@ -1,4 +1,5 @@
 import type { Locale } from '../locale'
+import { keccak256, toHex } from 'viem'
 import { getWeb3Runtime, requireWalletAccount } from './wallet'
 
 const addressValue = import.meta.env.VITE_AGENT_REGISTRY_ADDRESS || ''
@@ -47,8 +48,21 @@ const registryAbi = [
     }],
   },
   {
-    type: 'function', name: 'createAgent', stateMutability: 'nonpayable',
-    inputs: [{ name: 'metadataURI', type: 'string' }, { name: 'metadataHash', type: 'bytes32' }], outputs: [{ name: 'agentId', type: 'uint256' }],
+    type: 'function', name: 'createAgentForResident', stateMutability: 'nonpayable',
+    inputs: [{ name: 'metadataURI', type: 'string' }, { name: 'metadataHash', type: 'bytes32' }, { name: 'residentKey', type: 'bytes32' }],
+    outputs: [{ name: 'agentId', type: 'uint256' }, { name: 'created', type: 'bool' }],
+  },
+  {
+    type: 'function', name: 'agentByResident', stateMutability: 'view',
+    inputs: [{ name: 'owner', type: 'address' }, { name: 'residentKey', type: 'bytes32' }], outputs: [{ name: 'agentId', type: 'uint256' }],
+  },
+  {
+    type: 'function', name: 'residentKeyOf', stateMutability: 'view',
+    inputs: [{ name: 'agentId', type: 'uint256' }], outputs: [{ name: 'residentKey', type: 'bytes32' }],
+  },
+  {
+    type: 'function', name: 'updateMetadata', stateMutability: 'nonpayable',
+    inputs: [{ name: 'agentId', type: 'uint256' }, { name: 'metadataURI', type: 'string' }, { name: 'metadataHash', type: 'bytes32' }], outputs: [],
   },
   {
     type: 'function', name: 'publishVersion', stateMutability: 'nonpayable',
@@ -86,6 +100,10 @@ export function registryConfigured(): boolean {
   return /^0x[0-9a-fA-F]{40}$/.test(AGENT_REGISTRY_ADDRESS)
 }
 
+export function residentKeyFor(residentId: string): `0x${string}` {
+  return keccak256(toHex(residentId))
+}
+
 function requireRegistry(): `0x${string}` {
   if (!registryConfigured()) throw new Error('VITE_AGENT_REGISTRY_ADDRESS is not configured')
   return AGENT_REGISTRY_ADDRESS
@@ -95,17 +113,34 @@ export async function loadOwnedAgents(owner: `0x${string}`): Promise<Array<{
   id: bigint
   uri: string
   state: AgentChainState
+  residentKey?: `0x${string}`
 }>> {
   const { config, core } = await getWeb3Runtime()
   const address = requireRegistry()
   const ids = await core.readContract(config, { address, abi: registryAbi, functionName: 'agentsOf', args: [owner] })
   return Promise.all(ids.map(async (id) => {
-    const [uri, state] = await Promise.all([
+    const [uri, state, residentKey] = await Promise.all([
       core.readContract(config, { address, abi: registryAbi, functionName: 'tokenURI', args: [id] }),
       core.readContract(config, { address, abi: registryAbi, functionName: 'agentState', args: [id] }),
+      core.readContract(config, { address, abi: registryAbi, functionName: 'residentKeyOf', args: [id] }),
     ])
-    return { id, uri, state: state as AgentChainState }
+    return { id, uri, state: state as AgentChainState, residentKey }
   }))
+}
+
+export async function loadAgentForResident(owner: `0x${string}`, residentId: string) {
+  const { config, core } = await getWeb3Runtime()
+  const address = requireRegistry()
+  const key = residentKeyFor(residentId)
+  const id = await core.readContract(config, {
+    address, abi: registryAbi, functionName: 'agentByResident', args: [owner, key],
+  })
+  if (id === 0n) return null
+  const [uri, state] = await Promise.all([
+    core.readContract(config, { address, abi: registryAbi, functionName: 'tokenURI', args: [id] }),
+    core.readContract(config, { address, abi: registryAbi, functionName: 'agentState', args: [id] }),
+  ])
+  return { id, uri, state: state as AgentChainState, residentKey: key }
 }
 
 export async function loadLatestSaveAnchor(agentId: bigint): Promise<ContentAnchor | null> {
@@ -124,7 +159,7 @@ export async function loadLatestSaveAnchor(agentId: bigint): Promise<ContentAnch
 async function write(
   locale: Locale,
   expectedAccount: `0x${string}`,
-  functionName: 'createAgent' | 'publishVersion' | 'anchorMemory' | 'anchorSave',
+  functionName: 'createAgentForResident' | 'updateMetadata' | 'publishVersion' | 'anchorMemory' | 'anchorSave',
   args: readonly unknown[],
 ): Promise<`0x${string}`> {
   const address = requireRegistry()
@@ -144,8 +179,12 @@ async function write(
   return hash
 }
 
-export function createAgentPassport(locale: Locale, account: `0x${string}`, uri: string, hash: `0x${string}`) {
-  return write(locale, account, 'createAgent', [uri, hash])
+export function createAgentPassport(locale: Locale, account: `0x${string}`, residentId: string, uri: string, hash: `0x${string}`) {
+  return write(locale, account, 'createAgentForResident', [uri, hash, residentKeyFor(residentId)])
+}
+
+export function updateAgentMetadata(locale: Locale, account: `0x${string}`, agentId: bigint, uri: string, hash: `0x${string}`) {
+  return write(locale, account, 'updateMetadata', [agentId, uri, hash])
 }
 
 export function publishTrainingVersion(locale: Locale, account: `0x${string}`, agentId: bigint, uri: string, hash: `0x${string}`, trainingRoot: `0x${string}`) {

@@ -15,7 +15,7 @@ import type { OnboardingResidentResponse, ResidentListItem, SpriteTemplate } fro
 import { API_BASE } from '../services/api/core'
 import { loginPath, safeAuthReturnTo } from '../services/authReturnTo'
 import { useLocale } from '../services/locale'
-import { loadOwnedAgents, registryConfigured } from '../services/web3/agentRegistry'
+import { registryConfigured } from '../services/web3/agentRegistry'
 import { checkAgentRuntime } from '../services/web3/connectivity'
 import { registerResidentOnchain, type PassportResident } from '../services/web3/passport'
 import { configuredChainId, configuredChainName } from '../services/web3/wallet'
@@ -104,28 +104,30 @@ export function OnboardingPage() {
     setPhase('loading'); setError('')
     try {
       const check = await checkOnboarding(token)
-      const agentsPromise = wallet && registryConfigured() ? loadOwnedAgents(wallet).catch(() => []) : Promise.resolve([])
       if (!check.needs_onboarding) {
-        const [player, agents] = await Promise.all([loadPlayerResident(token, check.player_resident_id), agentsPromise])
+        const player = await loadPlayerResident(token, check.player_resident_id)
         setResident(player)
-        if (agents.length > 0) { setAgentId(agents[0].id.toString()); setPhase(player ? 'ready' : 'resident') }
-        else setPhase(player ? 'passport' : 'resident')
+        if (check.passport && check.passport.resident_id === player?.id) {
+          setAgentId(check.passport.agent_id)
+          setPhase('ready')
+        } else {
+          setPhase(player ? 'passport' : 'resident')
+        }
         return
       }
-      const [residents, templates, agents] = await Promise.all([getResidents(), getSpriteTemplates(), agentsPromise])
+      const [residents, templates] = await Promise.all([getResidents(), getSpriteTemplates()])
       const templateMap = new Map<string, SpriteTemplate>(templates.map((template) => [template.key, template]))
       const cards = residents.filter((item: ResidentListItem) => item.meta_json?.origin === 'preset').map((item) => ({
         slug: item.slug, name: item.name, district: item.district, sprite_key: item.sprite_key,
         vibe: templateMap.get(item.sprite_key)?.vibe, tags: templateMap.get(item.sprite_key)?.tags,
       }))
       setPresets(cards); setSelectedSlug((current) => current || cards[0]?.slug || '')
-      if (agents.length > 0) setAgentId(agents[0].id.toString())
       setPhase('resident')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : copy.defaultError)
       setPhase('resident')
     }
-  }, [copy.defaultError, navigate, next, token, wallet])
+  }, [copy.defaultError, navigate, next, token])
 
   useEffect(() => { void initialize() }, [initialize])
 
@@ -160,10 +162,9 @@ export function OnboardingPage() {
     if (!registryConfigured()) { setError(copy.contractMissing); return }
     setBusy('passport'); setError('')
     try {
-      const hash = await registerResidentOnchain(locale, wallet, resident)
-      setTransaction(hash)
-      const agents = await loadOwnedAgents(wallet)
-      setAgentId(agents[0]?.id.toString() ?? null)
+      const result = await registerResidentOnchain(locale, wallet, resident)
+      setTransaction(result.transaction)
+      setAgentId(result.agentId.toString())
       setPhase('ready')
     } catch (reason) { setError(reason instanceof Error ? reason.message : copy.defaultError) }
     finally { setBusy(null) }

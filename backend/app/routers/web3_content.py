@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import desc, select
@@ -53,14 +53,16 @@ def _user_root(user_id: str) -> Path:
     return target
 
 
-def _public_content_uri(request: Request, content_id: str) -> str:
+def _public_content_uri(request: Request, content_id: str, *, public: bool = False) -> str:
     configured = settings.web3_public_api_base_url.strip().rstrip("/")
     base_url = configured or str(request.base_url).rstrip("/")
-    return f"{base_url}/web3/content/{content_id}"
+    visibility = "/public" if public else ""
+    return f"{base_url}/web3/content{visibility}/{content_id}"
 
 
 def _store_snapshot(
-    *, request: Request, user: User, payload: bytes, filename: str, media_type: str
+    *, request: Request, user: User, payload: bytes, filename: str, media_type: str,
+    public: bool = False,
 ) -> ContentUploadResponse:
     if not payload:
         raise HTTPException(status_code=400, detail="Empty content cannot be anchored")
@@ -75,10 +77,11 @@ def _store_snapshot(
         "media_type": media_type,
         "size": len(payload),
         "sha256": digest,
+        "public": public,
     }, ensure_ascii=False), encoding="utf-8")
     return ContentUploadResponse(
         content_id=content_id,
-        content_uri=_public_content_uri(request, content_id),
+        content_uri=_public_content_uri(request, content_id, public=public),
         content_hash=f"0x{digest}",
         filename=filename,
         media_type=media_type,
@@ -119,6 +122,7 @@ async def upload_content(
             "media_type": media_type,
             "size": size,
             "sha256": digest.hexdigest(),
+            "public": False,
         }
         meta_path.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
     except Exception:
@@ -136,6 +140,50 @@ async def upload_content(
         filename=filename,
         media_type=media_type,
         size=size,
+    )
+
+
+@router.post("/passport-metadata/{resident_id}", response_model=ContentUploadResponse)
+async def create_passport_metadata(
+    resident_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create immutable public metadata suitable for tokenURI consumers."""
+    user = await _wallet_user(request, db)
+    resident = (await db.execute(
+        select(Resident).where(
+            Resident.id == resident_id,
+            Resident.creator_id == user.id,
+        )
+    )).scalar_one_or_none()
+    if resident is None:
+        raise HTTPException(status_code=404, detail="Owned resident not found")
+    origin = settings.web3_uri.strip().rstrip("/") or str(request.base_url).rstrip("/")
+    metadata = {
+        "schema": "simverse-agent-passport-v2",
+        "name": resident.name,
+        "description": f"Wallet-owned Simverse resident {resident.slug}",
+        "external_url": f"{origin}/profile",
+        "owner": user.wallet_address,
+        "simverse": {
+            "resident_id": resident.id,
+            "slug": resident.slug,
+            "district": resident.district,
+            "status": resident.status,
+            "sprite_key": resident.sprite_key,
+            "star_rating": resident.star_rating,
+            "profile": resident.meta_json,
+        },
+    }
+    payload = json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return _store_snapshot(
+        request=request,
+        user=user,
+        payload=payload,
+        filename=f"{resident.slug}-agent-passport.json",
+        media_type="application/json",
+        public=True,
     )
 
 
@@ -185,6 +233,33 @@ async def create_memory_snapshot(
         payload=payload,
         filename=f"{resident.slug}-memory-snapshot.json",
         media_type="application/json",
+    )
+
+
+@router.get("/public/{content_id}")
+async def download_public_content(content_id: uuid.UUID):
+    """Serve immutable public Passport metadata without a wallet session."""
+    identifier = str(content_id)
+    root = Path(settings.web3_content_dir).resolve()
+    matches = list(root.glob(f"*/{identifier}.json"))
+    if len(matches) != 1:
+        raise HTTPException(status_code=404, detail="Public content not found")
+    meta_path = matches[0].resolve()
+    if not meta_path.is_relative_to(root):
+        raise HTTPException(status_code=404, detail="Public content not found")
+    data_path = meta_path.with_suffix(".bin")
+    if not data_path.is_file():
+        raise HTTPException(status_code=404, detail="Public content not found")
+    try:
+        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail="Public content metadata is invalid") from exc
+    if metadata.get("public") is not True:
+        raise HTTPException(status_code=404, detail="Public content not found")
+    return Response(
+        content=data_path.read_bytes(),
+        media_type=str(metadata.get("media_type") or "application/json"),
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
     )
 
 

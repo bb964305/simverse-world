@@ -3,7 +3,7 @@ pragma solidity ^0.8.34;
 
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {SimverseAgentRegistry} from "../contracts/SimverseAgentRegistry.sol";
-import {SimverseAgentRegistryV2} from "../contracts/mocks/SimverseAgentRegistryV2.sol";
+import {SimverseAgentRegistryV2} from "../contracts/SimverseAgentRegistryV2.sol";
 
 contract AgentActor {
     function create(
@@ -63,6 +63,15 @@ contract AgentActor {
         } catch {
             return false;
         }
+    }
+
+    function createForResident(
+        SimverseAgentRegistryV2 registry,
+        string calldata uri,
+        bytes32 digest,
+        bytes32 residentKey
+    ) external returns (uint256, bool) {
+        return registry.createAgentForResident(uri, digest, residentKey);
     }
 }
 
@@ -190,6 +199,42 @@ contract SimverseAgentRegistryTest {
         require(upgraded.implementationVersion() == 2, "proxy did not upgrade");
         require(upgraded.ownerOf(agentId) == address(alice), "agent owner was not preserved");
         require(upgraded.nextAgentId() == 2, "registry state was not preserved");
+    }
+
+    function testV2CreatesOnePassportPerResidentIdempotently() public {
+        SimverseAgentRegistryV2 implementationV2 = new SimverseAgentRegistryV2();
+        registry.upgradeToAndCall(address(implementationV2), "");
+        SimverseAgentRegistryV2 upgraded = SimverseAgentRegistryV2(address(registry));
+        bytes32 residentKey = keccak256("resident-42");
+
+        (uint256 firstId, bool firstCreated) = alice.createForResident(
+            upgraded,
+            "https://simverse.space/api/web3/content/public/identity-42",
+            keccak256("metadata-42"),
+            residentKey
+        );
+        (uint256 secondId, bool secondCreated) = alice.createForResident(
+            upgraded,
+            "https://simverse.space/api/web3/content/public/identity-42",
+            keccak256("metadata-42"),
+            residentKey
+        );
+
+        require(firstCreated && !secondCreated, "idempotent creation flags are wrong");
+        require(firstId == secondId, "duplicate passport was minted");
+        require(upgraded.nextAgentId() == firstId + 1, "next id advanced twice");
+        require(upgraded.agentByResident(address(alice), residentKey) == firstId, "resident lookup mismatch");
+        require(upgraded.residentKeyOf(firstId) == residentKey, "reverse resident lookup mismatch");
+    }
+
+    function testV2LegacyUnscopedCreationIsDisabled() public {
+        SimverseAgentRegistryV2 implementationV2 = new SimverseAgentRegistryV2();
+        registry.upgradeToAndCall(address(implementationV2), "");
+        bool succeeded;
+        try alice.create(registry, "ipfs://legacy", keccak256("legacy")) {
+            succeeded = true;
+        } catch {}
+        require(!succeeded, "legacy unscoped mint remained enabled");
     }
 
     function testOnlyUpgraderRoleCanUpgrade() public {

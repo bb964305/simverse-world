@@ -5,6 +5,17 @@ import { apiFetch } from './core'
 export interface OnboardingCheckResponse {
   needs_onboarding: boolean
   player_resident_id: string | null
+  passport?: PassportLink | null
+}
+
+export interface PassportLink {
+  resident_id: string
+  agent_id: string
+  chain_id: number
+  registry_address: string
+  transaction_hash: `0x${string}` | null
+  metadata_uri?: string
+  metadata_hash?: `0x${string}`
 }
 
 export interface ResidentListItem {
@@ -72,6 +83,20 @@ export function createPlayerResident(token: string, input: CreateCharacterInput)
 export function skipOnboarding(token: string): Promise<OnboardingResidentResponse> {
   return apiFetch('/onboarding/skip', {
     method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export function confirmResidentPassport(token: string, input: {
+  resident_id: string
+  agent_id: string
+  transaction_hash: `0x${string}` | null
+  metadata_uri: string
+  metadata_hash: `0x${string}`
+}): Promise<PassportLink> {
+  return apiFetch('/onboarding/passport/confirm', {
+    method: 'POST',
+    body: JSON.stringify(input),
     headers: { Authorization: `Bearer ${token}` },
   })
 }
