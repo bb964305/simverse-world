@@ -63,6 +63,12 @@ async def _require_resident(request: Request, db: AsyncSession) -> tuple[User, R
     return user, resident, db
 
 
+def _require_legacy_account_management() -> None:
+    """Hide password and OAuth account controls in wallet-only production."""
+    if not app_settings.web2_auth_enabled and not app_settings.debug:
+        raise HTTPException(status_code=404, detail="Wallet authentication required")
+
+
 # ─── GET /settings ───────────────────────────────────────────────
 
 @router.get("", response_model=AllSettingsResponse)
@@ -75,6 +81,7 @@ async def get_all_settings(request: Request, db: AsyncSession = Depends(get_db))
     account = AccountSettingsResponse(
         display_name=user.name,
         email=user.email,
+        wallet_address=user.wallet_address,
         has_password=user.hashed_password is not None,
         github_bound=user.github_id is not None,
         linuxdo_bound=getattr(user, "linuxdo_id", None) is not None,
@@ -152,6 +159,7 @@ async def change_password_endpoint(
     db: AsyncSession = Depends(get_db),
 ):
     """POST /settings/account/password — change password (email users only)."""
+    _require_legacy_account_management()
     user, db = await _require_user(request, db)
     await change_password(db, user, req.old_password, req.new_password)
     return {"message": "Password changed"}
@@ -405,6 +413,7 @@ async def bind_github(
     db: AsyncSession = Depends(get_db),
 ):
     """POST /settings/account/bind-github — initiate GitHub OAuth binding flow."""
+    _require_legacy_account_management()
     user, db = await _require_user(request, db)
     if not app_settings.github_client_id:
         raise HTTPException(status_code=501, detail="GitHub OAuth not configured")
@@ -423,6 +432,7 @@ async def bind_linuxdo(
     db: AsyncSession = Depends(get_db),
 ):
     """POST /settings/account/bind-linuxdo — initiate LinuxDo OAuth binding flow."""
+    _require_legacy_account_management()
     user, db = await _require_user(request, db)
     try:
         from app.services.linuxdo_auth import LinuxDoOAuth
@@ -447,6 +457,7 @@ async def unbind_provider(
     db: AsyncSession = Depends(get_db),
 ):
     """DELETE /settings/account/unbind/{provider} — unbind a third-party account."""
+    _require_legacy_account_management()
     user, db = await _require_user(request, db)
 
     if provider == "github":

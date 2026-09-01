@@ -28,6 +28,7 @@ const CapsulesPage = lazy(() => import('./pages/CapsulesPage').then((m) => ({ de
 const TownPage = lazy(() => import('./pages/TownPage').then((m) => ({ default: m.TownPage })))
 const WatchPage = lazy(() => import('./pages/WatchPage').then((m) => ({ default: m.WatchPage })))
 const AgentStudioPage = lazy(() => import('./pages/AgentStudioPage').then((m) => ({ default: m.AgentStudioPage })))
+const Web3GuidePage = lazy(() => import('./pages/Web3GuidePage').then((m) => ({ default: m.Web3GuidePage })))
 
 function normalizePathname(pathname: string): string {
   if (pathname === '/') return pathname
@@ -177,6 +178,7 @@ export function AppRoutes() {
             <Route path="/auth/callback" element={<AuthCallbackPage />} />
             <Route path="/town" element={<TownPage />} />
             <Route path="/watch" element={<WatchPage />} />
+            <Route path="/guide" element={<Web3GuidePage />} />
             <Route path="/onboarding" element={<OnboardingPage />} />
             <Route path="/" element={<HomeRoute />} />
             {/* The game also lives at /play — many entry points (landing CTA,

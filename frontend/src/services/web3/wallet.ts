@@ -57,6 +57,10 @@ export function configuredChainName(): string {
   return CHAIN_NAME
 }
 
+export function configuredRpcUrl(): string {
+  return RPC_URL
+}
+
 export function getWeb3Runtime(): Promise<Web3Runtime> {
   runtimePromise ??= createRuntime()
   return runtimePromise

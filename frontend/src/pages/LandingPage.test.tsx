@@ -26,6 +26,9 @@ describe('LandingPage', () => {
     expect(screen.getByText(/BUILT ON ROBINHOOD CHAIN/)).toBeInTheDocument()
     expect(screen.getAllByRole('link', { name: /连接钱包/ })[0]).toHaveAttribute('href', '/login')
     expect(screen.getAllByRole('link', { name: /观察小镇|观看小镇实况/ })[0]).toHaveAttribute('href', '/town')
+    expect(screen.getAllByRole('link', { name: '使用教程' })[0]).toHaveAttribute('href', '/guide')
+    expect(screen.getAllByRole('link', { name: 'Simverse on X' })[0]).toHaveAttribute('href', 'https://x.com/SIM_VERSESPACE')
+    expect(screen.getAllByRole('link', { name: 'Simverse on Telegram' })[0]).toHaveAttribute('href', 'https://t.me/SIM_VERSESPACE')
     expect(screen.getByRole('heading', { level: 2, name: /不是 NPC/ })).toBeInTheDocument()
   })
 

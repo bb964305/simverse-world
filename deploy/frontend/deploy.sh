@@ -11,7 +11,7 @@ FRONTEND_DIR="$SCRIPT_DIR/../../frontend"
 echo "==> Building frontend..."
 cd "$FRONTEND_DIR"
 npm ci
-VITE_API_URL="${VITE_API_URL:-https://simverse-api.proxypool.eu.org}" \
+VITE_API_URL="${VITE_API_URL:-https://simverse.space/api}" \
 VITE_WEB3_CHAIN_ID="${VITE_WEB3_CHAIN_ID:-4663}" \
 VITE_WEB3_CHAIN_NAME="${VITE_WEB3_CHAIN_NAME:-Robinhood Chain}" \
 VITE_WEB3_RPC_URL="${VITE_WEB3_RPC_URL:-https://rpc.mainnet.chain.robinhood.com}" \

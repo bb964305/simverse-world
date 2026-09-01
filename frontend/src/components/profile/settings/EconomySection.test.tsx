@@ -20,6 +20,7 @@ function makeSettings(economy: AllSettings['economy']): AllSettings {
     account: {
       display_name: 'Tester',
       email: 'tester@example.com',
+      wallet_address: '0x1234567890123456789012345678901234567890',
       has_password: true,
       github_bound: false,
       linuxdo_bound: false,

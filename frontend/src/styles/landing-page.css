@@ -632,6 +632,33 @@ body.marketing-page-open #root {
   border-bottom: 2px solid var(--site-ink);
 }
 
+.brand-socials {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.brand-socials a {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 50%;
+  color: inherit;
+  transition: color 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+.brand-socials a:hover,
+.brand-socials a:focus-visible {
+  border-color: var(--site-acid, #d9ff3f);
+  color: var(--site-acid, #d9ff3f);
+  transform: translateY(-2px);
+}
+
+.brand-socials svg { width: 15px; height: 15px; fill: currentColor; }
+.brand-socials--footer a { border-color: #9fa7aa; color: var(--site-ink); }
+
 .life-loop--web3 {
   grid-template-columns: repeat(4, 1fr);
 }
@@ -865,6 +892,7 @@ body.marketing-page-open #root {
   .site-brand__mark { width: 34px; height: 34px; font-size: 13px; }
   .site-header__login { padding: 8px 12px; font-size: 12px; }
   .language-toggle--site { display: none; }
+  .brand-socials--header { display: none; }
   .site-menu-button { width: 38px; height: 38px; }
   .site-nav { top: 64px; padding-right: 18px; padding-left: 18px; }
 

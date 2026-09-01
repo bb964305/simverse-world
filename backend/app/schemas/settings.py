@@ -18,6 +18,7 @@ class PasswordChangeRequest(BaseModel):
 class AccountSettingsResponse(BaseModel):
     display_name: str
     email: str
+    wallet_address: str | None
     has_password: bool
     github_bound: bool
     linuxdo_bound: bool

@@ -123,7 +123,7 @@ export function Badge({
       color: active ? '#53d769' : 'var(--text-muted)',
       border: `1px solid ${active ? '#53d769' : 'var(--border)'}`,
     }}>
-      {active ? '✓' : '✗'} {label}
+      {`${active ? '✓' : '✗'} ${label}`}
     </span>
   )
 }

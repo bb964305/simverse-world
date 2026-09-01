@@ -258,4 +258,6 @@ Proxy 地址不变，网站无需改地址。生产环境应把 `UPGRADER_ROLE` 
 
 Simverse now uses a wallet as the public identity source and targets Robinhood Chain. RabbyKit connects the wallet; a one-time EIP-4361-style message creates a short game session without submitting a transaction. Agent creation, training/upload versions, memory snapshots, and game saves are anchored through the UUPS `SimverseAgentRegistry` proxy. Full content stays offchain; its hash, URI, ownership, and revision live onchain.
 
+The public executable tutorial lives at `https://simverse.space/guide`. It performs live API, Robinhood Chain RPC, and proxy-contract checks before guiding a player through wallet login, resident creation, Agent Passport creation, upload/training provenance, and verified save restore.
+
 Run a Hardhat node, deploy locally, place the emitted proxy in `frontend/.env.local`, start FastAPI with chain ID `31337`, and start Vite. Open `/web3` after wallet login to create an Agent Passport and publish or restore training, memory, and save revisions. Use Robinhood Chain Testnet (`46630`) for shared testing and Robinhood Chain (`4663`) only after acceptance; keep all production upgrade roles behind a multisig.

@@ -105,6 +105,7 @@ def test_all_settings_response_structure():
         account=AccountSettingsResponse(
             display_name="Alice",
             email="a@b.com",
+            wallet_address="0x1234567890123456789012345678901234567890",
             has_password=True,
             github_bound=False,
             linuxdo_bound=False,
@@ -215,6 +216,7 @@ async def test_get_all_settings(client, auth_user):
     data = resp.json()
     assert "account" in data
     assert data["account"]["display_name"] == "TestUser"
+    assert data["account"]["wallet_address"] is None
     assert data["account"]["has_password"] is True
     assert data["account"]["github_bound"] is False
     assert "character" in data
@@ -265,6 +267,28 @@ async def test_change_password_wrong_old(client, auth_user):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 403
+
+
+async def test_legacy_account_controls_are_hidden_in_wallet_only_production(
+    client, auth_user, monkeypatch
+):
+    """Production wallet mode must not expose password or OAuth binding APIs."""
+    from app.routers import settings as settings_router
+
+    _, token = auth_user
+    headers = {"Authorization": f"Bearer {token}"}
+    monkeypatch.setattr(settings_router.app_settings, "debug", False)
+    monkeypatch.setattr(settings_router.app_settings, "web2_auth_enabled", False)
+
+    password = await client.post(
+        "/settings/account/password",
+        json={"old_password": "oldpassword123", "new_password": "newpassword456"},
+        headers=headers,
+    )
+    github = await client.post("/settings/account/bind-github", headers=headers)
+    unbind = await client.delete("/settings/account/unbind/github", headers=headers)
+
+    assert password.status_code == github.status_code == unbind.status_code == 404
 
 
 async def test_patch_character_name(client, auth_user):

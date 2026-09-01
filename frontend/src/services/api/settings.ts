@@ -5,6 +5,7 @@ import { apiFetch } from './core'
 export interface AccountSettings {
   display_name: string
   email: string
+  wallet_address: string | null
   has_password: boolean
   github_bound: boolean
   linuxdo_bound: boolean
