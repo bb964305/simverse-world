@@ -8,15 +8,39 @@ if (!proxyAddress) throw new Error('Set SIMVERSE_AGENT_REGISTRY to the UUPS prox
 const connection = await hre.network.create()
 const { viem } = connection
 const upgradesApi = await upgrades(hre, connection)
+const [upgrader] = await viem.getWalletClients()
+if (!upgrader?.account) throw new Error('No upgrader account is configured')
+const gasPrice = BigInt(process.env.ROBINHOOD_GAS_PRICE_WEI ?? '660000000')
+
+// Robinhood Chain's public RPC currently rejects automatic deployment gas
+// estimation with "contract creation code storage out of gas". Deploy the
+// implementation first with a bounded creation limit, then submit the much
+// smaller proxy switch separately so the account does not need to reserve the
+// creation-sized gas limit twice.
+const preparedImplementation = await upgradesApi.prepareUpgrade(
+  proxyAddress,
+  'SimverseAgentRegistryV2',
+  {
+    kind: 'uups',
+    client: upgrader,
+    gas: 3_200_000n,
+    gasPrice,
+  },
+)
 const upgraded = await upgradesApi.upgradeProxy(
   proxyAddress,
   'SimverseAgentRegistryV2',
-  { kind: 'uups' },
+  {
+    kind: 'uups',
+    client: upgrader,
+    gas: 250_000n,
+    gasPrice,
+    redeployImplementation: 'never',
+  },
 )
 const publicClient = await viem.getPublicClient()
 const chainId = await publicClient.getChainId()
 const implementation = await upgradesApi.erc1967.getImplementationAddress(upgraded.address)
-const [upgrader] = await viem.getWalletClients()
 await mkdir('deployments', { recursive: true })
 await writeFile(`deployments/${chainId}.json`, `${JSON.stringify({
   chainId,
@@ -30,5 +54,6 @@ await writeFile(`deployments/${chainId}.json`, `${JSON.stringify({
 
 console.log(`SIMVERSE_AGENT_REGISTRY=${upgraded.address}`)
 console.log(`IMPLEMENTATION=${implementation}`)
+console.log(`PREPARED_IMPLEMENTATION=${preparedImplementation}`)
 console.log('IMPLEMENTATION_VERSION=2')
 console.log(`DEPLOYMENT_RECORD=deployments/${chainId}.json`)
