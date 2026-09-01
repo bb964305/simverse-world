@@ -1,4 +1,7 @@
 :root {
+  --font-ui: "Manrope Variable", Manrope, "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", system-ui, -apple-system, sans-serif;
+  --font-display: "Manrope Variable", Manrope, "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+  --font-mono: "Cascadia Code", "SFMono-Regular", Consolas, "Noto Sans Mono CJK SC", monospace;
   --bg-page: #0f0f17;
   --bg-card: #18181b;
   --bg-input: #27272a;
@@ -17,8 +20,82 @@
 body {
   background: var(--bg-page);
   color: var(--text-primary);
-  font-family: Inter, system-ui, -apple-system, sans-serif;
+  font-family: var(--font-ui);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   overflow: hidden;
+}
+
+:lang(en) body {
+  letter-spacing: -0.008em;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.language-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.language-toggle button {
+  appearance: none;
+  padding: 5px 3px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.language-toggle button[aria-pressed="true"] {
+  color: #c8ff3d;
+}
+
+.language-toggle button:focus-visible {
+  outline: 2px solid #52e8ff;
+  outline-offset: 2px;
+}
+
+:lang(zh-CN) {
+  letter-spacing: normal;
+}
+
+.brand-socials {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.brand-socials a {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 50%;
+  color: inherit;
+  transition: color 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+.brand-socials a:hover,
+.brand-socials a:focus-visible {
+  border-color: #c8ff3d;
+  color: #c8ff3d;
+  transform: translateY(-2px);
+}
+
+.brand-socials svg {
+  width: 15px;
+  height: 15px;
+  fill: currentColor;
 }
 
 @keyframes coinFloatUp {

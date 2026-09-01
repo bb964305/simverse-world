@@ -5,6 +5,7 @@ import { safeAuthReturnTo } from '../services/authReturnTo'
 import { LanguageToggle } from '../components/LanguageToggle'
 import { useLocale } from '../services/locale'
 import { configuredChainName } from '../services/web3/wallet'
+import { BrandLogo } from '../components/BrandLogo'
 import '../styles/login-page.css'
 
 const COPY = {
@@ -18,11 +19,11 @@ const COPY = {
     heading: '连接你的链上身份',
     lead: '连接钱包并签署一次性登录消息。签名免费，不会发起交易或授权资产。',
     identity: '一个钱包就是一个持续身份',
-    identityCopy: '首次连接自动创建城市身份；再次连接会恢复同一位居民、记忆和存档。',
+    identityCopy: '首次连接进入三步注册：创建居民并将 Agent Passport 上链；再次连接恢复同一身份、记忆和存档。',
     storage: '内容链下保存，证明链上保存',
     storageCopy: '训练文件、记忆与存档保留原始内容；哈希、URI、版本和所有权写入可升级合约。',
     network: '目标网络',
-    note: '首次进入后将继续完成居民创建与世界引导。请只签署域名与内容均正确的登录消息。',
+    note: '登录签名免费；后续 Passport 注册是明确的链上交易，需要少量 ETH Gas。请只确认域名与内容均正确的请求。',
   },
   en: {
     brandLabel: 'Back to the Simverse World site',
@@ -34,11 +35,11 @@ const COPY = {
     heading: 'Connect your onchain identity',
     lead: 'Connect a wallet and sign a one-time login message. Signing is free and never submits a transaction or asset approval.',
     identity: 'One wallet, one persistent identity',
-    identityCopy: 'Your first connection creates a city identity. Returning with the same wallet restores your residents, memories, and saves.',
+    identityCopy: 'Your first connection opens a three-step registration: create a resident and mint its Agent Passport. Returning restores the same identity, memories, and saves.',
     storage: 'Content offchain, proof onchain',
     storageCopy: 'Training files, memories, and saves keep their full content while hashes, URIs, versions, and ownership live in an upgradeable contract.',
     network: 'Network',
-    note: 'New players continue to resident creation and world onboarding. Only sign when the domain and message are correct.',
+    note: 'Login signing is free. Passport registration is a clearly labeled onchain transaction and requires a small amount of ETH for gas.',
   },
 } as const
 
@@ -60,7 +61,7 @@ export function LoginPage() {
 
       <header className="auth-header">
         <Link className="auth-brand" to="/" aria-label={copy.brandLabel}>
-          <span className="auth-brand__mark" aria-hidden="true">S/</span>
+          <BrandLogo className="auth-brand__mark" size={42} eager />
           <span>SIMVERSE</span>
         </Link>
         <div className="auth-header__actions">

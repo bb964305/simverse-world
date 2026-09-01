@@ -19,7 +19,7 @@ body.marketing-page-open #root {
   overflow: hidden;
   color: var(--site-paper);
   background: var(--site-ink);
-  font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-family: var(--font-ui);
 }
 
 .marketing-site * {
@@ -64,21 +64,17 @@ body.marketing-page-open #root {
   justify-self: start;
   gap: 10px;
   color: #ffffff;
-  font-family: Impact, Haettenschweiler, "Arial Narrow Bold", sans-serif;
+  font-family: var(--font-display);
   font-size: 22px;
   text-decoration: none;
 }
 
 .site-brand__mark {
-  display: inline-grid;
-  place-items: center;
-  width: 38px;
-  height: 38px;
-  border: 2px solid currentColor;
-  color: inherit;
-  font-family: Arial, sans-serif;
-  font-size: 15px;
-  font-weight: 900;
+  display: block;
+  width: 42px;
+  height: 42px;
+  object-fit: contain;
+  filter: drop-shadow(0 0 10px rgba(99, 216, 255, 0.3));
 }
 
 .site-brand__name {
@@ -224,7 +220,7 @@ body.marketing-page-open #root {
 .site-kicker {
   margin: 0 0 24px;
   color: #252b2e;
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 800;
   text-transform: uppercase;
@@ -237,7 +233,7 @@ body.marketing-page-open #root {
 .site-hero__title,
 .display-heading {
   margin: 0;
-  font-family: Impact, Haettenschweiler, "Arial Narrow Bold", "PingFang SC", sans-serif;
+  font-family: var(--font-display);
   font-weight: 900;
   text-transform: uppercase;
 }
@@ -352,7 +348,7 @@ body.marketing-page-open #root {
   align-items: center;
   gap: 16px;
   color: rgba(255, 255, 255, 0.62);
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 700;
 }
@@ -434,7 +430,7 @@ body.marketing-page-open #root {
   gap: 24px;
   padding: 16px 0 24px;
   color: #78838a;
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   text-transform: uppercase;
 }
@@ -509,7 +505,7 @@ body.marketing-page-open #root {
 .resident-stats div:last-child { border-right: 0; }
 
 .resident-stats strong {
-  font-family: Impact, Haettenschweiler, "Arial Narrow Bold", sans-serif;
+  font-family: var(--font-display);
   font-size: 62px;
   line-height: 1;
 }
@@ -558,7 +554,7 @@ body.marketing-page-open #root {
 
 .memory-layers__index {
   color: var(--site-purple);
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 14px;
   font-weight: 800;
 }
@@ -672,14 +668,14 @@ body.marketing-page-open #root {
 .life-loop > div:last-child { border-right: 0; }
 
 .life-loop span {
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 800;
 }
 
 .life-loop h3 {
   margin: 56px 0 0;
-  font-family: Impact, Haettenschweiler, "Arial Narrow Bold", "PingFang SC", sans-serif;
+  font-family: var(--font-display);
   font-size: 56px;
   line-height: 1;
 }
@@ -746,14 +742,12 @@ body.marketing-page-open #root {
   max-width: 480px;
 }
 
-.site-footer__brand .site-brand__mark {
-  color: var(--site-ink);
-}
+.site-footer__brand .site-brand__mark { width: 58px; height: 58px; }
 
 .site-footer__brand strong {
   display: block;
   margin-top: 22px;
-  font-family: Impact, Haettenschweiler, "Arial Narrow Bold", sans-serif;
+  font-family: var(--font-display);
   font-size: 48px;
   line-height: 1;
 }
@@ -780,7 +774,7 @@ body.marketing-page-open #root {
 .site-footer__links span,
 .site-footer__meta {
   color: #798084;
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 800;
 }

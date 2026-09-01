@@ -22,6 +22,8 @@ vi.mock('../components/CoinNotification', () => ({ CoinNotification: () => null 
 vi.mock('../components/PhotoBooth', () => ({ PhotoBooth: () => null }))
 vi.mock('../components/DecorEditor', () => ({ DecorEditor: () => null }))
 vi.mock('../components/minimap/MinimapOverlay', () => ({ MinimapOverlay: () => null }))
+vi.mock('../components/WorldWeb3Dock', () => ({ WorldWeb3Dock: () => null }))
+vi.mock('../components/WorldWelcomeGuide', () => ({ WorldWelcomeGuide: () => null }))
 
 import { destroyGame, initGame } from '../game/GameScene'
 import { connectWS, disconnectWS } from '../services/ws'

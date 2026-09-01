@@ -19,6 +19,7 @@ vi.mock('../services/web3/wallet', () => ({
   configuredChainName: () => 'Simverse Local',
 }))
 vi.mock('../services/web3/agentRegistry', () => ({
+  AGENT_REGISTRY_ADDRESS: '0x1111111111111111111111111111111111111111',
   registryConfigured: () => true,
   loadOwnedAgents: vi.fn().mockResolvedValue([]),
   loadLatestSaveAnchor: vi.fn(),

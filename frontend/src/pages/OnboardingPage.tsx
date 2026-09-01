@@ -1,388 +1,201 @@
-import { useEffect, useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
-import { useGameStore } from '../stores/gameStore'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { BrandLogo } from '../components/BrandLogo'
+import { BrandSocialLinks } from '../components/BrandSocialLinks'
+import { LanguageToggle } from '../components/LanguageToggle'
+import { staticResidentSpriteUrl } from '../game/residentSpriteRuntime'
 import {
   checkOnboarding,
+  createPlayerResident,
   getResidents,
   getSpriteTemplates,
-  loadPreset,
   skipOnboarding,
 } from '../services/api'
-import type { ResidentListItem, SpriteTemplate } from '../services/api'
-import { staticResidentSpriteUrl } from '../game/residentSpriteRuntime'
+import type { OnboardingResidentResponse, ResidentListItem, SpriteTemplate } from '../services/api'
+import { API_BASE } from '../services/api/core'
 import { loginPath, safeAuthReturnTo } from '../services/authReturnTo'
+import { useLocale } from '../services/locale'
+import { loadOwnedAgents, registryConfigured } from '../services/web3/agentRegistry'
+import { checkAgentRuntime } from '../services/web3/connectivity'
+import { registerResidentOnchain, type PassportResident } from '../services/web3/passport'
+import { configuredChainId, configuredChainName } from '../services/web3/wallet'
+import { useGameStore } from '../stores/gameStore'
+import '../styles/onboarding-page.css'
+
+const EXPLORER = 'https://robinhoodchain.blockscout.com'
 
 interface PresetCard {
   slug: string
   name: string
   district: string
   sprite_key: string
-  star_rating: number
   vibe?: string
   tags?: string[]
 }
 
-const DISTRICT_LABELS: Record<string, string> = {
-  engineering: '工程区',
-  product: '产品区',
-  academy: '学术区',
-  free: '自由区',
+type Phase = 'loading' | 'resident' | 'passport' | 'ready'
+
+const COPY = {
+  en: {
+    back: 'Back to site', guide: 'Live guide', economy: 'SIM economy', eyebrow: 'ONCHAIN CITY REGISTRATION', title: 'Create your persistent identity.',
+    lead: 'Registration now finishes both layers: a playable resident in the world and a soulbound Agent Passport owned by your wallet.',
+    steps: ['Wallet verified', 'Resident created', 'Passport onchain'],
+    wallet: 'Wallet', network: 'Network', residentTitle: 'Choose how you enter the world', residentLead: 'Pick a visual origin and give your resident a unique public name. You can deepen abilities and personality later in the Forge.',
+    name: 'Resident name', namePlaceholder: 'e.g. Nova, Ash, Zero…', visual: 'Visual origin', selected: 'Selected', create: 'Create resident', creating: 'Creating resident…', starter: 'Use a starter identity', starterBusy: 'Preparing starter…',
+    passportTitle: 'Register your Agent Passport', passportLead: 'This final step uploads public identity metadata, then asks your wallet to write its hash and ownership to the upgradeable registry on Robinhood Chain.',
+    chainWrites: ['Soulbound ownership', 'Resident metadata hash', 'Creation time and Agent ID'], chainKeeps: 'No token approval. No asset transfer. Only network gas is required.',
+    mint: 'Register identity onchain', minting: 'Waiting for wallet & confirmation…', existing: 'Existing Agent Passport found', existingLead: 'This wallet already owns an onchain Agent identity. You can enter now and manage every version in Agent Studio.',
+    readyTitle: 'Identity registered. The city is awake.', readyLead: 'Your resident can now play, train, upload versions, anchor memories, save state, and remain part of the running world.', enter: 'Enter Simverse World', studio: 'Open Agent Studio', transaction: 'View registration transaction',
+    loading: 'Checking wallet, resident, contract, and live network…', retry: 'Try again', defaultError: 'Registration could not be completed.', nameError: 'Use a name between 2 and 40 characters.', contractMissing: 'The Agent Registry is not configured.', runtime: 'World Agent loop', runtimeChecking: 'Checking…', runtimeOnline: 'Online 24/7', runtimeOffline: 'Unavailable',
+  },
+  'zh-CN': {
+    back: '返回官网', guide: '实时教程', economy: 'SIM 经济模型', eyebrow: '链上城市注册', title: '创建你的持续身份。',
+    lead: '注册现在会完成两层身份：世界中可游玩的居民，以及由当前钱包拥有的不可转让 Agent Passport。',
+    steps: ['钱包已验证', '创建居民', '身份上链'],
+    wallet: '钱包', network: '网络', residentTitle: '选择进入世界的方式', residentLead: '选择视觉原型并填写唯一公开名称。能力与人格之后还可以在炼化工坊继续完善。',
+    name: '居民名称', namePlaceholder: '例如：Nova、阿零、赛博旅人…', visual: '视觉原型', selected: '已选择', create: '创建居民', creating: '正在创建居民…', starter: '使用新手身份', starterBusy: '正在准备新手身份…',
+    passportTitle: '登记 Agent Passport', passportLead: '最后一步先上传公开身份元数据，再由钱包把哈希和所有权写入 Robinhood Chain 上的可升级注册合约。',
+    chainWrites: ['不可转让的钱包所有权', '居民元数据哈希', '创建时间与 Agent ID'], chainKeeps: '不会授权代币，不会转移资产，只需支付网络 Gas。',
+    mint: '将身份登记上链', minting: '等待钱包与链上确认…', existing: '已找到 Agent Passport', existingLead: '这个钱包已经拥有链上 Agent 身份，现在可直接进入，并在 Agent Studio 管理所有版本。',
+    readyTitle: '身份登记完成，城市已经醒来。', readyLead: '居民现在可以游玩、训练、上传版本、锚定记忆、保存状态，并持续存在于运行中的世界。', enter: '进入 Simverse World', studio: '打开 Agent Studio', transaction: '查看注册交易',
+    loading: '正在检查钱包、居民、合约与实时网络…', retry: '重新尝试', defaultError: '注册未能完成。', nameError: '名称长度需为 2 到 40 个字符。', contractMissing: 'Agent Registry 尚未配置。', runtime: '世界 Agent 循环', runtimeChecking: '检测中…', runtimeOnline: '24/7 在线', runtimeOffline: '暂不可用',
+  },
+} as const
+
+function shortAddress(value: string | null | undefined) {
+  return value ? `${value.slice(0, 8)}…${value.slice(-6)}` : '—'
 }
 
-function districtLabel(district: string): string {
-  return DISTRICT_LABELS[district] ?? district
+async function loadPlayerResident(token: string, residentId?: string | null): Promise<PassportResident | null> {
+  const response = await fetch(`${API_BASE}/profile/residents`, { headers: { Authorization: `Bearer ${token}` } })
+  if (!response.ok) throw new Error(`Residents API ${response.status}`)
+  const residents = await response.json() as PassportResident[]
+  return residents.find((item) => item.id === residentId) ?? residents[0] ?? null
 }
 
-function districtColor(district: string): string {
-  const map: Record<string, string> = {
-    engineering: '#0ea5e9',
-    product: '#a855f7',
-    academy: '#f59e0b',
-    free: '#53d769',
-  }
-  return map[district] ?? '#71717a'
+function asPassportResident(resident: OnboardingResidentResponse): PassportResident {
+  return { ...resident, district: 'free', status: 'idle', star_rating: 0, meta_json: { origin: 'onboarding' } }
 }
 
 export function OnboardingPage() {
   const navigate = useNavigate()
   const [params] = useSearchParams()
   const next = safeAuthReturnTo(params.get('next'))
-  const token = useGameStore((s) => s.token)
-
+  const locale = useLocale((state) => state.locale)
+  const copy = COPY[locale]
+  const token = useGameStore((state) => state.token)
+  const user = useGameStore((state) => state.user)
+  const wallet = user?.wallet_address as `0x${string}` | undefined
+  const [phase, setPhase] = useState<Phase>('loading')
   const [presets, setPresets] = useState<PresetCard[]>([])
-  const [loading, setLoading] = useState(true)
-  const [actionLoading, setActionLoading] = useState(false)
+  const [selectedSlug, setSelectedSlug] = useState('')
+  const [name, setName] = useState('')
+  const [resident, setResident] = useState<PassportResident | null>(null)
+  const [agentId, setAgentId] = useState<string | null>(null)
+  const [transaction, setTransaction] = useState<`0x${string}` | null>(null)
+  const [busy, setBusy] = useState<'resident' | 'starter' | 'passport' | null>(null)
   const [error, setError] = useState('')
-  const [selected, setSelected] = useState<string | null>(null)
+  const [runtimeOnline, setRuntimeOnline] = useState<boolean | null>(null)
+
+  const selectedPreset = useMemo(() => presets.find((preset) => preset.slug === selectedSlug) ?? presets[0], [presets, selectedSlug])
+
+  const initialize = useCallback(async () => {
+    if (!token) { navigate(loginPath(next), { replace: true }); return }
+    setPhase('loading'); setError('')
+    try {
+      const check = await checkOnboarding(token)
+      const agentsPromise = wallet && registryConfigured() ? loadOwnedAgents(wallet).catch(() => []) : Promise.resolve([])
+      if (!check.needs_onboarding) {
+        const [player, agents] = await Promise.all([loadPlayerResident(token, check.player_resident_id), agentsPromise])
+        setResident(player)
+        if (agents.length > 0) { setAgentId(agents[0].id.toString()); setPhase(player ? 'ready' : 'resident') }
+        else setPhase(player ? 'passport' : 'resident')
+        return
+      }
+      const [residents, templates, agents] = await Promise.all([getResidents(), getSpriteTemplates(), agentsPromise])
+      const templateMap = new Map<string, SpriteTemplate>(templates.map((template) => [template.key, template]))
+      const cards = residents.filter((item: ResidentListItem) => item.meta_json?.origin === 'preset').map((item) => ({
+        slug: item.slug, name: item.name, district: item.district, sprite_key: item.sprite_key,
+        vibe: templateMap.get(item.sprite_key)?.vibe, tags: templateMap.get(item.sprite_key)?.tags,
+      }))
+      setPresets(cards); setSelectedSlug((current) => current || cards[0]?.slug || '')
+      if (agents.length > 0) setAgentId(agents[0].id.toString())
+      setPhase('resident')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : copy.defaultError)
+      setPhase('resident')
+    }
+  }, [copy.defaultError, navigate, next, token, wallet])
+
+  useEffect(() => { void initialize() }, [initialize])
 
   useEffect(() => {
-    if (!token) {
-      navigate(loginPath(next), { replace: true })
-      return
-    }
+    const controller = new AbortController()
+    void checkAgentRuntime(controller.signal).then((status) => setRuntimeOnline(status.ok)).catch(() => setRuntimeOnline(false))
+    return () => controller.abort()
+  }, [])
 
-    let cancelled = false
-
-    async function init() {
-      setLoading(true)
-      try {
-        // Check if onboarding is needed
-        const check = await checkOnboarding(token!)
-        if (!cancelled && !check.needs_onboarding) {
-          navigate(next, { replace: true })
-          return
-        }
-
-        // Fetch residents and sprite templates in parallel
-        const [residents, templates] = await Promise.all([
-          getResidents(),
-          getSpriteTemplates(),
-        ])
-
-        if (cancelled) return
-
-        // Build a lookup from sprite_key → template attributes
-        const templateMap = new Map<string, SpriteTemplate>(
-          templates.map((t) => [t.key, t])
-        )
-
-        // Filter residents that are marked as presets (meta_json.origin === 'preset')
-        const presetResidents: ResidentListItem[] = residents.filter(
-          (r) => r.meta_json?.origin === 'preset'
-        )
-
-        const cards: PresetCard[] = presetResidents.map((r) => {
-          const tmpl = templateMap.get(r.sprite_key)
-          return {
-            slug: r.slug,
-            name: r.name,
-            district: r.district,
-            sprite_key: r.sprite_key,
-            star_rating: r.star_rating,
-            vibe: tmpl?.vibe,
-            tags: tmpl?.tags,
-          }
-        })
-
-        setPresets(cards)
-      } catch (err: unknown) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : '加载失败，请刷新重试')
-        }
-      } finally {
-        if (!cancelled) setLoading(false)
-      }
-    }
-
-    init()
-    return () => { cancelled = true }
-  }, [token, navigate, next])
-
-  async function handleSelectPreset(slug: string) {
-    if (!token || actionLoading) return
-    setSelected(slug)
-    setActionLoading(true)
-    setError('')
+  const createResident = async () => {
+    if (!token || !selectedPreset || busy) return
+    const cleanName = name.trim()
+    if (cleanName.length < 2 || cleanName.length > 40) { setError(copy.nameError); return }
+    setBusy('resident'); setError('')
     try {
-      await loadPreset(token, slug)
-      navigate(next, { replace: true })
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '选择失败，请重试')
-      setSelected(null)
-      setActionLoading(false)
-    }
+      const created = await createPlayerResident(token, { name: cleanName, sprite_key: selectedPreset.sprite_key })
+      setResident(asPassportResident(created)); setPhase('passport')
+    } catch (reason) { setError(reason instanceof Error ? reason.message : copy.defaultError) }
+    finally { setBusy(null) }
   }
 
-  async function handleSkip() {
-    if (!token || actionLoading) return
-    setActionLoading(true)
-    setError('')
-    try {
-      await skipOnboarding(token)
-      navigate(next, { replace: true })
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : '操作失败，请重试')
-      setActionLoading(false)
-    }
+  const createStarter = async () => {
+    if (!token || busy) return
+    setBusy('starter'); setError('')
+    try { const created = await skipOnboarding(token); setResident(asPassportResident(created)); setPhase('passport') }
+    catch (reason) { setError(reason instanceof Error ? reason.message : copy.defaultError) }
+    finally { setBusy(null) }
   }
 
-  return (
-    <div style={{
-      height: '100vh',
-      background: 'linear-gradient(135deg, #0f0f17 0%, #1a1a2e 50%, #0f3460 100%)',
-      overflowY: 'auto',
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      padding: '40px 20px 80px',
-      boxSizing: 'border-box',
-    }}>
-      {/* Header */}
-      <div style={{ textAlign: 'center', marginBottom: 36, maxWidth: 600 }}>
-        <div style={{ fontSize: 36, marginBottom: 8 }}>🏙️</div>
-        <h1 style={{ fontSize: 24, fontWeight: 800, color: 'var(--text-primary)', marginBottom: 8 }}>
-          欢迎来到 Simverse World
-        </h1>
-        <p style={{ color: 'var(--text-secondary)', fontSize: 14, lineHeight: 1.6 }}>
-          选择一个预设角色开始你的城市生活，或跳过使用默认角色
-        </p>
-      </div>
+  const mintPassport = async () => {
+    if (!wallet || !resident || busy) return
+    if (!registryConfigured()) { setError(copy.contractMissing); return }
+    setBusy('passport'); setError('')
+    try {
+      const hash = await registerResidentOnchain(locale, wallet, resident)
+      setTransaction(hash)
+      const agents = await loadOwnedAgents(wallet)
+      setAgentId(agents[0]?.id.toString() ?? null)
+      setPhase('ready')
+    } catch (reason) { setError(reason instanceof Error ? reason.message : copy.defaultError) }
+    finally { setBusy(null) }
+  }
 
-      {/* Loading state */}
-      {loading && (
-        <div style={{ color: 'var(--text-muted)', fontSize: 14, marginTop: 40 }}>
-          正在加载角色列表…
-        </div>
-      )}
-
-      {/* Error */}
-      {error && (
-        <div style={{
-          color: 'var(--accent-red)',
-          background: '#e9456015',
-          border: '1px solid #e9456030',
-          borderRadius: 8,
-          padding: '10px 16px',
-          fontSize: 13,
-          marginBottom: 20,
-          maxWidth: 600,
-          width: '100%',
-          textAlign: 'center',
-        }}>
-          {error}
-        </div>
-      )}
-
-      {/* Preset grid */}
-      {!loading && presets.length > 0 && (
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
-          gap: 16,
-          width: '100%',
-          maxWidth: 900,
-        }}>
-          {presets.map((card) => (
-            <PresetCardItem
-              key={card.slug}
-              card={card}
-              isSelected={selected === card.slug}
-              disabled={actionLoading}
-              onSelect={handleSelectPreset}
-            />
-          ))}
-        </div>
-      )}
-
-      {/* No presets fallback */}
-      {!loading && presets.length === 0 && !error && (
-        <div style={{
-          color: 'var(--text-muted)',
-          fontSize: 15,
-          marginTop: 40,
-          textAlign: 'center',
-          lineHeight: 2,
-        }}>
-          暂无预设角色
-          <br />
-          <span style={{ fontSize: 13 }}>请点击下方按钮使用默认角色进入游戏</span>
-        </div>
-      )}
-
-      {/* Skip button */}
-      {!loading && (
-        <div style={{ marginTop: 36, textAlign: 'center' }}>
-          <button
-            onClick={handleSkip}
-            disabled={actionLoading}
-            style={{
-              background: 'transparent',
-              border: '1px solid var(--border)',
-              color: 'var(--text-muted)',
-              padding: '10px 28px',
-              borderRadius: 'var(--radius)',
-              fontSize: 13,
-              cursor: actionLoading ? 'not-allowed' : 'pointer',
-              opacity: actionLoading ? 0.5 : 1,
-              transition: 'all 0.15s',
-            }}
-            onMouseEnter={(e) => {
-              if (!actionLoading) {
-                ;(e.currentTarget as HTMLButtonElement).style.color = 'var(--text-secondary)'
-                ;(e.currentTarget as HTMLButtonElement).style.borderColor = 'var(--text-muted)'
-              }
-            }}
-            onMouseLeave={(e) => {
-              ;(e.currentTarget as HTMLButtonElement).style.color = 'var(--text-muted)'
-              ;(e.currentTarget as HTMLButtonElement).style.borderColor = 'var(--border)'
-            }}
-          >
-            跳过，使用默认角色
-          </button>
-        </div>
-      )}
-    </div>
-  )
-}
-
-interface PresetCardItemProps {
-  card: PresetCard
-  isSelected: boolean
-  disabled: boolean
-  onSelect: (slug: string) => void
-}
-
-function PresetCardItem({ card, isSelected, disabled, onSelect }: PresetCardItemProps) {
-  const [hovered, setHovered] = useState(false)
-
-  const borderColor = isSelected
-    ? 'var(--accent-red)'
-    : hovered
-    ? '#3f3f46'
-    : 'var(--border)'
+  const completedStep = phase === 'ready' ? 3 : phase === 'passport' ? 2 : 1
 
   return (
-    <div
-      style={{
-        background: 'var(--bg-card)',
-        border: `1px solid ${borderColor}`,
-        borderRadius: 12,
-        padding: 16,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 10,
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled && !isSelected ? 0.6 : 1,
-        transition: 'border-color 0.15s, transform 0.15s',
-        transform: hovered && !disabled ? 'translateY(-2px)' : 'none',
-      }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-    >
-      {/* Sprite preview */}
-      <div style={{
-        width: '100%',
-        aspectRatio: '1',
-        borderRadius: 8,
-        background: 'var(--bg-input)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        overflow: 'visible',
-        position: 'relative',
-      }}>
-        <div style={{
-          width: 32,
-          height: 32,
-          backgroundImage: `url(${staticResidentSpriteUrl(card.sprite_key)})`,
-          backgroundPosition: '-32px 0px',
-          backgroundSize: '96px 128px',
-          imageRendering: 'pixelated',
-          transform: 'scale(2)',
-          transformOrigin: 'center',
-        }} />
-      </div>
+    <div className="onchain-onboarding">
+      <header className="onboarding-header">
+        <Link className="onboarding-brand" to="/"><BrandLogo size={44} eager /><span>SIMVERSE</span></Link>
+        <nav><Link to="/">{copy.back}</Link><Link to="/guide">{copy.guide}</Link><Link to="/economy">{copy.economy}</Link><BrandSocialLinks /><LanguageToggle /></nav>
+      </header>
 
-      {/* Name + district */}
-      <div>
-        <div style={{
-          fontWeight: 700,
-          fontSize: 15,
-          color: 'var(--text-primary)',
-          marginBottom: 4,
-        }}>
-          {card.name}
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          <span style={{
-            background: districtColor(card.district) + '20',
-            color: districtColor(card.district),
-            border: `1px solid ${districtColor(card.district)}40`,
-            borderRadius: 4,
-            padding: '1px 6px',
-            fontSize: 11,
-            fontWeight: 600,
-          }}>
-            {districtLabel(card.district)}
-          </span>
-          {card.star_rating > 0 && (
-            <span style={{ fontSize: 11, color: '#f59e0b' }}>
-              {'★'.repeat(Math.min(card.star_rating, 5))}
-            </span>
-          )}
-        </div>
-      </div>
+      <main className="onboarding-shell">
+        <section className="onboarding-intro">
+          <p className="onboarding-kicker">{copy.eyebrow}</p><h1>{copy.title}</h1><p>{copy.lead}</p>
+          <div className="onboarding-identity"><div><span>{copy.wallet}</span><strong>{shortAddress(wallet)}</strong></div><div><span>{copy.network}</span><strong>{configuredChainName()} · {configuredChainId()}</strong></div><div><span>{copy.runtime}</span><strong className={runtimeOnline ? 'is-online' : ''}><i />{runtimeOnline === null ? copy.runtimeChecking : runtimeOnline ? copy.runtimeOnline : copy.runtimeOffline}</strong></div></div>
+        </section>
 
-      {/* Vibe / tags */}
-      {(card.vibe || (card.tags && card.tags.length > 0)) && (
-        <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-          {card.vibe && <span style={{ marginRight: 4 }}>#{card.vibe}</span>}
-          {card.tags?.slice(0, 2).map((tag) => (
-            <span key={tag} style={{ marginRight: 4 }}>#{tag}</span>
-          ))}
-        </div>
-      )}
+        <ol className="onboarding-progress">{copy.steps.map((step, index) => <li data-state={index + 1 < completedStep ? 'done' : index + 1 === completedStep ? 'active' : 'next'} key={step}><span>{index + 1 < completedStep ? '✓' : `0${index + 1}`}</span><strong>{step}</strong></li>)}</ol>
 
-      {/* Select button */}
-      <button
-        onClick={() => !disabled && onSelect(card.slug)}
-        disabled={disabled}
-        style={{
-          marginTop: 'auto',
-          width: '100%',
-          background: isSelected ? 'var(--accent-red)' : hovered ? '#e9456022' : 'transparent',
-          border: `1px solid ${isSelected ? 'var(--accent-red)' : 'var(--border)'}`,
-          color: isSelected ? 'white' : hovered ? 'var(--accent-red)' : 'var(--text-secondary)',
-          padding: '7px 0',
-          borderRadius: 'var(--radius)',
-          fontSize: 13,
-          fontWeight: 600,
-          cursor: disabled ? 'not-allowed' : 'pointer',
-          transition: 'all 0.15s',
-        }}
-      >
-        {isSelected ? '选择中…' : '选择此角色'}
-      </button>
+        {phase === 'loading' && <section className="onboarding-panel onboarding-loading"><BrandLogo size={86} /><p>{copy.loading}</p></section>}
+
+        {phase === 'resident' && <section className="onboarding-panel"><div className="onboarding-panel__heading"><p>STEP 02 / RESIDENT</p><h2>{copy.residentTitle}</h2><span>{copy.residentLead}</span></div><label className="onboarding-name"><span>{copy.name}</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder={copy.namePlaceholder} maxLength={40} autoComplete="nickname" /></label><div className="onboarding-visual-label">{copy.visual}</div><div className="onboarding-presets">{presets.slice(0, 8).map((preset) => <button type="button" data-selected={selectedPreset?.slug === preset.slug} onClick={() => setSelectedSlug(preset.slug)} key={preset.slug}><span className="onboarding-sprite"><i style={{ backgroundImage: `url(${staticResidentSpriteUrl(preset.sprite_key)})` }} /></span><strong>{preset.name}</strong><small>{preset.vibe || preset.district}{preset.tags?.[0] ? ` · ${preset.tags[0]}` : ''}</small><em>{selectedPreset?.slug === preset.slug ? copy.selected : ''}</em></button>)}</div><div className="onboarding-actions"><button className="onboarding-primary" type="button" onClick={() => void createResident()} disabled={!selectedPreset || busy !== null}>{busy === 'resident' ? copy.creating : copy.create}</button><button className="onboarding-secondary" type="button" onClick={() => void createStarter()} disabled={busy !== null}>{busy === 'starter' ? copy.starterBusy : copy.starter}</button></div></section>}
+
+        {phase === 'passport' && resident && <section className="onboarding-panel onboarding-passport"><div className="onboarding-panel__heading"><p>STEP 03 / PASSPORT</p><h2>{copy.passportTitle}</h2><span>{copy.passportLead}</span></div><div className="passport-preview"><BrandLogo size={104} /><div><span>SIMVERSE AGENT PASSPORT</span><strong>{resident.name}</strong><small>{resident.slug}</small></div><b>SOULBOUND</b></div><ul>{copy.chainWrites.map((item) => <li key={item}><span>✓</span>{item}</li>)}</ul><p className="passport-gas">{copy.chainKeeps}</p><div className="onboarding-actions"><button className="onboarding-primary" type="button" onClick={() => void mintPassport()} disabled={!wallet || busy !== null}>{busy === 'passport' ? copy.minting : copy.mint}</button></div></section>}
+
+        {phase === 'ready' && <section className="onboarding-panel onboarding-ready"><BrandLogo size={118} /><p>AGENT PASSPORT {agentId ? `#${agentId}` : '✓'}</p><h2>{agentId && !transaction ? copy.existing : copy.readyTitle}</h2><span>{agentId && !transaction ? copy.existingLead : copy.readyLead}</span>{transaction && <a href={`${EXPLORER}/tx/${transaction}`} target="_blank" rel="noreferrer">{copy.transaction} ↗</a>}<div className="onboarding-actions"><button className="onboarding-primary" type="button" onClick={() => navigate(next, { replace: true })}>{copy.enter}</button><button className="onboarding-secondary" type="button" onClick={() => navigate('/web3')}>{copy.studio}</button></div></section>}
+
+        {error && <div className="onboarding-error" role="alert"><span>{error}</span><button type="button" onClick={() => void initialize()}>{copy.retry}</button></div>}
+      </main>
     </div>
   )
 }

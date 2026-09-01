@@ -21,6 +21,27 @@ import {
 import type { CaravanState } from '../services/api'
 import '../styles/game-ui.css'
 import { disconnectWallet } from '../services/web3/wallet'
+import { useLocale, type Locale } from '../services/locale'
+import { BrandLogo } from './BrandLogo'
+import { BrandSocialLinks } from './BrandSocialLinks'
+import { LanguageToggle } from './LanguageToggle'
+
+const NAV_COPY = {
+  en: {
+    nav: 'Game navigation', home: 'Simverse World home', forge: '＋ Forge resident', agent: '◇ Onchain Agent',
+    board: '📋 Bulletin', seasons: '🏆 Seasons', debates: '⚔️ Debates', shop: '🛒 Shop', commissions: '🗒️ Commissions',
+    hall: '🏛️ Town Hall', market: '🏬 Market', lab: '🧪 Lab', terminal: '📊 Lab terminal', observatory: '◫ Observatory',
+    world: 'World', openWorld: 'Open world menu', closeWorld: 'Close world menu', digest: '📰 Town digest', guide: '◎ New player guide', economy: '◉ SIM economy',
+    account: 'Account menu', profile: '👤 Profile', capsules: '💌 Capsules', logout: 'Exit wallet session', studio: '◇ Onchain Agent Studio', community: 'Official community', user: 'Wallet resident',
+  },
+  'zh-CN': {
+    nav: '游戏主导航', home: '返回 Simverse World', forge: '＋ 炼化居民', agent: '◇ 链上 Agent',
+    board: '📋 公告板', seasons: '🏆 赛季', debates: '⚔️ 辩论', shop: '🛒 商店', commissions: '🗒️ 委托',
+    hall: '🏛️ 市政厅', market: '🏬 集市', lab: '🧪 实验楼', terminal: '📊 实验楼终端', observatory: '◫ 小镇观测站',
+    world: '世界', openWorld: '打开世界菜单', closeWorld: '关闭世界菜单', digest: '📰 村落日报', guide: '◎ 新手教程', economy: '◉ SIM 经济模型',
+    account: '账号菜单', profile: '👤 个人主页', capsules: '💌 时间胶囊', logout: '退出钱包登录', studio: '◇ 链上 Agent 工作台', community: '官方社区', user: '钱包居民',
+  },
+} as const
 
 // Streak reward ladder (D3): SC amounts for each day of the 7-day cycle.
 const STREAK_LADDER = [10, 15, 20, 25, 30, 40, 50]
@@ -40,18 +61,21 @@ function getDismissedEvents(userId: string | undefined): Set<string> {
 type NavPopover = 'streak' | 'notifications' | 'account' | 'menu' | null
 type NavModal = 'digest' | 'commission' | 'shop' | null
 
-function useClock() {
-  const [time, setTime] = useState(() => new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }))
+function useClock(locale: Locale) {
+  const clockLocale = locale === 'en' ? 'en-US' : 'zh-CN'
+  const [time, setTime] = useState(() => new Date().toLocaleTimeString(clockLocale, { hour: '2-digit', minute: '2-digit' }))
   useEffect(() => {
     const id = setInterval(() => {
-      setTime(new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }))
+      setTime(new Date().toLocaleTimeString(clockLocale, { hour: '2-digit', minute: '2-digit' }))
     }, 30_000)
     return () => clearInterval(id)
-  }, [])
+  }, [clockLocale])
   return time
 }
 
 export function TopNav() {
+  const locale = useLocale((state) => state.locale)
+  const copy = NAV_COPY[locale]
   const user = useGameStore((s) => s.user)
   const logout = useGameStore((s) => s.logout)
   const balance = user?.soul_coin_balance ?? 0
@@ -60,7 +84,7 @@ export function TopNav() {
   const [activeModal, setActiveModal] = useState<NavModal>(null)
   const avatarRef = useRef<HTMLDivElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
-  const clock = useClock()
+  const clock = useClock(locale)
   const unreadCount = useGameStore((s) => s.unreadCount)
   const setNotifications = useGameStore((s) => s.setNotifications)
   const notifRef = useRef<HTMLDivElement>(null)
@@ -275,59 +299,61 @@ export function TopNav() {
   }
 
   return (<>
-    <nav className="game-topnav" aria-label="游戏主导航">
+    <nav className="game-topnav" aria-label={copy.nav}>
       <div className="game-topnav__left">
-        <button className="game-topnav__brand" onClick={() => navigateTo('/')} aria-label="返回 Simverse World">
-          <span className="game-topnav__brand-mark" aria-hidden="true">🏙️</span>
+        <button className="game-topnav__brand" onClick={() => navigateTo('/')} aria-label={copy.home}>
+          <BrandLogo className="game-topnav__brand-mark" size={30} eager />
           <span className="game-topnav__brand-word">Simverse World</span>
         </button>
         <div className="game-topnav__links">
-          <button onClick={() => navigateTo('/forge')} className="game-nav-link game-nav-link--primary">＋ 炼化居民</button>
-          <button onClick={() => navigateTo('/web3')} className="game-nav-link game-nav-link--teal">◇ 链上 Agent</button>
-          <button onClick={() => openBridgePanel('bulletin')} className="game-nav-link game-nav-link--gold">📋 公告板</button>
-          <button onClick={() => navigateTo('/seasons')} className="game-nav-link game-nav-link--gold">🏆 赛季</button>
-          <button onClick={() => navigateTo('/debates')} className="game-nav-link game-nav-link--violet">⚔️ 辩论</button>
-          <button onClick={() => openModal('shop')} className="game-nav-link game-nav-link--pink">🛒 商店</button>
-          <button onClick={() => openModal('commission')} className="game-nav-link game-nav-link--green">🗒️ 委托</button>
-          <button onClick={() => openBridgePanel('townhall')} className="game-nav-link game-nav-link--violet">🏛️ 市政厅</button>
-          {caravanState?.visible && <button onClick={() => openBridgePanel('market')} className="game-nav-link game-nav-link--gold">🏬 集市</button>}
-          <button onClick={() => openBridgePanel('experiment')} className="game-nav-link game-nav-link--teal">🧪 实验楼</button>
+          <button onClick={() => navigateTo('/forge')} className="game-nav-link game-nav-link--primary">{copy.forge}</button>
+          <button onClick={() => navigateTo('/web3')} className="game-nav-link game-nav-link--teal">{copy.agent}</button>
+          <button onClick={() => openBridgePanel('bulletin')} className="game-nav-link game-nav-link--gold">{copy.board}</button>
+          <button onClick={() => navigateTo('/seasons')} className="game-nav-link game-nav-link--gold">{copy.seasons}</button>
+          <button onClick={() => navigateTo('/debates')} className="game-nav-link game-nav-link--violet">{copy.debates}</button>
+          <button onClick={() => openModal('shop')} className="game-nav-link game-nav-link--pink">{copy.shop}</button>
+          <button onClick={() => openModal('commission')} className="game-nav-link game-nav-link--green">{copy.commissions}</button>
+          <button onClick={() => openBridgePanel('townhall')} className="game-nav-link game-nav-link--violet">{copy.hall}</button>
+          {caravanState?.visible && <button onClick={() => openBridgePanel('market')} className="game-nav-link game-nav-link--gold">{copy.market}</button>}
+          <button onClick={() => openBridgePanel('experiment')} className="game-nav-link game-nav-link--teal">{copy.lab}</button>
           {labEnabled && (
-            <button onClick={() => openBridgePanel('labterminal')} className="game-nav-link game-nav-link--teal">📊 实验楼终端</button>
+              <button onClick={() => openBridgePanel('labterminal')} className="game-nav-link game-nav-link--teal">{copy.terminal}</button>
           )}
           {user?.is_admin && (
-            <button onClick={() => navigateTo('/admin')} className="game-nav-link game-nav-link--violet">◫ 小镇观测站</button>
+            <button onClick={() => navigateTo('/admin')} className="game-nav-link game-nav-link--violet">{copy.observatory}</button>
           )}
         </div>
         <div ref={menuRef} className="game-topnav__control">
           <button
             className="game-topnav__menu-button"
             onClick={() => setActivePopover((current) => current === 'menu' ? null : 'menu')}
-            aria-label={menuOpen ? '关闭世界菜单' : '打开世界菜单'}
+            aria-label={menuOpen ? copy.closeWorld : copy.openWorld}
             aria-expanded={menuOpen}
             aria-controls="game-world-menu"
           >
-            <span aria-hidden="true">☰</span><span>世界</span>
+            <span aria-hidden="true">☰</span><span>{copy.world}</span>
           </button>
           {menuOpen && (
             <div id="game-world-menu" className="game-nav-menu" role="menu">
               <div className="game-nav-menu__search"><SearchDropdown /></div>
-              <button onClick={() => navigateTo('/forge')} className="game-nav-link game-nav-link--primary" role="menuitem">＋ 炼化居民</button>
-              <button onClick={() => navigateTo('/web3')} className="game-nav-link game-nav-link--teal" role="menuitem">◇ 链上 Agent</button>
-              <button onClick={() => openBridgePanel('bulletin')} className="game-nav-link game-nav-link--gold" role="menuitem">📋 公告板</button>
-              <button onClick={() => navigateTo('/seasons')} className="game-nav-link game-nav-link--gold" role="menuitem">🏆 赛季</button>
-              <button onClick={() => navigateTo('/debates')} className="game-nav-link game-nav-link--violet" role="menuitem">⚔️ 辩论</button>
-              <button onClick={() => openModal('shop')} className="game-nav-link game-nav-link--pink" role="menuitem">🛒 商店</button>
-              <button onClick={() => openModal('commission')} className="game-nav-link game-nav-link--green" role="menuitem">🗒️ 委托</button>
-              <button onClick={() => openBridgePanel('townhall')} className="game-nav-link game-nav-link--violet" role="menuitem">🏛️ 市政厅</button>
-              <button onClick={() => openBridgePanel('market')} className="game-nav-link game-nav-link--gold" role="menuitem">🏬 集市大厅</button>
-              <button onClick={() => openBridgePanel('experiment')} className="game-nav-link game-nav-link--teal" role="menuitem">🧪 实验楼</button>
+              <button onClick={() => navigateTo('/forge')} className="game-nav-link game-nav-link--primary" role="menuitem">{copy.forge}</button>
+              <button onClick={() => navigateTo('/web3')} className="game-nav-link game-nav-link--teal" role="menuitem">{copy.agent}</button>
+              <button onClick={() => navigateTo('/guide')} className="game-nav-link game-nav-link--teal" role="menuitem">{copy.guide}</button>
+              <button onClick={() => navigateTo('/economy')} className="game-nav-link game-nav-link--gold" role="menuitem">{copy.economy}</button>
+              <button onClick={() => openBridgePanel('bulletin')} className="game-nav-link game-nav-link--gold" role="menuitem">{copy.board}</button>
+              <button onClick={() => navigateTo('/seasons')} className="game-nav-link game-nav-link--gold" role="menuitem">{copy.seasons}</button>
+              <button onClick={() => navigateTo('/debates')} className="game-nav-link game-nav-link--violet" role="menuitem">{copy.debates}</button>
+              <button onClick={() => openModal('shop')} className="game-nav-link game-nav-link--pink" role="menuitem">{copy.shop}</button>
+              <button onClick={() => openModal('commission')} className="game-nav-link game-nav-link--green" role="menuitem">{copy.commissions}</button>
+              <button onClick={() => openBridgePanel('townhall')} className="game-nav-link game-nav-link--violet" role="menuitem">{copy.hall}</button>
+              <button onClick={() => openBridgePanel('market')} className="game-nav-link game-nav-link--gold" role="menuitem">{copy.market}</button>
+              <button onClick={() => openBridgePanel('experiment')} className="game-nav-link game-nav-link--teal" role="menuitem">{copy.lab}</button>
               {labEnabled && (
-                <button onClick={() => openBridgePanel('labterminal')} className="game-nav-link game-nav-link--teal" role="menuitem">📊 实验楼终端</button>
+                <button onClick={() => openBridgePanel('labterminal')} className="game-nav-link game-nav-link--teal" role="menuitem">{copy.terminal}</button>
               )}
-              <button onClick={() => { setDigestUnread(false); openModal('digest') }} className="game-nav-link" role="menuitem">📰 村落日报</button>
+              <button onClick={() => { setDigestUnread(false); openModal('digest') }} className="game-nav-link" role="menuitem">{copy.digest}</button>
               {user?.is_admin && (
-                <button onClick={() => navigateTo('/admin')} className="game-nav-link game-nav-link--violet" role="menuitem">◫ 小镇观测站</button>
+                <button onClick={() => navigateTo('/admin')} className="game-nav-link game-nav-link--violet" role="menuitem">{copy.observatory}</button>
               )}
             </div>
           )}
@@ -439,7 +465,7 @@ export function TopNav() {
           <button
             onClick={() => setActivePopover((current) => current === 'account' ? null : 'account')}
             className="game-topnav__avatar"
-            aria-label="账号菜单"
+            aria-label={copy.account}
             aria-expanded={dropdownOpen}
           >
             {user?.name?.[0]?.toUpperCase() || '?'}
@@ -450,12 +476,16 @@ export function TopNav() {
                 padding: '10px 14px', fontSize: 13, fontWeight: 600,
                 color: 'var(--text-primary)', borderBottom: '1px solid var(--border)',
               }}>
-                {user?.name ?? '用户'}
+                {user?.name ?? copy.user}
                 {user?.wallet_address && (
                   <div style={{ marginTop: 4, color: 'var(--text-muted)', fontSize: 10, fontFamily: 'monospace' }}>
                     {user.wallet_address.slice(0, 8)}…{user.wallet_address.slice(-6)}
                   </div>
                 )}
+              </div>
+              <div className="game-account-web3-tools">
+                <LanguageToggle className="game-language-toggle" />
+                <div><span>{copy.community}</span><BrandSocialLinks /></div>
               </div>
               <button
                 onClick={() => navigateTo('/web3')}
@@ -466,7 +496,7 @@ export function TopNav() {
                   cursor: 'pointer',
                 }}
               >
-                ◇ 链上 Agent 工作台
+                {copy.studio}
               </button>
               <button
                 onClick={() => navigateTo('/profile')}
@@ -479,7 +509,7 @@ export function TopNav() {
                 onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--bg-input)' }}
                 onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'none' }}
               >
-                👤 个人主页
+                {copy.profile}
               </button>
               <button
                 onClick={() => navigateTo('/capsules')}
@@ -492,7 +522,7 @@ export function TopNav() {
                 onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--bg-input)' }}
                 onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'none' }}
               >
-                💌 时间胶囊
+                {copy.capsules}
               </button>
               <button
                 onClick={handleLogout}
@@ -505,7 +535,7 @@ export function TopNav() {
                 onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--bg-input)' }}
                 onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'none' }}
               >
-                🚪 退出登录
+                🚪 {copy.logout}
               </button>
             </div>
           )}

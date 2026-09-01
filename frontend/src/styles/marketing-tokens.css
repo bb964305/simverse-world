@@ -15,6 +15,7 @@
   --mkt-ok: #53d769;
   --mkt-ease: cubic-bezier(0.22, 1, 0.36, 1);
   --mkt-max: 1120px;
-  --mkt-font: 'Space Grotesk', Inter, system-ui, sans-serif;
-  --mkt-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --mkt-font: var(--font-ui);
+  --mkt-display: var(--font-display);
+  --mkt-mono: var(--font-mono);
 }

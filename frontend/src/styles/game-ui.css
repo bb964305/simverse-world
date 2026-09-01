@@ -13,6 +13,63 @@
   --game-z-toast: 700;
 }
 
+.world-web3-dock {
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  z-index: var(--game-z-popover);
+  width: min(320px, calc(100vw - 28px));
+  border: 1px solid rgba(82, 232, 255, .38);
+  color: #edf4f1;
+  background: rgba(8, 12, 15, .94);
+  box-shadow: 0 20px 55px rgba(0,0,0,.48), 8px 8px 0 rgba(82,232,255,.07);
+  backdrop-filter: blur(16px);
+  font-family: var(--font-ui);
+}
+
+.world-web3-dock > header { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; padding: 11px 12px; border-bottom: 1px solid rgba(255,255,255,.1); }
+.world-web3-dock > header img { object-fit: contain; }
+.world-web3-dock > header div > strong, .world-web3-dock > header div > span { display: block; }
+.world-web3-dock > header div > strong { font: 800 10px var(--font-mono); letter-spacing: .08em; }
+.world-web3-dock > header div > span { margin-top: 3px; color: #788387; font-size: 9px; }
+.world-web3-dock > header button { width: 28px; height: 28px; border: 0; color: #7f8b8e; background: none; font-size: 19px; cursor: pointer; }
+.world-web3-dock__status { display: grid; grid-template-columns: 1fr 1fr; }
+.world-web3-dock__status > div { padding: 11px 12px; border-right: 1px solid rgba(255,255,255,.09); border-bottom: 1px solid rgba(255,255,255,.09); }
+.world-web3-dock__status > div:last-child { border-right: 0; }
+.world-web3-dock__status span, .world-web3-dock__status strong { display: block; }
+.world-web3-dock__status span { color: #6f7a7d; font: 700 8px var(--font-mono); text-transform: uppercase; }
+.world-web3-dock__status strong { margin-top: 6px; color: #c8ff3d; font: 800 9px var(--font-mono); }
+.world-web3-dock__status strong i { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: #667074; }
+.world-web3-dock__status strong[data-online='true'] { color: #8df69b; }
+.world-web3-dock__status strong[data-online='true'] i { background: #53d769; box-shadow: 0 0 8px #53d769; }
+.world-web3-dock nav { padding: 7px; }
+.world-web3-dock nav button { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 9px 10px; border: 0; color: #bec7c5; background: none; font-size: 11px; font-weight: 750; text-align: left; cursor: pointer; }
+.world-web3-dock nav button:hover { color: #080c0f; background: #c8ff3d; }
+.world-web3-dock > footer { display: flex; align-items: center; justify-content: space-between; padding: 9px 12px; border-top: 1px solid rgba(255,255,255,.09); color: #727d80; font: 700 8px var(--font-mono); text-transform: uppercase; }
+.world-web3-dock .brand-socials a { width: 27px; height: 27px; border-color: rgba(255,255,255,.18); color: #dce4e2; }
+.world-web3-dock .brand-socials svg { width: 12px; height: 12px; }
+.world-web3-dock__opener { position: fixed; right: 14px; bottom: 14px; z-index: var(--game-z-popover); display: grid; place-items: center; width: 62px; height: 62px; border: 1px solid rgba(82,232,255,.48); color: #c8ff3d; background: rgba(8,12,15,.94); box-shadow: 0 12px 36px rgba(0,0,0,.45); cursor: pointer; }
+.world-web3-dock__opener img { width: 38px; height: 38px; object-fit: contain; }
+.world-web3-dock__opener span { font: 800 7px var(--font-mono); letter-spacing: .1em; }
+
+.world-welcome-guide { position: fixed; left: 18px; bottom: 18px; z-index: var(--game-z-overlay); width: min(420px, calc(100vw - 36px)); padding: 26px; border: 1px solid rgba(200,255,61,.55); color: #eff3ef; background: rgba(8,12,15,.96); box-shadow: 12px 12px 0 rgba(200,255,61,.08), 0 22px 60px rgba(0,0,0,.55); backdrop-filter: blur(18px); }
+.world-welcome-guide__progress { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; margin-bottom: 22px; }
+.world-welcome-guide__progress i { height: 3px; background: #2a3336; }
+.world-welcome-guide__progress i[data-active='true'] { background: #c8ff3d; }
+.world-welcome-guide__close { position: absolute; top: 32px; right: 22px; border: 0; color: #808b8d; background: none; font-size: 21px; cursor: pointer; }
+.world-welcome-guide > p { color: #52e8ff; font: 800 9px var(--font-mono); letter-spacing: .1em; }
+.world-welcome-guide h2 { max-width: 330px; margin: 11px 0; font: 900 30px/.95 var(--font-display); text-transform: uppercase; }
+.world-welcome-guide > span { display: block; color: #a6b0b0; font-size: 13px; line-height: 1.65; }
+.world-welcome-guide > div:last-child { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
+.world-welcome-guide > div:last-child button { min-height: 40px; padding: 0 14px; border: 1px solid #485356; color: #e5ebe8; background: transparent; font-size: 11px; font-weight: 800; cursor: pointer; }
+.world-welcome-guide > div:last-child button:last-child { border-color: #c8ff3d; color: #07090d; background: #c8ff3d; }
+
+@media (max-width: 679px) {
+  .world-web3-dock { right: 8px; bottom: 8px; width: min(300px, calc(100vw - 16px)); }
+  .world-web3-dock__opener { right: 8px; bottom: 8px; }
+  .world-welcome-guide { left: 8px; bottom: 8px; width: calc(100vw - 16px); padding: 22px 18px; }
+}
+
 .game-topnav {
   position: fixed;
   inset: 0 0 auto;
@@ -58,15 +115,21 @@
 }
 
 .game-topnav__brand-mark {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border: 1px solid rgba(99, 213, 208, 0.35);
-  border-radius: 6px;
-  background: rgba(99, 213, 208, 0.1);
-  font-size: 15px;
+  display: block;
+  width: 30px;
+  height: 30px;
+  object-fit: contain;
+  filter: drop-shadow(0 0 7px rgba(82,232,255,.28));
 }
+
+.game-account-web3-tools { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.game-account-web3-tools > div { display: flex; align-items: center; gap: 7px; }
+.game-account-web3-tools > div > span { color: var(--text-muted); font-size: 8px; text-transform: uppercase; }
+.game-account-web3-tools .brand-socials a { width: 27px; height: 27px; color: var(--text-secondary); }
+.game-account-web3-tools .brand-socials svg { width: 12px; height: 12px; }
+.game-language-toggle { display: inline-flex; align-items: center; gap: 4px; color: var(--text-muted); font: 750 9px var(--font-mono); }
+.game-language-toggle button { border: 0; color: inherit; background: none; cursor: pointer; }
+.game-language-toggle button[aria-pressed='true'] { color: #c8ff3d; }
 
 .game-nav-link,
 .game-topnav__menu-button {

@@ -37,6 +37,12 @@ export interface OnboardingResidentResponse {
   tile_y: number
 }
 
+export interface CreateCharacterInput {
+  name: string
+  sprite_key: string
+  reply_mode?: 'auto' | 'manual'
+}
+
 export function checkOnboarding(token: string): Promise<OnboardingCheckResponse> {
   return apiFetch('/onboarding/check', {
     headers: { Authorization: `Bearer ${token}` },
@@ -51,6 +57,14 @@ export function loadPreset(token: string, preset_slug: string): Promise<Onboardi
   return apiFetch('/onboarding/load-preset', {
     method: 'POST',
     body: JSON.stringify({ preset_slug }),
+    headers: { Authorization: `Bearer ${token}` },
+  })
+}
+
+export function createPlayerResident(token: string, input: CreateCharacterInput): Promise<OnboardingResidentResponse> {
+  return apiFetch('/onboarding/create-character', {
+    method: 'POST',
+    body: JSON.stringify({ ...input, reply_mode: input.reply_mode ?? 'auto' }),
     headers: { Authorization: `Bearer ${token}` },
   })
 }

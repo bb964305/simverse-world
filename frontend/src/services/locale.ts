@@ -7,16 +7,22 @@ interface LocaleState {
   setLocale: (locale: Locale) => void
 }
 
-const STORAGE_KEY = 'simverse-locale'
+// v2 deliberately starts existing installs in English once. The previous
+// release defaulted to Chinese and left that choice in storage even after the
+// public site's default changed.
+const STORAGE_KEY = 'simverse-locale-v2'
 
 function initialLocale(): Locale {
   const stored = localStorage.getItem(STORAGE_KEY)
   if (stored === 'zh-CN' || stored === 'en') return stored
-  return navigator.language.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en'
+  return 'en'
 }
 
+const defaultLocale = initialLocale()
+document.documentElement.lang = defaultLocale
+
 export const useLocale = create<LocaleState>((set) => ({
-  locale: initialLocale(),
+  locale: defaultLocale,
   setLocale: (locale) => {
     localStorage.setItem(STORAGE_KEY, locale)
     document.documentElement.lang = locale

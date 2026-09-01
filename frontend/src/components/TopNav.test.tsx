@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { TopNav } from './TopNav'
 import { useGameStore } from '../stores/gameStore'
 import { bridge } from '../game/phaserBridge'
+import { useLocale } from '../services/locale'
 
 const caravanHarness = vi.hoisted(() => ({
   listener: null as ((projection: { snapshot: unknown }) => void) | null,
@@ -70,6 +71,7 @@ const user = {
 }
 
 beforeEach(() => {
+  useLocale.setState({ locale: 'zh-CN' })
   useGameStore.setState({ user, token: 'token', unreadCount: 2, digestUnread: true })
 })
 

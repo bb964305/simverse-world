@@ -9,6 +9,7 @@ export interface ConnectivityItem {
 
 export interface ConnectivityReport {
   api: ConnectivityItem
+  runtime: ConnectivityItem
   chain: ConnectivityItem
   contract: ConnectivityItem
   checkedAt: string
@@ -28,6 +29,18 @@ async function checkApi(signal: AbortSignal): Promise<ConnectivityItem> {
     const response = await fetch(`${API_BASE}/health`, { signal, headers: { Accept: 'application/json' } })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     return { ok: true, detail: `${API_BASE}/health` }
+  } catch (reason) {
+    return failed(reason)
+  }
+}
+
+export async function checkAgentRuntime(signal: AbortSignal): Promise<ConnectivityItem> {
+  try {
+    const response = await fetch(`${API_BASE}/health/loops`, { signal, headers: { Accept: 'application/json' } })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    const body = await response.json() as { status?: string; loops?: { agent?: { state?: string; last_beat?: string } } }
+    if (body.status !== 'ok' || body.loops?.agent?.state !== 'ok') throw new Error(`Agent loop ${body.loops?.agent?.state ?? 'unknown'}`)
+    return { ok: true, detail: `Agent loop online · ${body.loops.agent.last_beat ?? 'heartbeat live'}` }
   } catch (reason) {
     return failed(reason)
   }
@@ -59,9 +72,10 @@ async function checkChainAndContract(): Promise<Pick<ConnectivityReport, 'chain'
 export async function checkProductionConnectivity(signal?: AbortSignal): Promise<ConnectivityReport> {
   const timeout = AbortSignal.timeout(12_000)
   const mergedSignal = signal ? AbortSignal.any([signal, timeout]) : timeout
-  const [api, onchain] = await Promise.all([
+  const [api, runtime, onchain] = await Promise.all([
     checkApi(mergedSignal),
+    checkAgentRuntime(mergedSignal),
     checkChainAndContract().catch((reason) => ({ chain: failed(reason), contract: failed(reason) })),
   ])
-  return { api, ...onchain, checkedAt: new Date().toISOString() }
+  return { api, runtime, ...onchain, checkedAt: new Date().toISOString() }
 }

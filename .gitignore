@@ -55,12 +55,16 @@ seed_local.py
 
 # Playwright MCP
 .playwright-mcp/
+.playwright-cli/
 
 # Screenshots
 *.png
 !assets/screenshots/*.png
 !archive/**/docs/**/*.png
 !output/imagegen/simverse-concepts/*.png
+!frontend/public/brand/
+!frontend/public/brand/simverse-logo-128.png
+!frontend/public/brand/simverse-logo-512.png
 .omx/
 
 # Agent/session workspaces + runtime artifacts

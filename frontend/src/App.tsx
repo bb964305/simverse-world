@@ -10,6 +10,7 @@ import { EncounterCard } from './components/EncounterCard'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { checkOnboarding, getMe, type MeResponse } from './services/api'
 import { loginPath, safeAuthReturnTo } from './services/authReturnTo'
+import { loadOwnedAgents, registryConfigured } from './services/web3/agentRegistry'
 
 // Heavy pages are code-split so the login/first-load bundle stays lean:
 // GamePage pulls in Phaser (~1.4MB), ProfilePage pulls in @uiw/react-md-editor
@@ -29,6 +30,7 @@ const TownPage = lazy(() => import('./pages/TownPage').then((m) => ({ default: m
 const WatchPage = lazy(() => import('./pages/WatchPage').then((m) => ({ default: m.WatchPage })))
 const AgentStudioPage = lazy(() => import('./pages/AgentStudioPage').then((m) => ({ default: m.AgentStudioPage })))
 const Web3GuidePage = lazy(() => import('./pages/Web3GuidePage').then((m) => ({ default: m.Web3GuidePage })))
+const EconomyPage = lazy(() => import('./pages/EconomyPage').then((m) => ({ default: m.EconomyPage })))
 
 function normalizePathname(pathname: string): string {
   if (pathname === '/') return pathname
@@ -91,8 +93,9 @@ function AdminRoute() {
 // default skin (E2E-01). Re-run the same check here before rendering the
 // game. Network failures fail OPEN (render GamePage) rather than stranding
 // an otherwise-fine player on a spinner.
-function HomeRoute() {
+function HomeRoute({ requireAuth = false }: { requireAuth?: boolean }) {
   const token = useGameStore((s) => s.token)
+  const user = useGameStore((s) => s.user)
   // "Checking" is derived, not stored: the check for the current token is in
   // flight exactly while `checked.token` doesn't match it, so a token change
   // shows the spinner again without any synchronous setState in the effect.
@@ -101,9 +104,14 @@ function HomeRoute() {
   useEffect(() => {
     if (!token) return
     let cancelled = false
-    checkOnboarding(token)
-      .then((result) => {
-        if (!cancelled) setChecked({ token, needsOnboarding: result.needs_onboarding })
+    const wallet = user?.wallet_address as `0x${string}` | undefined
+    Promise.all([
+      checkOnboarding(token),
+      wallet && registryConfigured() ? loadOwnedAgents(wallet).catch(() => null) : Promise.resolve(null),
+    ])
+      .then(([result, agents]) => {
+        const missingPassport = Array.isArray(agents) && agents.length === 0
+        if (!cancelled) setChecked({ token, needsOnboarding: result.needs_onboarding || missingPassport })
       })
       .catch(() => {
         if (!cancelled) setChecked({ token, needsOnboarding: false })
@@ -111,9 +119,9 @@ function HomeRoute() {
     return () => {
       cancelled = true
     }
-  }, [token])
+  }, [token, user?.wallet_address])
 
-  if (!token) return <LandingPage />
+  if (!token) return requireAuth ? <Navigate to={loginPath('/play')} replace /> : <LandingPage />
   if (checked?.token !== token) return <PageFallback />
   if (checked.needsOnboarding) return <Navigate to="/onboarding" replace />
   return <GamePage />
@@ -179,12 +187,13 @@ export function AppRoutes() {
             <Route path="/town" element={<TownPage />} />
             <Route path="/watch" element={<WatchPage />} />
             <Route path="/guide" element={<Web3GuidePage />} />
+            <Route path="/economy" element={<EconomyPage />} />
             <Route path="/onboarding" element={<OnboardingPage />} />
             <Route path="/" element={<HomeRoute />} />
             {/* The game also lives at /play — many entry points (landing CTA,
                 onboarding redirect, Admin/Forge/ErrorBoundary) navigate here.
                 Without this route React Router matches nothing → blank screen. */}
-            <Route path="/play" element={<ProtectedRoute><GamePage /></ProtectedRoute>} />
+            <Route path="/play" element={<HomeRoute requireAuth />} />
             <Route path="/forge" element={<ProtectedRoute><ForgePage /></ProtectedRoute>} />
             <Route path="/web3" element={<ProtectedRoute><AgentStudioPage /></ProtectedRoute>} />
             <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />

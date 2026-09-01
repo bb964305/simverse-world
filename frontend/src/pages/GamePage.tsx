@@ -7,6 +7,8 @@ import { PhotoBooth } from '../components/PhotoBooth'
 import { DecorEditor } from '../components/DecorEditor'
 import { MinimapOverlay } from '../components/minimap/MinimapOverlay'
 import { BuildingTooltip } from '../components/BuildingTooltip'
+import { WorldWeb3Dock } from '../components/WorldWeb3Dock'
+import { WorldWelcomeGuide } from '../components/WorldWelcomeGuide'
 import { useGameStore } from '../stores/gameStore'
 import { connectWS } from '../services/ws'
 import { getSettings } from '../services/api'
@@ -75,6 +77,8 @@ export function GamePage() {
       <CoinNotification />
       <PhotoBooth />
       <DecorEditor />
+      <WorldWeb3Dock />
+      <WorldWelcomeGuide />
     </>
   )
 }

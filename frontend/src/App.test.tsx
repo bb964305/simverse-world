@@ -5,6 +5,7 @@ import { MemoryRouter, useLocation } from 'react-router-dom'
 import { AppRoutes } from './App'
 import { useGameStore } from './stores/gameStore'
 import { checkOnboarding, getMe } from './services/api'
+import { loadOwnedAgents } from './services/web3/agentRegistry'
 
 vi.mock('./pages/GamePage', () => ({
   GamePage: () => <main data-testid="game-page">Game World</main>,
@@ -38,6 +39,11 @@ vi.mock('./services/api', () => ({
   getMe: vi.fn(),
 }))
 
+vi.mock('./services/web3/agentRegistry', () => ({
+  registryConfigured: () => true,
+  loadOwnedAgents: vi.fn(),
+}))
+
 const user = {
   id: 'user-1',
   name: 'Resident',
@@ -47,6 +53,7 @@ const user = {
 }
 
 const adminUser = { ...user, is_admin: true }
+const walletUser = { ...user, wallet_address: '0x1234567890123456789012345678901234567890' }
 
 function LocationProbe() {
   const location = useLocation()
@@ -79,6 +86,7 @@ beforeEach(() => {
     player_resident_id: 'resident-1',
   })
   vi.mocked(getMe).mockReset().mockResolvedValue({ ...user, is_admin: false })
+  vi.mocked(loadOwnedAgents).mockReset().mockResolvedValue([{ id: 1n, uri: 'https://example.invalid/agent/1', state: {} as never }])
 })
 
 afterEach(() => {
@@ -312,6 +320,18 @@ describe('HomeRoute onboarding gate', () => {
 
     expect(await screen.findByTestId('game-page')).toBeInTheDocument()
     expect(screen.queryByTestId('onboarding-page')).not.toBeInTheDocument()
+  })
+
+  it('requires wallet users without an Agent Passport to finish onchain registration', async () => {
+    vi.mocked(checkOnboarding).mockResolvedValue({ needs_onboarding: false, player_resident_id: 'resident-1' })
+    vi.mocked(loadOwnedAgents).mockResolvedValue([])
+    useGameStore.setState({ user: walletUser, token: 'token' })
+
+    renderRoute('/')
+
+    expect(await screen.findByTestId('onboarding-page')).toBeInTheDocument()
+    expect(loadOwnedAgents).toHaveBeenCalledWith(walletUser.wallet_address)
+    expect(screen.queryByTestId('game-page')).not.toBeInTheDocument()
   })
 
   it('fails open into the game when the onboarding check errors', async () => {

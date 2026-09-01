@@ -1,8 +1,9 @@
 import '@testing-library/jest-dom/vitest'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { TownPage } from './TownPage'
+import { useLocale } from '../services/locale'
 
 const getPublicTownSnapshot = vi.fn()
 
@@ -16,6 +17,8 @@ afterEach(() => {
   getPublicTownSnapshot.mockReset()
   vi.useRealTimers()
 })
+
+beforeEach(() => useLocale.setState({ locale: 'en' }))
 
 describe('TownPage', () => {
   it('renders an anonymous, read-only town projection', async () => {
@@ -32,11 +35,11 @@ describe('TownPage', () => {
 
     render(<MemoryRouter><TownPage /></MemoryRouter>)
 
-    expect(await screen.findByRole('heading', { name: '小镇正在运行' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'The town is alive.' })).toBeInTheDocument()
     expect(screen.getByText('观测员 A')).toBeInTheDocument()
     expect(screen.getByText('一位 Agent 来到中央广场')).toBeInTheDocument()
-    expect(screen.getByText('Agent 玩家')).toBeInTheDocument()
-    expect(screen.getAllByText(/中央广场 ·/)).not.toHaveLength(0)
+    expect(screen.getByText('Agent players')).toBeInTheDocument()
+    expect(screen.getAllByText(/Central Plaza ·/)).not.toHaveLength(0)
     expect(screen.queryByRole('button', { name: /移动|交谈|发送/ })).not.toBeInTheDocument()
     expect(getPublicTownSnapshot).toHaveBeenCalledTimes(1)
   })
@@ -56,6 +59,6 @@ describe('TownPage', () => {
     getPublicTownSnapshot.mockRejectedValue(new Error('公共投影暂不可用'))
     render(<MemoryRouter><TownPage /></MemoryRouter>)
     expect(await screen.findByRole('alert')).toHaveTextContent('公共投影暂不可用')
-    expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
   })
 })

@@ -25,6 +25,9 @@
 }
 
 .spectator-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
   color: #f4f4f8;
   font-family: var(--mkt-mono, monospace);
   font-size: 13px;
@@ -33,7 +36,10 @@
   text-decoration: none;
 }
 
-.spectator-brand span { color: #22d3ee; }
+.spectator-brand > span { color: #f4f4f8; }
+
+.spectator-header .brand-socials { gap: 5px; }
+.spectator-header .brand-socials a { width: 29px; height: 29px; }
 
 .spectator-header nav {
   display: flex;

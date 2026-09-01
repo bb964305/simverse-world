@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from 'react'
+import { Link } from 'react-router-dom'
 import { TopNav } from '../components/TopNav'
 import { updateCharacter, updatePlayerPosition } from '../services/api'
 import { API_BASE } from '../services/api/core'
@@ -6,7 +7,7 @@ import { useLocale } from '../services/locale'
 import {
   anchorMemory,
   anchorSave,
-  createAgentPassport,
+  AGENT_REGISTRY_ADDRESS,
   loadLatestSaveAnchor,
   loadOwnedAgents,
   publishTrainingVersion,
@@ -14,6 +15,7 @@ import {
   type AgentChainState,
 } from '../services/web3/agentRegistry'
 import { readPrivateAnchoredJson, snapshotGameMemory, uploadWeb3Content } from '../services/web3/content'
+import { registerResidentOnchain } from '../services/web3/passport'
 import { configuredChainId, configuredChainName } from '../services/web3/wallet'
 import { useGameStore } from '../stores/gameStore'
 import '../styles/agent-studio.css'
@@ -49,7 +51,8 @@ const COPY = {
   'zh-CN': {
     eyebrow: 'WALLET-OWNED AGENT INFRASTRUCTURE', title: '链上 Agent 工作台',
     lead: '把现有居民铸造成不可转让的链上身份，并为训练、上传、记忆与游戏存档建立可验证的版本链。',
-    account: '钱包身份', network: '网络', contract: '可升级合约', connected: '已接通', missing: '尚未配置地址',
+    account: '钱包身份', network: '网络', contract: '可升级合约', runtime: 'Agent 挂机循环', online: '24/7 在线', checking: '检测中', connected: '已接通', missing: '尚未配置地址',
+    mapTitle: '哪些动作会真正上链', mapItems: [['身份注册', '钱包所有权 + Agent ID + 元数据哈希'], ['训练上传', '文件哈希 + 训练根 + 递增版本'], ['记忆快照', '内容哈希 + 父哈希 + 修订号'], ['游戏存档', '状态哈希 + 父哈希 + 可验证恢复']], guide: '新手教程', economy: 'SIM 经济模型', explorer: '链上浏览器',
     createTitle: '01 / 创建 Agent 身份', createLead: '选择你在游戏中锻造的居民。元数据先保存到私有内容层，哈希与所有权由钱包写入链上。',
     resident: '游戏居民', noResident: '请先在炼化工坊创建一位居民', create: '创建链上身份', creating: '正在上传并等待钱包…',
     anchorTitle: '02 / 保存与确权', anchorLead: '选择 Agent 和内容类型。每次写入都会形成不可篡改的新版本，不会转移资金。',
@@ -61,7 +64,8 @@ const COPY = {
   en: {
     eyebrow: 'WALLET-OWNED AGENT INFRASTRUCTURE', title: 'Onchain Agent Studio',
     lead: 'Turn an existing resident into a non-transferable onchain identity, then build verifiable version chains for training, uploads, memories, and game saves.',
-    account: 'Wallet identity', network: 'Network', contract: 'Upgradeable contract', connected: 'Connected', missing: 'Address not configured',
+    account: 'Wallet identity', network: 'Network', contract: 'Upgradeable contract', runtime: 'Agent world loop', online: 'Online 24/7', checking: 'Checking', connected: 'Connected', missing: 'Address not configured',
+    mapTitle: 'What is actually written onchain', mapItems: [['Identity registration', 'Wallet ownership + Agent ID + metadata hash'], ['Training upload', 'File hash + training root + incremental version'], ['Memory snapshot', 'Content hash + parent hash + revision'], ['Game save', 'State hash + parent hash + verified restore']], guide: 'New player guide', economy: 'SIM economy', explorer: 'Block explorer',
     createTitle: '01 / Create Agent identity', createLead: 'Choose a resident forged in the game. Metadata enters the private content layer first; your wallet anchors its hash and ownership onchain.',
     resident: 'Game resident', noResident: 'Create a resident in the Forge first', create: 'Create onchain identity', creating: 'Uploading and waiting for wallet…',
     anchorTitle: '02 / Save and prove', anchorLead: 'Choose an Agent and content type. Every write creates an immutable version without moving funds.',
@@ -116,6 +120,7 @@ export function AgentStudioPage() {
   const [error, setError] = useState('')
   const [transaction, setTransaction] = useState<`0x${string}` | null>(null)
   const [restored, setRestored] = useState(false)
+  const [runtimeOnline, setRuntimeOnline] = useState<boolean | null>(null)
 
   const selectedResident = useMemo(() => residents.find((resident) => resident.id === residentId), [residentId, residents])
   const contractReady = registryConfigured()
@@ -144,23 +149,24 @@ export function AgentStudioPage() {
 
   useEffect(() => { void refreshAgents() }, [refreshAgents])
 
+  useEffect(() => {
+    const controller = new AbortController()
+    fetch(`${API_BASE}/health/loops`, { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) return false
+        const body = await response.json() as { status?: string; loops?: { agent?: { state?: string } } }
+        return body.status === 'ok' && body.loops?.agent?.state === 'ok'
+      })
+      .then(setRuntimeOnline)
+      .catch(() => setRuntimeOnline(false))
+    return () => controller.abort()
+  }, [])
+
   const createPassport = async () => {
     if (!selectedResident || !wallet) return
     setBusy('create'); setError(''); setTransaction(null); setRestored(false)
     try {
-      const metadata = {
-        name: selectedResident.name,
-        description: `Simverse resident ${selectedResident.slug}`,
-        external_url: `${window.location.origin}/profile`,
-        simverse: {
-          resident_id: selectedResident.id, slug: selectedResident.slug, district: selectedResident.district,
-          status: selectedResident.status, sprite_key: selectedResident.sprite_key, star_rating: selectedResident.star_rating,
-          profile: selectedResident.meta_json,
-        },
-      }
-      const blob = new Blob([JSON.stringify(metadata, null, 2)], { type: 'application/json' })
-      const content = await uploadWeb3Content(blob, `${selectedResident.slug}-metadata.json`)
-      const hash = await createAgentPassport(locale, wallet, content.content_uri, content.content_hash)
+      const hash = await registerResidentOnchain(locale, wallet, selectedResident)
       setTransaction(hash)
       await refreshAgents()
     } catch (reason) {
@@ -243,8 +249,12 @@ export function AgentStudioPage() {
             <div><span>{copy.account}</span><strong>{shortAddress(wallet)}</strong></div>
             <div><span>{copy.network}</span><strong>{configuredChainName()} · {configuredChainId()}</strong></div>
             <div><span>{copy.contract}</span><strong data-ready={contractReady}>{contractReady ? copy.connected : copy.missing}</strong></div>
+            <div><span>{copy.runtime}</span><strong data-ready={runtimeOnline === true}>{runtimeOnline === null ? copy.checking : runtimeOnline ? copy.online : copy.missing}</strong></div>
           </div>
+          <div className="agent-studio__quick-links"><Link to="/guide">{copy.guide} ↗</Link><Link to="/economy">{copy.economy} ↗</Link><a href={`https://robinhoodchain.blockscout.com/address/${AGENT_REGISTRY_ADDRESS}`} target="_blank" rel="noreferrer">{copy.explorer} ↗</a></div>
         </header>
+
+        <section className="agent-studio__chain-map"><h2>{copy.mapTitle}</h2><div>{copy.mapItems.map(([title, body], index) => <article key={title}><span>0{index + 1}</span><strong>{title}</strong><p>{body}</p></article>)}</div></section>
 
         <div className="agent-studio__grid">
           <section className="agent-studio-card">
@@ -264,12 +274,12 @@ export function AgentStudioPage() {
           </section>
         </div>
 
-        {(error || transaction || restored) && <div className={`agent-studio__message ${error ? 'is-error' : 'is-success'}`} role={error ? 'alert' : 'status'}>{error || (restored ? copy.restored : `${copy.tx}: ${shortAddress(transaction)}`)}</div>}
+        {(error || transaction || restored) && <div className={`agent-studio__message ${error ? 'is-error' : 'is-success'}`} role={error ? 'alert' : 'status'}>{error || (restored ? copy.restored : <>{copy.tx}: <a href={`https://robinhoodchain.blockscout.com/tx/${transaction}`} target="_blank" rel="noreferrer">{shortAddress(transaction)} ↗</a></>)}</div>}
         <p className="agent-studio__privacy">{copy.privacy}</p>
 
         <section className="agent-passports">
           <div className="agent-passports__heading"><h2>{copy.passports}</h2><button type="button" onClick={() => void refreshAgents()} disabled={!contractReady || busy !== null}>{copy.refresh}</button></div>
-          {agents.length === 0 ? <p className="agent-passports__empty">{copy.empty}</p> : <div className="agent-passports__list">{agents.map((agent) => <article key={agent.id.toString()}><div className="agent-passport__id"><span>AGENT PASSPORT</span><strong>#{agent.id.toString()}</strong></div><dl><div><dt>{copy.version}</dt><dd>{agent.state.version.toString()}</dd></div><div><dt>{copy.memories}</dt><dd>{agent.state.memoryRevision.toString()}</dd></div><div><dt>{copy.saves}</dt><dd>{agent.state.saveRevision.toString()}</dd></div></dl><a href={agent.uri} target="_blank" rel="noreferrer">{copy.metadata} ↗</a></article>)}</div>}
+          {agents.length === 0 ? <p className="agent-passports__empty">{copy.empty}</p> : <div className="agent-passports__list">{agents.map((agent) => <article key={agent.id.toString()}><div className="agent-passport__id"><span>AGENT PASSPORT</span><strong>#{agent.id.toString()}</strong></div><dl><div><dt>{copy.version}</dt><dd>{agent.state.version.toString()}</dd></div><div><dt>{copy.memories}</dt><dd>{agent.state.memoryRevision.toString()}</dd></div><div><dt>{copy.saves}</dt><dd>{agent.state.saveRevision.toString()}</dd></div></dl><a href={`https://robinhoodchain.blockscout.com/token/${AGENT_REGISTRY_ADDRESS}/instance/${agent.id.toString()}`} target="_blank" rel="noreferrer">{copy.metadata} ↗</a></article>)}</div>}
         </section>
       </main>
     </div>

@@ -107,11 +107,11 @@ async function createRuntime(): Promise<Web3Runtime> {
   }))
   const modal = rabbykit.createModal({
     wagmi: config,
-    language: 'zh-CN',
+    language: 'en',
     theme: 'dark',
     showWalletConnect: Boolean(WALLETCONNECT_PROJECT_ID),
     themeVariables: {
-      '--rk-font-family': 'Inter, system-ui, sans-serif',
+      '--rk-font-family': '"Segoe UI Variable", Inter, "Noto Sans SC", "Microsoft YaHei UI", system-ui, sans-serif',
       '--rk-primary-button-bg': '#d9ff3f',
       '--rk-primary-button-color': '#080c0f',
       '--rk-border-radius': '6px',
