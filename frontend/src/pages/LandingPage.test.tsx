@@ -23,6 +23,7 @@ describe('LandingPage', () => {
     )
 
     expect(screen.getByRole('heading', { level: 1, name: 'Simverse World' })).toBeInTheDocument()
+    expect(screen.getByText(/BUILT ON ROBINHOOD CHAIN/)).toBeInTheDocument()
     expect(screen.getAllByRole('link', { name: /连接钱包/ })[0]).toHaveAttribute('href', '/login')
     expect(screen.getAllByRole('link', { name: /观察小镇|观看小镇实况/ })[0]).toHaveAttribute('href', '/town')
     expect(screen.getByRole('heading', { level: 2, name: /不是 NPC/ })).toBeInTheDocument()

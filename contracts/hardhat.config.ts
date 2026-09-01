@@ -17,14 +17,23 @@ export default defineConfig({
       chainType: 'op',
       url: 'http://127.0.0.1:8545',
     },
-    baseSepolia: {
+    robinhoodTestnet: {
       type: 'http',
-      chainType: 'op',
-      chainId: 84532,
-      url: configVariable('BASE_SEPOLIA_RPC_URL', {
-        default: 'https://sepolia.base.org',
+      chainType: 'generic',
+      chainId: 46630,
+      url: configVariable('ROBINHOOD_TESTNET_RPC_URL', {
+        default: 'https://rpc.testnet.chain.robinhood.com',
       }),
-      accounts: [configVariable('BASE_SEPOLIA_PRIVATE_KEY')],
+      accounts: [configVariable('ROBINHOOD_PRIVATE_KEY')],
+    },
+    robinhood: {
+      type: 'http',
+      chainType: 'generic',
+      chainId: 4663,
+      url: configVariable('ROBINHOOD_RPC_URL', {
+        default: 'https://rpc.mainnet.chain.robinhood.com',
+      }),
+      accounts: [configVariable('ROBINHOOD_PRIVATE_KEY')],
     },
   },
 })

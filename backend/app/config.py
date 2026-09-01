@@ -54,8 +54,8 @@ class Settings(BaseSettings):
     # Wallet login proves address control and then issues the same application
     # JWT used by email/OAuth. It never asks the wallet to submit a transaction.
     web3_enabled: bool = True
-    web3_chain_id: int = 84532
-    web3_chain_name: str = "Base Sepolia"
+    web3_chain_id: int = 46630
+    web3_chain_name: str = "Robinhood Chain Testnet"
     web3_uri: str = ""
     web3_content_dir: str = "data/web3-content"
     web3_content_max_bytes: int = 25 * 1024 * 1024

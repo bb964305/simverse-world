@@ -6,12 +6,17 @@
   "scripts": {
     "compile": "hardhat compile",
     "test": "hardhat test solidity --chain-type op",
+    "network:robinhood-testnet": "hardhat run scripts/network.ts --network robinhoodTestnet",
+    "network:robinhood": "hardhat run scripts/network.ts --network robinhood",
     "node": "hardhat node",
     "deploy:local": "hardhat run scripts/deploy.ts --network localhost",
-    "deploy:base-sepolia": "hardhat run scripts/deploy.ts --network baseSepolia",
+    "deploy:robinhood-testnet": "hardhat run scripts/deploy.ts --network robinhoodTestnet",
+    "deploy:robinhood": "hardhat run scripts/deploy.ts --network robinhood",
     "upgrade:local": "hardhat run scripts/upgrade.ts --network localhost",
-    "upgrade:base-sepolia": "hardhat run scripts/upgrade.ts --network baseSepolia",
-    "smoke:local": "hardhat run scripts/smoke.ts --network localhost"
+    "upgrade:robinhood-testnet": "hardhat run scripts/upgrade.ts --network robinhoodTestnet",
+    "upgrade:robinhood": "hardhat run scripts/upgrade.ts --network robinhood",
+    "smoke:local": "hardhat run scripts/smoke.ts --network localhost",
+    "smoke:robinhood-testnet": "hardhat run scripts/smoke.ts --network robinhoodTestnet"
   },
   "dependencies": {
     "@openzeppelin/contracts": "^5.6.1",

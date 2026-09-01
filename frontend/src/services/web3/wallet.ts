@@ -3,9 +3,17 @@ import type { Chain } from 'viem'
 import type { Locale } from '../locale'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000'
-const CHAIN_ID = Number(import.meta.env.VITE_WEB3_CHAIN_ID || 84532)
-const CHAIN_NAME = import.meta.env.VITE_WEB3_CHAIN_NAME || (CHAIN_ID === 84532 ? 'Base Sepolia' : 'Simverse Local')
-const RPC_URL = import.meta.env.VITE_WEB3_RPC_URL || (CHAIN_ID === 84532 ? 'https://sepolia.base.org' : 'http://127.0.0.1:8545')
+const ROBINHOOD_TESTNET_CHAIN_ID = 46630
+const ROBINHOOD_MAINNET_CHAIN_ID = 4663
+const CHAIN_ID = Number(import.meta.env.VITE_WEB3_CHAIN_ID || ROBINHOOD_TESTNET_CHAIN_ID)
+const CHAIN_NAME = import.meta.env.VITE_WEB3_CHAIN_NAME || (
+  CHAIN_ID === ROBINHOOD_MAINNET_CHAIN_ID ? 'Robinhood Chain' :
+    CHAIN_ID === ROBINHOOD_TESTNET_CHAIN_ID ? 'Robinhood Chain Testnet' : 'Simverse Local'
+)
+const RPC_URL = import.meta.env.VITE_WEB3_RPC_URL || (
+  CHAIN_ID === ROBINHOOD_MAINNET_CHAIN_ID ? 'https://rpc.mainnet.chain.robinhood.com' :
+    CHAIN_ID === ROBINHOOD_TESTNET_CHAIN_ID ? 'https://rpc.testnet.chain.robinhood.com' : 'http://127.0.0.1:8545'
+)
 const WALLETCONNECT_PROJECT_ID = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID || ''
 
 export interface WalletUser {
@@ -67,9 +75,14 @@ async function createRuntime(): Promise<Web3Runtime> {
     import('viem'),
     import('@wagmi/core/chains'),
   ])
-  const chain = CHAIN_ID === chains.baseSepolia.id
+  const knownChain = CHAIN_ID === chains.robinhood.id
+    ? chains.robinhood
+    : CHAIN_ID === chains.robinhoodTestnet.id
+      ? chains.robinhoodTestnet
+      : undefined
+  const chain = knownChain
     ? {
-        ...chains.baseSepolia,
+        ...knownChain,
         rpcUrls: { default: { http: [RPC_URL] } },
       }
     : viem.defineChain({

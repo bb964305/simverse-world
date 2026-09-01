@@ -58,6 +58,7 @@ Passport 禁止 `approve`、`setApprovalForAll` 和钱包间转移。合约没�
    - “游戏存档”：上传存档文件；
    - “保存当前游戏状态”：保存角色外观和地图坐标，再由钱包锚定。
 8. 交易确认后，下方 Passport 卡片会显示训练、记忆和存档的最新版本号。
+9. 点击“恢复最新链上存档”时，页面先从合约读取最新 URI/哈希，再用钱包会话下载私有内容、重新计算 SHA-256；只有哈希、钱包和 Agent ID 都一致，才会恢复角色外观与地图坐标。
 
 连接的钱包必须和当前登录钱包一致。切换到另一个钱包后，写入会被前端拒绝；合约还会再次校验 Passport 所有者。
 
@@ -170,31 +171,63 @@ cd backend
 uv run pytest tests/test_auth.py tests/test_web3_content.py -q
 ```
 
-## 5. Base Sepolia 部署
+## 5. Robinhood Chain 部署
 
-默认测试网络是 Base Sepolia（chain ID `84532`）。根目录的 `私钥.txt` 已被 `.gitignore` 明确排除。文件只应包含 `0x` 开头的 32 字节 EVM 私钥；不要复制进命令历史、截图、日志、`.env` 或 Git。
+项目目标链是 Robinhood Chain。共享验收先使用 Robinhood Chain Testnet（chain ID `46630`），正式网络使用 Robinhood Chain（chain ID `4663`）。两条网络都使用 ETH 支付 Gas：
 
-先确认部署地址有足够 Base Sepolia ETH，再在 PowerShell 进程内临时注入：
+| 网络 | Chain ID | RPC | 浏览器 |
+|---|---:|---|---|
+| Robinhood Chain Testnet | `46630` | `https://rpc.testnet.chain.robinhood.com` | `https://explorer.testnet.chain.robinhood.com` |
+| Robinhood Chain | `4663` | `https://rpc.mainnet.chain.robinhood.com` | `https://robinhoodchain.blockscout.com` |
+
+官方测试币入口是 `https://faucet.testnet.chain.robinhood.com`。公共 RPC 有速率限制，正式网站应换成 Alchemy、QuickNode 或其他 Robinhood Chain 基础设施商的专用端点。
+
+根目录的 `私钥.txt` 已被 `.gitignore` 明确排除。文件只应包含 `0x` 开头的 32 字节 EVM 私钥；不要复制进命令历史、截图、日志、`.env` 或 Git。
+
+先确认部署地址有足够 Robinhood Chain Testnet ETH，再在 PowerShell 进程内临时注入：
 
 ```powershell
 cd contracts
 $deployKey = (Get-Content -Raw -LiteralPath '..\私钥.txt').Trim()
-$env:HARDHAT_VAR_BASE_SEPOLIA_PRIVATE_KEY = $deployKey
-$env:HARDHAT_VAR_BASE_SEPOLIA_RPC_URL = 'https://sepolia.base.org'
-npm run deploy:base-sepolia
-Remove-Item Env:HARDHAT_VAR_BASE_SEPOLIA_PRIVATE_KEY
+$env:ROBINHOOD_PRIVATE_KEY = $deployKey
+$env:ROBINHOOD_TESTNET_RPC_URL = 'https://rpc.testnet.chain.robinhood.com'
+npm run deploy:robinhood-testnet
+Remove-Item Env:ROBINHOOD_PRIVATE_KEY
 ```
 
-部署脚本会输出 Proxy、Implementation、升级管理员，并写入 `contracts/deployments/84532.json`。网站只连接 Proxy 地址：
+部署脚本会输出 Proxy、Implementation、升级管理员，并写入 `contracts/deployments/46630.json`。网站只连接 Proxy 地址：
 
 ```dotenv
-VITE_WEB3_CHAIN_ID=84532
-VITE_WEB3_CHAIN_NAME=Base Sepolia
-VITE_WEB3_RPC_URL=https://sepolia.base.org
+VITE_WEB3_CHAIN_ID=46630
+VITE_WEB3_CHAIN_NAME=Robinhood Chain Testnet
+VITE_WEB3_RPC_URL=https://rpc.testnet.chain.robinhood.com
 VITE_AGENT_REGISTRY_ADDRESS=0xProxy地址
 ```
 
-后端同步设置 `WEB3_CHAIN_ID=84532`、`WEB3_CHAIN_NAME="Base Sepolia"` 和正式域名 `WEB3_URI`。前后端链 ID 不一致时，钱包登录会被拒绝。
+后端同步设置 `WEB3_CHAIN_ID=46630`、`WEB3_CHAIN_NAME="Robinhood Chain Testnet"` 和网站域名 `WEB3_URI`。前后端链 ID 不一致时，钱包登录会被拒绝。
+
+本地验收通过并完成安全检查后，正式部署使用同一个脚本和 Robinhood Chain 主网配置：
+
+```powershell
+$env:ROBINHOOD_PRIVATE_KEY = $deployKey
+$env:ROBINHOOD_RPC_URL = 'https://rpc.mainnet.chain.robinhood.com'
+npm run deploy:robinhood
+Remove-Item Env:ROBINHOOD_PRIVATE_KEY
+```
+
+正式网站使用 chain ID `4663`、名称 `Robinhood Chain`、主网 RPC 和 `contracts/deployments/4663.json` 里的 Proxy 地址。不要把 Testnet Proxy 配到主网网站。
+
+### 当前 Robinhood Chain 主网部署
+
+2026-09-01 已完成主网部署：
+
+| 项目 | 地址 |
+|---|---|
+| UUPS Proxy（网站使用） | [`0x24f6f6bE48066cbE0B54d741cd4B52862Bb4b05c`](https://robinhoodchain.blockscout.com/address/0x24f6f6bE48066cbE0B54d741cd4B52862Bb4b05c) |
+| Implementation | [`0xDb20c37F40a7715181Af7fA4A41117802FcD74f4`](https://robinhoodchain.blockscout.com/address/0xDb20c37F40a7715181Af7fA4A41117802FcD74f4) |
+| Upgrade admin | `0x5e807ae9c82ba691fca0cc1f56eb01eb58d6f04c` |
+
+升级安全所需的 OpenZeppelin manifest 保存在 `contracts/.openzeppelin/unknown-4663.json`，部署摘要保存在 `contracts/deployments/4663.json`。这两个文件必须随源码一起备份，升级前不得删除或重建。
 
 ## 6. 合约升级
 
@@ -203,11 +236,11 @@ VITE_AGENT_REGISTRY_ADDRESS=0xProxy地址
 ```powershell
 cd contracts
 $deployKey = (Get-Content -Raw -LiteralPath '..\私钥.txt').Trim()
-$env:HARDHAT_VAR_BASE_SEPOLIA_PRIVATE_KEY = $deployKey
-$env:HARDHAT_VAR_BASE_SEPOLIA_RPC_URL = 'https://sepolia.base.org'
+$env:ROBINHOOD_PRIVATE_KEY = $deployKey
+$env:ROBINHOOD_TESTNET_RPC_URL = 'https://rpc.testnet.chain.robinhood.com'
 $env:SIMVERSE_AGENT_REGISTRY = '0xProxy地址'
-npm run upgrade:base-sepolia
-Remove-Item Env:HARDHAT_VAR_BASE_SEPOLIA_PRIVATE_KEY
+npm run upgrade:robinhood-testnet
+Remove-Item Env:ROBINHOOD_PRIVATE_KEY
 ```
 
 Proxy 地址不变，网站无需改地址。生产环境应把 `UPGRADER_ROLE` 和 `DEFAULT_ADMIN_ROLE` 转移到多签，并把日常部署钱包从管理员中移除。
@@ -219,10 +252,10 @@ Proxy 地址不变，网站无需改地址。生产环境应把 `UPGRADER_ROLE` 
 - RabbyKit 和合约调用都不会接触私钥；私钥始终由钱包持有。
 - 内容接口要求已验证的钱包 JWT，并按用户隔离目录；链上 URI 公开可见，但下载仍要求同一身份会话。
 - 迁移到公开去中心化存储前必须加密私密记忆，链上不要写明文隐私。
-- Base Sepolia 用于验收，不代表主网安全审计。正式上线前仍应做独立合约审计、多签、密钥轮换、备份和回滚演练。
+- Robinhood Chain Testnet 用于验收，不代表主网安全审计。正式上线前仍应做独立合约审计、多签、密钥轮换、备份和回滚演练。
 
 ## 8. English quick start
 
-Simverse now uses a wallet as the public identity source. RabbyKit connects the wallet; a one-time EIP-4361-style message creates a short game session without submitting a transaction. Agent creation, training/upload versions, memory snapshots, and game saves are anchored through the UUPS `SimverseAgentRegistry` proxy. Full content stays offchain; its hash, URI, ownership, and revision live onchain.
+Simverse now uses a wallet as the public identity source and targets Robinhood Chain. RabbyKit connects the wallet; a one-time EIP-4361-style message creates a short game session without submitting a transaction. Agent creation, training/upload versions, memory snapshots, and game saves are anchored through the UUPS `SimverseAgentRegistry` proxy. Full content stays offchain; its hash, URI, ownership, and revision live onchain.
 
-Run a Hardhat node, deploy locally, place the emitted proxy in `frontend/.env.local`, start FastAPI with chain ID `31337`, and start Vite. Open `/web3` after wallet login to create an Agent Passport and publish training, memory, or save revisions. Use Base Sepolia (`84532`) for the shared test deployment and keep all production upgrade roles behind a multisig.
+Run a Hardhat node, deploy locally, place the emitted proxy in `frontend/.env.local`, start FastAPI with chain ID `31337`, and start Vite. Open `/web3` after wallet login to create an Agent Passport and publish or restore training, memory, and save revisions. Use Robinhood Chain Testnet (`46630`) for shared testing and Robinhood Chain (`4663`) only after acceptance; keep all production upgrade roles behind a multisig.

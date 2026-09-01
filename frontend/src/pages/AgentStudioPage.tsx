@@ -1,17 +1,19 @@
 import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from 'react'
 import { TopNav } from '../components/TopNav'
+import { updateCharacter, updatePlayerPosition } from '../services/api'
 import { API_BASE } from '../services/api/core'
 import { useLocale } from '../services/locale'
 import {
   anchorMemory,
   anchorSave,
   createAgentPassport,
+  loadLatestSaveAnchor,
   loadOwnedAgents,
   publishTrainingVersion,
   registryConfigured,
   type AgentChainState,
 } from '../services/web3/agentRegistry'
-import { snapshotGameMemory, uploadWeb3Content } from '../services/web3/content'
+import { readPrivateAnchoredJson, snapshotGameMemory, uploadWeb3Content } from '../services/web3/content'
 import { configuredChainId, configuredChainName } from '../services/web3/wallet'
 import { useGameStore } from '../stores/gameStore'
 import '../styles/agent-studio.css'
@@ -35,6 +37,14 @@ interface ChainAgent {
   state: AgentChainState
 }
 
+interface SaveSnapshot {
+  schema: 'simverse-save-v1'
+  wallet: string
+  agent_id: string
+  recorded_at: string
+  player: { sprite_key: string; tile_x: number; tile_y: number }
+}
+
 const COPY = {
   'zh-CN': {
     eyebrow: 'WALLET-OWNED AGENT INFRASTRUCTURE', title: '链上 Agent 工作台',
@@ -44,7 +54,7 @@ const COPY = {
     resident: '游戏居民', noResident: '请先在炼化工坊创建一位居民', create: '创建链上身份', creating: '正在上传并等待钱包…',
     anchorTitle: '02 / 保存与确权', anchorLead: '选择 Agent 和内容类型。每次写入都会形成不可篡改的新版本，不会转移资金。',
     agent: '链上 Agent', kind: '内容类型', file: '选择内容文件', training: '训练 / 上传版本', memory: '记忆快照', save: '游戏存档',
-    anchor: '上传并写入链上', anchoring: '正在等待链上确认…', quickSave: '保存当前游戏状态', memorySync: '同步居民记忆上链',
+    anchor: '上传并写入链上', anchoring: '正在等待链上确认…', quickSave: '保存当前游戏状态', memorySync: '同步居民记忆上链', restoreSave: '恢复最新链上存档', restoring: '正在校验并恢复…', restored: '链上存档已恢复', noSave: '这个 Agent 还没有链上存档', invalidSave: '链上存档内容无效',
     passports: '03 / 我的链上身份', empty: '这个钱包还没有 Agent Passport。', version: '训练版本', memories: '记忆版本', saves: '存档版本', metadata: '元数据',
     tx: '交易已确认', refresh: '刷新链上状态', privacy: '隐私提示：该内容接口需要钱包会话才能下载；正式接入 IPFS/Arweave 时，请先加密敏感记忆。',
   },
@@ -56,7 +66,7 @@ const COPY = {
     resident: 'Game resident', noResident: 'Create a resident in the Forge first', create: 'Create onchain identity', creating: 'Uploading and waiting for wallet…',
     anchorTitle: '02 / Save and prove', anchorLead: 'Choose an Agent and content type. Every write creates an immutable version without moving funds.',
     agent: 'Onchain Agent', kind: 'Content type', file: 'Choose content file', training: 'Training / upload version', memory: 'Memory snapshot', save: 'Game save',
-    anchor: 'Upload and anchor', anchoring: 'Waiting for onchain confirmation…', quickSave: 'Save current game state', memorySync: 'Anchor resident memory',
+    anchor: 'Upload and anchor', anchoring: 'Waiting for onchain confirmation…', quickSave: 'Save current game state', memorySync: 'Anchor resident memory', restoreSave: 'Restore latest onchain save', restoring: 'Verifying and restoring…', restored: 'Onchain save restored', noSave: 'This Agent has no onchain save yet', invalidSave: 'The onchain save is invalid',
     passports: '03 / My onchain identities', empty: 'This wallet has no Agent Passport yet.', version: 'Training versions', memories: 'Memory versions', saves: 'Save versions', metadata: 'Metadata',
     tx: 'Transaction confirmed', refresh: 'Refresh onchain state', privacy: 'Privacy: downloads require the wallet session. Encrypt sensitive memories before moving content to IPFS or Arweave in production.',
   },
@@ -64,6 +74,25 @@ const COPY = {
 
 function shortAddress(value: string | null | undefined) {
   return value ? `${value.slice(0, 8)}…${value.slice(-6)}` : '—'
+}
+
+function validatedSave(
+  value: unknown,
+  wallet: `0x${string}`,
+  agentId: string,
+  invalidMessage: string,
+): SaveSnapshot {
+  const snapshot = value as Partial<SaveSnapshot> | null
+  const player = snapshot?.player
+  if (
+    snapshot?.schema !== 'simverse-save-v1' ||
+    typeof snapshot.wallet !== 'string' || snapshot.wallet.toLowerCase() !== wallet.toLowerCase() ||
+    snapshot.agent_id !== agentId || !player ||
+    typeof player.sprite_key !== 'string' || player.sprite_key.length < 1 || player.sprite_key.length > 100 ||
+    !Number.isInteger(player.tile_x) || player.tile_x < 0 || player.tile_x > 4095 ||
+    !Number.isInteger(player.tile_y) || player.tile_y < 0 || player.tile_y > 4095
+  ) throw new Error(invalidMessage)
+  return snapshot as SaveSnapshot
 }
 
 export function AgentStudioPage() {
@@ -74,6 +103,8 @@ export function AgentStudioPage() {
   const playerSpriteKey = useGameStore((state) => state.playerSpriteKey)
   const playerTileX = useGameStore((state) => state.playerTileX)
   const playerTileY = useGameStore((state) => state.playerTileY)
+  const setPlayerSpriteKey = useGameStore((state) => state.setPlayerSpriteKey)
+  const setPlayerTile = useGameStore((state) => state.setPlayerTile)
   const wallet = user?.wallet_address as `0x${string}` | undefined
   const [residents, setResidents] = useState<LocalResident[]>([])
   const [residentId, setResidentId] = useState('')
@@ -81,9 +112,10 @@ export function AgentStudioPage() {
   const [agentId, setAgentId] = useState('')
   const [kind, setKind] = useState<AnchorKind>('training')
   const [file, setFile] = useState<File | null>(null)
-  const [busy, setBusy] = useState<'create' | 'anchor' | 'save' | 'memory' | 'refresh' | null>(null)
+  const [busy, setBusy] = useState<'create' | 'anchor' | 'save' | 'restore' | 'memory' | 'refresh' | null>(null)
   const [error, setError] = useState('')
   const [transaction, setTransaction] = useState<`0x${string}` | null>(null)
+  const [restored, setRestored] = useState(false)
 
   const selectedResident = useMemo(() => residents.find((resident) => resident.id === residentId), [residentId, residents])
   const contractReady = registryConfigured()
@@ -114,7 +146,7 @@ export function AgentStudioPage() {
 
   const createPassport = async () => {
     if (!selectedResident || !wallet) return
-    setBusy('create'); setError(''); setTransaction(null)
+    setBusy('create'); setError(''); setTransaction(null); setRestored(false)
     try {
       const metadata = {
         name: selectedResident.name,
@@ -147,7 +179,7 @@ export function AgentStudioPage() {
 
   const anchorFile = async () => {
     if (!file) return
-    setBusy('anchor'); setError(''); setTransaction(null)
+    setBusy('anchor'); setError(''); setTransaction(null); setRestored(false)
     try {
       const hash = await writeAnchor(file)
       setTransaction(hash || null); setFile(null); await refreshAgents()
@@ -156,7 +188,7 @@ export function AgentStudioPage() {
   }
 
   const saveGame = async () => {
-    setBusy('save'); setError(''); setTransaction(null)
+    setBusy('save'); setError(''); setTransaction(null); setRestored(false)
     try {
       const snapshot = {
         schema: 'simverse-save-v1', wallet, agent_id: agentId, recorded_at: new Date().toISOString(),
@@ -169,9 +201,28 @@ export function AgentStudioPage() {
     finally { setBusy(null) }
   }
 
+  const restoreGame = async () => {
+    if (!wallet || !agentId) return
+    setBusy('restore'); setError(''); setTransaction(null); setRestored(false)
+    try {
+      const anchor = await loadLatestSaveAnchor(BigInt(agentId))
+      if (!anchor) throw new Error(copy.noSave)
+      const raw = await readPrivateAnchoredJson<unknown>(anchor.contentURI, anchor.contentHash)
+      const snapshot = validatedSave(raw, wallet, agentId, copy.invalidSave)
+      await Promise.all([
+        updatePlayerPosition(snapshot.player.tile_x, snapshot.player.tile_y),
+        updateCharacter({ sprite_key: snapshot.player.sprite_key }),
+      ])
+      setPlayerTile(snapshot.player.tile_x, snapshot.player.tile_y)
+      setPlayerSpriteKey(snapshot.player.sprite_key)
+      setRestored(true)
+    } catch (reason) { setError(reason instanceof Error ? reason.message : copy.invalidSave) }
+    finally { setBusy(null) }
+  }
+
   const syncMemory = async () => {
     if (!selectedResident || !wallet || !agentId) return
-    setBusy('memory'); setError(''); setTransaction(null)
+    setBusy('memory'); setError(''); setTransaction(null); setRestored(false)
     try {
       const content = await snapshotGameMemory(selectedResident.id)
       const hash = await anchorMemory(locale, wallet, BigInt(agentId), content.content_uri, content.content_hash)
@@ -209,11 +260,11 @@ export function AgentStudioPage() {
               <label><span>{copy.kind}</span><select value={kind} onChange={(event) => setKind(event.target.value as AnchorKind)}><option value="training">{copy.training}</option><option value="memory">{copy.memory}</option><option value="save">{copy.save}</option></select></label>
             </div>
             <label className="agent-studio-file"><span>{copy.file}</span><input type="file" onChange={onFile} /></label>
-            <div className="agent-studio-card__actions"><button type="button" onClick={() => void anchorFile()} disabled={!file || !agentId || busy !== null}>{busy === 'anchor' ? copy.anchoring : copy.anchor}</button><button className="secondary" type="button" onClick={() => void syncMemory()} disabled={!selectedResident || !agentId || busy !== null}>{busy === 'memory' ? copy.anchoring : copy.memorySync}</button><button className="secondary" type="button" onClick={() => void saveGame()} disabled={!agentId || busy !== null}>{busy === 'save' ? copy.anchoring : copy.quickSave}</button></div>
+            <div className="agent-studio-card__actions"><button type="button" onClick={() => void anchorFile()} disabled={!file || !agentId || busy !== null}>{busy === 'anchor' ? copy.anchoring : copy.anchor}</button><button className="secondary" type="button" onClick={() => void syncMemory()} disabled={!selectedResident || !agentId || busy !== null}>{busy === 'memory' ? copy.anchoring : copy.memorySync}</button><button className="secondary" type="button" onClick={() => void saveGame()} disabled={!agentId || busy !== null}>{busy === 'save' ? copy.anchoring : copy.quickSave}</button><button className="secondary" type="button" onClick={() => void restoreGame()} disabled={!agentId || busy !== null}>{busy === 'restore' ? copy.restoring : copy.restoreSave}</button></div>
           </section>
         </div>
 
-        {(error || transaction) && <div className={`agent-studio__message ${error ? 'is-error' : 'is-success'}`} role={error ? 'alert' : 'status'}>{error || `${copy.tx}: ${shortAddress(transaction)}`}</div>}
+        {(error || transaction || restored) && <div className={`agent-studio__message ${error ? 'is-error' : 'is-success'}`} role={error ? 'alert' : 'status'}>{error || (restored ? copy.restored : `${copy.tx}: ${shortAddress(transaction)}`)}</div>}
         <p className="agent-studio__privacy">{copy.privacy}</p>
 
         <section className="agent-passports">

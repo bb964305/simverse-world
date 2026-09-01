@@ -17,6 +17,7 @@ const COPY = {
   'zh-CN': {
     homeLabel: 'Simverse World 首页', navLabel: '官网导航', world: '世界', residents: '居民', forge: '锻造', memory: '记忆',
     watch: '观察小镇', enter: '连接钱包', menuOpen: '打开导航菜单', menuClose: '关闭导航菜单',
+    chainKicker: 'PERSISTENT AI WORLD / BUILT ON ROBINHOOD CHAIN',
     heroLead: '一座由 AI 居民持续生活、记忆与演化的链上开放世界。', live: '观看小镇实况',
     worldTitle: <>这里没有等待触发的剧本，<br />只有正在发生的生活。</>,
     worldLead: '居民会移动、工作、交谈和反思。你离线之后，关系仍在变化，新的记忆仍在形成，城市不会为任何人按下暂停。',
@@ -38,11 +39,12 @@ const COPY = {
     loopTitle: '相遇。记住。上链。演化。',
     loops: [['相遇', '进入街区，与一个拥有自己目标的居民说话。'], ['记住', '对话沉入事件与关系，成为下一次选择的上下文。'], ['确权', '钱包签名保存版本，链上锚定记忆、存档与训练证明。'], ['演化', '长期经历推动人格变化，世界因此产生真正的历史。']],
     finalTitle: '世界不会等你上线。', finalLead: '连接钱包，看看居民们已经把今天过成了什么样子。', finalButton: '进入 Simverse',
-    footerLead: '一座由 AI 居民持续生活、由钱包拥有的开放世界。', city: '城市', top: '回到顶部', login: '钱包身份',
+    footerLead: '一座由 AI 居民持续生活、由钱包拥有并锚定在 Robinhood Chain 的开放世界。', city: '城市', top: '回到顶部', login: '钱包身份',
   },
   en: {
     homeLabel: 'Simverse World home', navLabel: 'Site navigation', world: 'World', residents: 'Residents', forge: 'Forge', memory: 'Memory',
     watch: 'Watch town', enter: 'Connect wallet', menuOpen: 'Open navigation menu', menuClose: 'Close navigation menu',
+    chainKicker: 'PERSISTENT AI WORLD / BUILT ON ROBINHOOD CHAIN',
     heroLead: 'An onchain open world where AI residents keep living, remembering, and evolving.', live: 'Watch the town live',
     worldTitle: <>There is no script waiting to fire.<br />Only life already in motion.</>,
     worldLead: 'Residents move, work, talk, and reflect. Relationships keep changing while you are away, new memories keep forming, and the city never pauses for anyone.',
@@ -64,7 +66,7 @@ const COPY = {
     loopTitle: 'Meet. Remember. Anchor. Evolve.',
     loops: [['Meet', 'Enter a district and talk to a resident with goals of their own.'], ['Remember', 'Conversation settles into events and relationships that shape the next choice.'], ['Own', 'Sign a version with your wallet and anchor memory, saves, and training proofs onchain.'], ['Evolve', 'Long experience changes personality and gives the world a real history.']],
     finalTitle: 'The world will not wait for you to log in.', finalLead: 'Connect your wallet and see what the residents have made of today.', finalButton: 'Enter Simverse',
-    footerLead: 'An open world lived by AI residents and owned through wallets.', city: 'City', top: 'Back to top', login: 'Wallet identity',
+    footerLead: 'An open world lived by AI residents, wallet-owned, and anchored on Robinhood Chain.', city: 'City', top: 'Back to top', login: 'Wallet identity',
   },
 } as const
 
@@ -136,7 +138,7 @@ export function LandingPage() {
         <section className="site-hero" aria-labelledby="hero-title">
           <img className="site-hero__backdrop" src="/marketing/world-hero.jpg" alt="" fetchPriority="high" /><div className="site-hero__shade" />
           <div className="site-hero__content">
-            <p className="site-kicker site-kicker--light">Persistent AI World / Web3 Beta</p>
+            <p className="site-kicker site-kicker--light">{copy.chainKicker}</p>
             <h1 className="site-hero__title" id="hero-title" aria-label="Simverse World"><span>SIMVERSE</span><span>WORLD</span></h1>
             <p className="site-hero__lead">{copy.heroLead}</p>
             <div className="site-hero__actions"><Link className="site-button site-button--primary" to="/login">{copy.enter} <span aria-hidden="true">-&gt;</span></Link><Link className="site-button site-button--ghost" to="/town">{copy.live}</Link></div>

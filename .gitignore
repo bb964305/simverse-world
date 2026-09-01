@@ -35,6 +35,7 @@ contracts/cache/
 contracts/ignition/deployments/chain-31337/
 contracts/deployments/31337.json
 /私钥.txt
+/VPS.txt
 backend/data/web3-content/
 
 # Database

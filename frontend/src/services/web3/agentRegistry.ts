@@ -17,6 +17,14 @@ export interface AgentChainState {
   updatedAt: bigint
 }
 
+export interface ContentAnchor {
+  contentHash: `0x${string}`
+  parentHash: `0x${string}`
+  contentURI: string
+  revision: bigint
+  recordedAt: bigint
+}
+
 const registryAbi = [
   {
     type: 'function', name: 'agentsOf', stateMutability: 'view', inputs: [{ name: 'owner', type: 'address' }],
@@ -57,6 +65,21 @@ const registryAbi = [
     inputs: [{ name: 'agentId', type: 'uint256' }, { name: 'contentURI', type: 'string' }, { name: 'contentHash', type: 'bytes32' }],
     outputs: [{ name: 'revision', type: 'uint64' }],
   },
+  {
+    type: 'function', name: 'saveAnchorCount', stateMutability: 'view', inputs: [{ name: 'agentId', type: 'uint256' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    type: 'function', name: 'saveAnchor', stateMutability: 'view',
+    inputs: [{ name: 'agentId', type: 'uint256' }, { name: 'anchorId', type: 'uint256' }],
+    outputs: [{
+      name: '', type: 'tuple', components: [
+        { name: 'contentHash', type: 'bytes32' }, { name: 'parentHash', type: 'bytes32' },
+        { name: 'contentURI', type: 'string' }, { name: 'revision', type: 'uint64' },
+        { name: 'recordedAt', type: 'uint64' },
+      ],
+    }],
+  },
 ] as const
 
 export function registryConfigured(): boolean {
@@ -83,6 +106,19 @@ export async function loadOwnedAgents(owner: `0x${string}`): Promise<Array<{
     ])
     return { id, uri, state: state as AgentChainState }
   }))
+}
+
+export async function loadLatestSaveAnchor(agentId: bigint): Promise<ContentAnchor | null> {
+  const { config, core } = await getWeb3Runtime()
+  const address = requireRegistry()
+  const count = await core.readContract(config, {
+    address, abi: registryAbi, functionName: 'saveAnchorCount', args: [agentId],
+  })
+  if (count === 0n) return null
+  const anchor = await core.readContract(config, {
+    address, abi: registryAbi, functionName: 'saveAnchor', args: [agentId, count - 1n],
+  })
+  return anchor as ContentAnchor
 }
 
 async function write(

@@ -4,11 +4,16 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { MemoryRouter } from 'react-router-dom'
 import { AgentStudioPage } from './AgentStudioPage'
 import { useLocale } from '../services/locale'
-import { createAgentPassport, loadOwnedAgents } from '../services/web3/agentRegistry'
-import { uploadWeb3Content } from '../services/web3/content'
+import { updateCharacter, updatePlayerPosition } from '../services/api'
+import { createAgentPassport, loadLatestSaveAnchor, loadOwnedAgents } from '../services/web3/agentRegistry'
+import { readPrivateAnchoredJson, uploadWeb3Content } from '../services/web3/content'
 import { useGameStore } from '../stores/gameStore'
 
 vi.mock('../components/TopNav', () => ({ TopNav: () => <nav data-testid="top-nav" /> }))
+vi.mock('../services/api', () => ({
+  updateCharacter: vi.fn().mockResolvedValue({}),
+  updatePlayerPosition: vi.fn().mockResolvedValue({ tile_x: 88, tile_y: 41 }),
+}))
 vi.mock('../services/web3/wallet', () => ({
   configuredChainId: () => 31337,
   configuredChainName: () => 'Simverse Local',
@@ -16,6 +21,7 @@ vi.mock('../services/web3/wallet', () => ({
 vi.mock('../services/web3/agentRegistry', () => ({
   registryConfigured: () => true,
   loadOwnedAgents: vi.fn().mockResolvedValue([]),
+  loadLatestSaveAnchor: vi.fn(),
   createAgentPassport: vi.fn().mockResolvedValue(`0x${'ab'.repeat(32)}`),
   publishTrainingVersion: vi.fn(),
   anchorMemory: vi.fn(),
@@ -31,6 +37,7 @@ vi.mock('../services/web3/content', () => ({
     size: 100,
   }),
   snapshotGameMemory: vi.fn(),
+  readPrivateAnchoredJson: vi.fn(),
 }))
 
 beforeEach(() => {
@@ -50,6 +57,8 @@ beforeEach(() => {
     }]),
   }))
   vi.mocked(loadOwnedAgents).mockResolvedValue([])
+  vi.mocked(loadLatestSaveAnchor).mockReset()
+  vi.mocked(readPrivateAnchoredJson).mockReset()
 })
 
 afterEach(() => {
@@ -78,5 +87,42 @@ describe('AgentStudioPage', () => {
     render(<MemoryRouter><AgentStudioPage /></MemoryRouter>)
     expect(await screen.findByRole('heading', { name: 'Onchain Agent Studio' })).toBeInTheDocument()
     expect(screen.getByText(/Turn an existing resident/)).toBeInTheDocument()
+  })
+
+  it('verifies and restores the latest onchain save into the game profile', async () => {
+    vi.mocked(loadOwnedAgents).mockResolvedValue([{
+      id: 7n,
+      uri: 'http://test/web3/content/metadata',
+      state: {
+        metadataHash: `0x${'01'.repeat(32)}`, latestArtifactHash: `0x${'00'.repeat(32)}`,
+        trainingRoot: `0x${'00'.repeat(32)}`, latestMemoryHash: `0x${'00'.repeat(32)}`,
+        latestSaveHash: `0x${'34'.repeat(32)}`, version: 0n, memoryRevision: 0n,
+        saveRevision: 1n, createdAt: 1n, updatedAt: 2n,
+      },
+    }])
+    vi.mocked(loadLatestSaveAnchor).mockResolvedValue({
+      contentHash: `0x${'34'.repeat(32)}`, parentHash: `0x${'00'.repeat(32)}`,
+      contentURI: 'http://test/web3/content/save-1', revision: 1n, recordedAt: 2n,
+    })
+    vi.mocked(readPrivateAnchoredJson).mockResolvedValue({
+      schema: 'simverse-save-v1',
+      wallet: '0x1234567890123456789012345678901234567890',
+      agent_id: '7', recorded_at: '2026-09-01T00:00:00.000Z',
+      player: { sprite_key: '梅', tile_x: 88, tile_y: 41 },
+    })
+
+    render(<MemoryRouter><AgentStudioPage /></MemoryRouter>)
+    const restore = await screen.findByRole('button', { name: '恢复最新链上存档' })
+    await waitFor(() => expect(restore).toBeEnabled())
+    fireEvent.click(restore)
+
+    await waitFor(() => expect(readPrivateAnchoredJson).toHaveBeenCalledWith(
+      'http://test/web3/content/save-1', `0x${'34'.repeat(32)}`,
+    ))
+    await waitFor(() => expect(updatePlayerPosition).toHaveBeenCalledWith(88, 41))
+    expect(updateCharacter).toHaveBeenCalledWith({ sprite_key: '梅' })
+    expect(useGameStore.getState().playerTileX).toBe(88)
+    expect(useGameStore.getState().playerSpriteKey).toBe('梅')
+    expect(await screen.findByRole('status')).toHaveTextContent('链上存档已恢复')
   })
 })

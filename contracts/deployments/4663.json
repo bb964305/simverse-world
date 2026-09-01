@@ -1,0 +1,9 @@
+{
+  "chainId": 4663,
+  "proxy": "0x24f6f6bE48066cbE0B54d741cd4B52862Bb4b05c",
+  "implementation": "0xDb20c37F40a7715181Af7fA4A41117802FcD74f4",
+  "admin": "0x5e807ae9c82ba691fca0cc1f56eb01eb58d6f04c",
+  "contract": "SimverseAgentRegistry",
+  "upgradeKind": "uups",
+  "deployedAt": "2026-09-01T13:26:01.957Z"
+}

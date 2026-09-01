@@ -35,3 +35,34 @@ export async function snapshotGameMemory(residentId: string): Promise<AnchoredCo
   if (!response.ok) throw new Error(typeof body?.detail === 'string' ? body.detail : `Snapshot failed (${response.status})`)
   return body as AnchoredContent
 }
+
+function normalizedHash(value: string): string {
+  return value.toLowerCase().replace(/^0x/, '')
+}
+
+export async function readPrivateAnchoredJson<T>(contentUri: string, expectedHash: `0x${string}`): Promise<T> {
+  const token = getToken()
+  if (!token) throw new Error('Wallet session required')
+
+  const apiUrl = new URL(API_BASE, window.location.origin)
+  const contentUrl = new URL(contentUri, apiUrl)
+  if (contentUrl.origin !== apiUrl.origin || !contentUrl.pathname.startsWith('/web3/content/')) {
+    throw new Error('Unsupported private content URI')
+  }
+
+  const response = await fetch(contentUrl, { headers: { Authorization: `Bearer ${token}` } })
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}))
+    throw new Error(typeof body?.detail === 'string' ? body.detail : `Content download failed (${response.status})`)
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer())
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))
+  const actualHash = Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('')
+  if (actualHash !== normalizedHash(expectedHash)) throw new Error('Anchored content hash mismatch')
+
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes)) as T
+  } catch (reason) {
+    throw new Error('Anchored save is not valid JSON', { cause: reason })
+  }
+}

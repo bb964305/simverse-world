@@ -8,7 +8,7 @@ import { signInWithWallet } from '../services/web3/wallet'
 import { useGameStore } from '../stores/gameStore'
 
 vi.mock('../services/web3/wallet', () => ({
-  configuredChainName: () => 'Base Sepolia',
+  configuredChainName: () => 'Robinhood Chain Testnet',
   signInWithWallet: vi.fn(),
 }))
 

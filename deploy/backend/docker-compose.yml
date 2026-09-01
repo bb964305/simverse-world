@@ -128,12 +128,14 @@ services:
       RESIDENT_SPRITE_ARTIFACT_DIR: /var/lib/simverse/resident-sprites
       # Number of uvicorn workers; scale to CPU. Read by the Dockerfile CMD.
       UVICORN_WORKERS: "${UVICORN_WORKERS:-2}"
+      WEB3_CONTENT_DIR: /var/lib/simverse/web3-content
     # Persist served static files (uploaded media + AI portraits) across
     # rebuilds; /app/static is the STATIC_DIR the app mounts at GET /static.
     # The lab_artifact_released read-only mount + receipt-trust secret come from
     # the lab-v2 control plane (044 line) and are kept alongside media_static.
     volumes:
       - media_static:/app/static
+      - web3_content:/var/lib/simverse/web3-content
       - resident_sprite_artifacts:/var/lib/simverse/resident-sprites
       - lab_artifact_released:/var/lib/simverse/artifacts/lab-artifact-released:ro
       - type: bind
@@ -662,6 +664,7 @@ volumes:
   lab_artifact_quarantine:
   lab_artifact_released:
   media_static:
+  web3_content:
   resident_sprite_artifacts:
 
 networks:
